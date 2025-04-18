@@ -239,7 +239,7 @@ fi
 #   meson will not detect the ccache.
 # So we need to add 'ccache' here, instead of use meson to detect.
 # Also, meson will do double check, if 'ccache' not exsits, meson
-#   will delete 'ccache' and remain 'cc'. 
+#   will delete 'ccache' and remain 'cc'.
 ccache=""
 if [ -x "$(command -v ccache)" ]; then
   ccache="ccache"
@@ -409,6 +409,7 @@ guest_base_zero="no"
 latx_capstone_git="yes"
 latx_atomic="no"
 latx_xcomisx_opt="no"
+latx_avx_opt="no"
 capstone_diet="yes"
 latx_syscall_tunnel="no"
 latx_tbmini_enable="yes"
@@ -1253,6 +1254,8 @@ for opt do
   --enable-latx-atomic) latx_atomic="yes"
   ;;
   --enable-latx-xcomisx-opt) latx_xcomisx_opt="yes"
+  ;;
+  --enable-latx-avx-opt) latx_avx_opt="yes"
   ;;
   --disable-capstone-diet) capstone_diet="no"
   ;;
@@ -5779,6 +5782,9 @@ if test "$latx" = "yes" ; then
   fi
   if test "$latx_xcomisx_opt" = "yes" ; then
   echo "CONFIG_LATX_XCOMISX_OPT=y" >> $config_host_mak
+  fi
+  if test "$latx_avx_opt" = "yes" ; then
+  echo "CONFIG_LATX_AVX_OPT=y" >> $config_host_mak
   fi
   if test "$capstone_diet" = "yes" ; then
     echo "CONFIG_CAPSTONE_DIET=y" >> $config_host_mak

@@ -2288,6 +2288,95 @@ void glue(helper_aeskeygenassist, SUFFIX)(CPUX86State *env, Reg *d, Reg *s,
 #endif
 #endif
 
+#ifdef CONFIG_LATX_AVX_OPT
+#if SHIFT >= 1
+void glue(helper_vaesdec, SUFFIX)(CPUX86State *env, Reg *d, Reg *s1, Reg *s2)
+{
+    int i;
+    Reg st = *s1;
+    Reg rk = *s2;
+
+    for (i = 0 ; i < 2 << SHIFT ; i++) {
+        int j = i & 3;
+        int z = 16 * (i >> 2);
+        d->L(i) = rk.L(i) ^ bswap32(AES_Td0[st.B(z + AES_ishifts[4 * j + 0])] ^
+                                    AES_Td1[st.B(z + AES_ishifts[4 * j + 1])] ^
+                                    AES_Td2[st.B(z + AES_ishifts[4 * j + 2])] ^
+                                    AES_Td3[st.B(z + AES_ishifts[4 * j + 3])]);
+    }
+
+}
+
+void glue(helper_vaesdeclast, SUFFIX)(CPUX86State *env, Reg *d, Reg *s1, Reg *s2)
+{
+    int i;
+    Reg st = *s1;
+    Reg rk = *s2;
+
+    for (i = 0; i < 8 << SHIFT; i++) {
+        d->B(i) = rk.B(i) ^ (AES_isbox[st.B(AES_ishifts[i & 15] + (i & ~15))]);
+    }
+
+}
+
+void glue(helper_vaesenc, SUFFIX)(CPUX86State *env, Reg *d, Reg *s1, Reg *s2)
+{
+    int i;
+    Reg st = *s1;
+    Reg rk = *s2;
+
+    for (i = 0 ; i < 2 << SHIFT ; i++) {
+        int j = i & 3;
+        int z = 16 * (i >> 2);
+        d->L(i) = rk.L(i) ^ bswap32(AES_Te0[st.B(z + AES_shifts[4 * j + 0])] ^
+                                    AES_Te1[st.B(z + AES_shifts[4 * j + 1])] ^
+                                    AES_Te2[st.B(z + AES_shifts[4 * j + 2])] ^
+                                    AES_Te3[st.B(z + AES_shifts[4 * j + 3])]);
+    }
+
+}
+
+void glue(helper_vaesenclast, SUFFIX)(CPUX86State *env, Reg *d, Reg *s1, Reg *s2)
+{
+    int i;
+    Reg st = *s1;
+    Reg rk = *s2;
+
+    for (i = 0; i < 8 << SHIFT; i++) {
+        d->B(i) = rk.B(i) ^ (AES_sbox[st.B(AES_shifts[i & 15] + (i & ~15))]);
+    }
+
+}
+
+void glue(helper_vpclmulqdq, SUFFIX)(CPUX86State *env, Reg *d, Reg *s1, Reg *s2,
+                                    uint32_t ctrl)
+{
+    uint64_t ah, al, b, resh, resl;
+
+    for(int i = 0; i < 4; i += 2) {
+        ah = 0;
+        al = s1->Q(((ctrl & 1) != 0) + i);
+        b = s2->Q(((ctrl & 16) != 0) + i);
+        resh = resl = 0;
+
+        while (b) {
+            if (b & 1) {
+                resl ^= al;
+                resh ^= ah;
+            }
+            ah = (ah << 1) | (al >> 63);
+            al <<= 1;
+            b >>= 1;
+        }
+
+        d->Q(0 + i) = resl;
+        d->Q(1 + i) = resh;
+    }
+}
+
+#endif
+#endif
+
 /* FMA3 op helpers */
 #if SHIFT == 1
 #define SSE_HELPER_FMAS(name, elem, F)                                         \

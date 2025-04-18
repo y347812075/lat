@@ -384,6 +384,15 @@ DEF_HELPER_7(glue(fma4ps, SUFFIX), void, env, Reg, Reg, Reg, Reg, int, int)
 DEF_HELPER_7(glue(fma4pd, SUFFIX), void, env, Reg, Reg, Reg, Reg, int, int)
 #endif
 
+#ifdef CONFIG_LATX_AVX_OPT
+#if SHIFT >= 1
+DEF_HELPER_4(glue(vaesdec, SUFFIX), void, env, Reg, Reg, Reg)
+DEF_HELPER_4(glue(vaesdeclast, SUFFIX), void, env, Reg, Reg, Reg)
+DEF_HELPER_4(glue(vaesenc, SUFFIX), void, env, Reg, Reg, Reg)
+DEF_HELPER_4(glue(vaesenclast, SUFFIX), void, env, Reg, Reg, Reg)
+DEF_HELPER_5(glue(vpclmulqdq, SUFFIX), void, env, Reg, Reg, Reg, i32)
+#endif
+#endif
 
 #undef SHIFT
 #undef Reg

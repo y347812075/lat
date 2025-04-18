@@ -334,6 +334,12 @@ ADDRX ir1_disasm(IR1_INST *ir1, uint8_t *addr, ADDRX t_pc, int ir1_num, void *pi
         /* repleace rdsspq with 5 bytes nop, just a temporary solution */
         addr = (uint8_t *)&nop_5;
     }
+#ifdef CONFIG_LATX_AVX_OPT
+    if (((*((uint64_t *)addr)) & 0xfffffaff) == 0xae0f48f3) {
+        /* repleace incsspq with 5 bytes nop, just a temporary solution */
+        addr = (uint8_t *)&nop_5;
+    }
+#endif
     /* FIXME:the count parameter in cs_disasm is 1, it means we translte 1 insn at a time,
      * there should be a performance improvement if we increase the number, but
      * for now there are some problems if we change it. It will be settled later.
