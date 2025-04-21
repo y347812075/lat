@@ -55,7 +55,6 @@ build() {
         --disable-docs
         --disable-werror
         --disable-pie
-        --static
         --disable-linux-io-uring
     )
 

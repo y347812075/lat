@@ -145,7 +145,7 @@ STEP1:
 .. code-block:: bash
 
     git clone --depth=1 --recursive https://github.com/lat-opensource/lat
-    cd lat/latxbuild
+    cd lat
 
 
 STEP2:
@@ -173,7 +173,7 @@ STEP3:
 
 .. code-block:: bash
 
-    ./build-release.sh
+    ./latxbuild/build-release.sh
 
 
 未来规划（TODO）
