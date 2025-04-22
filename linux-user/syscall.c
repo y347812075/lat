@@ -810,6 +810,11 @@ safe_syscall5(int, ppoll, struct pollfd *, ufds, unsigned int, nfds,
 safe_syscall6(int, epoll_pwait, int, epfd, struct epoll_event *, events,
               int, maxevents, int, timeout, const sigset_t *, sigmask,
               size_t, sigsetsize)
+#if defined(__NR_epoll_pwait2)
+safe_syscall6(int, epoll_pwait2, int, epfd, struct epoll_event *, events,
+              int, maxevents, struct timespec *, timeout, const sigset_t *, sigmask,
+              size_t, sigsetsize)
+#endif
 #if defined(__NR_futex)
 safe_syscall6(int,futex,int *,uaddr,int,op,int,val, \
               const struct timespec *,timeout,int *,uaddr2,int,val3)
@@ -16523,19 +16528,22 @@ defined(__loongarch__)
     }
 #endif
 
-#if defined(TARGET_NR_epoll_wait) || defined(TARGET_NR_epoll_pwait)
+#if defined(TARGET_NR_epoll_wait) || defined(TARGET_NR_epoll_pwait) || defined(TARGET_NR_epoll_pwait2)
 #if defined(TARGET_NR_epoll_wait)
     case TARGET_NR_epoll_wait:
 #endif
 #if defined(TARGET_NR_epoll_pwait)
     case TARGET_NR_epoll_pwait:
 #endif
+#if defined(TARGET_NR_epoll_pwait2)
+    case TARGET_NR_epoll_pwait2:
+#endif
     {
         struct target_epoll_event *target_ep;
         struct epoll_event *ep;
         int epfd = arg1;
         int maxevents = arg3;
-        int timeout = arg4;
+        abi_long timeout = arg4;
 
         if (maxevents <= 0 || maxevents > TARGET_EP_MAX_EVENTS) {
             return -TARGET_EINVAL;
@@ -16556,6 +16564,9 @@ defined(__loongarch__)
         switch (num) {
 #if defined(TARGET_NR_epoll_pwait)
         case TARGET_NR_epoll_pwait:
+#if defined(TARGET_NR_epoll_pwait2)
+        case TARGET_NR_epoll_pwait2:
+#endif
         {
             target_sigset_t *target_set;
             sigset_t _set, *set = &_set;
@@ -16577,10 +16588,23 @@ defined(__loongarch__)
             } else {
                 set = NULL;
             }
-
-            ret = get_errno(safe_epoll_pwait(epfd, ep, maxevents, timeout,
-                                             set, SIGSET_T_SIZE));
-            break;
+            if (num == TARGET_NR_epoll_pwait) {
+                ret = get_errno(safe_epoll_pwait(epfd, ep, maxevents, timeout,
+                                                 set, SIGSET_T_SIZE));
+            } else {
+#if defined(TARGET_NR_epoll_pwait2)
+                struct timespec hspec;
+                struct timespec *ts_arg = NULL;
+                if (timeout != 0) {
+                    target_to_host_timespec(&hspec, (abi_ulong)timeout);
+                    ts_arg = &hspec;
+                }
+                ret = get_errno(safe_epoll_pwait2(epfd, ep, maxevents, ts_arg, set, SIGSET_T_SIZE));
+#else
+                return -TARGET_ENOSYS;
+#endif
+            }
+                break;
         }
 #endif
 #if defined(TARGET_NR_epoll_wait)
