@@ -4311,9 +4311,9 @@ bool translate_vblendpd(IR1_INST * pir1) {
         IR2_OPND temp2 = ra_alloc_ftemp();
         la_xvori_b(temp2, src1, 0);
         if (imm & 0x4)
-            la_vextrins_d(temp2, src2, VEXTRINS_IMM_4_0(0, 0));
+            la_xvextrins_d(temp2, src2, VEXTRINS_IMM_4_0(0, 0));
         if (imm & 0x8)
-            la_vextrins_d(temp2, src2, VEXTRINS_IMM_4_0(1, 1));
+            la_xvextrins_d(temp2, src2, VEXTRINS_IMM_4_0(1, 1));
         la_xvpermi_q(temp, temp2, VEXTRINS_IMM_4_0(1, 2));
     }
     la_xvori_b(dest, temp, 0);
@@ -4336,25 +4336,25 @@ bool translate_vblendps(IR1_INST * pir1) {
     IR2_OPND temp = ra_alloc_ftemp();
     la_xvori_b(temp, src1, 0);
     if (imm & 0x1)
-        la_vextrins_w(temp, src2, VEXTRINS_IMM_4_0(0, 0));
+        la_xvextrins_w(temp, src2, VEXTRINS_IMM_4_0(0, 0));
     if (imm & 0x2)
-        la_vextrins_w(temp, src2, VEXTRINS_IMM_4_0(1, 1));
+        la_xvextrins_w(temp, src2, VEXTRINS_IMM_4_0(1, 1));
     if (imm & 0x4)
-        la_vextrins_w(temp, src2, VEXTRINS_IMM_4_0(2, 2));
+        la_xvextrins_w(temp, src2, VEXTRINS_IMM_4_0(2, 2));
     if (imm & 0x8)
-        la_vextrins_w(temp, src2, VEXTRINS_IMM_4_0(3, 3));
+        la_xvextrins_w(temp, src2, VEXTRINS_IMM_4_0(3, 3));
     if (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0))) {
         IR2_OPND temp2 = ra_alloc_ftemp();
         la_xvori_b(temp2, src1, 0);
         imm = imm >> 4;
         if (imm & 0x1)
-            la_vextrins_w(temp2, src2, VEXTRINS_IMM_4_0(0, 0));
+            la_xvextrins_w(temp2, src2, VEXTRINS_IMM_4_0(0, 0));
         if (imm & 0x2)
-            la_vextrins_w(temp2, src2, VEXTRINS_IMM_4_0(1, 1));
+            la_xvextrins_w(temp2, src2, VEXTRINS_IMM_4_0(1, 1));
         if (imm & 0x4)
-            la_vextrins_w(temp2, src2, VEXTRINS_IMM_4_0(2, 2));
+            la_xvextrins_w(temp2, src2, VEXTRINS_IMM_4_0(2, 2));
         if (imm & 0x8)
-            la_vextrins_w(temp2, src2, VEXTRINS_IMM_4_0(3, 3));
+            la_xvextrins_w(temp2, src2, VEXTRINS_IMM_4_0(3, 3));
         la_xvpermi_q(temp, temp2, VEXTRINS_IMM_4_0(1, 2));
     }
     la_xvori_b(dest, temp, 0);
@@ -7401,7 +7401,7 @@ bool translate_vpermilps(IR1_INST * pir1) {
         IR2_OPND src1 = load_freg256_from_ir1(opnd1);
         if (ir1_opnd_is_imm(opnd2)) {
             uint8_t imm = ir1_opnd_uimm(opnd2);
-            la_vshuf4i_w(dest, src1, imm);
+            la_xvshuf4i_w(dest, src1, imm);
 
         } else {
             IR2_OPND src2 = load_freg256_from_ir1(opnd2);

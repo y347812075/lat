@@ -641,7 +641,7 @@ bool translate_vpsllx(IR1_INST * pir1) {
         IR2_OPND temp = ra_alloc_ftemp();
         if (max_count == 63) {
             la_xvreplve0_d(mask, src2);
-            la_vldi(temp, VLDI_IMM_TYPE0(3, 63));
+            la_xvldi(temp, VLDI_IMM_TYPE0(3, 63));
             la_xvsle_du(mask, mask, temp);
         } else {
             la_xvreplve0_d(mask, src2);

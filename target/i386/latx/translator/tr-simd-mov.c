@@ -993,7 +993,7 @@ bool translate_vmovntdqa(IR1_INST * pir1) {
 
     } else if (ir1_opnd_is_ymm(dest) && ir1_opnd_is_mem(src)) {
         IR2_OPND temp = load_freg256_from_ir1(src);
-        la_vand_v(ra_alloc_xmm(ir1_opnd_base_reg_num(dest)),
+        la_xvand_v(ra_alloc_xmm(ir1_opnd_base_reg_num(dest)),
             temp, temp);
     }
     return true;

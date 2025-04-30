@@ -1066,16 +1066,16 @@ bool translate_vpcmpgtx(IR1_INST * pir1) {
     IR2_INST * ( * tr_inst)(IR2_OPND, IR2_OPND, IR2_OPND);
     switch (op) {
         case dt_X86_INS_VPCMPGTB:
-            tr_inst = la_vslt_b;
+            tr_inst = la_xvslt_b;
             break;
         case dt_X86_INS_VPCMPGTW:
-            tr_inst = la_vslt_h;
+            tr_inst = la_xvslt_h;
             break;
         case dt_X86_INS_VPCMPGTD:
-            tr_inst = la_vslt_w;
+            tr_inst = la_xvslt_w;
             break;
         case dt_X86_INS_VPCMPGTQ:
-            tr_inst = la_vslt_d;
+            tr_inst = la_xvslt_d;
             break;
         default:
             tr_inst = NULL;
