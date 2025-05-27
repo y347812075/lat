@@ -1934,7 +1934,7 @@ tb_link_page(TranslationBlock *tb, tb_page_addr_t phys_pc,
     page_lock_pair(&p, phys_pc, &p2, phys_page2, 1);
     tb_set_page_addr0(tb, phys_pc);
     page_protect(phys_pc);
-    if (p2) {
+    if (phys_page2 != -1) {
         tb_set_page_addr1(tb, phys_page2);
         page_protect(phys_page2);
     } else {
