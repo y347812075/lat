@@ -118,10 +118,10 @@ void options_init(void)
     option_debug_aot = 0;
 #endif
 #ifdef CONFIG_LATX_IMM_REG
-    option_imm_reg = 1;
-    option_imm_rip = 1;
+    option_imm_reg = 0;
+    option_imm_rip = 0;
     // complex:base+index*scale
-    option_imm_complex = 1;
+    option_imm_complex = 0;
     option_imm_precache = 0;
     option_debug_imm_reg = 0;
     imm_skip_pc = 0;
