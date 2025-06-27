@@ -1031,16 +1031,16 @@ bool translate_vpcmpeqx(IR1_INST * pir1) {
     IR2_INST * ( * tr_inst)(IR2_OPND, IR2_OPND, IR2_OPND);
     switch (op) {
         case dt_X86_INS_VPCMPEQB:
-            tr_inst = la_vseq_b;
+            tr_inst = la_xvseq_b;
             break;
         case dt_X86_INS_VPCMPEQW:
-            tr_inst = la_vseq_h;
+            tr_inst = la_xvseq_h;
             break;
         case dt_X86_INS_VPCMPEQD:
-            tr_inst = la_vseq_w;
+            tr_inst = la_xvseq_w;
             break;
         case dt_X86_INS_VPCMPEQQ:
-            tr_inst = la_vseq_d;
+            tr_inst = la_xvseq_d;
             break;
         default:
             tr_inst = NULL;
