@@ -8178,7 +8178,7 @@ static abi_long do_ioctl(int fd, int cmd, abi_ulong arg)
             case TARGET_IOC_NR(TARGET_HIDIOCGOUTPUT(0)):
             case TARGET_IOC_NR(TARGET_HIDIOCREVOKE):
                 return handle_hidfeature(fd, cmd, arg, TARGET_IOC_SIZE(cmd), 1);
-        } 
+        }
         ie = ioctl_entries;
         for (i = 0; ; i++) {
             if (ie->target_cmd == 0) {
@@ -11004,6 +11004,8 @@ CPUID_GROUP_BASE = 0,
 CPUID_GROUP_EXT,
 CPUID_GROUP_EXT2,
 CPUID_GROUP_EXT3,
+CPUID_GROUP_EBX,
+CPUID_GROUP_XSAVE,
 };
 const char *__x86_cpuid_flags_table[] = {
 "fp87", "vme", "de", "pse", "tsc", "msr", "pae", "mce",
@@ -11026,8 +11028,19 @@ const char *__x86_cpuid_flags_table[] = {
 "cr8_legacy", "abm", "sse4a", "misalignsse",
 "3dnowprefetch", "osvw", "ibs", "xop", "skinit", "wdt", "", "lwp",
 "fma4", "tce", "", "nodeid", "", "tbm", "topoext", "perfctr_core",
-"perfctr_nb"
+"perfctr_nb","", "", "", "", "", "", "", "",
+/*ebx*/
+"fsgsbse", "tsc_adjust", "","bmi1", "hle", "avx2", "","smep",
+"bmi2", "erms", "invpcid","rtm", "", "", "mpx", "",
+"avx512f", "avx512dq", "rdseed","adx", "smap", "avx512ifma", "pcommit", "clflushopt",
+"clwb", "intel_pt", "avx512pf", "avx512er", "avx512cd", "sha_ni", "avx512bw", "avx512vl",
+/*xsave*/
+"xsaveopt", "xsavec", "xgetbv1", "xsaves", "", "", "", "",
+"", "", "", "", "" "", "", "",
+"", "", "", "", "", "", "", "",
+"", "", "", "", "", "", "", ""
 };
+
 char *g_cpu_flags;
 static char *cpuinfo_flags(CPUArchState *env)
 {
@@ -11045,14 +11058,19 @@ static char *cpuinfo_flags(CPUArchState *env)
                 group = CPUID_GROUP_EXT2;
             } else if (i == FEAT_8000_0001_ECX) {
                 group = CPUID_GROUP_EXT3;
+            } else if (i == FEAT_7_0_EBX) {
+                group = CPUID_GROUP_EBX;
+            } else if (i == FEAT_XSAVE) {
+                group = CPUID_GROUP_XSAVE;
+            } else if (i == FEAT_XSAVE_COMP_LO || i ==FEAT_XSAVE_COMP_HI) {
+                break;
             } else {
+			    fprintf(stderr, "ERROR:cpu features= %d\n", i);
                 g_assert(0);
+                break;
             };
             for (int j = 0; j < 32; j++) {
                 if (env->features[i] & (1U << j)) {
-                    if (group == CPUID_GROUP_EXT3) {
-                        g_assert(j <= 24);
-                    }
                     snprintf(l_tmp, 20, "%s ",
                         __x86_cpuid_flags_table[32 * group + j]);
                     if (!strstr(l_flags, l_tmp)) {
