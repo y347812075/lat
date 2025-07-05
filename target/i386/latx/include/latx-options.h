@@ -16,6 +16,11 @@ extern int option_flag_reduction;
 #ifdef CONFIG_LATX_TU
 extern int option_tu_link;
 #endif
+
+#ifdef CONFIG_LATX_AVX_OPT
+extern int option_avx_cpuid;
+#endif /* CONFIG_LATX_AVX_OPT */
+
 extern int close_latx_parallel;
 extern int option_dump;
 extern int option_dump_host;

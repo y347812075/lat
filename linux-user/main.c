@@ -636,6 +636,14 @@ static void handle_arg_latx_prlimit(const char *arg)
     option_prlimit = strtol(arg, NULL, 0);
 }
 
+#ifdef CONFIG_LATX_AVX_OPT
+static void handle_arg_latx_avx_cpuid(const char *arg)
+{
+    printf("handle_arg_latx_avx_cpuid:arg=%s\n",arg);
+    option_avx_cpuid = strtol(arg, NULL, 0);
+}
+#endif
+
 #if defined(CONFIG_LATX_KZT)
 static void handle_arg_latx_kzt(const char *arg)
 {
@@ -788,6 +796,10 @@ static const struct qemu_argument arg_table[] = {
     "",           "enable softfpu fast"},
     {"latx-prlimit",    "LATX_PRLIMIT",     true,  handle_arg_latx_prlimit,
     "",           "enable prlimit"},
+#if defined(CONFIG_LATX_AVX_OPT)
+    {"latx-avx-cpuid",    "LATX_AVX_CPUID",     true,  handle_arg_latx_avx_cpuid,
+    "",           "enable avx cpuid"},
+#endif
 #if defined(CONFIG_LATX_KZT)
     {"latx-kzt",    "LATX_KZT",     true,  handle_arg_latx_kzt,
     "",           "enable kuzhitong"},
@@ -1099,6 +1111,8 @@ int main(int argc, char **argv, char **envp)
     }
 #endif
 
+    optind = parse_args(argc, argv);
+
     error_init(argv[0]);
     module_call_init(MODULE_INIT_TRACE);
     qemu_init_cpu_list();
@@ -1126,8 +1140,6 @@ int main(int argc, char **argv, char **envp)
 
     qemu_add_opts(&qemu_trace_opts);
     qemu_plugin_add_opts();
-
-    optind = parse_args(argc, argv);
 
     if (argc >= 5 && !strcmp(argv[1], argv[2])) {
         long long hash = 0;

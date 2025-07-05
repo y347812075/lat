@@ -61,6 +61,10 @@
 extern int option_anonym;
 #endif
 
+#ifdef CONFIG_LATX_AVX_OPT
+extern int option_avx_cpuid;
+#endif
+
 /* Helpers for building CPUID[2] descriptors: */
 
 struct CPUID2CacheDescriptorInfo {
@@ -633,14 +637,14 @@ static void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
           CPUID_EXT_XSAVE | /* CPUID_EXT_OSXSAVE is dynamic */   \
           CPUID_EXT_MOVBE | CPUID_EXT_AES | CPUID_EXT_HYPERVISOR | \
           CPUID_EXT_RDRAND | CPUID_EXT_AVX | CPUID_EXT_FMA | CPUID_EXT_F16C )
-#else
+#else /*CONFIG_LATX_AVX_OPT*/
 #define TCG_EXT_FEATURES (CPUID_EXT_SSE3 | CPUID_EXT_PCLMULQDQ | \
           CPUID_EXT_MONITOR | CPUID_EXT_SSSE3 | CPUID_EXT_CX16 | \
           CPUID_EXT_SSE41 | CPUID_EXT_SSE42 | CPUID_EXT_POPCNT | \
           CPUID_EXT_XSAVE | /* CPUID_EXT_OSXSAVE is dynamic */   \
           CPUID_EXT_MOVBE | CPUID_EXT_AES | CPUID_EXT_HYPERVISOR | \
           CPUID_EXT_RDRAND)
-#endif
+#endif /*CONFIG_LATX_AVX_OPT*/
           /* missing:
           CPUID_EXT_DTES64, CPUID_EXT_DSCPL, CPUID_EXT_VMX, CPUID_EXT_SMX,
           CPUID_EXT_EST, CPUID_EXT_TM2, CPUID_EXT_CID, CPUID_EXT_FMA,
@@ -669,13 +673,13 @@ static void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
           CPUID_7_0_EBX_PCOMMIT | CPUID_7_0_EBX_CLFLUSHOPT |            \
           CPUID_7_0_EBX_CLWB | CPUID_7_0_EBX_MPX | CPUID_7_0_EBX_FSGSBASE | \
           CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_HLE)
-#else
+#else/*CONFIG_LATX_AVX_OPT*/
 #define TCG_7_0_EBX_FEATURES (CPUID_7_0_EBX_SMEP | CPUID_7_0_EBX_SMAP | \
           CPUID_7_0_EBX_BMI1 | CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ADX | \
           CPUID_7_0_EBX_PCOMMIT | CPUID_7_0_EBX_CLFLUSHOPT |            \
           CPUID_7_0_EBX_CLWB | CPUID_7_0_EBX_MPX | CPUID_7_0_EBX_FSGSBASE | \
           CPUID_7_0_EBX_ERMS)
-#endif
+#endif/*CONFIG_LATX_AVX_OPT*/
           /* missing:
           CPUID_7_0_EBX_HLE, CPUID_7_0_EBX_AVX2,
           CPUID_7_0_EBX_INVPCID, CPUID_7_0_EBX_RTM,
@@ -684,11 +688,11 @@ static void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
 #define TCG_7_0_ECX_FEATURES (CPUID_7_0_ECX_PKU | \
           /* CPUID_7_0_ECX_OSPKE is dynamic */ \
           CPUID_7_0_ECX_LA57)
-#else
+#else/*CONFIG_LATX_AVX_OPT*/
 #define TCG_7_0_ECX_FEATURES (CPUID_7_0_ECX_PKU | \
           /* CPUID_7_0_ECX_OSPKE is dynamic */ \
           CPUID_7_0_ECX_LA57 | CPUID_7_0_ECX_PKS)
-#endif
+#endif/*CONFIG_LATX_AVX_OPT*/
 #define TCG_7_0_EDX_FEATURES 0
 #define TCG_7_1_EAX_FEATURES 0
 #define TCG_APM_FEATURES 0
@@ -1912,7 +1916,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .features[FEAT_1_ECX] =
 #ifdef CONFIG_LATX_AVX_OPT
             CPUID_EXT_AVX | CPUID_EXT_FMA | CPUID_EXT_XSAVE |
-#endif
+#endif/*CONFIG_LATX_AVX_OPT*/
 #ifdef CONFIG_LATX_SSSE3_SSE4
             CPUID_EXT_AES | CPUID_EXT_POPCNT | CPUID_EXT_SSE42 |
             CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
@@ -1931,7 +1935,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_7_0_EBX_BMI2,
         .features[FEAT_XSAVE] =
             CPUID_XSAVE_XSAVEOPT | CPUID_XSAVE_XGETBV1,
-#endif
+#endif/*CONFIG_LATX_AVX_OPT*/
         .xlevel = 0x8000000A,
         .model_id = "LATX64 Virtual CPU @ 2.5GHz",
     },
@@ -2062,7 +2066,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .features[FEAT_1_ECX] =
 #ifdef CONFIG_LATX_AVX_OPT
             CPUID_EXT_AVX | CPUID_EXT_FMA | CPUID_EXT_XSAVE |
-#endif
+#endif/*CONFIG_LATX_AVX_OPT*/
 #ifdef CONFIG_LATX_SSSE3_SSE4
             CPUID_EXT_AES | CPUID_EXT_POPCNT | CPUID_EXT_SSE42 |
             CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
@@ -7571,6 +7575,40 @@ static const TypeInfo x86_base_cpu_type_info = {
 static void x86_cpu_register_types(void)
 {
     int i;
+
+#ifdef CONFIG_LATX_AVX_OPT
+    printf("option avx cpuid %d\n", option_avx_cpuid);
+    if(!option_avx_cpuid){
+        uint64_t feat_1_ecx_mask = ~(CPUID_EXT_AVX |
+                CPUID_EXT_FMA |
+                CPUID_EXT_XSAVE);
+        uint64_t feat_7_0_ebx_mask = ~(CPUID_7_0_EBX_HLE |
+                CPUID_7_0_EBX_BMI1 |
+                CPUID_7_0_EBX_AVX2 |
+                CPUID_7_0_EBX_BMI2);
+        uint64_t feat_xsave_mask = ~(CPUID_XSAVE_XSAVEOPT |
+                CPUID_XSAVE_XGETBV1);
+
+        uint64_t tcg_ext_mask = ~(CPUID_EXT_AVX |
+                CPUID_EXT_FMA |
+                CPUID_EXT_F16C);
+        uint64_t tcg_7_0_ebx_mask = ~(CPUID_7_0_EBX_HLE |
+                CPUID_7_0_EBX_AVX2);
+
+        for (i = 0; i < ARRAY_SIZE(builtin_x86_defs); i++) {
+            if(strcmp(builtin_x86_defs[i].name, "qemu64") == 0 ||
+                    strcmp(builtin_x86_defs[i].name, "qemu32") == 0){
+                builtin_x86_defs[i].features[FEAT_1_ECX] &= feat_1_ecx_mask;
+                builtin_x86_defs[i].features[FEAT_7_0_EBX] &= feat_7_0_ebx_mask;
+                builtin_x86_defs[i].features[FEAT_XSAVE] &= feat_xsave_mask;
+            }
+        }
+        feature_word_info[FEAT_1_ECX].tcg_features &= tcg_ext_mask;
+        feature_word_info[FEAT_7_0_EBX].tcg_features &= tcg_7_0_ebx_mask;
+        feature_word_info[FEAT_XSAVE].tcg_features |= CPUID_7_0_ECX_PKS;
+
+    }
+#endif
 
     type_register_static(&x86_cpu_type_info);
     for (i = 0; i < ARRAY_SIZE(builtin_x86_defs); i++) {

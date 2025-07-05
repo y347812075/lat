@@ -8,6 +8,10 @@
 int option_kzt = 0;
 #endif
 
+#ifdef CONFIG_LATX_AVX_OPT
+int option_avx_cpuid = 0;
+#endif
+
 #ifdef CONFIG_LATX_FLAG_REDUCTION
 int option_flag_reduction = 1;
 #endif
@@ -111,6 +115,10 @@ void options_init(void)
 
     counter_ir1_tr = 0;
     counter_mips_tr = 0;
+
+#ifdef CONFIG_LATX_AVX_OPT
+    option_avx_cpuid = 1;
+#endif /*CONFIG_LATX_AVX_OPT*/
 
 #ifdef CONFIG_LATX_AOT
     option_aot = 1;
