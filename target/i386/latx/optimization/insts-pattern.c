@@ -344,6 +344,8 @@ static inline bool get_pattern_list(IR1_INST *ir1,
         switch (BUF_OP(scan_buf, 0)) {
         case WRAP(IDIV):
             opnd0 = ir1_get_opnd(scan_buf[0], 0);
+            if (!ir1_opnd_is_gpr(opnd0))
+                return false;
             if (ir1_opnd_size(opnd0) != 32)
                 return false;
             if (is_contain_edx(opnd0))
