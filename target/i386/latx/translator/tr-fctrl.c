@@ -202,32 +202,6 @@ bool translate_stmxcsr(IR1_INST *pir1)
 
     lsassert(offset <= 0x7ff);
     la_ld_wu(mxcsr_opnd, env_ir2_opnd, offset);
-    if (option_softfpu) {
-        IR2_OPND fcsr = ra_alloc_itemp();
-        IR2_OPND temp = ra_alloc_itemp();
-
-        la_movfcsr2gr(fcsr, fcsr2_ir2_opnd);
-        /* PE */
-        /*la_bstrpick_w(temp, fcsr, 24, 24);*/
-        la_bstrpick_w(temp, fcsr, 16, 16);
-        la_bstrins_w(mxcsr_opnd, temp, 5, 5);
-        /* UE */
-        /*la_bstrpick_w(temp, fcsr, 25, 25);*/
-        la_bstrpick_w(temp, fcsr, 17, 17);
-        la_bstrins_w(mxcsr_opnd, temp, 4, 4);
-        /* OE */
-        /*la_bstrpick_w(temp, fcsr, 26, 26);*/
-        la_bstrpick_w(temp, fcsr, 18, 18);
-        la_bstrins_w(mxcsr_opnd, temp, 3, 3);
-        /* ZE */
-        /*la_bstrpick_w(temp, fcsr, 27, 27);*/
-        la_bstrpick_w(temp, fcsr, 19, 19);
-        la_bstrins_w(mxcsr_opnd, temp, 2, 2);
-        /* IE */
-        /*la_bstrpick_w(temp, fcsr, 28, 28);*/
-        la_bstrpick_w(temp, fcsr, 20, 20);
-        la_bstrins_w(mxcsr_opnd, temp, 0, 0);
-    }
 
     /* 2. store  the value of the mxcsr register state to the dest_opnd */
     store_ireg_to_ir1(mxcsr_opnd, ir1_get_opnd(pir1, 0), false);
@@ -246,65 +220,6 @@ bool translate_ldmxcsr(IR1_INST *pir1)
     /* 2. store the value into the env->mxcsr */
     lsassert(offset <= 0x7ff);
     la_st_w(new_mxcsr, env_ir2_opnd, offset);
-    if (option_softfpu) {
-        IR2_OPND fcsr = ra_alloc_itemp();
-        IR2_OPND temp = ra_alloc_itemp();
-
-        la_or(fcsr, zero_ir2_opnd, zero_ir2_opnd);
-        /* PE */
-        la_bstrpick_w(temp, new_mxcsr, 5, 5);
-        la_bstrins_w(fcsr, temp, 24, 24);
-        la_bstrins_w(fcsr, temp, 16, 16);
-        /* UE */
-        la_bstrpick_w(temp, new_mxcsr, 4, 4);
-        la_bstrins_w(fcsr, temp, 25, 25);
-        la_bstrins_w(fcsr, temp, 17, 17);
-        /* OE */
-        la_bstrpick_w(temp, new_mxcsr, 3, 3);
-        la_bstrins_w(fcsr, temp, 26, 26);
-        la_bstrins_w(fcsr, temp, 18, 18);
-        /* ZE */
-        la_bstrpick_w(temp, new_mxcsr, 2, 2);
-        la_bstrins_w(fcsr, temp, 27, 27);
-        la_bstrins_w(fcsr, temp, 19, 19);
-        /* IE */
-        la_bstrpick_w(temp, new_mxcsr, 0, 0);
-        la_bstrins_w(fcsr, temp, 28, 28);
-        la_bstrins_w(fcsr, temp, 20, 20);
-        la_movgr2fcsr(fcsr2_ir2_opnd, fcsr);
-        /* rounding */
-        la_bstrpick_w(temp, new_mxcsr, 14, 13);
-        la_andi(fcsr, temp, 0x1);
-        IR2_OPND label1 = ra_alloc_label();
-        la_beq(fcsr, zero_ir2_opnd, label1);
-        la_xori(temp, temp, 0x2);
-        la_label(label1);
-        la_bstrins_w(fcsr, temp, 9, 8);
-        la_movgr2fcsr(fcsr3_ir2_opnd, fcsr);
-        /* PM */
-        la_bstrpick_w(temp, new_mxcsr, 12, 12);
-        la_bstrins_w(fcsr, temp, 0, 0);
-        /* UM */
-        la_bstrpick_w(temp, new_mxcsr, 11, 11);
-        la_bstrins_w(fcsr, temp, 1, 1);
-        /* OM */
-        la_bstrpick_w(temp, new_mxcsr, 10, 10);
-        la_bstrins_w(fcsr, temp, 2, 2);
-        /* ZM */
-        la_bstrpick_w(temp, new_mxcsr, 9, 9);
-        la_bstrins_w(fcsr, temp, 3, 3);
-        /* IM */
-        la_bstrpick_w(temp, new_mxcsr, 7, 7);
-        la_bstrins_w(fcsr, temp, 4, 4);
-        la_nor(fcsr, zero_ir2_opnd, fcsr);
-
-        /* If FTZ set, enable UE to emulate */
-        la_bstrpick_w(temp, new_mxcsr, 15, 15);
-        la_slli_w(temp, temp, 1);
-        la_or(fcsr, fcsr, temp);
-
-        la_movgr2fcsr(fcsr1_ir2_opnd, fcsr);
-    }
 
     tr_gen_call_to_helper1((ADDR)update_mxcsr_status, 1,
                            LOAD_HELPER_UPDATE_MXCSR_STATUS);
