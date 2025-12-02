@@ -1020,6 +1020,7 @@ retry:
         tb->tu_search_addr_offset = (uintptr_t)
             ((uintptr_t)tcg_ctx->code_gen_ptr + search_buff_offset[i] - (uintptr_t)tb->tc.ptr);
     }
+
     memcpy(tcg_ctx->code_gen_ptr, search_buff, search_size);
     qatomic_set(&tcg_ctx->code_gen_ptr, (void *)
             ROUND_UP((uintptr_t)tcg_ctx->code_gen_ptr + search_size,
@@ -1213,11 +1214,13 @@ bool use_tu_jmp(TranslationBlock *tb)
 void set_use_tu_jmp(TranslationBlock *tb)
 {
     tb->bool_flags |= IS_TU_JMP;
+    tb->bool_flags &= ~IS_TU_SPLIT;
 }
 
 void unset_use_tu_jmp(TranslationBlock *tb)
 {
     tb->bool_flags &= ~IS_TU_JMP;
+    tb->bool_flags |= IS_TU_SPLIT;
 }
 #else
 bool use_tu_jmp(TranslationBlock *tb)

@@ -228,6 +228,17 @@ void tb_exit_to_qemu(CPUArchState *env, ucontext_t *uc)
             assert(current_tb->tu_jmp[TU_TB_INDEX_TARGET] != TB_JMP_RESET_OFFSET_INVALID);
             unlink_tu_jmp(current_tb);
             return;
+        } else if (current_tb->bool_flags & IS_TU_SPLIT) {
+            TranslationBlock *next_tb = current_tb;
+            while (next_tb->bool_flags & IS_TU_SPLIT) {
+                for (uintptr_t next_pc = pc; ; next_pc += 4) {
+                    next_tb = tcg_tb_lookup(next_pc);
+                    if (next_tb->pc != current_tb->pc) {
+                        break;
+                    }
+                }
+            }
+            current_tb = next_tb;
         }
 #endif
         if (use_indirect_jmp(current_tb) &&
