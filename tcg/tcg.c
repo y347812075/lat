@@ -674,9 +674,12 @@ static void tcg_region_tree_reset_all(void)
 #define MAX_TBM_TABLE_LEN 1000
 static void *query_tu_tbm_table(TBMini *tbm, uintptr_t tc_ptr)
 {
-    uintptr_t curr_pos = (uintptr_t)tbm + sizeof(struct TBMini);
+    int tb_num = tbm->mtbp_uint64 &
+        MAKE_64BIT_MASK(0, HOST_VIRT_ADDR_SPACE_BITS);
+    uintptr_t curr_pos = (uintptr_t)tbm + (tb_num + 1) *
+                            sizeof(struct TBMini);
     do {
-        tbm -= 1;
+        tbm += 1;
         curr_pos += tbm->mtbp_struct.magic;
     } while(curr_pos <= tc_ptr);
     return (void *)(tbm->mtbp_uint64 &
@@ -690,7 +693,7 @@ static void *tcg_tb_lookup_fast(uintptr_t tc_ptr)
         return NULL;
     }
     TBMini *tbm = (TBMini *)(ROUND_DOWN((uintptr_t)tc_ptr,
-                qemu_icache_linesize) - sizeof(struct TBMini));
+                CODE_GEN_ALIGN));
     while (tbm->mtbp_struct.magic != TB_MAGIC) {
         tbm = (TBMini *)((uint64_t)tbm - CODE_GEN_ALIGN);
     }

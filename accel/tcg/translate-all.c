@@ -2140,6 +2140,14 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
     }
 
     gen_code_buf = tcg_ctx->code_gen_ptr;
+
+#if defined(CONFIG_LATX) && defined(CONFIG_LATX_TBMINI_ENABLE)
+    /* set TBMini */
+    uint64_t *tbm = (uint64_t *)gen_code_buf;
+    tbmini_set_pointer(tbm, (uint64_t)tb);
+    gen_code_buf = (tcg_insn_unit *)((uintptr_t)gen_code_buf + sizeof(struct TBMini));
+#endif
+
     tb->tc.ptr = tcg_splitwx_to_rx(gen_code_buf);
     tb->pc = pc;
     /* tb->cs_base = cs_base; */
@@ -2412,12 +2420,6 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
      *          magic  /   | 48 bits
      *          number    TB pointer
      */
-#if defined(CONFIG_LATX) && defined(CONFIG_LATX_TBMINI_ENABLE)
-    /* set TBMini */
-    uint64_t *tbm;
-    tbm = (uint64_t *)((uintptr_t)gen_code_buf - sizeof(struct TBMini));
-    tbmini_set_pointer(tbm, (uint64_t)tb);
-#endif
     tb->tc.size = gen_code_size;
 
 #ifdef CONFIG_LATX_AOT
@@ -2435,9 +2437,6 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 #endif
 
     uintptr_t sptr = (uintptr_t)gen_code_buf + gen_code_size;
-#if defined(CONFIG_LATX) && defined(CONFIG_LATX_TBMINI_ENABLE)
-    sptr = sptr + sizeof(struct TBMini);
-#endif
     qatomic_set(&tcg_ctx->code_gen_ptr, (void *)
         ROUND_UP(sptr + search_size, CODE_GEN_ALIGN));
 
@@ -2497,6 +2496,10 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
     /* if the TB already exists, discard what we just translated */
     if (unlikely(existing_tb != tb)) {
         uintptr_t orig_aligned = (uintptr_t)gen_code_buf;
+
+#if defined(CONFIG_LATX) && defined(CONFIG_LATX_TBMINI_ENABLE)
+        orig_aligned -= sizeof(struct TBMini);
+#endif
 
         if (!option_split_tb) {
             orig_aligned -= ROUND_UP(sizeof(*tb), qemu_icache_linesize);
