@@ -4206,8 +4206,8 @@ static void smc_retrans_triger(TranslationBlock *ctb)
 
 /* TODO: handle cross page */
 #define SMC_HELPER_CHECK(spd, p, addr, addr2, size) do {    \
-    if (!(spd)) return 1;                                   \
-    if (!((p)->flags & PAGE_WRITE_ORG)) return 1;           \
+    if (!(spd) || !(spd->is_shmm)) return 1;                \
+    if (!(p) || !((p)->flags & PAGE_WRITE_ORG)) return 1;   \
     addr2 = (addr) + (size) - 1;                            \
     if (((addr)  & TARGET_PAGE_MASK) !=                     \
         ((addr2) & TARGET_PAGE_MASK)) {                     \
