@@ -68,6 +68,7 @@ int option_debug_lative;
 int option_aot;
 int option_load_aot;
 int option_aot_wine;
+int option_smc_reload;
 int option_debug_aot;
 int option_imm_reg;
 int option_imm_rip;
@@ -244,6 +245,7 @@ void options_init(void)
     option_aot_wine = 0;
     option_debug_aot = 0;
 #endif
+    option_smc_reload = 0;
 #ifdef CONFIG_LATX_IMM_REG
     option_imm_reg = 0;
     option_imm_rip = 0;
