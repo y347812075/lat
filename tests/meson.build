@@ -3,3 +3,4 @@ if not get_option('tests').enabled()
 endif
 
 subdir('unit')
+subdir('integration')
