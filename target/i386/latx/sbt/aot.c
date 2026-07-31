@@ -13,6 +13,7 @@
 #include "qemu-def.h"
 #include "segment.h"
 #include "aot.h"
+#include "aot_exit.h"
 #include <stdlib.h>
 #include <math.h>
 #include "latx-options.h"
@@ -1848,6 +1849,10 @@ static void creat_daemon(bool is_end)
 
 void aot_exit_entry(CPUState *cpu, AOTExitReason reason)
 {
+    TaskState *ts = cpu->opaque;
+    bool daemonize = aot_exit_worker_should_daemonize(
+        ts && ts->ipc_namespace_isolated);
+
     if (!option_aot) {
         return;
     }
@@ -1931,7 +1936,11 @@ parent_exit:
         return;
     }
 
-    creat_daemon(reason == AOT_EXIT_FINAL);
+    if (daemonize) {
+        creat_daemon(reason == AOT_EXIT_FINAL);
+    } else {
+        close_all_fd();
+    }
 
     aot_generate(cpu);
     _exit(EXIT_SUCCESS);

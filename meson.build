@@ -688,6 +688,22 @@ foreach target : target_dirs
       suite: 'lat-pr-fast',
     )
 
+    aot_exit_worker_test = executable(
+      'test-latx-aot-exit-worker',
+      files(
+        'target/i386/latx/sbt/tests/aot-exit-worker-test.c'
+      ) + genh + tcg_trace_genh + syscall_nr_generated,
+      c_args: smc_reload_test_c_args,
+      dependencies: [glib],
+      include_directories: target_inc,
+      link_args: smc_reload_test_link_args
+    )
+    test(
+      'latx-aot-exit-worker',
+      aot_exit_worker_test,
+      suite: 'lat-pr-fast',
+    )
+
     aot_pe_load_address_test = executable(
       'test-latx-aot-pe-load-address',
       files(
