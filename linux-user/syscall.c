@@ -9379,6 +9379,7 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         ts->info = parent_ts->info;
         ts->signal_mask = parent_ts->signal_mask;
         ts->seccomp_filter = parent_ts->seccomp_filter;
+        ts->ipc_namespace_isolated = parent_ts->ipc_namespace_isolated;
 
         if (flags & CLONE_CHILD_CLEARTID) {
             ts->child_tidptr = child_tidptr;
@@ -9505,6 +9506,9 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
             if (flags & CLONE_PARENT_SETTID)
                 put_user_u32(sys_gettid(), parent_tidptr);
             ts = (TaskState *)cpu->opaque;
+            if (flags & CLONE_NEWIPC) {
+                ts->ipc_namespace_isolated = true;
+            }
             if (flags & CLONE_SETTLS)
                 cpu_set_tls (env, newtls);
             if (flags & CLONE_CHILD_CLEARTID)
@@ -17857,6 +17861,9 @@ defined(__loongarch__)
 #if defined(TARGET_NR_unshare) && defined(CONFIG_SETNS)
     case TARGET_NR_unshare:
         ret = get_errno(unshare(arg1));
+        if (ret == 0 && (arg1 & CLONE_NEWIPC)) {
+            ((TaskState *)cpu->opaque)->ipc_namespace_isolated = true;
+        }
         if (arg1 & CLONE_NEWUSER) {
             rcu_start_deferred_thread();
         }

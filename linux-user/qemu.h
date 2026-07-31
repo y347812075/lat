@@ -122,6 +122,8 @@ typedef struct TaskState {
     uint32_t v86flags;
     uint32_t v86mask;
     abi_ulong child_tidptr;
+    /* A detached helper must not outlive an isolated IPC namespace. */
+    bool ipc_namespace_isolated;
     /* Immutable seccomp filter chain inherited by guest threads. */
     struct GuestSeccompFilter *seccomp_filter;
 #ifdef TARGET_M68K
