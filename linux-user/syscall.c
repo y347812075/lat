@@ -435,10 +435,12 @@ static void latx_wine_pe_prefer_image_base(int fd, void *buffer, abi_long len)
 
 /* Flags for fork which we can implement within QEMU itself */
 #define CLONE_FORK_NAMESPACE_FLAGS \
-    (CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET)
+    (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | \
+     CLONE_NEWPID | CLONE_NEWNET)
 
 #define CLONE_DIRECT_FORK_FLAGS \
-    (CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | CLONE_FS)
+    (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | \
+     CLONE_NEWPID | CLONE_NEWNET | CLONE_FS)
 
 #define CLONE_OPTIONAL_FORK_FLAGS               \
     (CLONE_SETTLS | CLONE_PARENT_SETTID |       \
@@ -459,13 +461,13 @@ static void latx_wine_pe_prefer_image_base(int fd, void *buffer, abi_long len)
 
 /* CLONE_VFORK is special cased early in do_fork(). The other flag bits
  * have almost all been allocated. We cannot support any of
- * CLONE_NEWNS, CLONE_NEWCGROUP, CLONE_NEWUTS, CLONE_NEWIPC,
- * CLONE_PTRACE, CLONE_UNTRACED.
+ * CLONE_NEWCGROUP, CLONE_PTRACE, CLONE_UNTRACED.
  * The checks against the invalid thread masks above will catch these.
  * (The one remaining unallocated bit is 0x1000 which used to be CLONE_PID.)
- * Fork-like CLONE_NEWUSER is applied in the single-threaded child. PID,
- * network, and shared-fs clone flags require a deferred single-thread child
- * and use the libc clone wrapper so the kernel creates the requested state.
+ * Fork-like CLONE_NEWUSER is applied in the single-threaded child. Mount, UTS,
+ * IPC, PID, network, and shared-fs clone flags require a deferred
+ * single-thread child and use the libc clone wrapper so the kernel creates the
+ * requested state.
  */
 
 /* Define DEBUG_ERESTARTSYS to force every syscall to be restarted
@@ -9334,7 +9336,7 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
     if (flags & CLONE_VFORK)
         flags &= ~(CLONE_VFORK | CLONE_VM);
 
-    direct_fork_flags = flags & (CLONE_NEWPID | CLONE_NEWNET | CLONE_FS);
+    direct_fork_flags = flags & (CLONE_DIRECT_FORK_FLAGS & ~CLONE_NEWUSER);
     userns_via_unshare = namespace_flags == CLONE_NEWUSER &&
                          !direct_fork_flags;
 
