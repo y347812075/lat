@@ -39,3 +39,16 @@ if 'CONFIG_LATX' in config_host
     suite: 'lat-pr-fast',
   )
 endif
+
+test_rcu_lazy_thread = executable(
+  'test-rcu-lazy-thread',
+  files('test-rcu-lazy-thread.c'),
+  include_directories: include_directories('../..'),
+  dependencies: [glib, qemuutil],
+)
+
+test(
+  'test-rcu-lazy-thread',
+  test_rcu_lazy_thread,
+  suite: 'lat-pr-fast',
+)

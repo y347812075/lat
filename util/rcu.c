@@ -182,6 +182,10 @@ static struct rcu_head dummy;
 static struct rcu_head *head = &dummy, **tail = &dummy.next;
 static int rcu_call_count;
 static QemuEvent rcu_call_ready_event;
+static bool atfork_child_deferred;
+static bool call_rcu_thread_started;
+
+static void rcu_start_call_thread(void);
 
 static void enqueue(struct rcu_head *node)
 {
@@ -290,6 +294,9 @@ void call_rcu1(struct rcu_head *node, void (*func)(struct rcu_head *node))
     node->func = func;
     enqueue(node);
     qatomic_inc(&rcu_call_count);
+    if (!atfork_child_deferred) {
+        rcu_start_call_thread();
+    }
     qemu_event_set(&rcu_call_ready_event);
 }
 
@@ -367,12 +374,17 @@ static void rcu_start_call_thread(void)
 {
     QemuThread thread;
 
+    if (qatomic_cmpxchg(&call_rcu_thread_started, false, true)) {
+        return;
+    }
+
     qemu_thread_create(&thread, "call_rcu", call_rcu_thread,
                        NULL, QEMU_THREAD_DETACHED);
 }
 
 static void rcu_init_complete(bool start_thread)
 {
+    qatomic_set(&call_rcu_thread_started, false);
     qemu_mutex_init(&rcu_registry_lock);
     qemu_mutex_init(&rcu_sync_lock);
     qemu_event_init(&rcu_gp_event, true);
@@ -387,7 +399,6 @@ static void rcu_init_complete(bool start_thread)
 }
 
 static int atfork_depth = 1;
-static bool atfork_child_deferred;
 
 void rcu_enable_atfork(void)
 {
@@ -422,7 +433,7 @@ void rcu_start_deferred_thread(void)
 
 bool rcu_call_thread_is_running(void)
 {
-    return !atfork_child_deferred;
+    return qatomic_read(&call_rcu_thread_started);
 }
 
 #ifdef CONFIG_POSIX
@@ -457,7 +468,11 @@ static void rcu_init_child(void)
     }
 
     memset(&registry, 0, sizeof(registry));
+#ifdef CONFIG_LATX
+    rcu_init_complete(false);
+#else
     rcu_init_complete(!atfork_child_deferred);
+#endif
 }
 
 void rcu_raw_clone_prepare(void)
@@ -484,10 +499,14 @@ static void __attribute__((__constructor__)) rcu_init(void)
 #endif
 #ifdef CONFIG_LATX
     /*
-     * Chromium execs its PID namespace child before entering the nested user
-     * namespace.  Keep that child single-threaded until the guest unshare.
+     * Keep translator-only threads out of a single-threaded guest until RCU
+     * work actually needs a consumer.  Chromium additionally defers that
+     * on-demand start until its namespace child enters the nested user
+     * namespace.
      */
     atfork_child_deferred = g_strcmp0(g_getenv("SBX_USER_NS"), "1") == 0;
+    rcu_init_complete(false);
+#else
+    rcu_init_complete(true);
 #endif
-    rcu_init_complete(!atfork_child_deferred);
 }
