@@ -33,4 +33,15 @@ if host_machine.cpu_family() == 'loongarch64' and \
     suite: 'latx-integration',
     timeout: 30,
   )
+  test(
+    'test-rcu-thread-visibility',
+    find_program('test-rcu-thread-visibility.sh'),
+    args: [
+      emulators['latx-x86_64'],
+      files('rcu-thread-visibility.S'),
+    ],
+    protocol: 'exitcode',
+    suite: 'latx-integration',
+    timeout: 30,
+  )
 endif
