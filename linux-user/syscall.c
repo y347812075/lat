@@ -17852,7 +17852,23 @@ defined(__loongarch__)
 
 #if defined(TARGET_NR_setns) && defined(CONFIG_SETNS)
     case TARGET_NR_setns:
-        return get_errno(setns(arg1, arg2));
+        {
+            bool joins_ipc_namespace = (arg2 & CLONE_NEWIPC) != 0;
+
+            if (arg2 == 0) {
+                int namespace_type = ioctl(arg1, NS_GET_NSTYPE);
+
+                if (namespace_type >= 0) {
+                    joins_ipc_namespace = namespace_type == CLONE_NEWIPC;
+                }
+            }
+
+            ret = get_errno(setns(arg1, arg2));
+            if (ret == 0 && joins_ipc_namespace) {
+                ((TaskState *)cpu->opaque)->ipc_namespace_isolated = true;
+            }
+            return ret;
+        }
 #endif
 #ifdef TARGET_NR_seccomp
     case TARGET_NR_seccomp:
