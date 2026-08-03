@@ -9537,8 +9537,6 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
                the child process gets its own copy of the lock.  */
             if (flags & CLONE_CHILD_SETTID)
                 put_user_u32(sys_gettid(), child_tidptr);
-            if (flags & CLONE_PARENT_SETTID)
-                put_user_u32(sys_gettid(), parent_tidptr);
             ts = (TaskState *)cpu->opaque;
             if (flags & CLONE_NEWIPC) {
                 ts->ipc_namespace_isolated = true;
@@ -9579,6 +9577,9 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
                 errno = len == (ssize_t)sizeof(namespace_errno) ?
                         namespace_errno : EIO;
                 ret = -1;
+            }
+            if (ret > 0 && (flags & CLONE_PARENT_SETTID)) {
+                put_user_u32(ret, parent_tidptr);
             }
         }
         g_assert(!cpu_in_exclusive_context(cpu));

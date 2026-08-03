@@ -67,6 +67,17 @@ if host_machine.cpu_family() == 'loongarch64' and \
     timeout: 30,
   )
   test(
+    'test-clone-parent-settid',
+    find_program('test-clone-parent-settid.sh'),
+    args: [
+      emulators['latx-x86_64'],
+      files('clone-parent-settid.S'),
+    ],
+    protocol: 'exitcode',
+    suite: 'latx-integration',
+    timeout: 30,
+  )
+  test(
     'test-setns-ipc-mqueue',
     find_program('test-setns-ipc-mqueue.sh'),
     args: [
