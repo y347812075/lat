@@ -207,6 +207,7 @@ int syscall_64_to_32[TARGET32_TARGET_NR_LATX_LAST + 1] = {0};
 void cpu_loop(CPUX86State *env)
 {
     CPUState *cs = env_cpu(env);
+    TaskState *ts = cs->opaque;
     int trapnr;
     abi_ulong pc;
     abi_ulong ret;
@@ -248,11 +249,12 @@ void cpu_loop(CPUX86State *env)
                              env->regs[R_EBP],
                              0, 0);
 #endif
-            if (ret == -TARGET_ERESTARTSYS) {
+            if (ret == -TARGET_ERESTARTSYS && !ts->seccomp_errno_return) {
                 env->eip -= 2;
             } else if (ret != -TARGET_QEMU_ESIGRETURN) {
                 env->regs[R_EAX] = ret;
             }
+            ts->seccomp_errno_return = false;
             break;
 #ifndef TARGET_ABI32
         case EXCP_SYSCALL:
@@ -266,11 +268,12 @@ void cpu_loop(CPUX86State *env)
                              env->regs[8],
                              env->regs[9],
                              0, 0);
-            if (ret == -TARGET_ERESTARTSYS) {
+            if (ret == -TARGET_ERESTARTSYS && !ts->seccomp_errno_return) {
                 env->eip -= 2;
             } else if (ret != -TARGET_QEMU_ESIGRETURN) {
                 env->regs[R_EAX] = ret;
             }
+            ts->seccomp_errno_return = false;
             break;
 #endif
 #ifdef TARGET_X86_64

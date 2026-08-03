@@ -459,7 +459,7 @@ GuestSeccompAction guest_seccomp_filter_syscall(CPUArchState *env, int num,
         return GUEST_SECCOMP_CONTINUE;
     case SECCOMP_RET_ERRNO:
         *result = -(abi_long)MIN(decision & SECCOMP_RET_DATA, 4095U);
-        return GUEST_SECCOMP_RETURN;
+        return GUEST_SECCOMP_RETURN_ERRNO;
     case SECCOMP_RET_TRAP:
     {
         target_siginfo_t info = {

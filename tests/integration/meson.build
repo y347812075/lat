@@ -122,4 +122,15 @@ if host_machine.cpu_family() == 'loongarch64' and \
     suite: 'latx-integration',
     timeout: 30,
   )
+  test(
+    'test-seccomp-errno-restart',
+    find_program('test-seccomp-errno-restart.sh'),
+    args: [
+      emulators['latx-x86_64'],
+      files('seccomp-errno-restart.S'),
+    ],
+    protocol: 'exitcode',
+    suite: 'latx-integration',
+    timeout: 30,
+  )
 endif

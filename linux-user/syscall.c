@@ -18286,12 +18286,15 @@ abi_long do_syscall_with_seccomp(void *cpu_env, int num, int seccomp_num,
 {
     CPUState *cpu = env_cpu(cpu_env);
     CPUArchState *env = cpu->env_ptr;
+    TaskState *ts = cpu->opaque;
     const abi_long seccomp_args[6] = {
         arg1, arg2, arg3, arg4, arg5, arg6,
     };
     GuestSeccompAction seccomp_action = GUEST_SECCOMP_CONTINUE;
     bool apply_seccomp = true;
     abi_long ret;
+
+    ts->seccomp_errno_return = false;
 #if defined(CONFIG_LATX_JRRA) || defined(CONFIG_LATX_JRRA_STACK)
     /*GR2SCR scr0, zeor; for todo.*/
     if (0) {
@@ -18334,6 +18337,9 @@ abi_long do_syscall_with_seccomp(void *cpu_env, int num, int seccomp_num,
                           arg5, arg6, arg7, arg8);
         break;
     case GUEST_SECCOMP_RETURN:
+        break;
+    case GUEST_SECCOMP_RETURN_ERRNO:
+        ts->seccomp_errno_return = true;
         break;
     case GUEST_SECCOMP_KILL_THREAD:
         seccomp_kill_thread(env);
