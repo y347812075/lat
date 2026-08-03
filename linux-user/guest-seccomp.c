@@ -244,15 +244,10 @@ static uint32_t seccomp_run_filter(const GuestSeccompFilter *filter,
     return SECCOMP_RET_KILL_THREAD;
 }
 
-static abi_long seccomp_load_filter(abi_ulong program,
-                                    GuestSeccompFilter **result)
+static abi_long seccomp_load_program(abi_ulong program, unsigned int *len,
+                                     abi_ulong *target_filter)
 {
     struct target_sock_fprog *target_program;
-    struct target_sock_filter *target_insns;
-    GuestSeccompFilter *filter;
-    abi_ulong target_filter;
-    unsigned int len;
-    unsigned int i;
 
     if (!program) {
         return -TARGET_EFAULT;
@@ -260,11 +255,25 @@ static abi_long seccomp_load_filter(abi_ulong program,
     if (!lock_user_struct(VERIFY_READ, target_program, program, 1)) {
         return -TARGET_EFAULT;
     }
-    len = tswap16(target_program->len);
-    target_filter = tswapal(target_program->filter);
+    *len = tswap16(target_program->len);
+    *target_filter = tswapal(target_program->filter);
     unlock_user_struct(target_program, program, 0);
 
-    if (len == 0 || len > BPF_MAXINSNS) {
+    if (*len == 0 || *len > BPF_MAXINSNS) {
+        return -TARGET_EINVAL;
+    }
+    return 0;
+}
+
+static abi_long seccomp_load_filter(abi_ulong target_filter,
+                                    unsigned int len,
+                                    GuestSeccompFilter **result)
+{
+    struct target_sock_filter *target_insns;
+    GuestSeccompFilter *filter;
+    unsigned int i;
+
+    if (!target_filter) {
         return -TARGET_EINVAL;
     }
     target_insns = lock_user(VERIFY_READ, target_filter,
@@ -301,15 +310,22 @@ static abi_long seccomp_install_filter(CPUArchState *env, abi_ulong flags,
     CPUState *cpu = env_cpu(env);
     TaskState *task = cpu->opaque;
     GuestSeccompFilter *filter;
+    abi_ulong target_filter;
+    unsigned int len;
     abi_long ret;
 
     if (flags & ~supported_flags) {
         return -TARGET_EINVAL;
     }
+    ret = seccomp_load_program(program, &len, &target_filter);
+    if (ret) {
+        return ret;
+    }
+    /* Linux validates the filter instructions only after this check. */
     if (prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1) {
         return -TARGET_EACCES;
     }
-    ret = seccomp_load_filter(program, &filter);
+    ret = seccomp_load_filter(target_filter, len, &filter);
     if (ret) {
         return ret;
     }
