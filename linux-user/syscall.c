@@ -18236,8 +18236,16 @@ defined(__loongarch__)
 
 #ifdef CONFIG_LATX_TUNNEL_LIB
     case TUNNEL_VIRTUAL_SYSCALL_ID:
-        reg_priv_plt(arg1, arg2, arg3);
-        break;
+        p = lock_user_string(arg1);
+        if (!p || !tunnel_method_exists(p)) {
+            if (p) {
+                unlock_user(p, arg1, 0);
+            }
+            return -TARGET_ENOSYS;
+        }
+        reg_priv_plt(p, arg2, arg3);
+        unlock_user(p, arg1, 0);
+        return 0;
 #endif
 #if TARGET_ABI_BITS == 32 && HOST_LONG_BITS == 64
     case TARGET_NR_io_setup:
@@ -18291,7 +18299,6 @@ abi_long do_syscall_with_seccomp(void *cpu_env, int num, int seccomp_num,
         arg1, arg2, arg3, arg4, arg5, arg6,
     };
     GuestSeccompAction seccomp_action = GUEST_SECCOMP_CONTINUE;
-    bool apply_seccomp = true;
     abi_long ret;
 
     ts->seccomp_errno_return = false;
@@ -18323,13 +18330,8 @@ abi_long do_syscall_with_seccomp(void *cpu_env, int num, int seccomp_num,
         print_syscall(cpu_env, num, arg1, arg2, arg3, arg4, arg5, arg6);
     }
 
-#ifdef CONFIG_LATX_TUNNEL_LIB
-    apply_seccomp = num != TUNNEL_VIRTUAL_SYSCALL_ID;
-#endif
-    if (apply_seccomp) {
-        seccomp_action = guest_seccomp_filter_syscall(
-            env, seccomp_num, seccomp_arch, seccomp_args, &ret);
-    }
+    seccomp_action = guest_seccomp_filter_syscall(
+        env, seccomp_num, seccomp_arch, seccomp_args, &ret);
 
     switch (seccomp_action) {
     case GUEST_SECCOMP_CONTINUE:

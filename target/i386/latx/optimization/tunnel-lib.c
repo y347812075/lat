@@ -564,12 +564,11 @@ static void create_tunnel_tb(
     mmap_unlock();
 }
 
-void reg_priv_plt(abi_ulong method, abi_ulong plt_addr, abi_ulong org)
+void reg_priv_plt(const char *method_name, abi_ulong plt_addr, abi_ulong org)
 {
     if (!option_tunnel_lib) {
         return;
     }
-    char *method_name = (char *)(unsigned long)method;
     if (!tunnel_method_hash) {
         init_tunnel_table();
     }
@@ -580,4 +579,15 @@ void reg_priv_plt(abi_ulong method, abi_ulong plt_addr, abi_ulong org)
     if (method_item) {
         create_tunnel_tb(method_item, org);
     }
+}
+
+bool tunnel_method_exists(const char *method_name)
+{
+    if (!option_tunnel_lib || !method_name) {
+        return false;
+    }
+    if (!tunnel_method_hash) {
+        init_tunnel_table();
+    }
+    return g_hash_table_lookup(tunnel_method_hash, method_name) != NULL;
 }

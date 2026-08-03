@@ -24,4 +24,6 @@ struct lib_method_item {
 
 extern struct lib_method_item method_table[];
 extern const int method_table_size;
-void reg_priv_plt(abi_ulong method, abi_ulong plt_addr, abi_ulong org_value);
+void reg_priv_plt(const char *method_name, abi_ulong plt_addr,
+                  abi_ulong org_value);
+bool tunnel_method_exists(const char *method_name);

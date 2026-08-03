@@ -133,4 +133,15 @@ if host_machine.cpu_family() == 'loongarch64' and \
     suite: 'latx-integration',
     timeout: 30,
   )
+  test(
+    'test-seccomp-virtual-syscall',
+    find_program('test-seccomp-virtual-syscall.sh'),
+    args: [
+      emulators['latx-x86_64'],
+      files('seccomp-virtual-syscall.S'),
+    ],
+    protocol: 'exitcode',
+    suite: 'latx-integration',
+    timeout: 30,
+  )
 endif
