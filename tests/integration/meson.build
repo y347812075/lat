@@ -45,6 +45,17 @@ if host_machine.cpu_family() == 'loongarch64' and \
     timeout: 30,
   )
   test(
+    'test-proc-thread-count',
+    find_program('test-proc-thread-count.sh'),
+    args: [
+      emulators['latx-x86_64'],
+      files('proc-thread-count.S'),
+    ],
+    protocol: 'exitcode',
+    suite: 'latx-integration',
+    timeout: 30,
+  )
+  test(
     'test-clone-namespaces',
     find_program('test-clone-namespaces.sh'),
     args: [
