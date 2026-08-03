@@ -11433,6 +11433,26 @@ static int open_self_smaps(void *cpu_env, int fd, const char *oldpath)
         : open_self_maps_1((CPUArchState *)cpu_env, fd, true);
 }
 
+#ifdef CONFIG_LATX
+static int latx_guest_thread_count(void)
+{
+    CPUState *cpu;
+    int count = 0;
+
+    cpu_list_lock();
+    CPU_FOREACH(cpu) {
+        TaskState *ts = cpu->opaque;
+
+        if (ts && ts->ts_tid > 0) {
+            count++;
+        }
+    }
+    cpu_list_unlock();
+
+    return count;
+}
+#endif
+
 static int open_self_stat(void *cpu_env, int fd, const char *oldpath)
 {
     CPUState *cpu = env_cpu((CPUArchState *)cpu_env);
@@ -11474,6 +11494,11 @@ static int open_self_stat(void *cpu_env, int fd, const char *oldpath)
             gchar *bin = g_strrstr(ts->bprm->argv[0], "/");
             bin = bin ? bin + 1 : ts->bprm->argv[0];
             g_string_printf(buf, "(%.15s) ", bin);
+#ifdef CONFIG_LATX
+        } else if (i == 19) {
+            /* Hide translator-only threads from the guest process view. */
+            g_string_printf(buf, "%d ", latx_guest_thread_count());
+#endif
         } else if (i == 27) {
             /* stack bottom */
             g_string_printf(buf, TARGET_ABI_FMT_ld " ", ts->info->start_stack);
@@ -11546,6 +11571,39 @@ static int is_proc_myself(const char *filename, const char *entry)
     }
     return 0;
 }
+#ifdef CONFIG_LATX
+static bool latx_is_proc_self_task(const char *filename)
+{
+    return !strcmp(filename, "self/task") ||
+           !strcmp(filename, "self/task/") ||
+           is_proc_myself(filename, "task") ||
+           is_proc_myself(filename, "task/");
+}
+
+static bool latx_fd_is_proc_self_task(int fd)
+{
+    char fd_path[64];
+    char proc_path[PATH_MAX + 1];
+    ssize_t len;
+
+    snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
+    len = readlink(fd_path, proc_path, PATH_MAX);
+    if (len <= 0) {
+        return false;
+    }
+    proc_path[len] = '\0';
+
+    return latx_is_proc_self_task(proc_path);
+}
+
+static void latx_adjust_proc_self_task_stat(const char *filename,
+                                            struct stat *st)
+{
+    if (latx_is_proc_self_task(filename)) {
+        st->st_nlink = latx_guest_thread_count() + 2;
+    }
+}
+#endif
 static int is_proc_other(const char *filename, const char *entry)
 {
     if (!strncmp(filename, "/proc/", strlen("/proc/"))) {
@@ -14285,6 +14343,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
         ret = get_errno(stat(path(p), &st));
+#ifdef CONFIG_LATX
+        if (!is_error(ret)) {
+            latx_adjust_proc_self_task_stat(p, &st);
+        }
+#endif
         unlock_user(p, arg1, 0);
         goto do_stat;
 #endif
@@ -14294,6 +14357,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
         ret = get_errno(lstat(path(p), &st));
+#ifdef CONFIG_LATX
+        if (!is_error(ret)) {
+            latx_adjust_proc_self_task_stat(p, &st);
+        }
+#endif
         unlock_user(p, arg1, 0);
         goto do_stat;
 #endif
@@ -14304,6 +14372,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             if (ret) {
                 ret = get_errno(fstat(arg1, &st));
             }
+#ifdef CONFIG_LATX
+            if (!is_error(ret) && latx_fd_is_proc_self_task(arg1)) {
+                st.st_nlink = latx_guest_thread_count() + 2;
+            }
+#endif
 #if defined(TARGET_NR_stat) || defined(TARGET_NR_lstat)
         do_stat:
 #endif
@@ -15680,6 +15753,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
         ret = get_errno(stat(path(p), &st));
+#ifdef CONFIG_LATX
+        if (!is_error(ret)) {
+            latx_adjust_proc_self_task_stat(p, &st);
+        }
+#endif
         unlock_user(p, arg1, 0);
         if (!is_error(ret))
             ret = host_to_target_stat64(cpu_env, arg2, &st);
@@ -15691,6 +15769,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
         ret = get_errno(lstat(path(p), &st));
+#ifdef CONFIG_LATX
+        if (!is_error(ret)) {
+            latx_adjust_proc_self_task_stat(p, &st);
+        }
+#endif
         unlock_user(p, arg1, 0);
         if (!is_error(ret))
             ret = host_to_target_stat64(cpu_env, arg2, &st);
@@ -15702,6 +15785,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         if (ret) {
             ret = get_errno(fstat(arg1, &st));
         }
+#ifdef CONFIG_LATX
+        if (!is_error(ret) && latx_fd_is_proc_self_task(arg1)) {
+            st.st_nlink = latx_guest_thread_count() + 2;
+        }
+#endif
         if (!is_error(ret))
             ret = host_to_target_stat64(cpu_env, arg2, &st);
         return ret;
@@ -15718,10 +15806,18 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         }
         ret = get_errno(fstatat(arg1, path(p), &st, arg4));
 
-        if (!is_error(ret) && rcu_call_thread_is_running() &&
-            (!strcmp((const char *)p, "self/task/") ||
-             is_proc_myself((const char *)p, "task/"))) {
-            st.st_nlink--;
+        if (!is_error(ret)) {
+#ifdef CONFIG_LATX
+            if (latx_is_proc_self_task(p)) {
+                latx_adjust_proc_self_task_stat(p, &st);
+            }
+#else
+            if (rcu_call_thread_is_running() &&
+                (!strcmp((const char *)p, "self/task/") ||
+                 is_proc_myself((const char *)p, "task/"))) {
+                st.st_nlink--;
+            }
+#endif
         }
 
         unlock_user(p, arg2, 0);
@@ -15750,6 +15846,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 
                 ret = get_errno(sys_statx(dirfd, p, flags, mask, &host_stx));
                 if (!is_error(ret)) {
+#ifdef CONFIG_LATX
+                    if (latx_is_proc_self_task(p)) {
+                        host_stx.stx_nlink = latx_guest_thread_count() + 2;
+                    }
+#endif
                     if (host_to_target_statx(&host_stx, arg5) != 0) {
                         unlock_user(p, arg2, 0);
                         return -TARGET_EFAULT;
@@ -15763,6 +15864,12 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             }
 #endif
             ret = get_errno(fstatat(dirfd, path(p), &st, flags));
+
+#ifdef CONFIG_LATX
+            if (!is_error(ret) && latx_is_proc_self_task(p)) {
+                st.st_nlink = latx_guest_thread_count() + 2;
+            }
+#endif
             unlock_user(p, arg2, 0);
 
             if (!is_error(ret)) {
