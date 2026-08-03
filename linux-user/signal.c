@@ -81,6 +81,7 @@ void sigact_fork_end(int child)
 static struct target_sigaction sigact_table[TARGET_NSIG + 1];
 #else
 static struct target_sigaction sigact_table[TARGET_NSIG];
+__thread volatile sig_atomic_t guest_fault_signal_requeue;
 #endif
 
 static void host_signal_handler(int host_signum, siginfo_t *info,
@@ -373,6 +374,24 @@ void target_save_altstack(target_stack_t *uss, CPUArchState *env)
 
 /* siginfo conversion */
 
+static bool siginfo_is_fault(int sig, int si_code)
+{
+    if (si_code <= 0) {
+        return false;
+    }
+
+    switch (sig) {
+    case TARGET_SIGILL:
+    case TARGET_SIGFPE:
+    case TARGET_SIGSEGV:
+    case TARGET_SIGBUS:
+    case TARGET_SIGTRAP:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static inline void host_to_target_siginfo_noswap(target_siginfo_t *tinfo,
                                                  const siginfo_t *info)
 {
@@ -419,6 +438,12 @@ static inline void host_to_target_siginfo_noswap(target_siginfo_t *tinfo,
         break;
     default:
         /* Everything else is spoofable. Make best guess based on signal */
+        if (siginfo_is_fault(sig, si_code)) {
+            tinfo->_sifields._sigfault._addr =
+                (abi_ulong)(unsigned long)info->si_addr;
+            si_type = QEMU_SI_FAULT;
+            break;
+        }
         switch (sig) {
         case TARGET_SIGCHLD:
             tinfo->_sifields._sigchld._pid = info->si_pid;
@@ -526,14 +551,22 @@ void host_to_target_siginfo(target_siginfo_t *tinfo, const siginfo_t *info)
 /* XXX: find a solution for 64 bit (additional malloced data is needed) */
 void target_to_host_siginfo(siginfo_t *info, const target_siginfo_t *tinfo)
 {
-    /* This conversion is used only for the rt_sigqueueinfo syscall,
-     * and so we know that the _rt fields are the valid ones.
-     */
     abi_ulong sival_ptr;
+    int sig;
+    int si_code;
 
-    __get_user(info->si_signo, &tinfo->si_signo);
+    memset(info, 0, sizeof(*info));
+
+    __get_user(sig, &tinfo->si_signo);
+    info->si_signo = sig;
     __get_user(info->si_errno, &tinfo->si_errno);
-    __get_user(info->si_code, &tinfo->si_code);
+    __get_user(si_code, &tinfo->si_code);
+    info->si_code = si_code;
+    if (siginfo_is_fault(sig, si_code)) {
+        __get_user(sival_ptr, &tinfo->_sifields._sigfault._addr);
+        info->si_addr = (void *)(uintptr_t)sival_ptr;
+        return;
+    }
     __get_user(info->si_pid, &tinfo->_sifields._rt._pid);
     __get_user(info->si_uid, &tinfo->_sifields._rt._uid);
     __get_user(sival_ptr, &tinfo->_sifields._rt._sigval.sival_ptr);
@@ -1151,8 +1184,9 @@ static void host_signal_handler(int host_signum, siginfo_t *info,
 
     /* the CPU emulator uses some host signals to detect exceptions,
        we forward to it some signals */
-    if ((host_signum == SIGSEGV || host_signum == SIGBUS)
-        && info->si_code > 0) {
+    if ((host_signum == SIGSEGV || host_signum == SIGBUS) &&
+        info->si_code > 0 &&
+        guest_fault_signal_requeue != host_signum) {
 #ifdef CONFIG_LATX
         env->puc = uc;
 #endif
