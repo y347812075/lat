@@ -67,4 +67,15 @@ if host_machine.cpu_family() == 'loongarch64' and \
     suite: 'latx-integration',
     timeout: 30,
   )
+  test(
+    'test-seccomp-filter-ordering',
+    find_program('test-seccomp-filter-ordering.sh'),
+    args: [
+      emulators['latx-x86_64'],
+      files('seccomp-filter-ordering.S'),
+    ],
+    protocol: 'exitcode',
+    suite: 'latx-integration',
+    timeout: 30,
+  )
 endif
