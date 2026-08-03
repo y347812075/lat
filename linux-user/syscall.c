@@ -164,6 +164,19 @@
 #include "exec/fasttb.h"
 #endif
 
+#ifdef CONFIG_LATX_TUNNEL_LIB
+static bool is_tunnel_virtual_syscall(abi_ulong method)
+{
+    char *method_name = lock_user_string(method);
+    bool valid = method_name != NULL;
+
+    if (method_name) {
+        unlock_user(method_name, method, 0);
+    }
+    return valid;
+}
+#endif
+
 #include <linux/perf_event.h>
 #include <sys/ptrace.h>
 #ifndef CLONE_IO
@@ -18487,6 +18500,7 @@ abi_long do_syscall_with_seccomp(void *cpu_env, int num, int seccomp_num,
         arg1, arg2, arg3, arg4, arg5, arg6,
     };
     GuestSeccompAction seccomp_action = GUEST_SECCOMP_CONTINUE;
+    bool suppress_tunnel = false;
     abi_long ret;
 
     ts->seccomp_errno_return = false;
@@ -18518,8 +18532,18 @@ abi_long do_syscall_with_seccomp(void *cpu_env, int num, int seccomp_num,
         print_syscall(cpu_env, num, arg1, arg2, arg3, arg4, arg5, arg6);
     }
 
-    seccomp_action = guest_seccomp_filter_syscall(
-        env, seccomp_num, seccomp_arch, seccomp_args, &ret);
+#ifdef CONFIG_LATX_TUNNEL_LIB
+    suppress_tunnel = ts->seccomp_filter &&
+                      num == TUNNEL_VIRTUAL_SYSCALL_ID &&
+                      is_tunnel_virtual_syscall(arg1);
+#endif
+    if (suppress_tunnel) {
+        ret = 0;
+        seccomp_action = GUEST_SECCOMP_RETURN;
+    } else {
+        seccomp_action = guest_seccomp_filter_syscall(
+            env, seccomp_num, seccomp_arch, seccomp_args, &ret);
+    }
 
     switch (seccomp_action) {
     case GUEST_SECCOMP_CONTINUE:
