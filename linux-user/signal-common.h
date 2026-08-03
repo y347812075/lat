@@ -71,6 +71,9 @@ void tswap_siginfo(target_siginfo_t *tinfo,
 void set_sigmask(const sigset_t *set);
 void force_sig(int sig);
 void QEMU_NORETURN force_sig_abort(int sig);
+
+/* The current thread is re-queueing a guest fault signal to itself. */
+extern __thread volatile sig_atomic_t guest_fault_signal_requeue;
 void force_sigsegv(int oldsig);
 #if defined(TARGET_ARCH_HAS_SETUP_FRAME)
 void setup_frame(int sig, struct target_sigaction *ka,

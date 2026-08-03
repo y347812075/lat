@@ -13627,6 +13627,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return ret;
     case TARGET_NR_rt_tgsigqueueinfo:
         {
+            int host_sig = target_to_host_signal(arg3);
             siginfo_t uinfo;
 
             p = lock_user(VERIFY_READ, arg4, sizeof(target_siginfo_t), 1);
@@ -13635,7 +13636,14 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             }
             target_to_host_siginfo(&uinfo, p);
             unlock_user(p, arg4, 0);
-            ret = get_errno(sys_rt_tgsigqueueinfo(arg1, arg2, target_to_host_signal(arg3), &uinfo));
+            if (arg1 == getpid() && arg2 == sys_gettid() &&
+                (host_sig == SIGSEGV || host_sig == SIGBUS) &&
+                uinfo.si_code > 0) {
+                guest_fault_signal_requeue = host_sig;
+            }
+            ret = get_errno(sys_rt_tgsigqueueinfo(arg1, arg2, host_sig,
+                                                  &uinfo));
+            guest_fault_signal_requeue = 0;
         }
         return ret;
 #ifdef TARGET_NR_sigreturn
