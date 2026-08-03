@@ -3941,6 +3941,106 @@ static void unlock_iovec(struct iovec *vec, abi_ulong target_addr,
     g_free(vec);
 }
 
+/*
+ * Convert an iovec whose buffers belong to another translated process.
+ * Only the iovec array itself is in the caller's address space; the kernel
+ * must validate and access the remote buffers in the process identified by
+ * process_vm_readv/process_vm_writev.
+ */
+static struct iovec *lock_remote_iovec(abi_ulong target_addr,
+                                       abi_ulong count, int type)
+{
+    struct target_iovec *target_vec;
+    struct iovec *vec;
+    abi_ulong total_len, max_len;
+    int i;
+    bool bad_address = false;
+
+    if (count == 0) {
+        errno = 0;
+        return NULL;
+    }
+    if (count > IOV_MAX) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    vec = g_try_new0(struct iovec, count);
+    if (vec == NULL) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    target_vec = lock_user(VERIFY_READ, target_addr,
+                           count * sizeof(struct target_iovec), 1);
+    if (target_vec == NULL) {
+        g_free(vec);
+        errno = EFAULT;
+        return NULL;
+    }
+
+    max_len = 0x7fffffff & TARGET_PAGE_MASK;
+    total_len = 0;
+    for (i = 0; i < count; i++) {
+        abi_ulong base = tswapal(target_vec[i].iov_base);
+        abi_long len = tswapal(target_vec[i].iov_len);
+
+        if (len < 0) {
+            unlock_user(target_vec, target_addr, 0);
+            g_free(vec);
+            errno = EINVAL;
+            return NULL;
+        }
+        if (len > max_len - total_len) {
+            len = max_len - total_len;
+        }
+
+        if (bad_address) {
+            len = 0;
+            vec[i].iov_base = NULL;
+        } else if (len == 0) {
+            vec[i].iov_base = NULL;
+        } else if (guest_range_valid_untagged(base, len)) {
+            abi_ulong checked = 0;
+
+            vec[i].iov_base = g2h_untagged(base);
+            while (checked < len) {
+                abi_ulong addr = base + checked;
+                abi_ulong chunk = MIN((abi_ulong)TARGET_PAGE_SIZE -
+                                      (addr & ~TARGET_PAGE_MASK),
+                                      (abi_ulong)len - checked);
+                int flags = page_get_flags(addr);
+
+                /*
+                 * Zero flags can mean a mapping created only in the remote
+                 * child, so leave those pages for the kernel to validate.
+                 */
+                if (flags != 0 && (flags & type) != type) {
+                    break;
+                }
+                checked += chunk;
+            }
+            if (checked < len) {
+                bad_address = true;
+                if (checked == 0) {
+                    vec[i].iov_base = (void *)(uintptr_t)-1;
+                } else {
+                    len = checked;
+                }
+            }
+        } else {
+            /* Let the kernel preserve partial-transfer and EFAULT semantics. */
+            vec[i].iov_base = (void *)(uintptr_t)-1;
+            bad_address = true;
+        }
+        vec[i].iov_len = len;
+        total_len += len;
+    }
+
+    unlock_user(target_vec, target_addr, 0);
+    return vec;
+}
+
 static struct iovec *lock_iovec_remap(int type, abi_ulong target_addr,
                                 abi_ulong count, int copy)
 {
@@ -18061,33 +18161,53 @@ defined(__loongarch__)
     case TARGET_NR_process_vm_readv:
         {
             struct iovec *lvec = lock_iovec(VERIFY_WRITE, arg2, arg3, 0);
-            struct iovec *rvec = lock_iovec(VERIFY_WRITE, arg4, arg5, 0);
+            struct iovec *rvec;
 
-            if (lvec != NULL && rvec != NULL) {
-                ret = get_errno(safe_process_vm_readv(arg1, lvec, arg3, rvec,
-                                arg5 ,arg6));
-                unlock_iovec(lvec, arg2, arg3, 1);
-                unlock_iovec(rvec, arg4, arg5, 1);
-            } else {
-                ret = -host_to_target_errno(errno);
+            if (lvec == NULL && arg3 != 0) {
+                return -host_to_target_errno(errno);
             }
+            rvec = lock_remote_iovec(arg4, arg5, PAGE_READ);
+            if (rvec == NULL && arg5 != 0) {
+                ret = -host_to_target_errno(errno);
+                if (lvec != NULL) {
+                    unlock_iovec(lvec, arg2, arg3, 0);
+                }
+                return ret;
+            }
+
+            ret = get_errno(safe_process_vm_readv(arg1, lvec, arg3, rvec,
+                            arg5, arg6));
+            if (lvec != NULL) {
+                unlock_iovec(lvec, arg2, arg3, 1);
+            }
+            g_free(rvec);
         }
         return ret;
 #endif
 #if defined(TARGET_NR_process_vm_writev) && defined(__NR_process_vm_writev)
     case TARGET_NR_process_vm_writev:
         {
-            struct iovec *lvec = lock_iovec(VERIFY_WRITE, arg2, arg3, 1);
-            struct iovec *rvec = lock_iovec(VERIFY_WRITE, arg4, arg5, 1);
+            struct iovec *lvec = lock_iovec(VERIFY_READ, arg2, arg3, 1);
+            struct iovec *rvec;
 
-            if (lvec != NULL && rvec != NULL) {
-                ret = get_errno(safe_process_vm_writev(arg1, lvec, arg3, rvec,
-                                arg5 ,arg6));
-                unlock_iovec(lvec, arg2, arg3, 0);
-                unlock_iovec(rvec, arg4, arg5, 0);
-            } else {
-                ret = -host_to_target_errno(errno);
+            if (lvec == NULL && arg3 != 0) {
+                return -host_to_target_errno(errno);
             }
+            rvec = lock_remote_iovec(arg4, arg5, PAGE_WRITE);
+            if (rvec == NULL && arg5 != 0) {
+                ret = -host_to_target_errno(errno);
+                if (lvec != NULL) {
+                    unlock_iovec(lvec, arg2, arg3, 0);
+                }
+                return ret;
+            }
+
+            ret = get_errno(safe_process_vm_writev(arg1, lvec, arg3, rvec,
+                            arg5, arg6));
+            if (lvec != NULL) {
+                unlock_iovec(lvec, arg2, arg3, 0);
+            }
+            g_free(rvec);
         }
         return ret;
 #endif

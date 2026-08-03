@@ -89,6 +89,17 @@ if host_machine.cpu_family() == 'loongarch64' and \
     timeout: 30,
   )
   test(
+    'test-process-vm-remote-iovec',
+    find_program('test-process-vm-remote-iovec.sh'),
+    args: [
+      emulators['latx-x86_64'],
+      files('process-vm-remote-iovec.S'),
+    ],
+    protocol: 'exitcode',
+    suite: 'latx-integration',
+    timeout: 30,
+  )
+  test(
     'test-setns-ipc-mqueue',
     find_program('test-setns-ipc-mqueue.sh'),
     args: [
