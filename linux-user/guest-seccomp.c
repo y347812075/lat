@@ -476,6 +476,23 @@ GuestSeccompAction guest_seccomp_filter_syscall(CPUArchState *env, int num,
         return GUEST_SECCOMP_RETURN;
     }
     case SECCOMP_RET_TRACE:
+#ifdef TARGET_X86_64
+        if (task->seccomp_trace.enabled) {
+            GuestSeccompTraceState *trace = &task->seccomp_trace;
+
+            trace->pending = true;
+            trace->data = decision & SECCOMP_RET_DATA;
+            trace->syscall_nr = num;
+            trace->result = -TARGET_ENOSYS;
+            memcpy(trace->regs, env->regs, sizeof(trace->regs));
+            trace->eip = env->eip;
+            trace->eflags = env->eflags;
+            raise(SIGSTOP);
+            return GUEST_SECCOMP_TRACE;
+        }
+#endif
+        *result = -TARGET_ENOSYS;
+        return GUEST_SECCOMP_RETURN;
     case SECCOMP_RET_USER_NOTIF:
         *result = -TARGET_ENOSYS;
         return GUEST_SECCOMP_RETURN;

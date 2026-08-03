@@ -103,6 +103,19 @@ struct emulated_sigtable {
 
 struct GuestSeccompFilter;
 
+#ifdef TARGET_X86_64
+typedef struct GuestSeccompTraceState {
+    bool enabled;
+    bool pending;
+    uint16_t data;
+    abi_long syscall_nr;
+    abi_long result;
+    abi_ulong regs[16];
+    abi_ulong eip;
+    abi_ulong eflags;
+} GuestSeccompTraceState;
+#endif
+
 /* NOTE: we force a big alignment so that the stack stored after is
    aligned too */
 typedef struct TaskState {
@@ -128,6 +141,9 @@ typedef struct TaskState {
     struct GuestSeccompFilter *seccomp_filter;
     /* A seccomp errno result must not be treated as an internal restart. */
     bool seccomp_errno_return;
+#ifdef TARGET_X86_64
+    GuestSeccompTraceState seccomp_trace;
+#endif
 #ifdef TARGET_M68K
     abi_ulong tp_value;
 #endif

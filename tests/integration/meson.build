@@ -144,4 +144,15 @@ if host_machine.cpu_family() == 'loongarch64' and \
     suite: 'latx-integration',
     timeout: 30,
   )
+  test(
+    'test-seccomp-ptrace-trace',
+    find_program('test-seccomp-ptrace-trace.sh'),
+    args: [
+      emulators['latx-x86_64'],
+      files('seccomp-ptrace-trace.S'),
+    ],
+    protocol: 'exitcode',
+    suite: 'latx-integration',
+    timeout: 30,
+  )
 endif

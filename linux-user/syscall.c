@@ -10978,6 +10978,90 @@ int host_to_target_waitstatus(int status)
     return status;
 }
 
+#ifdef TARGET_X86_64
+static bool read_seccomp_trace(pid_t pid, TaskState *ts,
+                               GuestSeccompTraceState *trace)
+{
+    /* Forked linux-user processes retain TaskState at the same host VA. */
+    struct iovec local = { trace, sizeof(*trace) };
+    struct iovec remote = { &ts->seccomp_trace, sizeof(*trace) };
+
+    return process_vm_readv(pid, &local, 1, &remote, 1, 0) == sizeof(*trace);
+}
+
+static bool write_seccomp_trace(pid_t pid, TaskState *ts,
+                                const GuestSeccompTraceState *trace)
+{
+    struct iovec local = { (void *)trace, sizeof(*trace) };
+    struct iovec remote = { &ts->seccomp_trace, sizeof(*trace) };
+
+    return process_vm_writev(pid, &local, 1, &remote, 1, 0) == sizeof(*trace);
+}
+
+static int seccomp_trace_waitstatus(pid_t pid, int status, TaskState *ts)
+{
+    GuestSeccompTraceState trace;
+
+    if (WIFSTOPPED(status) && read_seccomp_trace(pid, ts, &trace) &&
+        trace.pending) {
+        return (PTRACE_EVENT_SECCOMP << 16) | (TARGET_SIGTRAP << 8) | 0x7f;
+    }
+    return host_to_target_waitstatus(status);
+}
+
+static void seccomp_trace_to_regs(const GuestSeccompTraceState *trace,
+                                  struct target_pt_regs *regs)
+{
+    memset(regs, 0, sizeof(*regs));
+    regs->r15 = trace->regs[15];
+    regs->r14 = trace->regs[14];
+    regs->r13 = trace->regs[13];
+    regs->r12 = trace->regs[12];
+    regs->rbp = trace->regs[R_EBP];
+    regs->rbx = trace->regs[R_EBX];
+    regs->r11 = trace->regs[11];
+    regs->r10 = trace->regs[10];
+    regs->r9 = trace->regs[9];
+    regs->r8 = trace->regs[8];
+    regs->rax = trace->result;
+    regs->rcx = trace->regs[R_ECX];
+    regs->rdx = trace->regs[R_EDX];
+    regs->rsi = trace->regs[R_ESI];
+    regs->rdi = trace->regs[R_EDI];
+    regs->orig_rax = trace->syscall_nr;
+    regs->rip = trace->eip;
+    regs->cs = __USER_CS;
+    regs->eflags = trace->eflags;
+    regs->rsp = trace->regs[R_ESP];
+    regs->ss = __USER_DS;
+}
+
+static void regs_to_seccomp_trace(const struct target_pt_regs *regs,
+                                  GuestSeccompTraceState *trace)
+{
+    trace->regs[15] = regs->r15;
+    trace->regs[14] = regs->r14;
+    trace->regs[13] = regs->r13;
+    trace->regs[12] = regs->r12;
+    trace->regs[R_EBP] = regs->rbp;
+    trace->regs[R_EBX] = regs->rbx;
+    trace->regs[11] = regs->r11;
+    trace->regs[10] = regs->r10;
+    trace->regs[9] = regs->r9;
+    trace->regs[8] = regs->r8;
+    trace->regs[R_EAX] = regs->rax;
+    trace->regs[R_ECX] = regs->rcx;
+    trace->regs[R_EDX] = regs->rdx;
+    trace->regs[R_ESI] = regs->rsi;
+    trace->regs[R_EDI] = regs->rdi;
+    trace->syscall_nr = regs->orig_rax;
+    trace->result = regs->rax;
+    trace->eip = regs->rip;
+    trace->eflags = regs->eflags;
+    trace->regs[R_ESP] = regs->rsp;
+}
+#endif
+
 /*
  * Once setproctitle called, the argv should be reinterpted as the name
  * set by setproctitle
@@ -12367,7 +12451,13 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             }
             ret = get_errno(safe_wait4(arg1, &status, arg3, 0));
             if (!is_error(ret) && arg2 && ret
-                && put_user_s32(host_to_target_waitstatus(status), arg2))
+                && put_user_s32(
+#ifdef TARGET_X86_64
+                    seccomp_trace_waitstatus(ret, status, cpu->opaque),
+#else
+                    host_to_target_waitstatus(status),
+#endif
+                    arg2))
                 return -TARGET_EFAULT;
         }
         return ret;
@@ -13114,6 +13204,60 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
             void *addr = g2h_untagged(arg3);
             switch (arg1) {
+#ifdef TARGET_X86_64
+            case PTRACE_SETOPTIONS:
+            {
+                GuestSeccompTraceState trace;
+
+                ret = get_errno(ptrace(arg1, arg2, addr, arg4));
+                if (ret == 0 && read_seccomp_trace(arg2, ts, &trace)) {
+                    trace.enabled = (arg4 & PTRACE_O_TRACESECCOMP) != 0;
+                    write_seccomp_trace(arg2, ts, &trace);
+                }
+                return ret;
+            }
+            case PTRACE_GETEVENTMSG:
+            {
+                GuestSeccompTraceState trace;
+
+                if (read_seccomp_trace(arg2, ts, &trace) && trace.pending) {
+                    return put_user_ual(trace.data, arg4) ?
+                           -TARGET_EFAULT : 0;
+                }
+                break;
+            }
+            case PTRACE_GETREGS:
+            {
+                GuestSeccompTraceState trace;
+                struct target_pt_regs *regs;
+
+                if (read_seccomp_trace(arg2, ts, &trace) && trace.pending) {
+                    if (!lock_user_struct(VERIFY_WRITE, regs, arg4, 0)) {
+                        return -TARGET_EFAULT;
+                    }
+                    seccomp_trace_to_regs(&trace, regs);
+                    unlock_user_struct(regs, arg4, 1);
+                    return 0;
+                }
+                break;
+            }
+            case PTRACE_SETREGS:
+            {
+                GuestSeccompTraceState trace;
+                struct target_pt_regs *regs;
+
+                if (read_seccomp_trace(arg2, ts, &trace) && trace.pending) {
+                    if (!lock_user_struct(VERIFY_READ, regs, arg4, 1)) {
+                        return -TARGET_EFAULT;
+                    }
+                    regs_to_seccomp_trace(regs, &trace);
+                    unlock_user_struct(regs, arg4, 0);
+                    return write_seccomp_trace(arg2, ts, &trace) ?
+                           0 : -TARGET_EIO;
+                }
+                break;
+            }
+#endif
             case PTRACE_PEEKTEXT:
             case PTRACE_PEEKDATA:
             case PTRACE_PEEKUSER:
@@ -13188,6 +13332,17 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                     }
                     ts->ptrace_poke_page = NULL;
                 }
+#ifdef TARGET_X86_64
+                {
+                    GuestSeccompTraceState trace;
+
+                    if (read_seccomp_trace(arg2, ts, &trace)) {
+                        trace.enabled = false;
+                        trace.pending = false;
+                        write_seccomp_trace(arg2, ts, &trace);
+                    }
+                }
+#endif
                 break;
             default:
                 break;
@@ -14547,7 +14702,12 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             ret = get_errno(safe_wait4(arg1, &status, arg3, rusage_ptr));
             if (!is_error(ret)) {
                 if (status_ptr && ret) {
-                    status = host_to_target_waitstatus(status);
+                    status =
+#ifdef TARGET_X86_64
+                        seccomp_trace_waitstatus(ret, status, cpu->opaque);
+#else
+                        host_to_target_waitstatus(status);
+#endif
                     if (put_user_s32(status, status_ptr))
                         return -TARGET_EFAULT;
                 }
@@ -18371,6 +18531,28 @@ abi_long do_syscall_with_seccomp(void *cpu_env, int num, int seccomp_num,
     case GUEST_SECCOMP_RETURN_ERRNO:
         ts->seccomp_errno_return = true;
         break;
+    case GUEST_SECCOMP_TRACE:
+#ifdef TARGET_X86_64
+        memcpy(env->regs, ts->seccomp_trace.regs,
+               sizeof(ts->seccomp_trace.regs));
+        env->eip = ts->seccomp_trace.eip;
+        env->eflags = ts->seccomp_trace.eflags;
+        if (ts->seccomp_trace.syscall_nr < 0) {
+            ret = ts->seccomp_trace.result;
+        } else {
+            ret = do_syscall1(cpu_env, ts->seccomp_trace.syscall_nr,
+                              ts->seccomp_trace.regs[R_EDI],
+                              ts->seccomp_trace.regs[R_ESI],
+                              ts->seccomp_trace.regs[R_EDX],
+                              ts->seccomp_trace.regs[10],
+                              ts->seccomp_trace.regs[8],
+                              ts->seccomp_trace.regs[9], 0, 0);
+        }
+        ts->seccomp_trace.pending = false;
+        break;
+#else
+        g_assert_not_reached();
+#endif
     case GUEST_SECCOMP_KILL_THREAD:
         seccomp_kill_thread(env);
     case GUEST_SECCOMP_KILL_PROCESS:
