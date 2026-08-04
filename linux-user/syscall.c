@@ -10974,26 +10974,27 @@ int host_to_target_waitstatus(int status)
 }
 
 #ifdef TARGET_X86_64
-static bool read_seccomp_trace(pid_t pid, TaskState *ts,
+static bool read_seccomp_trace(pid_t pid, const TaskState *ts,
                                GuestSeccompTraceState *trace)
 {
     /* Forked linux-user processes retain TaskState at the same host VA. */
     struct iovec local = { trace, sizeof(*trace) };
-    struct iovec remote = { &ts->seccomp_trace, sizeof(*trace) };
+    struct iovec remote = { (void *)&ts->seccomp_trace, sizeof(*trace) };
 
     return process_vm_readv(pid, &local, 1, &remote, 1, 0) == sizeof(*trace);
 }
 
-static bool write_seccomp_trace(pid_t pid, TaskState *ts,
+static bool write_seccomp_trace(pid_t pid, const TaskState *ts,
                                 const GuestSeccompTraceState *trace)
 {
     struct iovec local = { (void *)trace, sizeof(*trace) };
-    struct iovec remote = { &ts->seccomp_trace, sizeof(*trace) };
+    struct iovec remote = { (void *)&ts->seccomp_trace, sizeof(*trace) };
 
     return process_vm_writev(pid, &local, 1, &remote, 1, 0) == sizeof(*trace);
 }
 
-static int seccomp_trace_waitstatus(pid_t pid, int status, TaskState *ts)
+static int seccomp_trace_waitstatus(pid_t pid, int status,
+                                    const TaskState *ts)
 {
     GuestSeccompTraceState trace;
 
