@@ -42,6 +42,13 @@ case $ret in
 23) echo "FAIL: child did not observe the remote write" >&2 ;;
 24) echo "FAIL: remote write crossed the guest page boundary" >&2 ;;
 25) echo "FAIL: remote write accepted a protected guest page" >&2 ;;
+26) echo "FAIL: caller permissions rejected a readable remote page" >&2 ;;
+27) echo "FAIL: remote-only write crossed a guest page boundary" >&2 ;;
+28) echo "FAIL: remote-only write accepted a protected guest page" >&2 ;;
+29) echo "FAIL: divergent-permission mmap failed" >&2 ;;
+30) echo "FAIL: child divergent-permission mprotect failed" >&2 ;;
+31) echo "FAIL: child remote-only mmap failed" >&2 ;;
+32) echo "FAIL: child remote-only mprotect failed" >&2 ;;
 124) echo "FAIL: process_vm remote iovec test timed out" >&2 ;;
 *) echo "FAIL: unexpected guest exit status $ret" >&2 ;;
 esac

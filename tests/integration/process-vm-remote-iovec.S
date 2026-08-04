@@ -27,7 +27,11 @@ sync_pipe:
     .skip 8
 remote_address:
     .quad 0
+remote_cross_address:
+    .quad 0
 protected_address:
+    .quad 0
+divergent_address:
     .quad 0
 local_buffer:
     .skip 8
@@ -67,6 +71,18 @@ _start:
     test %rax, %rax
     js protected_mprotect_failed
 
+    xor %edi, %edi
+    mov $4096, %esi
+    xor %edx, %edx
+    mov $MAP_PRIVATE_ANONYMOUS, %r10d
+    mov $-1, %r8
+    xor %r9d, %r9d
+    mov $__NR_mmap, %eax
+    syscall
+    test %rax, %rax
+    js divergent_mmap_failed
+    mov %rax, divergent_address(%rip)
+
     lea sync_pipe(%rip), %rdi
     mov $__NR_pipe, %eax
     syscall
@@ -87,10 +103,10 @@ _start:
     mov %eax, %r12d
     mov address_pipe(%rip), %edi
     lea remote_address(%rip), %rsi
-    mov $8, %edx
+    mov $16, %edx
     mov $__NR_read, %eax
     syscall
-    cmp $8, %rax
+    cmp $16, %rax
     jne parent_read_address_failed
 
     lea local_buffer(%rip), %rax
@@ -130,6 +146,63 @@ _start:
     syscall
     cmp $5, %rax
     jne process_write_failed
+
+    lea local_buffer(%rip), %rax
+    mov %rax, local_iov(%rip)
+    movq $5, local_iov+8(%rip)
+    mov divergent_address(%rip), %rax
+    mov %rax, remote_iov(%rip)
+    movq $5, remote_iov+8(%rip)
+    mov $__NR_process_vm_readv, %eax
+    mov %r12d, %edi
+    lea local_iov(%rip), %rsi
+    mov $1, %edx
+    lea remote_iov(%rip), %r10
+    mov $1, %r8d
+    xor %r9d, %r9d
+    syscall
+    cmp $5, %rax
+    jne process_divergent_read_failed
+
+    mov local_buffer(%rip), %eax
+    cmp child_data(%rip), %eax
+    jne process_divergent_read_failed
+    movzbl local_buffer+4(%rip), %eax
+    cmpb child_data+4(%rip), %al
+    jne process_divergent_read_failed
+
+    mov protected_address(%rip), %rax
+    mov %rax, local_iov(%rip)
+    movq $4096, local_iov+8(%rip)
+    mov remote_cross_address(%rip), %rax
+    add $2048, %rax
+    mov %rax, remote_iov(%rip)
+    movq $4096, remote_iov+8(%rip)
+    mov $__NR_process_vm_writev, %eax
+    mov %r12d, %edi
+    lea local_iov(%rip), %rsi
+    mov $1, %edx
+    lea remote_iov(%rip), %r10
+    mov $1, %r8d
+    xor %r9d, %r9d
+    syscall
+    cmp $2048, %rax
+    jne process_remote_partial_write_failed
+
+    addq $2048, local_iov(%rip)
+    movq $2048, local_iov+8(%rip)
+    addq $2048, remote_iov(%rip)
+    movq $2048, remote_iov+8(%rip)
+    mov $__NR_process_vm_writev, %eax
+    mov %r12d, %edi
+    lea local_iov(%rip), %rsi
+    mov $1, %edx
+    lea remote_iov(%rip), %r10
+    mov $1, %r8d
+    xor %r9d, %r9d
+    syscall
+    cmp $-14, %rax
+    jne process_remote_protected_write_failed
 
     mov protected_address(%rip), %rax
     mov %rax, local_iov(%rip)
@@ -187,6 +260,17 @@ _start:
     jmp exit
 
 child:
+    mov divergent_address(%rip), %rdi
+    mov $4096, %esi
+    mov $PROT_READ_WRITE, %edx
+    mov $__NR_mprotect, %eax
+    syscall
+    test %rax, %rax
+    js child_divergent_mprotect_failed
+    mov divergent_address(%rip), %rax
+    mov child_data(%rip), %rcx
+    mov %rcx, (%rax)
+
     xor %edi, %edi
     mov $4096, %esi
     mov $PROT_READ_WRITE, %edx
@@ -202,12 +286,32 @@ child:
     mov child_data(%rip), %rcx
     mov %rcx, (%r12)
     mov %r12, remote_address(%rip)
+
+    xor %edi, %edi
+    mov $8192, %esi
+    mov $PROT_READ_WRITE, %edx
+    mov $MAP_PRIVATE_ANONYMOUS, %r10d
+    mov $-1, %r8
+    xor %r9d, %r9d
+    mov $__NR_mmap, %eax
+    syscall
+    test %rax, %rax
+    js child_cross_mmap_failed
+    mov %rax, remote_cross_address(%rip)
+    lea 4096(%rax), %rdi
+    mov $4096, %esi
+    xor %edx, %edx
+    mov $__NR_mprotect, %eax
+    syscall
+    test %rax, %rax
+    js child_cross_mprotect_failed
+
     mov address_pipe+4(%rip), %edi
     lea remote_address(%rip), %rsi
-    mov $8, %edx
+    mov $16, %edx
     mov $__NR_write, %eax
     syscall
-    cmp $8, %rax
+    cmp $16, %rax
     jne child_pipe_failed
 
     mov sync_pipe(%rip), %edi
@@ -275,6 +379,27 @@ process_partial_write_failed:
 process_protected_write_failed:
     mov $25, %edi
     jmp reap_child
+process_divergent_read_failed:
+    mov $26, %edi
+    jmp reap_child
+process_remote_partial_write_failed:
+    mov $27, %edi
+    jmp reap_child
+process_remote_protected_write_failed:
+    mov $28, %edi
+    jmp reap_child
+divergent_mmap_failed:
+    mov $29, %edi
+    jmp exit
+child_divergent_mprotect_failed:
+    mov $30, %edi
+    jmp exit
+child_cross_mmap_failed:
+    mov $31, %edi
+    jmp exit
+child_cross_mprotect_failed:
+    mov $32, %edi
+    jmp exit
 
 reap_child:
     mov %edi, %r13d
