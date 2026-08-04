@@ -8,6 +8,7 @@
 .equ __NR_newfstatat, 262
 .equ AT_FDCWD, -100
 .equ O_RDONLY, 0
+.equ O_DIRECTORY, 0x10000
 .equ CLONE_VM, 0x00000100
 .equ CLONE_FS, 0x00000200
 .equ CLONE_FILES, 0x00000400
@@ -27,6 +28,10 @@ proc_stat:
     .asciz "/proc/self/stat"
 proc_task:
     .asciz "/proc/self/task/"
+proc_root:
+    .asciz "/proc"
+relative_task:
+    .asciz "self/task"
 
 .section .bss
 .align 8
@@ -116,6 +121,51 @@ _start:
     cmpq $3, task_statbuf+16(%rip)
     jne task_fstatat_failed
 
+    mov $__NR_openat, %eax
+    mov $AT_FDCWD, %edi
+    lea proc_root(%rip), %rsi
+    mov $(O_RDONLY | O_DIRECTORY), %edx
+    xor %r10d, %r10d
+    syscall
+    test %rax, %rax
+    js task_dirfd_failed
+    mov %eax, %r15d
+
+    mov $__NR_newfstatat, %eax
+    mov %r15d, %edi
+    lea relative_task(%rip), %rsi
+    lea task_statbuf(%rip), %rdx
+    xor %r10d, %r10d
+    syscall
+    mov %rax, %r14
+    mov $__NR_close, %eax
+    mov %r15d, %edi
+    syscall
+    test %r14, %r14
+    js task_dirfd_failed
+    cmpq $3, task_statbuf+16(%rip)
+    jne task_dirfd_failed
+
+    mov $__NR_stat, %eax
+    lea relative_task(%rip), %rdi
+    lea task_statbuf(%rip), %rsi
+    syscall
+    test %rax, %rax
+    js relative_task_stat_failed
+    cmpq $2, task_statbuf+16(%rip)
+    jne relative_task_stat_failed
+
+    mov $__NR_newfstatat, %eax
+    mov $AT_FDCWD, %edi
+    lea relative_task(%rip), %rsi
+    lea task_statbuf(%rip), %rdx
+    xor %r10d, %r10d
+    syscall
+    test %rax, %rax
+    js relative_task_fstatat_failed
+    cmpq $2, task_statbuf+16(%rip)
+    jne relative_task_fstatat_failed
+
     xor %edi, %edi
     jmp exit
 
@@ -150,6 +200,18 @@ task_stat_failed:
 
 task_fstatat_failed:
     mov $14, %edi
+    jmp exit
+
+task_dirfd_failed:
+    mov $15, %edi
+    jmp exit
+
+relative_task_stat_failed:
+    mov $16, %edi
+    jmp exit
+
+relative_task_fstatat_failed:
+    mov $17, %edi
     jmp exit
 
 release_thread:
