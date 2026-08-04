@@ -3960,13 +3960,13 @@ static void unlock_iovec(struct iovec *vec, abi_ulong target_addr,
  * must validate and access the remote buffers in the process identified by
  * process_vm_readv/process_vm_writev.
  */
-static struct iovec *lock_remote_iovec(abi_ulong target_addr,
+static struct iovec *lock_remote_iovec(pid_t pid, abi_ulong target_addr,
                                        abi_ulong count, int type)
 {
     struct target_iovec *target_vec;
     struct iovec *vec;
     abi_ulong total_len, max_len;
-    int i;
+    unsigned int i;
     bool bad_address = false;
 
     if (count == 0) {
@@ -4022,13 +4022,10 @@ static struct iovec *lock_remote_iovec(abi_ulong target_addr,
                 abi_ulong chunk = MIN((abi_ulong)TARGET_PAGE_SIZE -
                                       (addr & ~TARGET_PAGE_MASK),
                                       (abi_ulong)len - checked);
-                int flags = page_get_flags(addr);
+                int flags;
 
-                /*
-                 * Zero flags can mean a mapping created only in the remote
-                 * child, so leave those pages for the kernel to validate.
-                 */
-                if (flags != 0 && (flags & type) != type) {
+                if (page_get_flags_remote(pid, addr, &flags) &&
+                    (flags & type) != type) {
                     break;
                 }
                 checked += chunk;
@@ -18339,7 +18336,7 @@ defined(__loongarch__)
             if (lvec == NULL && arg3 != 0) {
                 return -host_to_target_errno(errno);
             }
-            rvec = lock_remote_iovec(arg4, arg5, PAGE_READ);
+            rvec = lock_remote_iovec(arg1, arg4, arg5, PAGE_READ);
             if (rvec == NULL && arg5 != 0) {
                 ret = -host_to_target_errno(errno);
                 if (lvec != NULL) {
@@ -18366,7 +18363,7 @@ defined(__loongarch__)
             if (lvec == NULL && arg3 != 0) {
                 return -host_to_target_errno(errno);
             }
-            rvec = lock_remote_iovec(arg4, arg5, PAGE_WRITE);
+            rvec = lock_remote_iovec(arg1, arg4, arg5, PAGE_WRITE);
             if (rvec == NULL && arg5 != 0) {
                 ret = -host_to_target_errno(errno);
                 if (lvec != NULL) {

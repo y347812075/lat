@@ -3195,6 +3195,73 @@ int page_get_flags(target_ulong address)
     return p ? p->flags : 0;
 }
 
+static bool pageflags_read_remote(pid_t pid, const void *remote_addr,
+                                  void *local_addr, size_t len)
+{
+    struct iovec local = { local_addr, len };
+    struct iovec remote = { (void *)remote_addr, len };
+
+    return process_vm_readv(pid, &local, 1, &remote, 1, 0) == len;
+}
+
+static bool pageflags_uses_same_executable(pid_t pid)
+{
+    char remote_exe[64];
+    struct stat self_st;
+    struct stat remote_st;
+
+    if (stat("/proc/self/exe", &self_st) < 0) {
+        return false;
+    }
+    snprintf(remote_exe, sizeof(remote_exe), "/proc/%d/exe", pid);
+    if (stat(remote_exe, &remote_st) < 0) {
+        return false;
+    }
+    return self_st.st_dev == remote_st.st_dev &&
+           self_st.st_ino == remote_st.st_ino;
+}
+
+bool page_get_flags_remote(pid_t pid, target_ulong address, int *flags)
+{
+    IntervalTreeRoot root;
+    RBNode *node;
+    unsigned int depth;
+
+    if (pid == getpid()) {
+        *flags = page_get_flags(address);
+        return true;
+    }
+    if (!pageflags_uses_same_executable(pid)) {
+        return false;
+    }
+    if (!pageflags_read_remote(pid, &pageflags_root, &root, sizeof(root))) {
+        *flags = 0;
+        return true;
+    }
+
+    node = root.rb_root.rb_node;
+    for (depth = 0; node && depth < 128; depth++) {
+        PageFlagsNode remote_node;
+
+        if (!pageflags_read_remote(pid, node, &remote_node,
+                                   sizeof(remote_node))) {
+            *flags = 0;
+            return true;
+        }
+        if (address < remote_node.itree.start) {
+            node = remote_node.itree.rb.rb_left;
+        } else if (address > remote_node.itree.last) {
+            node = remote_node.itree.rb.rb_right;
+        } else {
+            *flags = remote_node.flags;
+            return true;
+        }
+    }
+
+    *flags = 0;
+    return true;
+}
+
 #define rb_to_itree(N)  container_of(N, IntervalTreeNode, rb)
 
 /* Cut down some code, Maybe have bug. */

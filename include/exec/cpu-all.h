@@ -289,6 +289,7 @@ int walk_memory_regions(void *, walk_memory_regions_fn);
 bool test_flags(target_ulong address, int flags);
 target_ulong get_first_page(target_ulong start, target_ulong end);
 int page_get_flags(target_ulong address);
+bool page_get_flags_remote(pid_t pid, target_ulong address, int *flags);
 void page_clear_overflow(target_ulong start, target_ulong end);
 void page_set_flags(target_ulong start, target_ulong end, int flags);
 void page_set_flags_tb_reload(target_ulong start, target_ulong end,
