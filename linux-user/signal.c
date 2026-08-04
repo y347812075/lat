@@ -81,8 +81,8 @@ void sigact_fork_end(int child)
 static struct target_sigaction sigact_table[TARGET_NSIG + 1];
 #else
 static struct target_sigaction sigact_table[TARGET_NSIG];
-__thread volatile sig_atomic_t guest_fault_signal_requeue;
 #endif
+__thread volatile sig_atomic_t guest_fault_signal_requeue;
 
 static void host_signal_handler(int host_signum, siginfo_t *info,
                                 void *puc);
