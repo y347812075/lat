@@ -42,6 +42,9 @@ case $ret in
 14)
     echo "FAIL: child did not observe its TID" >&2
     ;;
+15)
+    echo "FAIL: invalid parent TID pointer did not return EFAULT" >&2
+    ;;
 *)
     echo "FAIL: unexpected guest exit status $ret" >&2
     ;;
