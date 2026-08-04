@@ -9484,6 +9484,16 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
     userns_via_unshare = namespace_flags == CLONE_NEWUSER &&
                          !direct_fork_flags;
 
+    if (flags & CLONE_PARENT_SETTID) {
+        uint32_t *parent_tid = lock_user(VERIFY_WRITE, parent_tidptr,
+                                         sizeof(*parent_tid), 0);
+
+        if (!parent_tid) {
+            return -TARGET_EFAULT;
+        }
+        unlock_user(parent_tid, parent_tidptr, 0);
+    }
+
     if (flags & CLONE_VM) {
         TaskState *parent_ts = (TaskState *)cpu->opaque;
         new_thread_info info;
@@ -9689,7 +9699,16 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
                 ret = -1;
             }
             if (ret > 0 && (flags & CLONE_PARENT_SETTID)) {
-                put_user_u32(ret, parent_tidptr);
+                if (put_user_u32(ret, parent_tidptr)) {
+                    int status;
+
+                    kill(ret, SIGKILL);
+                    while (waitpid(ret, &status, 0) < 0 && errno == EINTR) {
+                        /* Retry until the failed clone child is reaped. */
+                    }
+                    errno = EFAULT;
+                    ret = -1;
+                }
             }
         }
         g_assert(!cpu_in_exclusive_context(cpu));

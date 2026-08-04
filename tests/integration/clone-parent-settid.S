@@ -5,6 +5,7 @@
 .equ CLONE_PARENT_SETTID, 0x00100000
 .equ CLONE_CHILD_SETTID, 0x01000000
 .equ SIGCHLD, 17
+.equ EFAULT, 14
 
 .section .bss
 .align 4
@@ -19,6 +20,16 @@ status:
 .global _start
 .type _start, @function
 _start:
+    mov $__NR_clone, %eax
+    mov $(CLONE_PARENT_SETTID | SIGCHLD), %edi
+    xor %esi, %esi
+    mov $-1, %rdx
+    xor %r10d, %r10d
+    xor %r8d, %r8d
+    syscall
+    cmp $-EFAULT, %rax
+    jne invalid_parent_tid_failed
+
     mov $__NR_clone, %eax
     mov $(CLONE_PARENT_SETTID | CLONE_CHILD_SETTID | SIGCHLD), %edi
     xor %esi, %esi
@@ -80,6 +91,10 @@ child_failed:
 
 child_tid_failed:
     mov $14, %edi
+    jmp exit
+
+invalid_parent_tid_failed:
+    mov $15, %edi
     jmp exit
 
 reap_child:
