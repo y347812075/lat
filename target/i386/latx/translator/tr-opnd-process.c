@@ -625,9 +625,12 @@ void store_ireg_to_ir1_seg(IR2_OPND seg_value_opnd, IR1_OPND *opnd1)
     lsassert(ir2_opnd_is_ireg(&seg_value_opnd));
     /* 1. set selector */
     int seg_num = ir1_opnd_base_reg_num(opnd1);
+    IR2_OPND selector_opnd = ra_alloc_itemp_internal();
+    /* Segment selectors are 16-bit even when their source register is wider. */
+    la_bstrpick_d(selector_opnd, seg_value_opnd, 15, 0);
     /*lsassertm(((seg_num == 0) || (seg_num == 4) || (seg_num == 5)),
         "Modify segment selector %d is not supported (cs:1, ss:2, ds:3)\n", seg_num);*/
-    la_st_w(seg_value_opnd, env_ir2_opnd,
+    la_st_w(selector_opnd, env_ir2_opnd,
                       lsenv_offset_of_seg_selector(lsenv, seg_num));
 
 
@@ -638,7 +641,7 @@ void store_ireg_to_ir1_seg(IR2_OPND seg_value_opnd, IR1_OPND *opnd1)
         IR2_OPND label_x64 = ra_alloc_label();
         IR2_OPND label_csend = ra_alloc_label();//if (cs == 0x23) isx86 ; else is x64;
         li_d(ir2_tmp, 0x23);
-        la_bne(seg_value_opnd, ir2_tmp,label_x64);
+        la_bne(selector_opnd, ir2_tmp,label_x64);
         la_st_w(zero_ir2_opnd, env_ir2_opnd,
             offsetof(CPUX86State, sys.codemode));
 
@@ -678,7 +681,7 @@ void store_ireg_to_ir1_seg(IR2_OPND seg_value_opnd, IR1_OPND *opnd1)
     IR2_OPND label_base_end = ra_alloc_label();
     IR2_OPND is_ldt = ra_alloc_itemp_internal(); /* [51:48] [15: 0] limit */
     IR2_OPND dt_opnd = ra_alloc_itemp_internal();
-    la_andi(is_ldt, seg_value_opnd, 0x4);
+    la_andi(is_ldt, selector_opnd, 0x4);
     la_bne(is_ldt, zero_ir2_opnd, label_ldt);
     ra_free_temp(is_ldt);
     /* 2.1 get gdt base */
@@ -694,7 +697,8 @@ void store_ireg_to_ir1_seg(IR2_OPND seg_value_opnd, IR1_OPND *opnd1)
     /* 2.2 get entry offset of gdt and add it on gdt-base */
     IR2_OPND offset_gdt = ra_alloc_itemp_internal();
     /* seg [15: 3] is offset, offset * 8 */
-    la_bstrpick_d(offset_gdt, seg_value_opnd, 15, 3);
+    la_bstrpick_d(offset_gdt, selector_opnd, 15, 3);
+    ra_free_temp(selector_opnd);
     la_slli_w(offset_gdt, offset_gdt, 3);
     la_add_d(dt_opnd, dt_opnd, offset_gdt);
     ra_free_temp(offset_gdt);
