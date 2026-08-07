@@ -3391,6 +3391,38 @@ int load_elf_binary(struct linux_binprm *bprm, struct image_info *info)
 
     if (elf_interpreter) {
         load_elf_interp(elf_interpreter, &interp_info, bprm->buf);
+#if defined(CONFIG_LATX) && defined(TARGET_I386)
+        abi_ulong addr;
+#ifdef TARGET_X86_64
+        bool tunnel_loader = !strcmp(elf_interpreter,
+                                     "/lib64/ld-linux-x86-64.so.2") ||
+                             !strcmp(elf_interpreter,
+                                     "/lib/x86_64-linux-gnu/"
+                                     "ld-linux-x86-64.so.2");
+#else
+        bool tunnel_loader = !strcmp(elf_interpreter,
+                                     "/lib/ld-linux.so.2") ||
+                             !strcmp(elf_interpreter,
+                                     "/lib/i386-linux-gnu/ld-linux.so.2");
+#endif
+
+        info->interpreter_start_code = 0;
+        info->interpreter_end_code = 0;
+        if (tunnel_loader) {
+            info->interpreter_start_code = interp_info.start_code;
+            info->interpreter_end_code = interp_info.end_code;
+            mmap_lock();
+            for (addr = interp_info.start_code & TARGET_PAGE_MASK;
+                 addr < TARGET_PAGE_ALIGN(interp_info.end_code);
+                 addr += TARGET_PAGE_SIZE) {
+                int flags = page_get_flags(addr);
+
+                page_set_flags(addr, addr + TARGET_PAGE_SIZE,
+                               flags | PAGE_TUNNEL_LOADER);
+            }
+            mmap_unlock();
+        }
+#endif
 
         /* If the program interpreter is one of these two, then assume
            an iBCS2 image.  Otherwise assume a native linux image.  */

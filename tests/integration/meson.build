@@ -156,3 +156,19 @@ if host_machine.cpu_family() == 'loongarch64' and \
     timeout: 30,
   )
 endif
+
+if host_machine.cpu_family() == 'loongarch64' and \
+   'i386-linux-user' in target_dirs
+  test(
+    'test-seccomp-virtual-syscall-i386',
+    find_program('test-seccomp-virtual-syscall.sh'),
+    args: [
+      emulators['latx-i386'],
+      files('seccomp-virtual-syscall-i386.S'),
+      'i386',
+    ],
+    protocol: 'exitcode',
+    suite: 'latx-integration',
+    timeout: 30,
+  )
+endif

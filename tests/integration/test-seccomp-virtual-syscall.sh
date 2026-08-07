@@ -3,6 +3,7 @@ set -eu
 
 emulator=$1
 source_file=$2
+target=${3:-x86_64}
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT HUP INT TERM
 
@@ -15,7 +16,7 @@ else
     exit 77
 fi
 
-"$clang" --target=x86_64-linux-gnu -fuse-ld=lld -nostdlib -static \
+"$clang" --target="$target-linux-gnu" -fuse-ld=lld -nostdlib -static \
     -Wl,--build-id=none "$source_file" -o "$workdir/seccomp-virtual-syscall"
 
 set +e
@@ -30,6 +31,8 @@ case $ret in
 11) echo "FAIL: PR_SET_NO_NEW_PRIVS failed" >&2 ;;
 12) echo "FAIL: seccomp filter installation failed" >&2 ;;
 13) echo "FAIL: seccomp did not filter guest syscall 600" >&2 ;;
+14) echo "FAIL: readable guest string bypassed syscall 600 filter" >&2 ;;
+15) echo "FAIL: copied loader marker bypassed syscall 600 filter" >&2 ;;
 124) echo "FAIL: guest syscall 600 test timed out" >&2 ;;
 *) echo "FAIL: unexpected guest exit status $ret" >&2 ;;
 esac

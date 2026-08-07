@@ -1,6 +1,6 @@
-.equ __NR_prctl, 157
-.equ __NR_exit_group, 231
-.equ __NR_seccomp, 317
+.equ __NR_prctl, 172
+.equ __NR_exit_group, 252
+.equ __NR_seccomp, 354
 .equ __NR_tunnel_virtual, 600
 
 .equ PR_SET_NO_NEW_PRIVS, 38
@@ -14,13 +14,13 @@ unknown_method:
     .asciz "guest-forged-tunnel-method"
 
 .section .data
-.align 8
+.align 4
 filter_program:
     .short 4
-    .zero 6
-    .quad filter
+    .zero 2
+    .long filter
 
-.align 8
+.align 4
 filter:
     .short 0x20
     .byte 0, 0
@@ -40,91 +40,99 @@ filter:
 .type _start, @function
 _start:
     mov $__NR_tunnel_virtual, %eax
-    mov $0x87, %edi
-    mov $0x87, %esi
+    mov $0x87, %ebx
+    mov $0x87, %ecx
     mov $0x87, %edx
-    syscall
-    cmp $-ENOSYS, %rax
+    int $0x80
+    cmp $-ENOSYS, %eax
     jne unfiltered_failed
 
     mov $__NR_prctl, %eax
-    mov $PR_SET_NO_NEW_PRIVS, %edi
-    mov $1, %esi
+    mov $PR_SET_NO_NEW_PRIVS, %ebx
+    mov $1, %ecx
     xor %edx, %edx
-    xor %r10d, %r10d
-    xor %r8d, %r8d
-    syscall
-    test %rax, %rax
+    xor %esi, %esi
+    xor %edi, %edi
+    int $0x80
+    test %eax, %eax
     jne set_nnp_failed
 
     mov $__NR_seccomp, %eax
-    mov $SECCOMP_SET_MODE_FILTER, %edi
-    xor %esi, %esi
-    lea filter_program(%rip), %rdx
-    syscall
-    test %rax, %rax
+    mov $SECCOMP_SET_MODE_FILTER, %ebx
+    xor %ecx, %ecx
+    mov $filter_program, %edx
+    int $0x80
+    test %eax, %eax
     jne install_failed
 
     mov $__NR_tunnel_virtual, %eax
-    mov $0x87, %edi
-    mov $0x87, %esi
+    mov $0x87, %ebx
+    mov $0x87, %ecx
     mov $0x87, %edx
-    syscall
-    cmp $-6, %rax
+    int $0x80
+    cmp $-6, %eax
     jne filtered_failed
 
     mov $__NR_tunnel_virtual, %eax
-    lea unknown_method(%rip), %rdi
-    xor %esi, %esi
+    mov $unknown_method, %ebx
+    xor %ecx, %ecx
     xor %edx, %edx
-    syscall
-    cmp $-6, %rax
+    int $0x80
+    cmp $-6, %eax
     jne readable_string_failed
 
-    lea unknown_method(%rip), %rsi
-    xor %edx, %edx
-    xor %ecx, %ecx
-    mov $__NR_tunnel_virtual, %edi
-    xor %eax, %eax
+    push $0
+    push $0
+    push $unknown_method
+    push $__NR_tunnel_virtual
     call forged_loader_syscall
-    cmp $-6, %rax
+    add $16, %esp
+    cmp $-6, %eax
     jne copied_marker_failed
 
-    xor %edi, %edi
+    xor %ebx, %ebx
     jmp exit
 
 forged_loader_syscall:
-    mov %rdi, %rax
-    mov %rsi, %rdi
-    mov %rdx, %rsi
-    mov %rcx, %rdx
-    mov %r8, %r10
-    mov %r9, %r8
-    mov 8(%rsp), %r9
-    syscall
+    push %ebp
+    push %edi
+    push %esi
+    push %ebx
+    mov 44(%esp), %ebp
+    mov 40(%esp), %edi
+    mov 36(%esp), %esi
+    mov 32(%esp), %edx
+    mov 28(%esp), %ecx
+    mov 24(%esp), %ebx
+    mov 20(%esp), %eax
+    int $0x80
+    pop %ebx
+    pop %esi
+    pop %edi
+    pop %ebp
     ret
 
 unfiltered_failed:
-    mov $10, %edi
+    mov $10, %ebx
     jmp exit
 set_nnp_failed:
-    mov $11, %edi
+    mov $11, %ebx
     jmp exit
 install_failed:
-    mov $12, %edi
+    mov $12, %ebx
     jmp exit
 filtered_failed:
-    mov $13, %edi
+    mov $13, %ebx
     jmp exit
 readable_string_failed:
-    mov $14, %edi
+    mov $14, %ebx
     jmp exit
 copied_marker_failed:
-    mov $15, %edi
+    mov $15, %ebx
 
 exit:
     mov $__NR_exit_group, %eax
-    syscall
+    int $0x80
 .size _start, .-_start
 
 .section .note.GNU-stack,"",@progbits

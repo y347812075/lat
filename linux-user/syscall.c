@@ -165,13 +165,75 @@
 #endif
 
 #ifdef CONFIG_LATX_TUNNEL_LIB
-static bool is_tunnel_virtual_syscall(abi_ulong method)
+static bool is_tunnel_loader_address(const TaskState *ts, abi_ulong addr)
 {
-    char *method_name = lock_user_string(method);
-    bool valid = method_name != NULL;
+    if (!ts->info || !ts->info->interpreter_path) {
+        return false;
+    }
+    return addr >= ts->info->interpreter_start_code &&
+           addr < ts->info->interpreter_end_code &&
+           (page_get_flags(addr) & PAGE_TUNNEL_LOADER);
+}
 
+static bool is_tunnel_loader_notification(CPUArchState *env,
+                                          abi_ulong method)
+{
+    CPUState *cpu = env_cpu(env);
+    TaskState *ts = cpu->opaque;
+    abi_ulong return_pc;
+    abi_ulong wrapper_pc;
+    uint8_t *marker;
+    int32_t call_disp;
+    char *method_name;
+    bool valid = false;
+
+#ifdef TARGET_X86_64
+    static const uint8_t marker_prefix[] = {
+        0xbf, 0x58, 0x02, 0x00, 0x00, /* mov $600, %edi */
+        0x31, 0xc0,                   /* xor %eax, %eax */
+        0xe8,                         /* call rel32 */
+    };
+    const abi_ulong marker_len = 12;
+    const abi_ulong call_disp_offset = 8;
+    const abi_ulong wrapper_next_offset = 0x19;
+    abi_ulong return_slot = env->regs[R_ESP];
+#else
+    static const uint8_t marker_prefix[] = {
+        0x68, 0x58, 0x02, 0x00, 0x00, /* push $600 */
+        0xe8,                         /* call rel32 */
+    };
+    const abi_ulong marker_len = 10;
+    const abi_ulong call_disp_offset = 6;
+    const abi_ulong wrapper_next_offset = 0x22;
+    abi_ulong return_slot = env->regs[R_ESP] + 4 * sizeof(abi_ulong);
+#endif
+
+    if (get_user_ual(return_pc, return_slot) || return_pc < marker_len ||
+        env->eip < wrapper_next_offset ||
+        !is_tunnel_loader_address(ts, env->eip) ||
+        !is_tunnel_loader_address(ts, return_pc)) {
+        return false;
+    }
+
+    marker = lock_user(VERIFY_READ, return_pc - marker_len, marker_len, 1);
+    if (!marker || memcmp(marker, marker_prefix, sizeof(marker_prefix))) {
+        goto out_marker;
+    }
+    call_disp = ldl_le_p(marker + call_disp_offset);
+    wrapper_pc = return_pc + call_disp;
+    if (wrapper_pc != env->eip - wrapper_next_offset) {
+        goto out_marker;
+    }
+
+    method_name = lock_user_string(method);
     if (method_name) {
+        valid = true;
         unlock_user(method_name, method, 0);
+    }
+
+out_marker:
+    if (marker) {
+        unlock_user(marker, return_pc - marker_len, 0);
     }
     return valid;
 }
@@ -18543,7 +18605,7 @@ abi_long do_syscall_with_seccomp(void *cpu_env, int num, int seccomp_num,
 #ifdef CONFIG_LATX_TUNNEL_LIB
     suppress_tunnel = ts->seccomp_filter &&
                       num == TUNNEL_VIRTUAL_SYSCALL_ID &&
-                      is_tunnel_virtual_syscall(arg1);
+                      is_tunnel_loader_notification(env, arg1);
 #endif
     if (suppress_tunnel) {
         ret = 0;
