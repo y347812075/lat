@@ -1288,7 +1288,6 @@ int main(int argc, char **argv, char **envp)
         fprintf(stderr, ". Please check KERNEL and HARDWARE.\n");
     }
     if (!(hwcap & HWCAP_LOONGARCH_LASX)) {
-            fprintf(stderr, "not found LASX, use 128-bit vectors\n");
             option_enable_lasx = 0;
     }
 #endif
