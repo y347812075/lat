@@ -7,6 +7,7 @@ pkgdate=$(date +%Y%m%d)
 srcdir=$(realpath "$(dirname "$0")/../")
 pkgdir=$srcdir/pkg
 tarballs=$pkgname-$pkgver-$pkgdate.tar.xz
+package_root=$pkgdir/$pkgname-$pkgver
 
 prepare() {
     [ -d $srcdir/build32 ] || mkdir -p $srcdir/build32
@@ -101,6 +102,16 @@ EOF
     )
 }
 
+report_artifacts() {
+    printf '\n构建和打包完成。\n'
+    printf '编译目录：\n'
+    printf '  32 位：%s（产物：%s）\n' "$srcdir/build32" "latx-i386"
+    printf '  64 位：%s（产物：%s）\n' "$srcdir/build64" "latx-x86_64"
+    printf '打包暂存目录：%s\n' "$package_root"
+    printf '最终压缩包：%s\n' "$srcdir/$tarballs"
+}
+
 prepare
 build
 package
+report_artifacts
