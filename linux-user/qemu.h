@@ -60,6 +60,10 @@ struct image_info {
         abi_ulong       interpreter_loadmap_addr;
         abi_ulong       interpreter_pt_dynamic_addr;
         char *              interpreter_path;
+#if defined(CONFIG_LATX) && defined(TARGET_I386)
+        abi_ulong       interpreter_start_code;
+        abi_ulong       interpreter_end_code;
+#endif
         struct image_info *other_info;
 
         /* For target-specific processing of NT_GNU_PROPERTY_TYPE_0. */
@@ -71,6 +75,10 @@ struct image_info {
 #endif
 };
 extern struct image_info info1, *info;
+
+#if defined(CONFIG_LATX) && defined(TARGET_I386)
+#define PAGE_TUNNEL_LOADER PAGE_TARGET_1
+#endif
 
 #ifdef TARGET_I386
 /* Information about the current linux thread */
