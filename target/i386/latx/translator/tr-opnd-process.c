@@ -1260,17 +1260,14 @@ void store_freg_to_ir1(IR2_OPND opnd2, IR1_OPND *opnd1, bool is_xmm_hi,
 IR2_OPND set_fpu_fcsr_rounding_field_by_x86(void)
 {
     if (option_set_rounding_opt) return zero_ir2_opnd;
-    CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
-    CPUState *cpu = env_cpu(env);
-    if (!close_latx_parallel && !(cpu->tcg_cflags & CF_PARALLEL)) {
-        return zero_ir2_opnd;
-    }
 
     IR2_OPND fcsr_opnd = ra_alloc_itemp_internal();
     la_movfcsr2gr(fcsr_opnd, fcsr3_ir2_opnd);
 
     /* set fcsr according to x86 MXCSR register */
+    IR2_OPND fcsr_value = ra_alloc_itemp_internal();
     IR2_OPND temp_mxcsr = ra_alloc_itemp_internal();
+    la_movfcsr2gr(fcsr_value, fcsr3_ir2_opnd);
     la_ld_wu(temp_mxcsr, env_ir2_opnd,
         lsenv_offset_of_mxcsr(lsenv));
     la_bstrpick_w(temp_mxcsr, temp_mxcsr, 14, 13);
@@ -1280,9 +1277,10 @@ IR2_OPND set_fpu_fcsr_rounding_field_by_x86(void)
     la_beq(temp_int, zero_ir2_opnd, label1);
     la_xori(temp_mxcsr, temp_mxcsr, 0x2);
     la_label(label1);
-    la_bstrins_w(temp_mxcsr, temp_mxcsr, 9, 8);
-    la_movgr2fcsr(fcsr3_ir2_opnd, temp_mxcsr);
+    la_bstrins_w(fcsr_value, temp_mxcsr, 9, 8);
+    la_movgr2fcsr(fcsr3_ir2_opnd, fcsr_value);
 
+    ra_free_temp(fcsr_value);
     ra_free_temp(temp_mxcsr);
     ra_free_temp(temp_int);
     return fcsr_opnd;
@@ -1291,13 +1289,7 @@ IR2_OPND set_fpu_fcsr_rounding_field_by_x86(void)
 void set_fpu_rounding_mode(IR2_OPND rm)
 {
     if (option_set_rounding_opt) return;
-    CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
-    CPUState *cpu = env_cpu(env);
-    if (close_latx_parallel) {
-        la_movgr2fcsr(fcsr3_ir2_opnd, rm);
-    } else if (cpu->tcg_cflags & CF_PARALLEL) {
-        la_movgr2fcsr(fcsr3_ir2_opnd, rm);
-    }
+    la_movgr2fcsr(fcsr3_ir2_opnd, rm);
 }
 
 void load_freg128_from_ir1_mem(IR2_OPND opnd2, IR1_OPND *opnd1){

@@ -11,6 +11,10 @@
 
 #ifdef CONFIG_LATX_AVX_OPT
 bool translate_vfmaddsubxxxps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfmaddsubxxxps_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     lsassert((ir1_opnd_is_xmm(opnd0) && ir1_opnd_is_xmm(opnd1)) ||
@@ -56,6 +60,10 @@ bool translate_vfmaddsubxxxps(IR1_INST * pir1) {
 }
 
 bool translate_vfmaddsubxxxpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfmaddsubxxxpd_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     lsassert((ir1_opnd_is_xmm(opnd0) && ir1_opnd_is_xmm(opnd1)) ||
@@ -99,6 +107,10 @@ bool translate_vfmaddsubxxxpd(IR1_INST * pir1) {
 }
 
 bool translate_vfmsubaddxxxps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfmsubaddxxxps_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     lsassert((ir1_opnd_is_xmm(opnd0) && ir1_opnd_is_xmm(opnd1)) ||
@@ -144,6 +156,10 @@ bool translate_vfmsubaddxxxps(IR1_INST * pir1) {
 }
 
 bool translate_vfmsubaddxxxpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfmsubaddxxxpd_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     lsassert((ir1_opnd_is_xmm(opnd0) && ir1_opnd_is_xmm(opnd1)) ||

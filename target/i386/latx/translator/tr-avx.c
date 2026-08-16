@@ -2213,6 +2213,10 @@ bool translate_vpxor(IR1_INST * pir1) {
 }
 
 bool translate_vfmaddxxxss(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfmaddxxxss_lsx(pir1);
+    }
+
     lsassert(ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1)));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2243,6 +2247,10 @@ bool translate_vfmaddxxxss(IR1_INST * pir1) {
 }
 
 bool translate_vfmaddxxxsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfmaddxxxsd_lsx(pir1);
+    }
+
     lsassert(ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1)));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2273,6 +2281,10 @@ bool translate_vfmaddxxxsd(IR1_INST * pir1) {
 }
 
 bool translate_vfmaddxxxpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfmaddxxxpd_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     lsassert((ir1_opnd_is_xmm(opnd0) && ir1_opnd_is_xmm(opnd1)) ||
@@ -2309,6 +2321,10 @@ bool translate_vfmaddxxxpd(IR1_INST * pir1) {
 }
 
 bool translate_vfmaddxxxps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfmaddxxxps_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     lsassert((ir1_opnd_is_xmm(opnd0) && ir1_opnd_is_xmm(opnd1)) ||
@@ -2345,6 +2361,10 @@ bool translate_vfmaddxxxps(IR1_INST * pir1) {
 }
 
 bool translate_vfmsubxxxss(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfmsubxxxss_lsx(pir1);
+    }
+
     lsassert(ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1)));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2375,6 +2395,10 @@ bool translate_vfmsubxxxss(IR1_INST * pir1) {
 }
 
 bool translate_vfmsubxxxsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfmsubxxxsd_lsx(pir1);
+    }
+
     lsassert(ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1)));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2405,6 +2429,10 @@ bool translate_vfmsubxxxsd(IR1_INST * pir1) {
 }
 
 bool translate_vfmsubxxxpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfmsubxxxpd_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     lsassert((ir1_opnd_is_xmm(opnd0) && ir1_opnd_is_xmm(opnd1)) ||
@@ -2441,6 +2469,10 @@ bool translate_vfmsubxxxpd(IR1_INST * pir1) {
 }
 
 bool translate_vfmsubxxxps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfmsubxxxps_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     lsassert((ir1_opnd_is_xmm(opnd0) && ir1_opnd_is_xmm(opnd1)) ||
@@ -2477,6 +2509,10 @@ bool translate_vfmsubxxxps(IR1_INST * pir1) {
 }
 
 bool translate_vfnmaddxxxss(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfnmaddxxxss_lsx(pir1);
+    }
+
     lsassert(ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1)));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2520,6 +2556,10 @@ bool translate_vfnmaddxxxss(IR1_INST * pir1) {
 }
 
 bool translate_vfnmaddxxxsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfnmaddxxxsd_lsx(pir1);
+    }
+
     lsassert(ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1)));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2563,6 +2603,10 @@ bool translate_vfnmaddxxxsd(IR1_INST * pir1) {
 }
 
 bool translate_vfnmaddxxxpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfnmaddxxxpd_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     lsassert((ir1_opnd_is_xmm(opnd0) && ir1_opnd_is_xmm(opnd1)) ||
@@ -2627,6 +2671,10 @@ bool translate_vfnmaddxxxpd(IR1_INST * pir1) {
 }
 
 bool translate_vfnmaddxxxps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfnmaddxxxps_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     lsassert((ir1_opnd_is_xmm(opnd0) && ir1_opnd_is_xmm(opnd1)) ||
@@ -2690,6 +2738,10 @@ bool translate_vfnmaddxxxps(IR1_INST * pir1) {
 }
 
 bool translate_vfnmsubxxxss(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfnmsubxxxss_lsx(pir1);
+    }
+
     lsassert(ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1)));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2733,6 +2785,10 @@ bool translate_vfnmsubxxxss(IR1_INST * pir1) {
 }
 
 bool translate_vfnmsubxxxsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfnmsubxxxsd_lsx(pir1);
+    }
+
     lsassert(ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1)));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2777,6 +2833,10 @@ bool translate_vfnmsubxxxsd(IR1_INST * pir1) {
 }
 
 bool translate_vfnmsubxxxpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfnmsubxxxpd_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     lsassert((ir1_opnd_is_xmm(opnd0) && ir1_opnd_is_xmm(opnd1)) ||
@@ -2839,6 +2899,10 @@ bool translate_vfnmsubxxxpd(IR1_INST * pir1) {
 }
 
 bool translate_vfnmsubxxxps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vfnmsubxxxps_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     lsassert((ir1_opnd_is_xmm(opnd0) && ir1_opnd_is_xmm(opnd1)) ||

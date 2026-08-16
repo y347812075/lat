@@ -13,6 +13,10 @@
 #ifdef CONFIG_LATX_AVX_OPT
 bool translate_vcvtph2ps(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcvtph2ps_lsx(pir1);
+    }
+
     IR1_OPND *opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND *opnd1 = ir1_get_opnd(pir1, 1);
     int d = ir1_opnd_base_reg_num(opnd0);
@@ -49,6 +53,10 @@ bool translate_vcvtph2ps(IR1_INST *pir1)
 
 bool translate_vcvtps2ph(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcvtps2ph_lsx(pir1);
+    }
+
     IR1_OPND *opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND *opnd1 = ir1_get_opnd(pir1, 1);
     IR1_OPND *opnd2 = ir1_get_opnd(pir1, 2);
