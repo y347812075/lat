@@ -1362,7 +1362,7 @@ static bool (*translate_functions[])(IR1_INST *) = {
     TRANS_FUNC_GEN(VPINSRB, vpinsrx),
     TRANS_FUNC_GEN(VPINSRW, vpinsrx),
     TRANS_FUNC_GEN(VPINSRD, vpinsrx),
-    TRANS_FUNC_GEN(VPINSRQ, vpinsrx),
+    TRANS_FUNC_GEN(VPINSRQ, vpinsrq),
     TRANS_FUNC_GEN(VPMINSD, vpminxx),
     TRANS_FUNC_GEN(VPMINSW, vpminxx),
     TRANS_FUNC_GEN(VPMINSB, vpminxx),

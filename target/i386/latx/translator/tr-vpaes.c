@@ -429,6 +429,12 @@ static void emit_aes_round_lsx(IR2_OPND dst, IR2_OPND key, int enc, int last)
         }
     }
     la_vxor_v(dst, dst, key);
+    ra_free_temp(zero);
+    ra_free_temp(mix_tmp1);
+    ra_free_temp(mix_tmp0);
+    ra_free_temp(table_mix);
+    ra_free_temp(hi_nibble);
+    ra_free_temp(lo_nibble);
 }
 
 static void emit_aes_round_lasx(IR2_OPND dst, IR2_OPND key, int enc, int last)
@@ -550,13 +556,24 @@ bool latx_translate_aesimc_vpaes(IR1_INST *pir1)
     vpaes_invmixcolumns_xtime_lsx(dst, vreg(VPAES_T0), vreg(VPAES_T1),
                                   d0, d1, d2, v0);
     vpaes_restore_low_fprs();
+    ra_free_temp(v0);
+    ra_free_temp(d2);
+    ra_free_temp(d1);
+    ra_free_temp(d0);
+    ra_free_temp_auto(src);
     return true;
 }
 
 bool latx_translate_vaesimc_vpaes(IR1_INST *pir1)
 {
     bool ret = latx_translate_aesimc_vpaes(pir1);
-    set_high128_xreg_to_zero(ra_alloc_xmm(ir1_opnd_base_reg_num(ir1_get_opnd(pir1, 0))));
+    if (option_enable_lasx) {
+        set_high128_xreg_to_zero(
+            ra_alloc_xmm(ir1_opnd_base_reg_num(ir1_get_opnd(pir1, 0))));
+    } else {
+        clear_ymm_high128_shadow(
+            ir1_opnd_base_reg_num(ir1_get_opnd(pir1, 0)));
+    }
     return ret;
 }
 
@@ -582,12 +599,25 @@ bool latx_translate_aeskeygenassist_vpaes(IR1_INST *pir1)
     vpaes_load_tables_lsx(VPAES_TABLE_KEYGEN, 0, 8);
     vpaes_keygenassist_lsx(dst, zero, d0, d1, d2, v0, v1, imm);
     vpaes_restore_low_fprs();
+    ra_free_temp(v1);
+    ra_free_temp(v0);
+    ra_free_temp(d2);
+    ra_free_temp(d1);
+    ra_free_temp(d0);
+    ra_free_temp(zero);
+    ra_free_temp_auto(src);
     return true;
 }
 
 bool latx_translate_vaeskeygenassist_vpaes(IR1_INST *pir1)
 {
     bool ret = latx_translate_aeskeygenassist_vpaes(pir1);
-    set_high128_xreg_to_zero(ra_alloc_xmm(ir1_opnd_base_reg_num(ir1_get_opnd(pir1, 0))));
+    if (option_enable_lasx) {
+        set_high128_xreg_to_zero(
+            ra_alloc_xmm(ir1_opnd_base_reg_num(ir1_get_opnd(pir1, 0))));
+    } else {
+        clear_ymm_high128_shadow(
+            ir1_opnd_base_reg_num(ir1_get_opnd(pir1, 0)));
+    }
     return ret;
 }

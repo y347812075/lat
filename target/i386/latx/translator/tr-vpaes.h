@@ -21,6 +21,10 @@ bool latx_translate_vaesenc_vpaes(IR1_INST *pir1);
 bool latx_translate_vaesenclast_vpaes(IR1_INST *pir1);
 bool latx_translate_vaesdec_vpaes(IR1_INST *pir1);
 bool latx_translate_vaesdeclast_vpaes(IR1_INST *pir1);
+bool latx_translate_vaesenc_lsx(IR1_INST *pir1);
+bool latx_translate_vaesenclast_lsx(IR1_INST *pir1);
+bool latx_translate_vaesdec_lsx(IR1_INST *pir1);
+bool latx_translate_vaesdeclast_lsx(IR1_INST *pir1);
 bool latx_translate_vaesimc_vpaes(IR1_INST *pir1);
 bool latx_translate_vaeskeygenassist_vpaes(IR1_INST *pir1);
 
