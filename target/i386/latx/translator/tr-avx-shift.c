@@ -11,6 +11,10 @@
 
 #ifdef CONFIG_LATX_AVX_OPT
 bool translate_vpslldq(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vpslldq_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     IR1_OPND * opnd2 = ir1_get_opnd(pir1, 2);
@@ -32,6 +36,10 @@ bool translate_vpslldq(IR1_INST * pir1) {
 }
 
 bool translate_vpsllx(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vpsllx_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     IR1_OPND * opnd2 = ir1_get_opnd(pir1, 2);
@@ -100,6 +108,10 @@ bool translate_vpsllx(IR1_INST * pir1) {
 }
 
 bool translate_vpsrldq(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vpsrldq_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     IR1_OPND * opnd2 = ir1_get_opnd(pir1, 2);
@@ -120,7 +132,14 @@ bool translate_vpsrldq(IR1_INST * pir1) {
     return true;
 }
 
+typedef IR2_INST *(*latx_avx_shift_imm_fn)(IR2_OPND, IR2_OPND, int);
+typedef IR2_INST *(*latx_avx_shift_var_fn)(IR2_OPND, IR2_OPND, IR2_OPND);
+
+
 bool translate_vpsrlx(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vpsrlx_lsx(pir1);
+    }
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     IR1_OPND * opnd2 = ir1_get_opnd(pir1, 2);
@@ -202,6 +221,10 @@ bool translate_vpsrlx(IR1_INST * pir1) {
 }
 
 bool translate_vpsrax(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vpsrax_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     IR1_OPND * opnd2 = ir1_get_opnd(pir1, 2);

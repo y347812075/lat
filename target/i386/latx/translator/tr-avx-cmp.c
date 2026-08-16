@@ -60,26 +60,53 @@ static inline void xcomisx(IR1_INST *pir1, bool is_double, bool qnan_exp)
 }
 
 bool translate_vcomisd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcomisd_lsx(pir1);
+    }
+
     xcomisx(pir1, true, true);
     return true;
 }
 
 bool translate_vcomiss(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcomiss_lsx(pir1);
+    }
+
     xcomisx(pir1, false, true);
     return true;
 }
 
+
+
+
+
+
 bool translate_vucomisd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vucomisd_lsx(pir1);
+    }
     xcomisx(pir1, true, false);
     return true;
 }
 
 bool translate_vucomiss(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vucomiss_lsx(pir1);
+    }
+
     xcomisx(pir1, false, false);
     return true;
 }
 
+typedef IR2_INST *(*latx_avx_integer_cmp_lsx_fn)(IR2_OPND, IR2_OPND,
+                                                 IR2_OPND);
+
 bool translate_vpcmpeqx(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vpcmpeqx_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     IR1_OPND * opnd2 = ir1_get_opnd(pir1, 2);
@@ -115,6 +142,10 @@ bool translate_vpcmpeqx(IR1_INST * pir1) {
 }
 
 bool translate_vpcmpgtx(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vpcmpgtx_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     IR1_OPND * opnd2 = ir1_get_opnd(pir1, 2);
@@ -150,6 +181,10 @@ bool translate_vpcmpgtx(IR1_INST * pir1) {
 }
 
 bool translate_vcmpeqpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -172,6 +207,10 @@ bool translate_vcmpeqpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpltpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -194,6 +233,10 @@ bool translate_vcmpltpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmplepd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -216,6 +259,10 @@ bool translate_vcmplepd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpunordpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -238,6 +285,10 @@ bool translate_vcmpunordpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpneqpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -260,6 +311,10 @@ bool translate_vcmpneqpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnltpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -283,6 +338,10 @@ bool translate_vcmpnltpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnlepd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -305,6 +364,10 @@ bool translate_vcmpnlepd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpordpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -327,6 +390,10 @@ bool translate_vcmpordpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpeq_uqpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -349,6 +416,10 @@ bool translate_vcmpeq_uqpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpngepd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -371,6 +442,10 @@ bool translate_vcmpngepd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpngtpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -393,6 +468,10 @@ bool translate_vcmpngtpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpfalsepd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -415,6 +494,10 @@ bool translate_vcmpfalsepd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpneq_oqpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -437,6 +520,10 @@ bool translate_vcmpneq_oqpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpgepd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -459,6 +546,10 @@ bool translate_vcmpgepd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpgtpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -481,6 +572,10 @@ bool translate_vcmpgtpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmptruepd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -506,6 +601,10 @@ bool translate_vcmptruepd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpeq_ospd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -528,6 +627,10 @@ bool translate_vcmpeq_ospd(IR1_INST * pir1) {
 }
 
 bool translate_vcmplt_oqpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -550,6 +653,10 @@ bool translate_vcmplt_oqpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmple_oqpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -572,6 +679,10 @@ bool translate_vcmple_oqpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpunord_spd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -594,6 +705,10 @@ bool translate_vcmpunord_spd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpneq_uspd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -616,6 +731,10 @@ bool translate_vcmpneq_uspd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnlt_uqpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -638,6 +757,10 @@ bool translate_vcmpnlt_uqpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnle_uqpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -660,6 +783,10 @@ bool translate_vcmpnle_uqpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpord_spd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -682,6 +809,10 @@ bool translate_vcmpord_spd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpeq_uspd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -704,6 +835,10 @@ bool translate_vcmpeq_uspd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnge_uqpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -726,6 +861,10 @@ bool translate_vcmpnge_uqpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpngt_uqpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -748,6 +887,10 @@ bool translate_vcmpngt_uqpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpfalse_ospd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -770,6 +913,10 @@ bool translate_vcmpfalse_ospd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpneq_ospd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -792,6 +939,10 @@ bool translate_vcmpneq_ospd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpge_oqpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -814,6 +965,10 @@ bool translate_vcmpge_oqpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpgt_oqpd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -836,6 +991,10 @@ bool translate_vcmpgt_oqpd(IR1_INST * pir1) {
 }
 
 bool translate_vcmptrue_uspd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -861,6 +1020,10 @@ bool translate_vcmptrue_uspd(IR1_INST * pir1) {
 }
 
 bool translate_vcmppd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmppd_lsx(pir1);
+    }
+
     lsassert(ir1_opnd_num(pir1) == 4 &&
         ir1_opnd_is_imm(ir1_get_opnd(pir1, 3)));
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
@@ -940,6 +1103,10 @@ bool translate_vcmppd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpeqps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -962,6 +1129,10 @@ bool translate_vcmpeqps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpltps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -984,6 +1155,10 @@ bool translate_vcmpltps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpleps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1006,6 +1181,10 @@ bool translate_vcmpleps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpunordps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1028,6 +1207,10 @@ bool translate_vcmpunordps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpneqps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1050,6 +1233,10 @@ bool translate_vcmpneqps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnltps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1073,6 +1260,10 @@ bool translate_vcmpnltps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnleps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1095,6 +1286,10 @@ bool translate_vcmpnleps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpordps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1117,6 +1312,10 @@ bool translate_vcmpordps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpeq_uqps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1139,6 +1338,10 @@ bool translate_vcmpeq_uqps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpngeps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1161,6 +1364,10 @@ bool translate_vcmpngeps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpngtps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1183,6 +1390,10 @@ bool translate_vcmpngtps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpfalseps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1205,6 +1416,10 @@ bool translate_vcmpfalseps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpneq_oqps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1227,6 +1442,10 @@ bool translate_vcmpneq_oqps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpgeps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1249,6 +1468,10 @@ bool translate_vcmpgeps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpgtps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1271,6 +1494,10 @@ bool translate_vcmpgtps(IR1_INST * pir1) {
 }
 
 bool translate_vcmptrueps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1296,6 +1523,10 @@ bool translate_vcmptrueps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpeq_osps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1318,6 +1549,10 @@ bool translate_vcmpeq_osps(IR1_INST * pir1) {
 }
 
 bool translate_vcmplt_oqps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1340,6 +1575,10 @@ bool translate_vcmplt_oqps(IR1_INST * pir1) {
 }
 
 bool translate_vcmple_oqps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1362,6 +1601,10 @@ bool translate_vcmple_oqps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpunord_sps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1384,6 +1627,10 @@ bool translate_vcmpunord_sps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpneq_usps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1406,6 +1653,10 @@ bool translate_vcmpneq_usps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnlt_uqps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1428,6 +1679,10 @@ bool translate_vcmpnlt_uqps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnle_uqps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1450,6 +1705,10 @@ bool translate_vcmpnle_uqps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpord_sps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1472,6 +1731,10 @@ bool translate_vcmpord_sps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpeq_usps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1494,6 +1757,10 @@ bool translate_vcmpeq_usps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnge_uqps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1516,6 +1783,10 @@ bool translate_vcmpnge_uqps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpngt_uqps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1538,6 +1809,10 @@ bool translate_vcmpngt_uqps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpfalse_osps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1560,6 +1835,10 @@ bool translate_vcmpfalse_osps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpneq_osps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1582,6 +1861,10 @@ bool translate_vcmpneq_osps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpge_oqps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1604,6 +1887,10 @@ bool translate_vcmpge_oqps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpgt_oqps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1626,6 +1913,10 @@ bool translate_vcmpgt_oqps(IR1_INST * pir1) {
 }
 
 bool translate_vcmptrue_usps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
             ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))) ||
         (ir1_opnd_is_ymm(ir1_get_opnd(pir1, 0)) &&
@@ -1651,6 +1942,10 @@ bool translate_vcmptrue_usps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpps(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpps_lsx(pir1);
+    }
+
     lsassert(ir1_opnd_num(pir1) == 4 &&
         ir1_opnd_is_imm(ir1_get_opnd(pir1, 3)));
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
@@ -1730,6 +2025,10 @@ bool translate_vcmpps(IR1_INST * pir1) {
 }
 
 bool translate_vcmpeqsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -1752,6 +2051,10 @@ bool translate_vcmpeqsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpltsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -1774,6 +2077,10 @@ bool translate_vcmpltsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmplesd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -1796,6 +2103,10 @@ bool translate_vcmplesd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpunordsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -1818,6 +2129,10 @@ bool translate_vcmpunordsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpneqsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -1840,6 +2155,10 @@ bool translate_vcmpneqsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnltsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -1862,6 +2181,10 @@ bool translate_vcmpnltsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnlesd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -1884,6 +2207,10 @@ bool translate_vcmpnlesd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpordsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -1906,6 +2233,10 @@ bool translate_vcmpordsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpeq_uqsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -1928,6 +2259,10 @@ bool translate_vcmpeq_uqsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpngesd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -1950,6 +2285,10 @@ bool translate_vcmpngesd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpngtsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -1972,6 +2311,10 @@ bool translate_vcmpngtsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpfalsesd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -1994,6 +2337,10 @@ bool translate_vcmpfalsesd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpneq_oqsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2016,6 +2363,10 @@ bool translate_vcmpneq_oqsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpgesd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2038,6 +2389,10 @@ bool translate_vcmpgesd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpgtsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2060,6 +2415,10 @@ bool translate_vcmpgtsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmptruesd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2083,6 +2442,10 @@ bool translate_vcmptruesd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpeq_ossd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2105,6 +2468,10 @@ bool translate_vcmpeq_ossd(IR1_INST * pir1) {
 }
 
 bool translate_vcmplt_oqsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2127,6 +2494,10 @@ bool translate_vcmplt_oqsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmple_oqsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2149,6 +2520,10 @@ bool translate_vcmple_oqsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpunord_ssd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2171,6 +2546,10 @@ bool translate_vcmpunord_ssd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpneq_ussd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2193,6 +2572,10 @@ bool translate_vcmpneq_ussd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnlt_uqsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2215,6 +2598,10 @@ bool translate_vcmpnlt_uqsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnle_uqsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2237,6 +2624,10 @@ bool translate_vcmpnle_uqsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpord_ssd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2259,6 +2650,10 @@ bool translate_vcmpord_ssd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpeq_ussd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2281,6 +2676,10 @@ bool translate_vcmpeq_ussd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpnge_uqsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2303,6 +2702,10 @@ bool translate_vcmpnge_uqsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpngt_uqsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2325,6 +2728,10 @@ bool translate_vcmpngt_uqsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpfalse_ossd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2347,6 +2754,10 @@ bool translate_vcmpfalse_ossd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpneq_ossd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2369,6 +2780,10 @@ bool translate_vcmpneq_ossd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpge_oqsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2391,6 +2806,10 @@ bool translate_vcmpge_oqsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpgt_oqsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2413,6 +2832,10 @@ bool translate_vcmpgt_oqsd(IR1_INST * pir1) {
 }
 
 bool translate_vcmptrue_ussd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
         ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2436,6 +2859,10 @@ bool translate_vcmptrue_ussd(IR1_INST * pir1) {
 }
 
 bool translate_vcmpsd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vcmpsd_lsx(pir1);
+    }
+
     lsassert(ir1_opnd_num(pir1) == 4 &&
         ir1_opnd_is_imm(ir1_get_opnd(pir1, 3)));
     lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
@@ -2514,6 +2941,10 @@ bool translate_vcmpsd(IR1_INST * pir1) {
 
 bool translate_vcmpeqss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2539,6 +2970,10 @@ bool translate_vcmpeqss(IR1_INST *pir1)
 
 bool translate_vcmpltss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2564,6 +2999,10 @@ bool translate_vcmpltss(IR1_INST *pir1)
 
 bool translate_vcmpless(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2589,6 +3028,10 @@ bool translate_vcmpless(IR1_INST *pir1)
 
 bool translate_vcmpunordss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2614,6 +3057,10 @@ bool translate_vcmpunordss(IR1_INST *pir1)
 
 bool translate_vcmpneqss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2639,6 +3086,10 @@ bool translate_vcmpneqss(IR1_INST *pir1)
 
 bool translate_vcmpnltss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2664,6 +3115,10 @@ bool translate_vcmpnltss(IR1_INST *pir1)
 
 bool translate_vcmpnless(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2689,6 +3144,10 @@ bool translate_vcmpnless(IR1_INST *pir1)
 
 bool translate_vcmpordss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2714,6 +3173,10 @@ bool translate_vcmpordss(IR1_INST *pir1)
 
 bool translate_vcmpeq_uqss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2739,6 +3202,10 @@ bool translate_vcmpeq_uqss(IR1_INST *pir1)
 
 bool translate_vcmpngess(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2764,6 +3231,10 @@ bool translate_vcmpngess(IR1_INST *pir1)
 
 bool translate_vcmpngtss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2789,6 +3260,10 @@ bool translate_vcmpngtss(IR1_INST *pir1)
 
 bool translate_vcmpfalsess(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2814,6 +3289,10 @@ bool translate_vcmpfalsess(IR1_INST *pir1)
 
 bool translate_vcmpneq_oqss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2839,6 +3318,10 @@ bool translate_vcmpneq_oqss(IR1_INST *pir1)
 
 bool translate_vcmpgess(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2864,6 +3347,10 @@ bool translate_vcmpgess(IR1_INST *pir1)
 
 bool translate_vcmpgtss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2889,6 +3376,10 @@ bool translate_vcmpgtss(IR1_INST *pir1)
 
 bool translate_vcmptruess(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2915,6 +3406,10 @@ bool translate_vcmptruess(IR1_INST *pir1)
 
 bool translate_vcmpeq_osss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2940,6 +3435,10 @@ bool translate_vcmpeq_osss(IR1_INST *pir1)
 
 bool translate_vcmplt_oqss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2965,6 +3464,10 @@ bool translate_vcmplt_oqss(IR1_INST *pir1)
 
 bool translate_vcmple_oqss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -2990,6 +3493,10 @@ bool translate_vcmple_oqss(IR1_INST *pir1)
 
 bool translate_vcmpunord_sss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -3015,6 +3522,10 @@ bool translate_vcmpunord_sss(IR1_INST *pir1)
 
 bool translate_vcmpneq_usss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -3040,6 +3551,10 @@ bool translate_vcmpneq_usss(IR1_INST *pir1)
 
 bool translate_vcmpnlt_uqss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -3065,6 +3580,10 @@ bool translate_vcmpnlt_uqss(IR1_INST *pir1)
 
 bool translate_vcmpnle_uqss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -3090,6 +3609,10 @@ bool translate_vcmpnle_uqss(IR1_INST *pir1)
 
 bool translate_vcmpord_sss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -3115,6 +3638,10 @@ bool translate_vcmpord_sss(IR1_INST *pir1)
 
 bool translate_vcmpeq_usss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -3140,6 +3667,10 @@ bool translate_vcmpeq_usss(IR1_INST *pir1)
 
 bool translate_vcmpnge_uqss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -3165,6 +3696,10 @@ bool translate_vcmpnge_uqss(IR1_INST *pir1)
 
 bool translate_vcmpngt_uqss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -3190,6 +3725,10 @@ bool translate_vcmpngt_uqss(IR1_INST *pir1)
 
 bool translate_vcmpfalse_osss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -3215,6 +3754,10 @@ bool translate_vcmpfalse_osss(IR1_INST *pir1)
 
 bool translate_vcmpneq_osss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -3240,6 +3783,10 @@ bool translate_vcmpneq_osss(IR1_INST *pir1)
 
 bool translate_vcmpge_oqss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -3265,6 +3812,10 @@ bool translate_vcmpge_oqss(IR1_INST *pir1)
 
 bool translate_vcmpgt_oqss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -3290,6 +3841,10 @@ bool translate_vcmpgt_oqss(IR1_INST *pir1)
 
 bool translate_vcmptrue_usss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
 				ir1_opnd_is_xmm(ir1_get_opnd(pir1, 1))));
 	IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -3316,6 +3871,10 @@ bool translate_vcmptrue_usss(IR1_INST *pir1)
 
 bool translate_vcmpss(IR1_INST *pir1)
 {
+    if (!option_enable_lasx) {
+        return translate_vcmpss_lsx(pir1);
+    }
+
 	lsassert(ir1_opnd_num(pir1) == 4 &&
 			ir1_opnd_is_imm(ir1_get_opnd(pir1, 3)));
 	lsassert((ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&

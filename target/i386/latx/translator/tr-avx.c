@@ -3764,6 +3764,10 @@ bool translate_vpinsrx(IR1_INST * pir1) {
     return true;
 }
 
+bool translate_vpsllvd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vpsllvd_lsx(pir1);
+    }
 
 bool translate_vpsllvd(IR1_INST * pir1) {
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
@@ -3798,6 +3802,10 @@ bool translate_vpsllvd(IR1_INST * pir1) {
 }
 
 bool translate_vpsllvq(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vpsllvq_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     IR1_OPND * opnd2 = ir1_get_opnd(pir1, 2);
@@ -3836,6 +3844,10 @@ bool translate_vpsllvq(IR1_INST * pir1) {
 }
 
 bool translate_vpsravd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vpsravd_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     IR1_OPND * opnd2 = ir1_get_opnd(pir1, 2);
@@ -5453,6 +5465,10 @@ bool translate_vaeskeygenassist(IR1_INST *pir1)
 }
 
 bool translate_vpsrlvd(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vpsrlvd_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     IR1_OPND * opnd2 = ir1_get_opnd(pir1, 2);
@@ -5481,6 +5497,10 @@ bool translate_vpsrlvd(IR1_INST * pir1) {
 }
 
 bool translate_vpsrlvq(IR1_INST * pir1) {
+    if (!option_enable_lasx) {
+        return translate_vpsrlvq_lsx(pir1);
+    }
+
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND * opnd1 = ir1_get_opnd(pir1, 1);
     IR1_OPND * opnd2 = ir1_get_opnd(pir1, 2);

@@ -33,6 +33,33 @@ bool TRANS_FUNC(name)(IR1_INST * pir1)
 [glue(dt_X86_INS_, opcode)] = function
 #define TRANS_FUNC_GEN(opcode, function) \
 TRANS_FUNC_GEN_REAL(opcode, TRANS_FUNC(function))
+#define LATX_AVX_INTEGER_CMP_LSX_TABLE(X) \
+    X(VPCMPEQB, pcmpeqb, la_vseq_b, false) \
+    X(VPCMPEQW, pcmpeqw, la_vseq_h, false) \
+    X(VPCMPEQD, pcmpeqd, la_vseq_w, false) \
+    X(VPCMPEQQ, pcmpeqq, la_vseq_d, false) \
+    X(VPCMPGTB, pcmpgtb, la_vslt_b, true) \
+    X(VPCMPGTW, pcmpgtw, la_vslt_h, true) \
+    X(VPCMPGTD, pcmpgtd, la_vslt_w, true) \
+    X(VPCMPGTQ, pcmpgtq, la_vslt_d, true)
+
+/* AVX integer shifts that operate independently in each 128-bit half. */
+#define LATX_AVX_INTEGER_SHIFT_LSX_TABLE(X) \
+    X(VPSLLDQ, vpslldq_lsx) \
+    X(VPSLLD, vpsllx_lsx) \
+    X(VPSLLQ, vpsllx_lsx) \
+    X(VPSLLVD, vpsllvd_lsx) \
+    X(VPSLLVQ, vpsllvq_lsx) \
+    X(VPSLLW, vpsllx_lsx) \
+    X(VPSRAD, vpsrax_lsx) \
+    X(VPSRAVD, vpsravd_lsx) \
+    X(VPSRAW, vpsrax_lsx) \
+    X(VPSRLD, vpsrlx_lsx) \
+    X(VPSRLDQ, vpsrldq_lsx) \
+    X(VPSRLQ, vpsrlx_lsx) \
+    X(VPSRLVD, vpsrlvd_lsx) \
+    X(VPSRLVQ, vpsrlvq_lsx) \
+    X(VPSRLW, vpsrlx_lsx)
 
 #define TRANS_FPU_WRAP_GEN_NO_PROLOGUE(function)    \
 bool translate_##function##_wrap(IR1_INST *pir1)    \
@@ -901,12 +928,32 @@ TRANS_FUNC_DEF(vpsllx);
 TRANS_FUNC_DEF(vpsrax);
 TRANS_FUNC_DEF(vpsrldq);
 TRANS_FUNC_DEF(vpsrlx);
+TRANS_FUNC_DEF(vpslldq_lsx);
+TRANS_FUNC_DEF(vpsllx_lsx);
+TRANS_FUNC_DEF(vpsllvd_lsx);
+TRANS_FUNC_DEF(vpsllvq_lsx);
+TRANS_FUNC_DEF(vpsrax_lsx);
+TRANS_FUNC_DEF(vpsravd_lsx);
+TRANS_FUNC_DEF(vpsrlx_lsx);
+TRANS_FUNC_DEF(vpsrldq_lsx);
+TRANS_FUNC_DEF(vpsrlvd_lsx);
+TRANS_FUNC_DEF(vpsrlvq_lsx);
 TRANS_FUNC_DEF(vpcmpeqx);
+TRANS_FUNC_DEF(vpcmpeqx_lsx);
+#define LATX_AVX_INTEGER_CMP_LSX_DECL(opcode, name, cmp, reverse) \
+TRANS_FUNC_DEF(v##name##_lsx);
+LATX_AVX_INTEGER_CMP_LSX_TABLE(LATX_AVX_INTEGER_CMP_LSX_DECL)
+#undef LATX_AVX_INTEGER_CMP_LSX_DECL
 TRANS_FUNC_DEF(vpcmpgtx);
+TRANS_FUNC_DEF(vpcmpgtx_lsx);
 TRANS_FUNC_DEF(vucomisd);
+TRANS_FUNC_DEF(vucomisd_lsx);
 TRANS_FUNC_DEF(vucomiss);
+TRANS_FUNC_DEF(vucomiss_lsx);
 TRANS_FUNC_DEF(vcomisd);
+TRANS_FUNC_DEF(vcomisd_lsx);
 TRANS_FUNC_DEF(vcomiss);
+TRANS_FUNC_DEF(vcomiss_lsx);
 TRANS_FUNC_DEF(vpabsx);
 TRANS_FUNC_DEF(vpackusxx);
 TRANS_FUNC_DEF(vpand);
@@ -963,6 +1010,7 @@ TRANS_FUNC_DEF(vfnmsubxxxps);
 TRANS_FUNC_DEF(vfnmsubxxxsd);
 TRANS_FUNC_DEF(vfnmsubxxxss);
 TRANS_FUNC_DEF(vcmppd);
+TRANS_FUNC_DEF(vcmppd_lsx);
 TRANS_FUNC_DEF(vcmpeqpd);
 TRANS_FUNC_DEF(vcmpltpd);
 TRANS_FUNC_DEF(vcmplepd);
@@ -996,6 +1044,7 @@ TRANS_FUNC_DEF(vcmpge_oqpd);
 TRANS_FUNC_DEF(vcmpgt_oqpd);
 TRANS_FUNC_DEF(vcmptrue_uspd);
 TRANS_FUNC_DEF(vcmpps);
+TRANS_FUNC_DEF(vcmpps_lsx);
 TRANS_FUNC_DEF(vcmpeqps);
 TRANS_FUNC_DEF(vcmpltps);
 TRANS_FUNC_DEF(vcmpleps);
@@ -1029,6 +1078,7 @@ TRANS_FUNC_DEF(vcmpge_oqps);
 TRANS_FUNC_DEF(vcmpgt_oqps);
 TRANS_FUNC_DEF(vcmptrue_usps);
 TRANS_FUNC_DEF(vcmpsd);
+TRANS_FUNC_DEF(vcmpsd_lsx);
 TRANS_FUNC_DEF(vcmpeqsd);
 TRANS_FUNC_DEF(vcmpltsd);
 TRANS_FUNC_DEF(vcmplesd);
@@ -1062,6 +1112,7 @@ TRANS_FUNC_DEF(vcmpge_oqsd);
 TRANS_FUNC_DEF(vcmpgt_oqsd);
 TRANS_FUNC_DEF(vcmptrue_ussd);
 TRANS_FUNC_DEF(vcmpss);
+TRANS_FUNC_DEF(vcmpss_lsx);
 TRANS_FUNC_DEF(vcmpeqss);
 TRANS_FUNC_DEF(vcmpltss);
 TRANS_FUNC_DEF(vcmpless);

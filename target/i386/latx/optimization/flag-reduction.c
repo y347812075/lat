@@ -112,6 +112,7 @@ static const IR1_EFLAG_USEDEF ir1_opcode_eflag_usedef[] = {
     FLAG_DEFINE(INVLPG,  __NONE, __NONE, __NONE),
     FLAG_DEFINE(UCOMISD, __NONE, __ALL_EFLAGS, __NONE),
     FLAG_DEFINE(UCOMISS, __NONE, __ALL_EFLAGS, __NONE),
+    FLAG_DEFINE(VUCOMISD, __NONE, __ALL_EFLAGS, __NONE),
     FLAG_DEFINE(IRET,    __NONE, __INVALID, __NONE),
 
     /* Jcc */
