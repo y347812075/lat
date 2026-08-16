@@ -267,6 +267,12 @@ static inline int lsenv_offset_of_xmm(ENV *lsenv, int i)
     return (int)((ADDR)(&cpu->xmm_regs[i]) - (ADDR)lsenv->cpu_state);
 }
 
+static inline int lsenv_offset_of_ymmh(ENV *lsenv, int i)
+{
+    CPUX86State *cpu = (CPUX86State *)lsenv->cpu_state;
+    return (int)((ADDR)(&cpu->ymmh_regs[i]) - (ADDR)lsenv->cpu_state);
+}
+
 static inline ADDR lsenv_get_vreg(ENV *lsenv, int i)
 {
     CPUX86State *cpu = (CPUX86State *)lsenv->cpu_state;

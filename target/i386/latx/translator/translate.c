@@ -3676,6 +3676,92 @@ void tr_load_xmm64_from_env(uint8 xmm_to_load)
 }
 #endif
 
+static inline void helper_save_reg(IR2_OPND opnd);
+static inline void helper_restore_reg(IR2_OPND opnd);
+
+static void tr_save_ymm_to_env_lsx(uint16 ymm_to_save)
+{
+    helper_save_reg(a1_ir2_opnd);
+    helper_save_reg(a2_ir2_opnd);
+
+    /* Keep the fixed env pointer out of the LSX fault-save scratch path. */
+    for (int i = 0; i < 8; ++i) {
+        if (ymm_to_save & (UINT16_C(1) << i)) {
+            la_vst(ra_alloc_xmm(i), env_ir2_opnd,
+                   lsenv_offset_of_xmm(lsenv, i));
+        }
+    }
+#ifdef TARGET_X86_64
+    if (ymm_to_save >> 8) {
+        la_addi_d(a1_ir2_opnd, env_ir2_opnd, 0x7f0);
+        for (int i = 0; i < 8; ++i) {
+            if (ymm_to_save & (UINT16_C(1) << (i + 8))) {
+                la_vst(ra_alloc_xmm(i + 8), a1_ir2_opnd,
+                       lsenv_offset_of_xmm(lsenv, i + 8) - 0x7f0);
+            }
+        }
+    }
+#endif
+
+    for (int i = 0; i < CPU_NB_REGS; ++i) {
+        IR2_OPND high;
+
+        if (!(ymm_to_save & (UINT16_C(1) << i))) {
+            continue;
+        }
+        high = ra_alloc_ftemp();
+        li_d(a1_ir2_opnd, lsenv_offset_of_ymmh(lsenv, i));
+        la_add_d(a1_ir2_opnd, env_ir2_opnd, a1_ir2_opnd);
+        la_vld(high, a1_ir2_opnd, 0);
+        li_d(a2_ir2_opnd, lsenv_offset_of_xmm(lsenv, i) + 16);
+        la_add_d(a2_ir2_opnd, env_ir2_opnd, a2_ir2_opnd);
+        la_vst(high, a2_ir2_opnd, 0);
+        ra_free_temp(high);
+    }
+    /* $a2 maps guest r8 on x86-64.  It is used above as an address scratch
+     * register, so restore the guest mapping before returning to the TB. */
+    helper_restore_reg(a2_ir2_opnd);
+    helper_restore_reg(a1_ir2_opnd);
+}
+
+void tr_save_ymm_to_env(uint16 ymm_to_save)
+{
+    if (!option_enable_lasx) {
+        tr_save_ymm_to_env_lsx(ymm_to_save);
+        return;
+    }
+
+    tr_save_xmm_to_env((uint8_t)ymm_to_save);
+#ifdef TARGET_X86_64
+    tr_save_xmm64_to_env((uint8_t)(ymm_to_save >> 8));
+#endif
+
+}
+
+void tr_load_ymm_high_from_env(uint16 ymm_to_load)
+{
+    if (option_enable_lasx) {
+        return;
+    }
+
+    for (int i = 0; i < CPU_NB_REGS; ++i) {
+        IR2_OPND address;
+        IR2_OPND high;
+
+        if (!(ymm_to_load & (UINT16_C(1) << i))) {
+            continue;
+        }
+        address = ra_alloc_itemp();
+        high = ra_alloc_ftemp();
+        li_d(address, lsenv_offset_of_xmm(lsenv, i) + 16);
+        la_add_d(address, env_ir2_opnd, address);
+        la_vld(high, address, 0);
+        store_ymm_high128_shadow(high, i);
+        ra_free_temp(address);
+        ra_free_temp(high);
+    }
+}
+
 void tr_save_registers_to_env(uint8 gpr_to_save, uint8 fpr_to_save,
                               uint8 xmm_to_save, uint8 vreg_to_save)
 {
@@ -3718,7 +3804,12 @@ void tr_save_registers_to_env(uint8 gpr_to_save, uint8 fpr_to_save,
     ra_free_temp(mode_fpu);
 
     /* 3. XMM */
-    tr_save_xmm_to_env(xmm_to_save);
+    if (!option_enable_lasx) {
+        /* LSX keeps YMM high halves in ymmh_regs instead of host registers. */
+        tr_save_ymm_to_env(xmm_to_save);
+    } else {
+        tr_save_xmm_to_env(xmm_to_save);
+    }
 
     /* 4. virtual registers */
     for (i = 0; i < STATIC_NUM; ++i) {
@@ -3769,6 +3860,9 @@ void tr_load_registers_from_env(uint8 gpr_to_load, uint8 fpr_to_load,
 
     /* 3. XMM */
     tr_load_xmm_from_env(xmm_to_load);
+    if (!option_enable_lasx) {
+        tr_load_ymm_high_from_env(xmm_to_load);
+    }
 
     /* 2. FPR (MMX) */
     IR2_OPND mode_fpu = ra_alloc_itemp();
@@ -3822,7 +3916,11 @@ void tr_save_x64_8_registers_to_env(uint8 gpr_to_save, uint8 xmm_to_save)
                               lsenv_offset_of_gpr(lsenv, i + 8));
         }
     }
-    tr_save_xmm64_to_env(xmm_to_save);
+    if (!option_enable_lasx) {
+        tr_save_ymm_to_env((uint16_t)xmm_to_save << 8);
+    } else {
+        tr_save_xmm64_to_env(xmm_to_save);
+    }
 }
 
 void tr_load_x64_8_registers_from_env(uint8 gpr_to_load, uint8 xmm_to_load)
@@ -3836,6 +3934,9 @@ void tr_load_x64_8_registers_from_env(uint8 gpr_to_load, uint8 xmm_to_load)
         }
     }
     tr_load_xmm64_from_env(xmm_to_load);
+    if (!option_enable_lasx) {
+        tr_load_ymm_high_from_env((uint16_t)xmm_to_load << 8);
+    }
 }
 #endif
 
@@ -4122,8 +4223,8 @@ void gen_test_page_flag(IR2_OPND mem_opnd, int mem_imm, uint32_t flag)
     }
 }
 
-void tr_gen_call_to_helper_vfll(ADDR func, IR2_OPND arg1, IR2_OPND arg2, int use_fp,
-        enum aot_rel_kind REL_KIND)
+void tr_gen_call_to_helper_vfll(ADDR func, IR2_OPND arg1, IR2_OPND arg2,
+        int use_fp, enum aot_rel_kind REL_KIND)
 {
     /* aot relocation requires the tb struct */
     TranslationBlock *tb __attribute__((unused)) = NULL;
@@ -4134,7 +4235,6 @@ void tr_gen_call_to_helper_vfll(ADDR func, IR2_OPND arg1, IR2_OPND arg2, int use
     helper_save_reg(arg2);
     /* prologue */
     tr_gen_call_to_helper_prologue(use_fp);
-
     helper_restore_reg(arg1);
     helper_restore_reg(arg2);
     la_mov64(a0_ir2_opnd, env_ir2_opnd);

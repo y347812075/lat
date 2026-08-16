@@ -3024,6 +3024,9 @@ bool translate_xsave(IR1_INST *pir1)
 
     la_bstrins_d(temp_rfbm, eax_opnd, 31, 0);
     la_bstrins_d(temp_rfbm, edx_opnd, 63, 32);
+    if (!option_enable_lasx) {
+        tr_save_ymm_to_env(UINT16_MAX);
+    }
     tr_gen_call_to_helper_vfll((ADDR)helper_xsave, mem_opnd, temp_rfbm, 1,
             LOAD_HELPER_XSAVE);
     return true;
@@ -3039,6 +3042,9 @@ bool translate_xsaveopt(IR1_INST *pir1)
 
     la_bstrins_d(temp_rfbm, eax_opnd, 31, 0);
     la_bstrins_d(temp_rfbm, edx_opnd, 63, 32);
+    if (!option_enable_lasx) {
+        tr_save_ymm_to_env(UINT16_MAX);
+    }
     tr_gen_call_to_helper_vfll((ADDR)helper_xsaveopt, mem_opnd, temp_rfbm, 1,
             LOAD_HELPER_XSAVEOPT);
     return true;
@@ -3056,6 +3062,7 @@ bool translate_xrstor(IR1_INST *pir1)
     la_bstrins_d(temp_rfbm, edx_opnd, 63, 32);
     tr_gen_call_to_helper_vfll((ADDR)helper_xrstor, mem_opnd, temp_rfbm, 1,
             LOAD_HELPER_XRSTOR);
+    tr_load_ymm_high_from_env(UINT16_MAX);
     return true;
 }
 

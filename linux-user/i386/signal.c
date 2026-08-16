@@ -384,6 +384,18 @@ static void load_xmm_from_env(CPUX86State *env)
 #endif
     }
 }
+
+#ifdef CONFIG_LATX_AVX_OPT
+static void sync_ymm_high_from_xmm(CPUX86State *env)
+{
+    if (!option_enable_lasx) {
+        for (int i = 0; i < CPU_NB_REGS; ++i) {
+            env->ymmh_regs[i]._q[0] = env->xmm_regs[i].ZMM_Q(2);
+            env->ymmh_regs[i]._q[1] = env->xmm_regs[i].ZMM_Q(3);
+        }
+    }
+}
+#endif
 #endif
 
 /*
@@ -723,6 +735,9 @@ static int xrstor_sigcontext(CPUX86State *env, struct target_fpstate_fxsave *fxs
             }
             if (tswapl(*(uint32_t *) &fxsave->xfeatures[xfeatures_size]) == TARGET_FP_XSTATE_MAGIC2) {
                 cpu_x86_xrstor(env, fxsave_addr);
+#ifdef CONFIG_LATX_AVX_OPT
+                sync_ymm_high_from_xmm(env);
+#endif
                 return 0;
             }
         }

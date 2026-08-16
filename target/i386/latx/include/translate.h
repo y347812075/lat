@@ -1237,6 +1237,8 @@ void tr_save_gpr_to_env(uint8 gpr_to_save);
 void tr_load_gpr_from_env(uint8 gpr_to_load);
 void tr_save_xmm_to_env(uint8 xmm_to_save);
 void tr_load_xmm_from_env(uint8 xmm_to_load);
+void tr_save_ymm_to_env(uint16 ymm_to_save);
+void tr_load_ymm_high_from_env(uint16 ymm_to_load);
 void tr_save_registers_to_env(uint8 gpr_to_save, uint8 fpr_to_save,
                               uint8 xmm_to_save, uint8 vreg_to_save);
 void tr_load_registers_from_env(uint8 gpr_to_load, uint8 fpr_to_load,
@@ -1279,6 +1281,27 @@ IR2_OPND load_freg128_from_ir1(IR1_OPND *);
 void load_imm_to_ir1_opnd_gpr(IR1_OPND *opnd0, uint64_t imm);
 IR2_OPND load_freg256_from_ir1(IR1_OPND *opnd1);
 void set_high128_xreg_to_zero(IR2_OPND opnd);
+IR2_OPND load_ymm_high128_shadow(int index);
+void store_ymm_high128_shadow(IR2_OPND src, int index);
+void clear_ymm_high128_shadow(int index);
+void clear_all_ymm_high128_shadows(void);
+IR2_OPND load_u64_from_ir1_mem_exact(IR1_OPND *opnd);
+void store_u64_to_ir1_mem_exact(IR2_OPND value, IR1_OPND *opnd);
+IR2_OPND load_u16_from_ir1_mem_exact(IR1_OPND *opnd);
+void store_u16_to_ir1_mem_exact(IR2_OPND value, IR1_OPND *opnd);
+IR2_OPND load_u8_from_ir1_mem_exact(IR1_OPND *opnd);
+void store_u8_to_ir1_mem_exact(IR2_OPND value, IR1_OPND *opnd);
+IR2_OPND load_u32_from_ir1_mem_exact(IR1_OPND *opnd);
+void store_u32_to_ir1_mem_exact(IR2_OPND value, IR1_OPND *opnd);
+IR2_OPND load_v128_from_ir1_mem_exact(IR1_OPND *opnd);
+IR2_OPND load_v128_from_guest_addr_exact(IR2_OPND address);
+void store_v128_to_guest_addr_exact(IR2_OPND value, IR2_OPND address);
+void store_v128_to_ir1_mem_exact(IR2_OPND value, IR1_OPND *opnd);
+void load_v256_from_ir1_mem_exact(IR1_OPND *opnd,
+                                  IR2_OPND *low, IR2_OPND *high);
+IR2_OPND load_v256_high_from_ir1_mem_exact(IR1_OPND *opnd);
+void store_v256_to_ir1_mem_exact(IR2_OPND low, IR2_OPND high,
+                                 IR1_OPND *opnd);
 void store_freg256_to_ir1_mem(IR2_OPND opnd2,IR1_OPND *opnd1);
 void load_freg256_from_ir1_mem(IR2_OPND opnd2,IR1_OPND *opnd1);
 
@@ -1362,7 +1385,8 @@ void rotate_fpu_to_bias(int bias);
 void tr_gen_call_to_helper1(ADDR func, int use_fp, enum aot_rel_kind);
 void tr_gen_call_to_helper2(ADDR, IR2_OPND, int, enum aot_rel_kind);
 void tr_gen_call_to_helper_xgetbv(void);
-void tr_gen_call_to_helper_vfll(ADDR, IR2_OPND, IR2_OPND, int, enum aot_rel_kind);
+void tr_gen_call_to_helper_vfll(ADDR, IR2_OPND, IR2_OPND, int,
+                                enum aot_rel_kind);
 void tr_gen_call_to_helper_pcmpxstrx(ADDR, int, int, int, enum aot_rel_kind);
 void tr_gen_call_to_helper_cvttpd2pi(ADDR, int, int, enum aot_rel_kind);
 void tr_gen_call_to_helper_pclmulqdq(ADDR, int, int, int, int ,int,
