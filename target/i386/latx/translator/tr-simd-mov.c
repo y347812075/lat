@@ -195,6 +195,13 @@ bool translate_maskmovq(IR1_INST *pir1)
 
 bool translate_maskmovdqu(IR1_INST *pir1)
 {
+#ifdef CONFIG_LATX_AVX_OPT
+    if (!option_enable_lasx &&
+        ir1_opcode(pir1) == dt_X86_INS_VMASKMOVDQU) {
+        return translate_maskmovdqu_lsx(pir1);
+    }
+#endif
+
     IR2_OPND src = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
     IR2_OPND mask = load_freg128_from_ir1(ir1_get_opnd(pir1, 1));
     IR2_OPND zero = ra_alloc_ftemp();

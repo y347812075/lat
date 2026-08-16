@@ -1597,3 +1597,27 @@ void store_v256_to_ir1_mem_exact(IR2_OPND low, IR2_OPND high,
     la_vst(high, address, 16);
     ra_free_temp(address);
 }
+
+void store_v256_low_to_ir1_mem_exact(IR2_OPND low, IR1_OPND *opnd)
+{
+    IR2_OPND address;
+
+    lsassert(ir2_opnd_is_freg(&low));
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 256);
+    address = convert_mem_to_itemp(opnd);
+    gen_test_page_flag(address, 0, PAGE_WRITE | PAGE_WRITE_ORG);
+    la_vst(low, address, 0);
+    ra_free_temp(address);
+}
+
+void store_v256_high_to_ir1_mem_exact(IR2_OPND high, IR1_OPND *opnd)
+{
+    IR2_OPND address;
+
+    lsassert(ir2_opnd_is_freg(&high));
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 256);
+    address = convert_mem_to_itemp(opnd);
+    gen_test_page_flag(address, 0, PAGE_WRITE | PAGE_WRITE_ORG);
+    la_vst(high, address, 16);
+    ra_free_temp(address);
+}

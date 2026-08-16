@@ -29,6 +29,7 @@ i386_ss.add(when: 'CONFIG_LATX', if_true: files(
   'tr-avx-cmp.c',
   'tr-avx-cvt.c',
   'tr-avx-mov.c',
+  'tr-avx-mov-lsx.c',
   'tr-avx-shift.c',
   'tr-bmi.c',
   'tr-adx.c',
