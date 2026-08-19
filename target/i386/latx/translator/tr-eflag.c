@@ -77,7 +77,6 @@ bool translate_pushf(IR1_INST *pir1)
     IR2_OPND temp   = ra_alloc_itemp();
     la_x86mfflag(temp, 0x3f);
     la_or(temp, eflags_opnd, temp);
-    ra_free_temp(temp);
 #ifndef TARGET_X86_64
     la_bstrpick_d(esp_opnd, esp_opnd, 31, 0);
 #else
@@ -86,6 +85,7 @@ bool translate_pushf(IR1_INST *pir1)
     }
 #endif
     la_store_addrx(temp, esp_opnd, -sp_step);
+    ra_free_temp(temp);
 
     la_addi_addrx(esp_opnd, esp_opnd, -sp_step);
 
