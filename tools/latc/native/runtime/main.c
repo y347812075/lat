@@ -1,4 +1,5 @@
 #include "native-image.h"
+#include "lat-fallback.h"
 #include "guest-loader.h"
 #include "relocate.h"
 #include "dispatch.h"
@@ -93,13 +94,41 @@ int main(int argc, char **argv)
         printf("smoke_result=%d\n", result);
         return result == 42 ? 0 : 119;
     }
+    if (argc == 2 && strcmp(argv[1], "--latc-run-state-smoke") == 0) {
+        if (!(header->flags & LAT_NATIVE_IMAGE_C_ABI_STATE_SMOKE)) {
+            fprintf(stderr, "latc: image is not a state ABI smoke test\n");
+            return 118;
+        }
+        const LatNativeTbV1 *tb = lat_native_tb_find(
+            header, latc_embedded_image_start, image_size,
+            header->guest_entry, 0);
+        LatNativeCode code = {0};
+        if (!tb || lat_native_code_load(header, latc_embedded_image_start,
+                                        image_size, &code, error,
+                                        sizeof(error))) {
+            fprintf(stderr, "latc: cannot load state smoke code: %s\n",
+                    tb ? error : "entry TB is missing");
+            return 117;
+        }
+        LatX86StateV1 state = {0};
+        state.gpr[0] = 35;
+        int (*entry)(LatX86StateV1 *) =
+            (void *)((unsigned char *)code.address + tb->code_offset);
+        int result = entry(&state);
+        lat_native_code_unload(&code);
+        printf("state_result=%d\ngpr0=%" PRIu64 "\nrip=0x%" PRIx64 "\n",
+               result, state.gpr[0], state.rip);
+        return result == 42 && state.gpr[0] == 42 && state.rip == 0x1234 ?
+            0 : 116;
+    }
     if (argc > 1 && (strcmp(argv[1], "--latc-inspect") == 0 ||
                      strcmp(argv[1], "--latc-map") == 0 ||
                      strcmp(argv[1], "--latc-relocate") == 0 ||
-                     strcmp(argv[1], "--latc-run-smoke") == 0)) {
+                     strcmp(argv[1], "--latc-run-smoke") == 0 ||
+                     strcmp(argv[1], "--latc-run-state-smoke") == 0)) {
         fprintf(stderr,
                 "usage: %s [--latc-inspect|--latc-map|--latc-relocate|"
-                "--latc-run-smoke]\n",
+                "--latc-run-smoke|--latc-run-state-smoke]\n",
                 argv[0]);
         return 2;
     }
