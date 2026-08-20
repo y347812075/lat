@@ -5,6 +5,7 @@
 #include "lat-native-image.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -68,7 +69,21 @@ static void x86_exit_smoke_syscall(void)
         ssize_t result = write((int)first_argument,
                                (const void *)(uintptr_t)second_argument,
                                (size_t)third_argument);
-        *(uint64_t *)(env + 344) = (uint64_t)result;
+        *(uint64_t *)(env + 344) = x86_result(result);
+        return;
+    }
+    if (syscall_number == 0) {
+        uint64_t second_argument = *(uint64_t *)(env + 392);
+        uint64_t third_argument = *(uint64_t *)(env + 360);
+        ssize_t result = read((int)first_argument,
+                              (void *)(uintptr_t)second_argument,
+                              (size_t)third_argument);
+        *(uint64_t *)(env + 344) = x86_result(result);
+        return;
+    }
+    if (syscall_number == 3) {
+        int result = close((int)first_argument);
+        *(uint64_t *)(env + 344) = x86_result(result);
         return;
     }
     if (syscall_number == 9) {
@@ -85,6 +100,15 @@ static void x86_exit_smoke_syscall(void)
     }
     if (syscall_number == 12) {
         *(uint64_t *)(env + 344) = x86_guest_brk(first_argument);
+        return;
+    }
+    if (syscall_number == 257) {
+        const char *path = (const void *)(uintptr_t)
+            *(uint64_t *)(env + 392);
+        int flags = (int)*(uint64_t *)(env + 360);
+        mode_t mode = (mode_t)*(uint64_t *)(env + 424);
+        int result = openat((int)first_argument, path, flags, mode);
+        *(uint64_t *)(env + 344) = x86_result(result);
         return;
     }
     _exit(127);

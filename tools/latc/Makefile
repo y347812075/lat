@@ -73,6 +73,14 @@ $(BUILD)/tests/x86-mmap-exit42: tests/x86-mmap-exit42.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
 
+$(BUILD)/tests/x86-file-exit42: tests/x86-file-exit42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-open-error42: tests/x86-open-error42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
 $(BUILD)/tests/test-cfg: tests/test-cfg.c $(BUILD)/liblatc_cfg.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
@@ -84,7 +92,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/x86-exit-loop42 $(BUILD)/tests/x86-exit-memory42 \
 	$(BUILD)/tests/x86-exit-call42 $(BUILD)/tests/x86-write-exit42 \
 	$(BUILD)/tests/x86-stack-exit42 $(BUILD)/tests/x86-brk-exit42 \
-	$(BUILD)/tests/x86-mmap-exit42
+	$(BUILD)/tests/x86-mmap-exit42 $(BUILD)/tests/x86-file-exit42 \
+	$(BUILD)/tests/x86-open-error42
 	$(BUILD)/tests/test-cfg $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc analyze $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc compile $(BUILD)/tests/cfg-fixture -o $(BUILD)/tests/cfg-bundle --runner $(BUILD)/tests/cfg-fixture
@@ -119,6 +128,10 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 6'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-mmap-exit42 | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 5'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-file-exit42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 10'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-open-error42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 4'
 	$(BUILD)/latc inspect-native --json $(BUILD)/tests/native-image | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["execution_model"] == "lat-native-image"; assert d["tbs"] == 1; assert d["relocations"] == 1'
 	$(MAKE) check-import
