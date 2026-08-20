@@ -52,6 +52,8 @@ static int runtime_symbol(aot_rel_kind kind)
     case LOAD_HOST_PFTABLE: return LAT_NATIVE_SYMBOL_PFTABLE;
     case LOAD_HELPER_PCMPISTRI_XMM:
         return LAT_NATIVE_SYMBOL_PCMPISTRI_XMM;
+    case LOAD_HELPER_PCMPISTRM_XMM:
+        return LAT_NATIVE_SYMBOL_PCMPISTRM_XMM;
     default: return LAT_NATIVE_SYMBOL_INVALID;
     }
 }

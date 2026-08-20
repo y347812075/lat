@@ -70,6 +70,18 @@ static int patch_branch(uint32_t *instruction, uintptr_t patch_address,
                        ((uint32_t)offset & 0xffffu) << 10;
         return 0;
     }
+    uint32_t opcode20 = *instruction & 0xfc000100u;
+    if (opcode == 0x40000000u || opcode == 0x44000000u ||
+        opcode20 == 0x48000000u || opcode20 == 0x48000100u) {
+        if (offset < -(1 << 19) || offset >= (1 << 19)) {
+            errno = ERANGE;
+            return -1;
+        }
+        *instruction = (*instruction & 0xfc0003e0u) |
+                       ((uint32_t)offset & 0xffffu) << 10 |
+                       (((uint32_t)offset >> 16) & 0x1fu);
+        return 0;
+    }
     errno = ENOEXEC;
     return -1;
 }
@@ -196,10 +208,14 @@ int lat_native_code_load(const LatNativeImageHeaderV1 *header,
             result = -1;
         }
         if (result) {
-            char message[128];
+            char message[160];
             snprintf(message, sizeof(message),
-                     "cannot apply native relocation %llu",
-                     (unsigned long long)i);
+                     "cannot apply native relocation %llu kind=%u slots=%u "
+                     "offset=0x%llx insn=0x%08x",
+                     (unsigned long long)i, relocation->kind,
+                     relocation->slots,
+                     (unsigned long long)relocation->code_offset,
+                     instructions[0]);
             munmap(address, mapped_size);
             return fail(error, error_size, message);
         }
