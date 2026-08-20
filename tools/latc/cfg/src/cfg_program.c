@@ -187,7 +187,8 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
             !addr_push(&leaders, in->target)) goto done;
         if (in->kind != INSN_NORMAL && next < fn->addr + fn->size &&
             !addr_push(&leaders, next)) goto done;
-        if (resolve_jt && in->kind == INSN_IJMP) {
+        if (resolve_jt && (in->kind == INSN_IJMP ||
+                           in->kind == INSN_ICALL)) {
             IjmpResult jt;
             if (ijmp_resolve_jump_table(&ijmp, buf, size, in->off, &jt)) {
                 for (size_t j = 0; j < jt.count; j++) {
@@ -238,12 +239,23 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
                 EDGE(CFG_EDGE_CALL_RETURN, next, CFG_EDGE_STATIC);
             break;
         case INSN_ICALL:
-            EDGE(CFG_EDGE_RUNTIME, 0, CFG_EDGE_RUNTIME_RESOLVED);
-            if (result->status != CFG_FUNCTION_ERROR)
-                result->status = CFG_FUNCTION_OPEN;
+        {
+            IjmpResult jt;
+            bool found = resolve_jt &&
+                ijmp_resolve_jump_table(&ijmp, buf, size, last->off, &jt);
+            if (found) {
+                for (size_t j = 0; j < jt.count; j++) {
+                    EDGE(CFG_EDGE_CALL, jt.targets[j], CFG_EDGE_STATIC);
+                }
+            } else {
+                EDGE(CFG_EDGE_RUNTIME, 0, CFG_EDGE_RUNTIME_RESOLVED);
+                if (result->status != CFG_FUNCTION_ERROR)
+                    result->status = CFG_FUNCTION_OPEN;
+            }
             if (next < fn->addr + fn->size)
                 EDGE(CFG_EDGE_CALL_RETURN, next, CFG_EDGE_STATIC);
             break;
+        }
         case INSN_JCC:
             if (last->has_target) EDGE(CFG_EDGE_TRUE, last->target, CFG_EDGE_STATIC);
             if (next < fn->addr + fn->size) EDGE(CFG_EDGE_FALSE, next, CFG_EDGE_STATIC);

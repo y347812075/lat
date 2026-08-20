@@ -66,6 +66,13 @@ typedef struct {
 } MovReg;
 
 typedef struct {
+    /* mov r64, qword ptr [rip + disp32] */
+    int dst;
+    uint64_t address;
+    size_t len;
+} MovRip;
+
+typedef struct {
     /* mov r64, qword ptr [base + index * scale + disp] */
     int dst;
     int base;
@@ -164,8 +171,8 @@ static Prefix parse_prefix(const uint8_t *buf, size_t size, size_t off)
     return p;
 }
 
-static bool parse_jmp_reg(const uint8_t *buf, size_t size, size_t off,
-                          int *reg_out)
+static bool parse_indirect_reg(const uint8_t *buf, size_t size, size_t off,
+                               int *reg_out)
 {
     Prefix p = parse_prefix(buf, size, off);
     if (p.op + 1 >= size || buf[p.op] != 0xff) {
@@ -176,11 +183,28 @@ static bool parse_jmp_reg(const uint8_t *buf, size_t size, size_t off,
     uint8_t mod = modrm >> 6;
     uint8_t reg = (modrm >> 3) & 7;
     uint8_t rm = modrm & 7;
-    if (mod != 3 || reg != 4) {
+    if (mod != 3 || (reg != 2 && reg != 4)) {
         return false;
     }
 
     *reg_out = rm + p.rex_b * 8;
+    return true;
+}
+
+static bool parse_mov_rip(const uint8_t *buf, size_t size,
+                          uint64_t func_addr, size_t off, MovRip *out)
+{
+    Prefix p = parse_prefix(buf, size, off);
+    if (p.op + 5 >= size || buf[p.op] != 0x8b) {
+        return false;
+    }
+    uint8_t modrm = buf[p.op + 1];
+    if ((modrm >> 6) != 0 || (modrm & 7) != 5) {
+        return false;
+    }
+    out->dst = ((modrm >> 3) & 7) + p.rex_r * 8;
+    out->len = p.op + 6 - off;
+    out->address = func_addr + off + out->len + rd_i32(buf + p.op + 2);
     return true;
 }
 
@@ -589,6 +613,24 @@ static bool resolve_const_reg_target(const IjmpContext *ctx,
             return add_target(out, lea.target);
         }
 
+        MovRip mov_rip;
+        if (parse_mov_rip(func, func_size, ctx->func_addr, off, &mov_rip) &&
+            mov_rip.dst == wanted) {
+            const uint8_t *p = va_ptr(ctx, mov_rip.address, 8);
+            if (!p) return false;
+            uint64_t target = (uint64_t)p[0] | ((uint64_t)p[1] << 8) |
+                              ((uint64_t)p[2] << 16) |
+                              ((uint64_t)p[3] << 24) |
+                              ((uint64_t)p[4] << 32) |
+                              ((uint64_t)p[5] << 40) |
+                              ((uint64_t)p[6] << 48) |
+                              ((uint64_t)p[7] << 56);
+            if (!is_valid_target(ctx, target)) return false;
+            memset(out, 0, sizeof(*out));
+            out->table_addr = mov_rip.address;
+            return add_target(out, target);
+        }
+
         MovReg mov;
         if (parse_mov_reg(func, func_size, off, &mov)) {
             if (mov.dst == wanted) {
@@ -625,7 +667,7 @@ bool ijmp_resolve_jump_table(const IjmpContext *ctx, const uint8_t *func,
     memset(out, 0, sizeof(*out));
 
     int jmp_reg = -1;
-    if (!parse_jmp_reg(func, func_size, ijmp_off, &jmp_reg)) {
+    if (!parse_indirect_reg(func, func_size, ijmp_off, &jmp_reg)) {
         return resolve_qword_table(ctx, func, func_size, ijmp_off, out);
     }
 

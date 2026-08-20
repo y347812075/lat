@@ -91,6 +91,8 @@ the descriptor, and exits with 42.
 `-ENOENT`, not the host libc's raw `-1`.
 `tests/x86-c-exit42.c` is compiled C code with a loop, local state, and normal
 function calls. A minimal assembly `_start` exits with the C return value.
+`tests/x86-indirect-call42.S` loads a function pointer from the guest data
+segment and calls it indirectly before exiting with 42.
 
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
