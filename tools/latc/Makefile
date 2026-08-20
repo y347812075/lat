@@ -18,7 +18,7 @@ CFG_SRC := \
 CFG_OBJ := $(CFG_SRC:%.c=$(BUILD)/%.o)
 FORMAT_OBJ := $(BUILD)/format/bundle.o
 
-.PHONY: all clean test test-native test-aot-native test-spec-analyze test-spec-gzip test-spec-gzip-aot check-import
+.PHONY: all clean test test-native test-native-shell test-aot-native test-spec-analyze test-spec-gzip test-spec-gzip-aot check-import
 
 all: $(BUILD)/latc $(BUILD)/liblatc_cfg.a
 
@@ -88,6 +88,17 @@ test-native: all
 	@test -n "$(RUNNER)" -a -n "$(X86_GUEST)" || \
 	  { echo "usage: make test-native RUNNER=/path/to/runner X86_GUEST=/path/to/static-x86"; exit 2; }
 	sh tests/test-bundle-runner.sh $(BUILD)/latc $(RUNNER) $(X86_GUEST) $(BUILD)/native-test
+
+test-native-shell: all $(BUILD)/tests/test-native-format
+	$(BUILD)/tests/test-native-format $(BUILD)/tests/native-image
+	scripts/link-native-shell.sh $(BUILD)/tests/native-image \
+	  $(BUILD)/tests/native-shell.la64
+	loongarch64-unknown-linux-gnu-readelf -h $(BUILD)/tests/native-shell.la64 | \
+	  grep -q 'DYN (Position-Independent Executable file)'
+	loongarch64-unknown-linux-gnu-readelf -S $(BUILD)/tests/native-shell.la64 | \
+	  grep -q '.latc.image'
+	! loongarch64-unknown-linux-gnu-readelf -d $(BUILD)/tests/native-shell.la64 | \
+	  grep -q 'liblat.so.1'
 
 test-aot-native: all
 	@test -n "$(RUNNER)" -a -n "$(X86_GUEST)" || \

@@ -28,6 +28,21 @@ build/latc inspect-native --json program.latnative
 This image is an input to the forthcoming ELF linker. It is not directly
 executable yet.
 
+Build the current LoongArch PIE shell with:
+
+```sh
+tools/latc/scripts/link-native-shell.sh program.latnative program.la64
+program.la64 --latc-inspect
+```
+
+The shell embeds the image in read-only `.latc.image` and validates it on the
+target host. Normal execution currently exits with status 126 because guest
+ELF loading and stable relocation application are not linked yet.
+
+`--latc-map` validates and maps the embedded static x86 ELF `PT_LOAD` segments
+at their recorded addresses, applies final page permissions, prints the mapped
+range, then unmaps it. This is a loader test only; it does not enter guest code.
+
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
 AOT image use LAT's JIT translator unless strict verification is enabled.
