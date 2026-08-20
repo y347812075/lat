@@ -83,6 +83,8 @@ restricted entry path initialises x86 RSP before entering translated code.
 returns to translated code, and then exits with 42.
 `tests/x86-stack-exit42.S` reads `argc` and `argv[0]` from the Linux-compatible
 initial guest stack before exiting with 42.
+`tests/x86-brk-exit42.S` and `tests/x86-mmap-exit42.S` allocate writable guest
+memory through returning syscalls, store 35, add seven, and exit with 42.
 
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
