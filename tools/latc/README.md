@@ -77,6 +77,8 @@ same restricted exit syscall.
 TBs, adding seven each time before exiting with 42.
 `tests/x86-exit-memory42.S` loads 35 from the static guest data segment through
 RIP-relative addressing, adds seven, and exits with the result.
+`tests/x86-exit-call42.S` uses the guest stack for a direct call and return. The
+restricted entry path initialises x86 RSP before entering translated code.
 
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the

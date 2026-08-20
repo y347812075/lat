@@ -41,6 +41,12 @@ static const unsigned char latc_x86_exit_smoke_sha256[][32] = {
         0x7e, 0xa0, 0x69, 0x43, 0xce, 0xc6, 0x86, 0x66,
         0x58, 0x4f, 0x4e, 0x30, 0xe4, 0xd1, 0xe6, 0x3c,
     },
+    {
+        0xb5, 0x7b, 0xb6, 0xf2, 0x3d, 0xbb, 0xb4, 0x9b,
+        0xec, 0x0e, 0xfe, 0x76, 0xe0, 0x99, 0xc9, 0x2c,
+        0xa3, 0x6f, 0x3f, 0x4e, 0x7a, 0xb4, 0xca, 0x70,
+        0xea, 0x3e, 0x72, 0x13, 0x83, 0x48, 0xea, 0x8e,
+    },
 };
 
 static int x86_exit_smoke_guest_allowed(const unsigned char digest[32])
@@ -222,14 +228,25 @@ int main(int argc, char **argv)
             return 111;
         }
         void *environment = calloc(1, 4096);
-        if (!environment) {
-            fprintf(stderr, "latc: cannot allocate x86 exit environment\n");
+        size_t stack_size = 1024 * 1024;
+        void *stack = malloc(stack_size);
+        size_t jump_cache_size = 1024 * 1024;
+        void *jump_cache = calloc(1, jump_cache_size);
+        if (!environment || !stack || !jump_cache) {
+            fprintf(stderr, "latc: cannot allocate x86 exit state\n");
+            free(environment);
+            free(stack);
+            free(jump_cache);
             lat_guest_unmap(&mapping);
             lat_native_code_unload(&code);
             return 110;
         }
         void *entry = (unsigned char *)code.address + tb->code_offset;
-        lat_native_enter_x86_exit_smoke(entry, environment);
+        lat_native_x86_dispatch_configure(header, latc_embedded_image_start,
+                                           image_size, code.address);
+        uintptr_t stack_top = ((uintptr_t)stack + stack_size) & ~(uintptr_t)15;
+        lat_native_enter_x86_exit_smoke(entry, environment,
+                                        (void *)stack_top, jump_cache);
     }
     if (argc > 1 && (strcmp(argv[1], "--latc-inspect") == 0 ||
                      strcmp(argv[1], "--latc-map") == 0 ||

@@ -3,6 +3,7 @@
 #include "relocate.h"
 
 #include "runtime-symbols.h"
+#include "dispatch.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -115,6 +116,20 @@ int lat_native_code_load(const LatNativeImageHeaderV1 *header,
         if (relocation->kind == LAT_NATIVE_RELOC_GUEST_ADDRESS) {
             result = patch_absolute(instructions, relocation->slots,
                                     (uint64_t)relocation->addend);
+        } else if (relocation->kind == LAT_NATIVE_RELOC_TB_TARGET) {
+            const LatNativeTbV1 *target_tb = lat_native_tb_find(
+                header, image, image_size, (uint64_t)relocation->addend,
+                relocation->target);
+            if (!target_tb) {
+                errno = ENOENT;
+                result = -1;
+            } else {
+                uintptr_t target = (uintptr_t)address + target_tb->code_offset;
+                result = relocation->slots == 2 ?
+                    patch_pc_relative(instructions,
+                                      (uintptr_t)instructions, target) :
+                    patch_absolute(instructions, relocation->slots, target);
+            }
         } else if (relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL) {
             uintptr_t target = lat_runtime_symbol_address(relocation->target);
             if (!target) {

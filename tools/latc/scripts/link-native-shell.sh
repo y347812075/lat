@@ -35,6 +35,7 @@ cp "$image" "$work/image.bin"
     "$root/native/runtime/relocate.c" \
     "$root/native/runtime/runtime-symbols.c" \
     "$root/native/runtime/dispatch.c" \
+    "$root/native/runtime/dispatch-x86.S" \
     "$root/native/runtime/enter-x86.S" \
     "$root/native/format/native-image.c" \
     "$work/image.o" -o "$work/program"

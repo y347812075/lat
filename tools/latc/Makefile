@@ -53,6 +53,10 @@ $(BUILD)/tests/x86-exit-memory42: tests/x86-exit-memory42.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
 
+$(BUILD)/tests/x86-exit-call42: tests/x86-exit-call42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
 $(BUILD)/tests/test-cfg: tests/test-cfg.c $(BUILD)/liblatc_cfg.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
@@ -61,7 +65,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-fallback-loader $(BUILD)/tests/test-native-format \
 	$(BUILD)/tests/test-native-relocate $(BUILD)/tests/test-native-dispatch \
 	$(BUILD)/tests/x86-exit42 $(BUILD)/tests/x86-exit-add42 \
-	$(BUILD)/tests/x86-exit-loop42 $(BUILD)/tests/x86-exit-memory42
+	$(BUILD)/tests/x86-exit-loop42 $(BUILD)/tests/x86-exit-memory42 \
+	$(BUILD)/tests/x86-exit-call42
 	$(BUILD)/tests/test-cfg $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc analyze $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc compile $(BUILD)/tests/cfg-fixture -o $(BUILD)/tests/cfg-bundle --runner $(BUILD)/tests/cfg-fixture
@@ -86,6 +91,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 4'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-exit-memory42 | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] == 2'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-exit-call42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 2; assert d["tbs"] >= 4'
 	$(BUILD)/latc inspect-native --json $(BUILD)/tests/native-image | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["execution_model"] == "lat-native-image"; assert d["tbs"] == 1; assert d["relocations"] == 1'
 	$(MAKE) check-import
@@ -114,7 +121,8 @@ $(BUILD)/tests/test-native-format: tests/test-native-format.c \
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 
 $(BUILD)/tests/test-native-relocate: tests/test-native-relocate.c \
-		native/runtime/relocate.c native/runtime/runtime-symbols.c
+		native/runtime/relocate.c native/runtime/runtime-symbols.c \
+		native/runtime/dispatch.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 
