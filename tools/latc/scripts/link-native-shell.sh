@@ -32,6 +32,8 @@ cp "$image" "$work/image.bin"
     -I"$root/native/include" -I"$root/native/format" \
     -I"$root/native/runtime" \
     "$root/native/runtime/main.c" "$root/native/runtime/guest-loader.c" \
+    "$root/native/runtime/relocate.c" \
+    "$root/native/runtime/runtime-symbols.c" \
     "$root/native/format/native-image.c" \
     "$work/image.o" -o "$work/program"
 chmod 0755 "$work/program"

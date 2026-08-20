@@ -1,5 +1,6 @@
 #include "native-image.h"
 #include "guest-loader.h"
+#include "relocate.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -54,9 +55,24 @@ int main(int argc, char **argv)
         lat_guest_unmap(&mapping);
         return 0;
     }
+    if (argc == 2 && strcmp(argv[1], "--latc-relocate") == 0) {
+        LatNativeCode code = {0};
+        if (lat_native_code_load(header, latc_embedded_image_start, image_size,
+                                 &code, error, sizeof(error))) {
+            fprintf(stderr, "latc: cannot relocate native code: %s\n", error);
+            return 123;
+        }
+        printf("native_code=%p\nnative_code_size=%zu\nrelocations=%" PRIu64
+               "\n", code.address, code.size, header->relocation_count);
+        lat_native_code_unload(&code);
+        return 0;
+    }
     if (argc > 1 && (strcmp(argv[1], "--latc-inspect") == 0 ||
-                     strcmp(argv[1], "--latc-map") == 0)) {
-        fprintf(stderr, "usage: %s [--latc-inspect|--latc-map]\n", argv[0]);
+                     strcmp(argv[1], "--latc-map") == 0 ||
+                     strcmp(argv[1], "--latc-relocate") == 0)) {
+        fprintf(stderr,
+                "usage: %s [--latc-inspect|--latc-map|--latc-relocate]\n",
+                argv[0]);
         return 2;
     }
     fprintf(stderr,
