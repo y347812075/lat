@@ -89,6 +89,8 @@ memory through returning syscalls, store 35, add seven, and exit with 42.
 the descriptor, and exits with 42.
 `tests/x86-open-error42.S` checks that a missing file returns x86 Linux
 `-ENOENT`, not the host libc's raw `-1`.
+`tests/x86-c-exit42.c` is compiled C code with a loop, local state, and normal
+function calls. A minimal assembly `_start` exits with the C return value.
 
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the

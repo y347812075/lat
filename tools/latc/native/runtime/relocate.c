@@ -42,6 +42,38 @@ static int patch_pc_relative(uint32_t *instructions, uintptr_t patch_address,
     return 0;
 }
 
+static int patch_branch(uint32_t *instruction, uintptr_t patch_address,
+                        uintptr_t target)
+{
+    int64_t difference = (int64_t)target - (int64_t)patch_address;
+    if ((difference & 3) != 0) {
+        errno = ERANGE;
+        return -1;
+    }
+    int64_t offset = difference >> 2;
+    uint32_t opcode = *instruction & 0xfc000000u;
+    if (opcode == 0x50000000u || opcode == 0x54000000u) {
+        if (offset < -(1 << 25) || offset >= (1 << 25)) {
+            errno = ERANGE;
+            return -1;
+        }
+        *instruction = opcode | ((uint32_t)offset & 0xffffu) << 10 |
+                       (((uint32_t)offset >> 16) & 0x3ffu);
+        return 0;
+    }
+    if (opcode >= 0x58000000u && opcode <= 0x6c000000u) {
+        if (offset < -(1 << 15) || offset >= (1 << 15)) {
+            errno = ERANGE;
+            return -1;
+        }
+        *instruction = (*instruction & 0xfc0003ffu) |
+                       ((uint32_t)offset & 0xffffu) << 10;
+        return 0;
+    }
+    errno = ENOEXEC;
+    return -1;
+}
+
 static int patch_absolute(uint32_t *instructions, uint32_t slots,
                           uint64_t target)
 {
@@ -140,7 +172,9 @@ int lat_native_code_load(const LatNativeImageHeaderV1 *header,
                 }
             } else {
                 uintptr_t target = (uintptr_t)address + target_tb->code_offset;
-                result = relocation->slots == 2 ?
+                result = relocation->slots == 1 ?
+                    patch_branch(instructions, (uintptr_t)instructions,
+                                 target) : relocation->slots == 2 ?
                     patch_pc_relative(instructions,
                                       (uintptr_t)instructions, target) :
                     patch_absolute(instructions, relocation->slots, target);
