@@ -33,6 +33,8 @@ def main() -> None:
         "linux-user/latc-bundle-loader.c",
         "linux-user/latc-bundle-loader.h",
         "linux-user/main.c",
+        "target/i386/latx/sbt/aot_recover_tb.c",
+        "target/i386/latx/sbt/aot.c",
     ):
         destination = source / relative
         destination.parent.mkdir(parents=True, exist_ok=True)

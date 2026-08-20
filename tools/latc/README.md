@@ -28,7 +28,16 @@ tools/latc/scripts/compile-aot.sh tools/latc/build/latc \
 ```
 
 Set `LATC_STRICT_AOT=1` when testing the output. The runner exits with status
-125 if any TB is generated after embedded AOT loading.
+125 before decoding if the runtime translator is entered after embedded AOT
+loading.
+
+Embedded AOT is installed into `$HOME/.cache/latx` on first use. Later runs
+reuse it only when a read-only cache file and its latc marker still match the
+recorded SHA-256 digest, inode, size, and modification time. Runtime statistics
+include `aot_cache_hit`, `bundle_verify_ns`, `guest_extract_ns`, and
+`aot_prepare_ns` so startup costs can be separated from guest execution.
+`runtime_tb_gen_attempts` is counted at translator entry; strict mode rejects
+the attempt before decoding or generating host code.
 
 An optional train profile marks hot TBs so the runner translates them first:
 
@@ -73,9 +82,10 @@ stores LAT's LoongArch code and relocation records and loads them before guest
 execution. Unresolved paths use JIT unless `LATC_STRICT_AOT=1` is set.
 
 `LATC_STATS_OUT=/path/stats.json` records both startup pretranslation and
-`runtime_tb_gen_calls`. The latter must be checked before claiming that a test
-ran without runtime translation. `LATC_DISABLE_PRETRANSLATE=1` provides a JIT
-baseline for the same bundle.
+`runtime_tb_gen_attempts` and `runtime_tb_gen_calls`. The attempt count must be
+checked before claiming that a test ran without entering the runtime
+translator. `LATC_DISABLE_PRETRANSLATE=1` provides a JIT baseline for the same
+bundle.
 
 `LATC_PROFILE_OUT=/path/missing.profile` records runtime-generated guest PCs.
 Passing that file back through `--profile` adds missing addresses that are
@@ -90,9 +100,26 @@ JIT fallback. See [spec2000/SPEC2000.md](spec2000/SPEC2000.md) for counts and
 AOT sizes. The same strict gzip AOT output runs on AOSC Linux and Loongnix Linux
 4.19 3A6000 systems.
 
+The official SPECint2000 train workloads are also automated:
+
+```sh
+python3 spec2000/prepare-specint-train.py \
+  --latc build/latc --runner /path/to/latx-x86_64 \
+  --spec-root /path/to/spec2000 --workdir /path/to/train-bundles
+python3 spec2000/bench-specint-train.py \
+  --runner /path/to/latx-x86_64 --spec-root /path/to/spec2000 \
+  --bundle-dir /path/to/train-bundles/bundles \
+  --workdir /path/to/train-benchmark --rounds 5
+```
+
+This proves that the main x86 ELF executes from LAT AOT without entering the
+runtime translator for the measured workload. It does not yet produce a
+standalone LoongArch program without the LAT runtime: the output remains a
+static LoongArch runner containing the x86 ELF, CFG, and LAT AOT image.
+
 Current limitations: AOT generation itself must run on a LoongArch build host;
 the runner extracts the embedded AOT into `$HOME/.cache/latx` and the x86 guest
 into `/tmp`, so both locations must be writable. Guest VDSO and anonymous
-signal-helper pages are not yet serialised as AOT segments. Test workloads are
-validated; train and ref profiles still need separate collection because they
-may expose additional indirect targets.
+signal-helper pages are not yet serialised as AOT segments. Test and train
+workloads are validated. Ref profiles still need separate collection because
+they may expose additional indirect targets.

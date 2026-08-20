@@ -10,13 +10,14 @@ static void usage(const char *name)
 {
     fprintf(stderr, "usage:\n"
             "  %s analyze [--json] X86_ELF\n"
-            "  %s compile X86_ELF -o OUTPUT --runner RUNNER [--profile FILE] [--aot FILE]\n"
+            "  %s compile X86_ELF -o OUTPUT --runner RUNNER [--profile FILE]"
+            " [--profile-ignore-outside-exec] [--aot FILE]\n"
             "  %s inspect [--json] BUNDLE\n", name, name, name);
 }
 
 static int compile_bundle(const char *input, const char *output,
                           const char *runner, const char *profile,
-                          const char *aot)
+                          int profile_ignore_outside_exec, const char *aot)
 {
     CfgProgram program;
     CfgAnalyzeOptions options = { .resolve_jump_tables = true };
@@ -25,15 +26,16 @@ static int compile_bundle(const char *input, const char *output,
         fprintf(stderr, "latc: %s\n", error); return 1;
     }
     if (profile) {
-        size_t matched = 0, unmatched = 0;
-        if (latc_profile_apply(profile, &program, &matched, &unmatched,
+        size_t matched = 0, unmatched = 0, ignored = 0;
+        if (latc_profile_apply(profile, &program, profile_ignore_outside_exec,
+                               &matched, &unmatched, &ignored,
                                error, sizeof(error)) != 0) {
             fprintf(stderr, "latc: %s\n", error);
             cfg_program_destroy(&program);
             return 1;
         }
-        fprintf(stderr, "latc: profile matched=%zu added=%zu\n",
-                matched, unmatched);
+        fprintf(stderr, "latc: profile matched=%zu added=%zu ignored=%zu\n",
+                matched, unmatched, ignored);
     }
     int rc = latc_bundle_write(runner, input, output, aot, &program,
                                error, sizeof(error));
@@ -123,15 +125,19 @@ int main(int argc, char **argv)
         const char *input = argv[2], *output = NULL, *runner = NULL;
         const char *profile = NULL;
         const char *aot = NULL;
+        int profile_ignore_outside_exec = 0;
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) output = argv[++i];
             else if (strcmp(argv[i], "--runner") == 0 && i + 1 < argc) runner = argv[++i];
             else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) profile = argv[++i];
+            else if (strcmp(argv[i], "--profile-ignore-outside-exec") == 0)
+                profile_ignore_outside_exec = 1;
             else if (strcmp(argv[i], "--aot") == 0 && i + 1 < argc) aot = argv[++i];
             else { usage(argv[0]); return 2; }
         }
         if (!output || !runner) { usage(argv[0]); return 2; }
-        return compile_bundle(input, output, runner, profile, aot);
+        return compile_bundle(input, output, runner, profile,
+                              profile_ignore_outside_exec, aot);
     }
     if (strcmp(argv[1], "inspect") == 0) {
         int json = 0; const char *path = NULL;

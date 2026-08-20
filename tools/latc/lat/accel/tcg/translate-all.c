@@ -1913,6 +1913,9 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 
     assert_memory_lock();
     qemu_thread_jit_write();
+#ifdef CONFIG_LATX
+    latc_bundle_note_tb_attempt(pc, cflags);
+#endif
 
     phys_pc = get_page_addr_code_hostp(env, pc, &host_pc);
 
@@ -2336,7 +2339,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
         return existing_tb;
     }
 #ifdef CONFIG_LATX
-    latc_bundle_note_tb_generated(tb->pc);
+    latc_bundle_note_tb_generated(tb->pc, tb_cflags(tb));
 #endif
     return tb;
 }

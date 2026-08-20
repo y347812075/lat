@@ -48,6 +48,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg
 	sh tests/test-aot-bundle.sh $(BUILD)/latc $(BUILD)/tests/cfg-fixture \
 	  tests/fake.aot2 $(BUILD)/tests/cfg-aot-bundle
 	sh tests/test-bundle-corruption.sh $(BUILD)/latc $(BUILD)/tests/cfg-bundle $(BUILD)/tests/cfg-bundle.bad
+	sh tests/test-spec-tools.sh $(BUILD)/tests/spec-tools
 	$(MAKE) check-import
 
 test-native: all

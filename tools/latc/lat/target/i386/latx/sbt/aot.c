@@ -218,6 +218,22 @@ static void get_tb(void)
         return;
     }
     qsort(tb_vector, tb_num, sizeof(TranslationBlock *), tb_cmp);
+    const char *debug_pc_text = getenv("LATC_DEBUG_PC");
+    if (debug_pc_text && *debug_pc_text) {
+        target_ulong debug_pc = strtoull(debug_pc_text, NULL, 0);
+        int matches = 0;
+        for (int i = 0; i < tb_num; i++) {
+            if (tb_vector[i]->pc == debug_pc) {
+                fprintf(stderr, "latc-aot: candidate pc=0x%lx cflags=0x%x size=%u icount=%u invalid=%u\n",
+                        (unsigned long)debug_pc, tb_vector[i]->cflags,
+                        tb_vector[i]->size, tb_vector[i]->icount,
+                        !!(tb_vector[i]->cflags & CF_INVALID));
+                matches++;
+            }
+        }
+        fprintf(stderr, "latc-aot: candidate matches pc=0x%lx count=%d total=%d\n",
+                (unsigned long)debug_pc, matches, tb_num);
+    }
 }
 
 /* Prepare segment infomation. */ 
@@ -1472,6 +1488,15 @@ static aot_segment *get_segment(seg_info *seg, char *lib_name,
                                   sizeof(aot_file_name)) < 0) {
         return NULL;
     }
+    const char *debug_pc_text = getenv("LATC_DEBUG_PC");
+    bool debug_segment = debug_pc_text && *debug_pc_text &&
+        strtoull(debug_pc_text, NULL, 0) >= (target_ulong)start &&
+        strtoull(debug_pc_text, NULL, 0) < (target_ulong)end;
+    if (debug_segment) {
+        fprintf(stderr, "latc-aot: segment file=%s aot=%s offset=0x%lx start=0x%lx end=0x%lx\n",
+                lib_name, aot_file_name, (unsigned long)aot_offset,
+                (unsigned long)start, (unsigned long)end);
+    }
     lib = lib_tree_lookup(aot_file_name);
     if (lib == NULL) {
         *curr_aot_buffer = NULL;
@@ -1484,9 +1509,17 @@ static aot_segment *get_segment(seg_info *seg, char *lib_name,
         return NULL;
     }
     if (*curr_aot_buffer == NULL) {
+        if (debug_segment) {
+            fprintf(stderr, "latc-aot: segment aot_load failed file=%s aot=%s\n",
+                    lib_name, aot_file_name);
+        }
         return NULL;
     }
     p_segment = aot_find_segment(lib_name, aot_offset, *curr_aot_buffer);
+    if (debug_segment) {
+        fprintf(stderr, "latc-aot: segment buffer=%p record=%p\n",
+                *curr_aot_buffer, p_segment);
+    }
     if (p_segment == NULL) {
         if (seg->aot_file_type & (PE_AOT_FILE | CACHE_AOT_FILE)) {
             lib_tree_remove(aot_file_name);
@@ -1573,6 +1606,15 @@ void recover_aot_tb(char *lib_name, uint64_t aot_offset, abi_long start,
         return;
     }
     seg = segment_tree_lookup2(start, start + len);
+    const char *debug_pc_text = getenv("LATC_DEBUG_PC");
+    bool debug_segment = debug_pc_text && *debug_pc_text &&
+        strtoull(debug_pc_text, NULL, 0) >= (target_ulong)start &&
+        strtoull(debug_pc_text, NULL, 0) < (target_ulong)(start + len);
+    if (debug_segment) {
+        fprintf(stderr, "latc-aot: recover file=%s offset=0x%lx start=0x%lx len=0x%lx seg=%p\n",
+                lib_name, (unsigned long)aot_offset, (unsigned long)start,
+                (unsigned long)len, seg);
+    }
     if (!seg) {
         return;
     }
@@ -1587,6 +1629,10 @@ void recover_aot_tb(char *lib_name, uint64_t aot_offset, abi_long start,
     /* First, we should identify whether this segment is in aot. */
     p_segment = get_segment(seg, lib_name, aot_offset, start, start + len,
                             &curr_aot_buffer);
+    if (debug_segment) {
+        fprintf(stderr, "latc-aot: recover buffer=%p record=%p\n",
+                curr_aot_buffer, p_segment);
+    }
 
     if (p_segment == NULL) {
         return;

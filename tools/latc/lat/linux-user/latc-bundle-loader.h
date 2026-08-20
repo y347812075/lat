@@ -9,7 +9,8 @@ int latc_bundle_inject_argv(int *argc, char ***argv);
 struct CPUState;
 void latc_bundle_pretranslate(struct CPUState *cpu);
 
-/* Called by the copied LAT code generator after a TB is installed. */
-void latc_bundle_note_tb_generated(uint64_t guest_pc);
+/* Called at runtime translator entry and after a TB is installed. */
+void latc_bundle_note_tb_attempt(uint64_t guest_pc, uint32_t cflags);
+void latc_bundle_note_tb_generated(uint64_t guest_pc, uint32_t cflags);
 
 #endif

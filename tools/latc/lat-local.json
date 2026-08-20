@@ -29,6 +29,14 @@
     {
       "path": "lat/accel/tcg/translate-all.c",
       "reason": "count and reject runtime TB generation for strict AOT verification"
+    },
+    {
+      "path": "lat/target/i386/latx/sbt/aot_recover_tb.c",
+      "reason": "provide opt-in diagnostics for static AOT loading"
+    },
+    {
+      "path": "lat/target/i386/latx/sbt/aot.c",
+      "reason": "provide opt-in diagnostics for static AOT coverage"
     }
   ]
 }
