@@ -1,0 +1,158 @@
+#define _GNU_SOURCE
+
+#include "relocate.h"
+
+#include "runtime-symbols.h"
+
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+static int fail(char *error, size_t error_size, const char *message)
+{
+    if (error && error_size) {
+        snprintf(error, error_size, "%s: %s", message, strerror(errno));
+    }
+    return -1;
+}
+
+static int patch_pc_relative(uint32_t *instructions, uintptr_t patch_address,
+                             uintptr_t target)
+{
+    int64_t difference = (int64_t)target - (int64_t)patch_address;
+    if ((difference & 3) != 0) {
+        errno = ERANGE;
+        return -1;
+    }
+    int64_t offset = difference >> 2;
+    int64_t upper = (offset + (1 << 15)) >> 16;
+    if (upper < -(1 << 19) || upper >= (1 << 19)) {
+        errno = ERANGE;
+        return -1;
+    }
+    uint32_t destination = instructions[1] & 0x1f;
+    instructions[0] = 0x1e000000u |
+        ((uint32_t)upper & 0xfffff) << 5 | 12u;
+    instructions[1] = 0x4c000000u |
+        ((uint32_t)offset & 0xffff) << 10 | 12u << 5 | destination;
+    return 0;
+}
+
+static int patch_absolute(uint32_t *instructions, uint32_t slots,
+                          uint64_t target)
+{
+    if (slots < 2 || slots > 3 || (slots == 2 && target >> 31)) {
+        errno = ERANGE;
+        return -1;
+    }
+    if ((instructions[0] & 0xfe000000u) != 0x14000000u ||
+        (instructions[1] & 0xffc00000u) != 0x03800000u ||
+        (slots == 3 &&
+         (instructions[2] & 0xfe000000u) != 0x16000000u)) {
+        errno = ENOEXEC;
+        return -1;
+    }
+    instructions[0] = (instructions[0] & 0xfe00001fu) |
+        (((target >> 12) & 0xfffff) << 5);
+    instructions[1] = (instructions[1] & 0xffc003ffu) |
+        ((target & 0xfff) << 10);
+    if (slots == 3) {
+        instructions[2] = (instructions[2] & 0xfe00001fu) |
+            (((target >> 32) & 0xfffff) << 5);
+    }
+    return 0;
+}
+
+int lat_native_code_load(const LatNativeImageHeaderV1 *header,
+                         const unsigned char *image, size_t image_size,
+                         LatNativeCode *code, char *error,
+                         size_t error_size)
+{
+    if (!header || !image || !code ||
+        header->code_offset > image_size ||
+        header->code_size > image_size - header->code_offset ||
+        header->relocation_offset > image_size ||
+        header->relocation_count >
+            (image_size - header->relocation_offset) /
+                sizeof(LatNativeRelocationV1)) {
+        errno = EINVAL;
+        return fail(error, error_size, "invalid native code image");
+    }
+    long page_size_long = sysconf(_SC_PAGESIZE);
+    if (page_size_long <= 0 || header->code_size > SIZE_MAX) {
+        errno = EOVERFLOW;
+        return fail(error, error_size, "native code size is unsupported");
+    }
+    size_t page_size = (size_t)page_size_long;
+    if (header->code_size > SIZE_MAX - (page_size - 1)) {
+        errno = EOVERFLOW;
+        return fail(error, error_size, "native code size overflows");
+    }
+    size_t mapped_size = ((size_t)header->code_size + page_size - 1) &
+                         ~(page_size - 1);
+    uintptr_t anchor = lat_runtime_symbol_address(
+        LAT_NATIVE_SYMBOL_EPILOGUE_RET_ID_1);
+    uintptr_t hint_value = (anchor + 16 * 1024 * 1024 + page_size - 1) &
+                           ~(uintptr_t)(page_size - 1);
+    void *address = mmap((void *)hint_value, mapped_size,
+                         PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (address == MAP_FAILED) {
+        return fail(error, error_size, "cannot allocate native code");
+    }
+    memcpy(address, image + header->code_offset, header->code_size);
+    const LatNativeRelocationV1 *relocations =
+        (const void *)(image + header->relocation_offset);
+    for (uint64_t i = 0; i < header->relocation_count; i++) {
+        const LatNativeRelocationV1 *relocation = &relocations[i];
+        uint32_t *instructions =
+            (void *)((unsigned char *)address + relocation->code_offset);
+        int result;
+        if (relocation->kind == LAT_NATIVE_RELOC_GUEST_ADDRESS) {
+            result = patch_absolute(instructions, relocation->slots,
+                                    (uint64_t)relocation->addend);
+        } else if (relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL) {
+            uintptr_t target = lat_runtime_symbol_address(relocation->target);
+            if (!target) {
+                errno = ENOENT;
+                result = -1;
+            } else if (relocation->slots == 2) {
+                result = patch_pc_relative(instructions,
+                    (uintptr_t)instructions, target);
+            } else {
+                result = patch_absolute(instructions, relocation->slots,
+                                        target);
+            }
+        } else {
+            errno = ENOTSUP;
+            result = -1;
+        }
+        if (result) {
+            char message[128];
+            snprintf(message, sizeof(message),
+                     "cannot apply native relocation %llu",
+                     (unsigned long long)i);
+            munmap(address, mapped_size);
+            return fail(error, error_size, message);
+        }
+    }
+    __builtin___clear_cache(address,
+        (unsigned char *)address + header->code_size);
+    if (mprotect(address, mapped_size, PROT_READ | PROT_EXEC)) {
+        munmap(address, mapped_size);
+        return fail(error, error_size, "cannot protect native code");
+    }
+    code->address = address;
+    code->size = mapped_size;
+    return 0;
+}
+
+void lat_native_code_unload(LatNativeCode *code)
+{
+    if (!code || !code->address || !code->size) return;
+    munmap(code->address, code->size);
+    memset(code, 0, sizeof(*code));
+}

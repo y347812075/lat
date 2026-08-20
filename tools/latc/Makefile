@@ -42,7 +42,8 @@ $(BUILD)/tests/test-cfg: tests/test-cfg.c $(BUILD)/liblatc_cfg.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 
 test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
-	$(BUILD)/tests/test-fallback-loader $(BUILD)/tests/test-native-format
+	$(BUILD)/tests/test-fallback-loader $(BUILD)/tests/test-native-format \
+	$(BUILD)/tests/test-native-relocate
 	$(BUILD)/tests/test-cfg $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc analyze $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc compile $(BUILD)/tests/cfg-fixture -o $(BUILD)/tests/cfg-bundle --runner $(BUILD)/tests/cfg-fixture
@@ -57,6 +58,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
 	$(BUILD)/tests/test-native-format $(BUILD)/tests/native-image
+	$(BUILD)/tests/test-native-relocate
 	$(BUILD)/latc inspect-native --json $(BUILD)/tests/native-image | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["execution_model"] == "lat-native-image"; assert d["tbs"] == 1; assert d["relocations"] == 1'
 	$(MAKE) check-import
@@ -81,6 +83,11 @@ $(BUILD)/tests/test-fallback-loader: tests/test-fallback-loader.c \
 
 $(BUILD)/tests/test-native-format: tests/test-native-format.c \
 		$(BUILD)/native/format/native-image.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+
+$(BUILD)/tests/test-native-relocate: tests/test-native-relocate.c \
+		native/runtime/relocate.c native/runtime/runtime-symbols.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 

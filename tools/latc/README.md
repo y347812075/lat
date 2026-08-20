@@ -37,11 +37,17 @@ program.la64 --latc-inspect
 
 The shell embeds the image in read-only `.latc.image` and validates it on the
 target host. Normal execution currently exits with status 126 because guest
-ELF loading and stable relocation application are not linked yet.
+state setup, real runtime helpers, and translated-code entry are not linked yet.
 
 `--latc-map` validates and maps the embedded static x86 ELF `PT_LOAD` segments
 at their recorded addresses, applies final page permissions, prints the mapped
 range, then unmaps it. This is a loader test only; it does not enter guest code.
+
+`--latc-relocate` copies the LoongArch code into an anonymous mapping near the
+PIE, applies every stable guest-address and runtime-symbol relocation, flushes
+the instruction cache, changes the mapping from RW to RX, then unmaps it.
+Runtime symbols are still aborting placeholders, so translated TBs must not be
+entered yet.
 
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
