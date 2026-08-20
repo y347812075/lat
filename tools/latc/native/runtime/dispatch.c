@@ -38,6 +38,36 @@ const LatNativeTbV1 *lat_native_tb_find(const LatNativeImageHeaderV1 *header,
     return NULL;
 }
 
+const LatNativeTbV1 *lat_native_tb_find_unique_pc(
+    const LatNativeImageHeaderV1 *header, const unsigned char *image,
+    size_t image_size, uint64_t guest_pc)
+{
+    if (!header || !image || header->tb_table_offset > image_size ||
+        header->tb_count > (image_size - header->tb_table_offset) /
+            sizeof(LatNativeTbV1)) {
+        return NULL;
+    }
+    const LatNativeTbV1 *tbs =
+        (const void *)(image + header->tb_table_offset);
+    uint64_t left = 0;
+    uint64_t right = header->tb_count;
+    while (left < right) {
+        uint64_t middle = left + (right - left) / 2;
+        if (tbs[middle].guest_pc < guest_pc) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+    if (left >= header->tb_count || tbs[left].guest_pc != guest_pc) {
+        return NULL;
+    }
+    if (left + 1 < header->tb_count && tbs[left + 1].guest_pc == guest_pc) {
+        return NULL;
+    }
+    return &tbs[left];
+}
+
 void lat_native_x86_dispatch_configure(const LatNativeImageHeaderV1 *header,
                                        const unsigned char *image,
                                        size_t image_size,

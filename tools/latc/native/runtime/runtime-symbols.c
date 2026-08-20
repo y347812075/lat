@@ -11,13 +11,24 @@ static uint32_t configured_flags;
 #if defined(__loongarch__)
 extern void lat_native_x86_dispatch_jirl(void);
 
-__attribute__((noreturn))
 static void x86_exit_smoke_syscall(void)
 {
     register unsigned char *env __asm__("$s8");
     uint64_t syscall_number = *(uint64_t *)(env + 344);
     uint64_t first_argument = *(uint64_t *)(env + 400);
-    _exit(syscall_number == 60 ? (int)first_argument : 127);
+    if (syscall_number == 60) {
+        _exit((int)first_argument);
+    }
+    if (syscall_number == 1) {
+        uint64_t second_argument = *(uint64_t *)(env + 392);
+        uint64_t third_argument = *(uint64_t *)(env + 360);
+        ssize_t result = write((int)first_argument,
+                               (const void *)(uintptr_t)second_argument,
+                               (size_t)third_argument);
+        *(uint64_t *)(env + 344) = (uint64_t)result;
+        return;
+    }
+    _exit(127);
 }
 #endif
 

@@ -47,6 +47,18 @@ static const unsigned char latc_x86_exit_smoke_sha256[][32] = {
         0xa3, 0x6f, 0x3f, 0x4e, 0x7a, 0xb4, 0xca, 0x70,
         0xea, 0x3e, 0x72, 0x13, 0x83, 0x48, 0xea, 0x8e,
     },
+    {
+        0x89, 0x01, 0x45, 0x2a, 0x93, 0x85, 0x3b, 0x63,
+        0xe7, 0x23, 0x4f, 0x4b, 0x57, 0x8b, 0xc4, 0x3a,
+        0xd6, 0x34, 0x82, 0x03, 0x1d, 0xc9, 0x19, 0xd0,
+        0xc0, 0xcd, 0x0f, 0xd4, 0x5c, 0x2b, 0x32, 0x39,
+    },
+    {
+        0x4a, 0x52, 0x9b, 0x82, 0xc1, 0x71, 0x83, 0x74,
+        0x41, 0xad, 0xdb, 0x91, 0x54, 0xe3, 0xf3, 0xc7,
+        0x96, 0x44, 0xd2, 0xc8, 0xe0, 0x9f, 0x32, 0x99,
+        0xd0, 0x4e, 0xe7, 0x6a, 0x97, 0x8a, 0x2f, 0x90,
+    },
 };
 
 static int x86_exit_smoke_guest_allowed(const unsigned char digest[32])
@@ -56,6 +68,25 @@ static int x86_exit_smoke_guest_allowed(const unsigned char digest[32])
         if (!memcmp(digest, latc_x86_exit_smoke_sha256[i], 32)) return 1;
     }
     return 0;
+}
+
+static void *prepare_x86_initial_stack(void *stack, size_t stack_size)
+{
+    static const char argv0[] = "latc-guest";
+    uintptr_t cursor = (uintptr_t)stack + stack_size;
+    cursor -= sizeof(argv0);
+    memcpy((void *)cursor, argv0, sizeof(argv0));
+    uintptr_t argv0_address = cursor;
+    cursor &= ~(uintptr_t)15;
+    cursor -= 6 * sizeof(uint64_t);
+    uint64_t *words = (void *)cursor;
+    words[0] = 1;
+    words[1] = argv0_address;
+    words[2] = 0;
+    words[3] = 0;
+    words[4] = 0;
+    words[5] = 0;
+    return words;
 }
 
 static int inspect_image(const LatNativeImageHeaderV1 *header)
@@ -244,9 +275,9 @@ int main(int argc, char **argv)
         void *entry = (unsigned char *)code.address + tb->code_offset;
         lat_native_x86_dispatch_configure(header, latc_embedded_image_start,
                                            image_size, code.address);
-        uintptr_t stack_top = ((uintptr_t)stack + stack_size) & ~(uintptr_t)15;
+        void *stack_top = prepare_x86_initial_stack(stack, stack_size);
         lat_native_enter_x86_exit_smoke(entry, environment,
-                                        (void *)stack_top, jump_cache);
+                                        stack_top, jump_cache);
     }
     if (argc > 1 && (strcmp(argv[1], "--latc-inspect") == 0 ||
                      strcmp(argv[1], "--latc-map") == 0 ||

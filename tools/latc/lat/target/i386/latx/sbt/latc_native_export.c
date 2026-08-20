@@ -131,17 +131,20 @@ static bool direct_tb_target(const aot_tb *tb, const aot_segment *segment,
         aot_rel_kind kind, uint64_t *guest_pc)
 {
     int32_t offset = -1;
-    if (kind == JIRL_EPILOGUE_RET_ID_0 || kind == B_EPILOGUE_RET_ID_0) {
-        if (tb->last_ir1_type == IR1_TYPE_CALL ||
-            tb->last_ir1_type == IR1_TYPE_JUMP) {
-            offset = tb->target_tb_pc_offset;
-        } else if (tb->last_ir1_type == IR1_TYPE_BRANCH) {
-            offset = tb->next_tb_pc_offset;
-        }
-    } else if ((kind == JIRL_EPILOGUE_RET_ID_1 ||
-                kind == B_EPILOGUE_RET_ID_1) &&
-               tb->last_ir1_type == IR1_TYPE_BRANCH) {
+    bool exit_id_0 = kind == JIRL_EPILOGUE_RET_ID_0 ||
+                     kind == B_EPILOGUE_RET_ID_0;
+    bool exit_id_1 = kind == JIRL_EPILOGUE_RET_ID_1 ||
+                     kind == B_EPILOGUE_RET_ID_1;
+    if ((tb->last_ir1_type == IR1_TYPE_CALL ||
+         tb->last_ir1_type == IR1_TYPE_JUMP) &&
+        (exit_id_0 || exit_id_1)) {
         offset = tb->target_tb_pc_offset;
+    } else if (tb->last_ir1_type == IR1_TYPE_BRANCH) {
+        if (exit_id_0) {
+            offset = tb->next_tb_pc_offset;
+        } else if (exit_id_1) {
+            offset = tb->target_tb_pc_offset;
+        }
     }
     if (offset < 0) return false;
     *guest_pc = segment->details.seg_begin + (uint32_t)offset;
@@ -164,6 +167,7 @@ static int append_relocation(GArray *output, const aot_rel *source,
         relocation.kind = LAT_NATIVE_RELOC_TB_TARGET;
         relocation.addend = guest_pc;
         relocation.target = tb->cflags;
+        relocation.reserved = runtime_symbol(source->kind);
     } else {
         int symbol = runtime_symbol(source->kind);
         if (symbol == LAT_NATIVE_SYMBOL_INVALID) {

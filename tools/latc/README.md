@@ -79,6 +79,10 @@ TBs, adding seven each time before exiting with 42.
 RIP-relative addressing, adds seven, and exits with the result.
 `tests/x86-exit-call42.S` uses the guest stack for a direct call and return. The
 restricted entry path initialises x86 RSP before entering translated code.
+`tests/x86-write-exit42.S` writes `OK` through the restricted syscall helper,
+returns to translated code, and then exits with 42.
+`tests/x86-stack-exit42.S` reads `argc` and `argv[0]` from the Linux-compatible
+initial guest stack before exiting with 42.
 
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
