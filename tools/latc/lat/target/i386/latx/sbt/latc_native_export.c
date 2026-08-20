@@ -127,16 +127,43 @@ static int copy_guest(const char *path, GByteArray **guest,
     return 0;
 }
 
+static bool direct_tb_target(const aot_tb *tb, const aot_segment *segment,
+        aot_rel_kind kind, uint64_t *guest_pc)
+{
+    int32_t offset = -1;
+    if (kind == JIRL_EPILOGUE_RET_ID_0 || kind == B_EPILOGUE_RET_ID_0) {
+        if (tb->last_ir1_type == IR1_TYPE_CALL ||
+            tb->last_ir1_type == IR1_TYPE_JUMP) {
+            offset = tb->target_tb_pc_offset;
+        } else if (tb->last_ir1_type == IR1_TYPE_BRANCH) {
+            offset = tb->next_tb_pc_offset;
+        }
+    } else if ((kind == JIRL_EPILOGUE_RET_ID_1 ||
+                kind == B_EPILOGUE_RET_ID_1) &&
+               tb->last_ir1_type == IR1_TYPE_BRANCH) {
+        offset = tb->target_tb_pc_offset;
+    }
+    if (offset < 0) return false;
+    *guest_pc = segment->details.seg_begin + (uint32_t)offset;
+    return true;
+}
+
 static int append_relocation(GArray *output, const aot_rel *source,
-        uint64_t tb_code_offset, uint64_t segment_base)
+        const aot_tb *tb, uint64_t tb_code_offset,
+        const aot_segment *segment)
 {
     LatNativeRelocationV1 relocation = {
         .code_offset = tb_code_offset + source->tc_offset,
         .slots = source->rel_slots_num,
     };
+    uint64_t guest_pc;
     if (source->kind == LOAD_CALL_TARGET) {
         relocation.kind = LAT_NATIVE_RELOC_GUEST_ADDRESS;
-        relocation.addend = segment_base + source->extra_addend;
+        relocation.addend = segment->details.seg_begin + source->extra_addend;
+    } else if (direct_tb_target(tb, segment, source->kind, &guest_pc)) {
+        relocation.kind = LAT_NATIVE_RELOC_TB_TARGET;
+        relocation.addend = guest_pc;
+        relocation.target = tb->cflags;
     } else {
         int symbol = runtime_symbol(source->kind);
         if (symbol == LAT_NATIVE_SYMBOL_INVALID) {
@@ -269,7 +296,7 @@ int latc_native_export(const char *path, const char *guest_path,
         for (int rel = tbs[i].rel_start_index;
              rel <= tbs[i].rel_end_index; rel++) {
             if (append_relocation(native_relocations, &source_relocations[rel],
-                                  code_offset, segment->details.seg_begin)) {
+                                  &tbs[i], code_offset, segment)) {
                 goto out;
             }
         }

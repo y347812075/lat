@@ -1,5 +1,12 @@
 #include "dispatch.h"
 
+#include <stdlib.h>
+
+static const LatNativeImageHeaderV1 *dispatch_header;
+static const unsigned char *dispatch_image;
+static size_t dispatch_image_size;
+static const unsigned char *dispatch_code;
+
 const LatNativeTbV1 *lat_native_tb_find(const LatNativeImageHeaderV1 *header,
                                         const unsigned char *image,
                                         size_t image_size,
@@ -29,4 +36,23 @@ const LatNativeTbV1 *lat_native_tb_find(const LatNativeImageHeaderV1 *header,
         return &tbs[left];
     }
     return NULL;
+}
+
+void lat_native_x86_dispatch_configure(const LatNativeImageHeaderV1 *header,
+                                       const unsigned char *image,
+                                       size_t image_size,
+                                       const void *code_address)
+{
+    dispatch_header = header;
+    dispatch_image = image;
+    dispatch_image_size = image_size;
+    dispatch_code = code_address;
+}
+
+void *lat_native_x86_dispatch_lookup(uint64_t guest_pc)
+{
+    const LatNativeTbV1 *tb = lat_native_tb_find(
+        dispatch_header, dispatch_image, dispatch_image_size, guest_pc, 0);
+    if (!tb || !dispatch_code) abort();
+    return (void *)(dispatch_code + tb->code_offset);
 }

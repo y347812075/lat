@@ -9,6 +9,8 @@ static const unsigned char placeholder_pftable[256];
 static uint32_t configured_flags;
 
 #if defined(__loongarch__)
+extern void lat_native_x86_dispatch_jirl(void);
+
 __attribute__((noreturn))
 static void x86_exit_smoke_syscall(void)
 {
@@ -31,6 +33,10 @@ uintptr_t lat_runtime_symbol_address(uint32_t symbol)
         return (uintptr_t)placeholder_pftable;
     }
 #if defined(__loongarch__)
+    if (symbol == LAT_NATIVE_SYMBOL_EPILOGUE_RET_0 &&
+        (configured_flags & LAT_NATIVE_IMAGE_X86_EXIT_SMOKE)) {
+        return (uintptr_t)lat_native_x86_dispatch_jirl;
+    }
     if (symbol == LAT_NATIVE_SYMBOL_RAISE_SYSCALL &&
         (configured_flags & LAT_NATIVE_IMAGE_X86_EXIT_SMOKE)) {
         return (uintptr_t)x86_exit_smoke_syscall;
