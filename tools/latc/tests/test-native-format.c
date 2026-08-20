@@ -14,16 +14,17 @@ _Static_assert(sizeof(LatNativeImageHeaderV1) == 208,
                "native image header size changed");
 _Static_assert(sizeof(LatNativeTbV1) == 24,
                "native TB record size changed");
-_Static_assert(sizeof(LatNativeRelocationV1) == 24,
+_Static_assert(sizeof(LatNativeRelocationV1) == 32,
                "native relocation record size changed");
 
-int main(void)
+int main(int argc, char **argv)
 {
     unsigned char image[512] = {0};
     LatNativeImageHeaderV1 *header = (void *)image;
     LatNativeTbV1 *tb;
     LatNativeRelocationV1 *relocation;
     char error[128] = {0};
+    size_t image_size;
 
     memcpy(header->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
     header->version = LAT_NATIVE_IMAGE_VERSION;
@@ -44,17 +45,39 @@ int main(void)
     relocation = (void *)(image + header->relocation_offset);
     relocation->code_offset = 8;
     relocation->kind = LAT_NATIVE_RELOC_RUNTIME_SYMBOL;
+    relocation->target = LAT_NATIVE_SYMBOL_RAISE_SYSCALL;
+    relocation->slots = 3;
+    image_size = header->relocation_offset + sizeof(*relocation);
 
-    if (lat_native_image_validate(image, sizeof(image), error,
+    if (lat_native_image_validate(image, image_size, error,
                                   sizeof(error)) != 0) {
         fprintf(stderr, "valid image rejected: %s\n", error);
         return 1;
     }
+    if (argc == 2) {
+        FILE *output = fopen(argv[1], "wb");
+        if (!output || fwrite(image, image_size, 1, output) != 1 ||
+            fclose(output)) {
+            fprintf(stderr, "cannot write native image fixture\n");
+            return 1;
+        }
+    } else if (argc != 1) {
+        fprintf(stderr, "usage: %s [OUTPUT]\n", argv[0]);
+        return 2;
+    }
     tb->code_size = 33;
-    if (lat_native_image_validate(image, sizeof(image), error,
+    if (lat_native_image_validate(image, image_size, error,
                                   sizeof(error)) == 0 ||
         !strstr(error, "code range")) {
         fprintf(stderr, "bad TB range accepted: %s\n", error);
+        return 1;
+    }
+    tb->code_size = 16;
+    relocation->code_offset = header->code_size - 4;
+    if (lat_native_image_validate(image, image_size, error,
+                                  sizeof(error)) == 0 ||
+        !strstr(error, "relocation")) {
+        fprintf(stderr, "bad relocation range accepted: %s\n", error);
         return 1;
     }
     puts("test-native-format: PASS");

@@ -1,6 +1,7 @@
 #include "cfg_program.h"
 #include "bundle.h"
 #include "profile.h"
+#include "native-image.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -13,6 +14,35 @@ static void usage(const char *name)
             "  %s compile X86_ELF -o OUTPUT --runner RUNNER [--profile FILE]"
             " [--profile-ignore-outside-exec] [--aot FILE]\n"
             "  %s inspect [--json] BUNDLE\n", name, name, name);
+    fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
+}
+
+static int inspect_native(const char *path, int json)
+{
+    LatNativeImageHeaderV1 header;
+    char error[256] = {0};
+    if (lat_native_image_inspect_file(path, &header, error, sizeof(error))) {
+        fprintf(stderr, "latc: %s\n", error);
+        return 1;
+    }
+    if (json) {
+        printf("{\"image\":\"%s\",\"execution_model\":\"lat-native-image\""
+               ",\"guest_entry\":%" PRIu64 ",\"guest_size\":%" PRIu64
+               ",\"code_size\":%" PRIu64 ",\"tbs\":%" PRIu64
+               ",\"relocations\":%" PRIu64 ",\"lat_build_id\":\"%s\"}\n",
+               path, header.guest_entry, header.guest_image_size,
+               header.code_size, header.tb_count, header.relocation_count,
+               header.lat_build_id);
+    } else {
+        printf("image=%s\nexecution_model=lat-native-image\n"
+               "guest_entry=0x%" PRIx64 "\nguest_size=%" PRIu64
+               "\ncode_size=%" PRIu64 "\ntbs=%" PRIu64
+               "\nrelocations=%" PRIu64 "\nlat_build_id=%s\n",
+               path, header.guest_entry, header.guest_image_size,
+               header.code_size, header.tb_count, header.relocation_count,
+               header.lat_build_id);
+    }
+    return 0;
 }
 
 static int compile_bundle(const char *input, const char *output,
@@ -151,6 +181,17 @@ int main(int argc, char **argv)
         }
         if (!path) { usage(argv[0]); return 2; }
         return inspect_bundle(path, json);
+    }
+    if (strcmp(argv[1], "inspect-native") == 0) {
+        int json = 0;
+        const char *path = NULL;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--json") == 0) json = 1;
+            else if (!path) path = argv[i];
+            else { usage(argv[0]); return 2; }
+        }
+        if (!path) { usage(argv[0]); return 2; }
+        return inspect_native(path, json);
     }
     if (strcmp(argv[1], "analyze") != 0) { usage(argv[0]); return 2; }
     int json = 0;

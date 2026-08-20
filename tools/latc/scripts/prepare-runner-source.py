@@ -2,6 +2,7 @@
 """Install latc runner adapters into a matching full LAT source tree."""
 
 import argparse
+import json
 import shutil
 from pathlib import Path
 
@@ -35,13 +36,28 @@ def main() -> None:
         "linux-user/main.c",
         "target/i386/latx/sbt/aot_recover_tb.c",
         "target/i386/latx/sbt/aot.c",
+        "target/i386/latx/sbt/latc_native_export.c",
+        "target/i386/latx/sbt/latc_native_export.h",
     ):
         destination = source / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(local / relative, destination)
 
+    shutil.copy2(Path(__file__).resolve().parents[1] /
+                 "native/include/lat-native-image.h",
+                 source / "include/lat-native-image.h")
+    manifest = json.loads((Path(__file__).resolve().parents[1] /
+                           "lat-import.json").read_text())
+    build_id = f"lat-{manifest['source_commit']}-x64-v1"
+    (source / "include/latc-build-id.h").write_text(
+        "#ifndef LATC_BUILD_ID_H\n#define LATC_BUILD_ID_H\n"
+        f"#define LATC_BUILD_ID \"{build_id}\"\n#endif\n"
+    )
+
     replace_once(source / "linux-user/meson.build",
                  "  'main.c',\n", "  'main.c',\n  'latc-bundle-loader.c',\n")
+    replace_once(source / "target/i386/latx/sbt/meson.build",
+                 "  'aot.c',\n", "  'aot.c',\n  'latc_native_export.c',\n")
     # The minimal static linux-user runner uses neither OpenSSL nor zlib.
     replace_once(source / "configure",
                  '  QEMU_LDFLAGS="-lcrypto -lz $QEMU_LDFLAGS"\n', "")

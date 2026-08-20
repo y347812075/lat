@@ -20,5 +20,14 @@ pointer-sized `TranslationBlock` and helper addresses are intentionally not
 part of this format.
 
 `format/native-image.c` validates every section range, TB code extent,
-sorted guest-PC index, and relocation kind before a native image is linked or
-loaded.
+the `(guest_pc, flags)` index order, and relocation kind before a native image
+is linked or loaded. Multiple code variants may share a guest PC when their
+LAT execution flags differ.
+TU-internal TB entries may report a zero independent code size because they
+share the containing Translation Unit; their code offset must still point
+inside the image.
+
+The exporter removes LAT's process-local TU search data because it can contain
+host pointers. Images currently carry `LAT_NATIVE_IMAGE_NO_PRECISE_SIGNAL_MAP`;
+a stable host-PC to x86-PC map must replace that data before precise
+instruction-level signal recovery is supported.
