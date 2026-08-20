@@ -85,6 +85,10 @@ returns to translated code, and then exits with 42.
 initial guest stack before exiting with 42.
 `tests/x86-brk-exit42.S` and `tests/x86-mmap-exit42.S` allocate writable guest
 memory through returning syscalls, store 35, add seven, and exit with 42.
+`tests/x86-file-exit42.S` opens `/dev/zero`, reads and checks one byte, closes
+the descriptor, and exits with 42.
+`tests/x86-open-error42.S` checks that a missing file returns x86 Linux
+`-ENOENT`, not the host libc's raw `-1`.
 
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
