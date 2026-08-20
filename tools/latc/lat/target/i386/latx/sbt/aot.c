@@ -26,6 +26,7 @@
 #include "aot_merge.h"
 #include "aot_recover_tb.h"
 #include "aot_smc.h"
+#include "latc_native_export.h"
 #include "aot_page.h"
 #include "../translator/tr-vpaes.h"
 #include<sys/syscall.h>
@@ -615,6 +616,61 @@ static void fill_rel_table(aot_header *p_header)
     table_end_addr = (uintptr_t)(p_aot_rel + total_rel_entry_num);
 }
 
+static void latc_write_relocation_stats(const aot_header *p_header,
+        const aot_tb *p_aot_tbs, uintptr_t tb_table_end,
+        unsigned long total_code_cache_size)
+{
+    const char *path = getenv("LATC_AOT_RELOC_STATS");
+    if (!path || !*path) {
+        return;
+    }
+
+    int max_kind = -1;
+    for (uint32_t i = 0; i < p_header->rel_entry_num; i++) {
+        if ((int)rel_table[i].kind > max_kind) {
+            max_kind = rel_table[i].kind;
+        }
+    }
+    uint64_t *counts = max_kind >= 0 ?
+        calloc((size_t)max_kind + 1, sizeof(*counts)) : NULL;
+    if (max_kind >= 0 && !counts) {
+        fprintf(stderr, "latc: cannot allocate AOT relocation statistics\n");
+        return;
+    }
+    for (uint32_t i = 0; i < p_header->rel_entry_num; i++) {
+        counts[rel_table[i].kind]++;
+    }
+
+    FILE *fp = fopen(path, "w");
+    if (!fp) {
+        fprintf(stderr, "latc: cannot write AOT relocation statistics %s: %s\n",
+                path, strerror(errno));
+        free(counts);
+        return;
+    }
+    uint64_t tb_count = ((uintptr_t)p_aot_tbs <= tb_table_end) ?
+        (tb_table_end - (uintptr_t)p_aot_tbs) / sizeof(*p_aot_tbs) : 0;
+    fprintf(fp, "{\"tb_count\":%llu,\"code_size\":%lu,"
+            "\"relocation_count\":%u,\"kinds\":{",
+            (unsigned long long)tb_count, total_code_cache_size,
+            p_header->rel_entry_num);
+    bool first = true;
+    for (int kind = 0; kind <= max_kind; kind++) {
+        if (!counts[kind]) {
+            continue;
+        }
+        fprintf(fp, "%s\"%d\":%llu", first ? "" : ",", kind,
+                (unsigned long long)counts[kind]);
+        first = false;
+    }
+    fprintf(fp, "}}\n");
+    if (fclose(fp)) {
+        fprintf(stderr, "latc: cannot close AOT relocation statistics %s\n",
+                path);
+    }
+    free(counts);
+}
+
 /* we now write tranlsation code cache to memory. First we use
  * another buffer to store code cache, and fixup all @tb_cache_offset of
  * Tbs. Then we write aot_buffer and insn_buffer into aot file. */
@@ -825,6 +881,18 @@ int do_generate_aot(int first_seg_in_lib, int end_seg_in_lib)
     uint32_t *p_insn = (uint32_t *)ROUND_UP(table_end_addr, 8);
     uint32_t *insn_buffer = fill_ins_buff((void *)p_insn - (void *)p_header,
             p_aot_tbs, tb_table_end, total_code_cache_size);
+
+    latc_write_relocation_stats(p_header, p_aot_tbs, tb_table_end,
+            total_code_cache_size);
+    const char *native_output = getenv("LATC_NATIVE_IMAGE_OUT");
+    if (native_output && *native_output &&
+        latc_native_export(native_output, curr_lib_name, p_header, p_segments,
+                p_aot_tbs, tb_table_end, insn_buffer, total_code_cache_size,
+                (uintptr_t)p_insn - (uintptr_t)p_header)) {
+        free(insn_buffer);
+        free(p_header);
+        return false;
+    }
 
     /* fill ir1 buffer */
     table_end_addr = (uintptr_t)p_insn + total_code_cache_size;

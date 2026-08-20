@@ -25,7 +25,8 @@ all: $(BUILD)/latc $(BUILD)/liblatc_cfg.a
 $(BUILD)/liblatc_cfg.a: $(CFG_OBJ)
 	$(AR) rcs $@ $^
 
-$(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/profile.o $(FORMAT_OBJ) $(BUILD)/liblatc_cfg.a
+$(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/profile.o \
+	$(FORMAT_OBJ) $(BUILD)/native/format/native-image.o $(BUILD)/liblatc_cfg.a
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD)/%.o: %.c
@@ -55,7 +56,9 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
-	$(BUILD)/tests/test-native-format
+	$(BUILD)/tests/test-native-format $(BUILD)/tests/native-image
+	$(BUILD)/latc inspect-native --json $(BUILD)/tests/native-image | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["execution_model"] == "lat-native-image"; assert d["tbs"] == 1; assert d["relocations"] == 1'
 	$(MAKE) check-import
 
 $(BUILD)/tests/liblat-good.so: tests/fake-liblat.c

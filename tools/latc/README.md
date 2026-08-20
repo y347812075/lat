@@ -17,6 +17,17 @@ image. It rejects a library whose ABI version or LAT build ID differs from the
 image. `LATC_LIBLAT` exists only as a test/development override; installed
 programs otherwise resolve the system `liblat.so.1`.
 
+Generate the current stable native image on a LoongArch build host with:
+
+```sh
+tools/latc/scripts/compile-native-image.sh build/latc \
+  /path/to/latx-x86_64 /path/to/x86-program program.latnative profile.txt
+build/latc inspect-native --json program.latnative
+```
+
+This image is an input to the forthcoming ELF linker. It is not directly
+executable yet.
+
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
 AOT image use LAT's JIT translator unless strict verification is enabled.

@@ -19,6 +19,14 @@
     {
       "path": "lat/target/i386/latx/ir1/latc-verify.c",
       "reason": "decode CFG TBs with the copied LAT IR1 decoder"
+    },
+    {
+      "path": "lat/target/i386/latx/sbt/latc_native_export.c",
+      "reason": "export LAT AOT code into the stable standalone image format"
+    },
+    {
+      "path": "lat/target/i386/latx/sbt/latc_native_export.h",
+      "reason": "native image exporter interface"
     }
   ],
   "modified": [
