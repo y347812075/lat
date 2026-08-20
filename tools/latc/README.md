@@ -73,6 +73,10 @@ The marker and runtime both require the exact fixture SHA-256, so the flag
 cannot be applied to gzip or another x86 ELF.
 `tests/x86-exit-add42.S` uses real x86 arithmetic to compute 42 before the
 same restricted exit syscall.
+`tests/x86-exit-loop42.S` executes a six-iteration x86 loop across four CFG
+TBs, adding seven each time before exiting with 42.
+`tests/x86-exit-memory42.S` loads 35 from the static guest data segment through
+RIP-relative addressing, adds seven, and exits with the result.
 
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
