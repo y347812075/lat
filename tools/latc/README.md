@@ -35,6 +35,10 @@ tools/latc/scripts/link-native-shell.sh program.latnative program.la64
 program.la64 --latc-inspect
 ```
 
+Set `LATC_LA64_LDFLAGS=-static-pie` when the LoongArch toolchain provides
+static libc objects and the output must have no ELF interpreter or shared
+library dependency.
+
 The shell embeds the image in read-only `.latc.image` and validates it on the
 target host. Normal execution currently exits with status 126 because guest
 state setup, real runtime helpers, and translated-code entry are not linked yet.
@@ -93,6 +97,12 @@ the descriptor, and exits with 42.
 function calls. A minimal assembly `_start` exits with the C return value.
 `tests/x86-indirect-call42.S` loads a function pointer from the guest data
 segment and calls it indirectly before exiting with 42.
+`tests/x86-static-hello.S` is a static x86-64 ELF with no interpreter and no
+host libraries. Its `_start` writes `Hello, LATC!` with the x86 Linux `write`
+syscall and exits with the x86 Linux `exit` syscall. This is the first direct
+static-translation test. A normal glibc-linked `puts` program is not supported
+yet because indirect calls selected by glibc's CPU dispatch need correct x86
+call/return stack handling in the native runtime.
 
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the

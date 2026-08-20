@@ -14,6 +14,7 @@ esac
 root=$(cd "$(dirname "$0")/.." && pwd)
 cc=${LATC_LA64_CC:-loongarch64-unknown-linux-gnu-gcc}
 objcopy=${LATC_LA64_OBJCOPY:-loongarch64-unknown-linux-gnu-objcopy}
+ldflags=${LATC_LA64_LDFLAGS:--pie}
 work=$(mktemp -d "${TMPDIR:-/tmp}/latc-link.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
@@ -28,7 +29,7 @@ cp "$image" "$work/image.bin"
         image.bin image.o
 )
 
-"$cc" -O2 -g -fPIE -pie -Wall -Wextra -Werror -std=c11 \
+"$cc" -O2 -g -fPIE $ldflags -Wall -Wextra -Werror -std=c11 \
     -I"$root/native/include" -I"$root/native/format" \
     -I"$root/native/runtime" \
     "$root/native/runtime/main.c" "$root/native/runtime/guest-loader.c" \
