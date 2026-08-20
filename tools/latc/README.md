@@ -60,6 +60,11 @@ LAT images cannot use this path.
 returns 42. This verifies the shared state layout and calling convention before
 adding LAT's context-switch assembly.
 
+`tests/make-native-dispatch-smoke.c` contains two TBs. The first changes
+`gpr[0]` from 5 to 12 and sets `rip` to the second TB; the second doubles it to
+24 and clears `rip`. The runtime performs two `(rip, flags)` lookups and stops
+when `rip` becomes zero.
+
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
 AOT image use LAT's JIT translator unless strict verification is enabled.

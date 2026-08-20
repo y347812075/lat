@@ -121,14 +121,53 @@ int main(int argc, char **argv)
         return result == 42 && state.gpr[0] == 42 && state.rip == 0x1234 ?
             0 : 116;
     }
+    if (argc == 2 && strcmp(argv[1], "--latc-run-dispatch-smoke") == 0) {
+        if (!(header->flags & LAT_NATIVE_IMAGE_C_ABI_DISPATCH_SMOKE)) {
+            fprintf(stderr, "latc: image is not a dispatch smoke test\n");
+            return 115;
+        }
+        LatNativeCode code = {0};
+        if (lat_native_code_load(header, latc_embedded_image_start, image_size,
+                                 &code, error, sizeof(error))) {
+            fprintf(stderr, "latc: cannot load dispatch smoke code: %s\n",
+                    error);
+            return 114;
+        }
+        LatX86StateV1 state = {0};
+        state.gpr[0] = 5;
+        state.rip = header->guest_entry;
+        unsigned steps = 0;
+        int tb_result = 0;
+        while (state.rip && steps < 8) {
+            const LatNativeTbV1 *tb = lat_native_tb_find(
+                header, latc_embedded_image_start, image_size, state.rip, 0);
+            if (!tb) {
+                tb_result = -1;
+                break;
+            }
+            int (*entry)(LatX86StateV1 *) =
+                (void *)((unsigned char *)code.address + tb->code_offset);
+            tb_result = entry(&state);
+            steps++;
+            if (tb_result) break;
+        }
+        lat_native_code_unload(&code);
+        printf("dispatch_steps=%u\ngpr0=%" PRIu64 "\nrip=0x%" PRIx64
+               "\ntb_result=%d\n", steps, state.gpr[0], state.rip,
+               tb_result);
+        return steps == 2 && state.gpr[0] == 24 && state.rip == 0 &&
+               tb_result == 0 ? 0 : 113;
+    }
     if (argc > 1 && (strcmp(argv[1], "--latc-inspect") == 0 ||
                      strcmp(argv[1], "--latc-map") == 0 ||
                      strcmp(argv[1], "--latc-relocate") == 0 ||
                      strcmp(argv[1], "--latc-run-smoke") == 0 ||
-                     strcmp(argv[1], "--latc-run-state-smoke") == 0)) {
+                     strcmp(argv[1], "--latc-run-state-smoke") == 0 ||
+                     strcmp(argv[1], "--latc-run-dispatch-smoke") == 0)) {
         fprintf(stderr,
                 "usage: %s [--latc-inspect|--latc-map|--latc-relocate|"
-                "--latc-run-smoke|--latc-run-state-smoke]\n",
+                "--latc-run-smoke|--latc-run-state-smoke|"
+                "--latc-run-dispatch-smoke]\n",
                 argv[0]);
         return 2;
     }
