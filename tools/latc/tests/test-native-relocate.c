@@ -14,12 +14,12 @@ int main(void)
     char error[128] = {0};
 
     header->code_offset = sizeof(*header);
-    header->code_size = 36;
+    header->code_size = 40;
     header->tb_table_offset = header->code_offset + header->code_size;
     header->tb_count = 1;
     header->relocation_offset = header->tb_table_offset +
                                 sizeof(LatNativeTbV1);
-    header->relocation_count = 4;
+    header->relocation_count = 5;
     instructions = (void *)(image + header->code_offset);
     instructions[0] = 0x1400000c;
     instructions[1] = 0x0380018c;
@@ -30,6 +30,7 @@ int main(void)
     instructions[6] = 0x4c000180;
     instructions[7] = 0x1e00000c;
     instructions[8] = 0x4c000180;
+    instructions[9] = 0x50000000;
     LatNativeTbV1 *tb = (void *)(image + header->tb_table_offset);
     tb->guest_pc = 0x402000;
     tb->code_offset = 0;
@@ -52,9 +53,13 @@ int main(void)
     relocations[3].addend = 0x403000;
     relocations[3].slots = 2;
     relocations[3].reserved = LAT_NATIVE_SYMBOL_EPILOGUE_RET_ID_0;
+    relocations[4].code_offset = 36;
+    relocations[4].kind = LAT_NATIVE_RELOC_TB_TARGET;
+    relocations[4].addend = 0x402000;
+    relocations[4].slots = 1;
 
     size_t image_size = header->relocation_offset +
-                        4 * sizeof(*relocations);
+                        5 * sizeof(*relocations);
     if (lat_native_code_load(header, image, image_size, &code,
                              error, sizeof(error))) {
         fprintf(stderr, "native relocation failed: %s\n", error);
@@ -62,7 +67,8 @@ int main(void)
     }
     const uint32_t *loaded = code.address;
     if ((loaded[5] == instructions[5] && loaded[6] == instructions[6]) ||
-        (loaded[7] == instructions[7] && loaded[8] == instructions[8])) {
+        (loaded[7] == instructions[7] && loaded[8] == instructions[8]) ||
+        loaded[9] == instructions[9]) {
         fprintf(stderr, "native TB target was not relocated or preserved\n");
         lat_native_code_unload(&code);
         return 1;

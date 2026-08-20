@@ -135,19 +135,27 @@ static bool direct_tb_target(const aot_tb *tb, const aot_segment *segment,
                      kind == B_EPILOGUE_RET_ID_0;
     bool exit_id_1 = kind == JIRL_EPILOGUE_RET_ID_1 ||
                      kind == B_EPILOGUE_RET_ID_1;
-    if ((tb->last_ir1_type == IR1_TYPE_CALL ||
-         tb->last_ir1_type == IR1_TYPE_JUMP) &&
-        (exit_id_0 || exit_id_1)) {
-        offset = tb->target_tb_pc_offset;
-    } else if (tb->last_ir1_type == IR1_TYPE_BRANCH) {
-        if (exit_id_0) {
-            offset = tb->next_tb_pc_offset;
-        } else if (exit_id_1) {
-            offset = tb->target_tb_pc_offset;
-        }
+    if (exit_id_0) {
+        offset = tb->next_tb_pc_offset >= 0 ?
+            tb->next_tb_pc_offset : tb->target_tb_pc_offset;
+    } else if (exit_id_1) {
+        offset = tb->target_tb_pc_offset >= 0 ?
+            tb->target_tb_pc_offset : tb->next_tb_pc_offset;
     }
-    if (offset < 0) return false;
-    *guest_pc = segment->details.seg_begin + (uint32_t)offset;
+    if (offset >= 0) {
+        *guest_pc = segment->details.seg_begin + (uint32_t)offset;
+        return true;
+    }
+    int exit_id = exit_id_1 ? 1 : 0;
+    uint64_t current_pc = segment->details.seg_begin + tb->offset_in_segment;
+    uint64_t target_pc = current_pc + tb->lazypc[exit_id];
+    if ((!exit_id_0 && !exit_id_1) ||
+        (!tb->lazypc[exit_id] && tb->tu_jmp[exit_id] == UINT16_MAX) ||
+        target_pc < segment->details.seg_begin ||
+        target_pc >= segment->details.seg_end) {
+        return false;
+    }
+    *guest_pc = target_pc;
     return true;
 }
 
@@ -181,6 +189,41 @@ static int append_relocation(GArray *output, const aot_rel *source,
     }
     g_array_append_val(output, relocation);
     return 0;
+}
+
+static bool has_relocation_at(const GArray *relocations, uint64_t code_offset)
+{
+    for (guint i = 0; i < relocations->len; i++) {
+        const LatNativeRelocationV1 *relocation = &g_array_index(
+            relocations, LatNativeRelocationV1, i);
+        if (relocation->code_offset == code_offset) return true;
+    }
+    return false;
+}
+
+static void append_tu_relocations(GArray *output, const aot_tb *tb,
+        uint64_t tb_code_offset, uint64_t guest_pc)
+{
+#ifdef CONFIG_LATX_TU
+    for (int edge = 0; edge < 2; edge++) {
+        if (tb->tu_jmp[edge] == UINT16_MAX) continue;
+        uint64_t code_offset = tb_code_offset + tb->tu_jmp[edge];
+        if (has_relocation_at(output, code_offset)) continue;
+        LatNativeRelocationV1 relocation = {
+            .code_offset = code_offset,
+            .addend = guest_pc + tb->lazypc[edge],
+            .kind = LAT_NATIVE_RELOC_TB_TARGET,
+            .target = tb->cflags,
+            .slots = 1,
+        };
+        g_array_append_val(output, relocation);
+    }
+#else
+    (void)output;
+    (void)tb;
+    (void)tb_code_offset;
+    (void)guest_pc;
+#endif
 }
 
 static int strip_process_local_search_data(uint8_t *code, uint64_t code_size,
@@ -289,6 +332,8 @@ int latc_native_export(const char *path, const char *guest_path,
         g_array_append_val(native_tbs, native_tb);
 
         if (tbs[i].rel_start_index == -1) {
+            append_tu_relocations(native_relocations, &tbs[i], code_offset,
+                                  pc);
             continue;
         }
         if (tbs[i].rel_start_index < 0 ||
@@ -304,6 +349,7 @@ int latc_native_export(const char *path, const char *guest_path,
                 goto out;
             }
         }
+        append_tu_relocations(native_relocations, &tbs[i], code_offset, pc);
     }
 
     g_array_sort(native_tbs, compare_native_tb);
