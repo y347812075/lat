@@ -43,7 +43,7 @@ $(BUILD)/tests/test-cfg: tests/test-cfg.c $(BUILD)/liblatc_cfg.a
 
 test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-fallback-loader $(BUILD)/tests/test-native-format \
-	$(BUILD)/tests/test-native-relocate
+	$(BUILD)/tests/test-native-relocate $(BUILD)/tests/test-native-dispatch
 	$(BUILD)/tests/test-cfg $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc analyze $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc compile $(BUILD)/tests/cfg-fixture -o $(BUILD)/tests/cfg-bundle --runner $(BUILD)/tests/cfg-fixture
@@ -59,6 +59,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
 	$(BUILD)/tests/test-native-format $(BUILD)/tests/native-image
 	$(BUILD)/tests/test-native-relocate
+	$(BUILD)/tests/test-native-dispatch
 	$(BUILD)/latc inspect-native --json $(BUILD)/tests/native-image | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["execution_model"] == "lat-native-image"; assert d["tbs"] == 1; assert d["relocations"] == 1'
 	$(MAKE) check-import
@@ -91,12 +92,22 @@ $(BUILD)/tests/test-native-relocate: tests/test-native-relocate.c \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 
+$(BUILD)/tests/test-native-dispatch: tests/test-native-dispatch.c \
+		native/runtime/dispatch.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+
+$(BUILD)/tests/make-native-smoke: tests/make-native-smoke.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
+
 test-native: all
 	@test -n "$(RUNNER)" -a -n "$(X86_GUEST)" || \
 	  { echo "usage: make test-native RUNNER=/path/to/runner X86_GUEST=/path/to/static-x86"; exit 2; }
 	sh tests/test-bundle-runner.sh $(BUILD)/latc $(RUNNER) $(X86_GUEST) $(BUILD)/native-test
 
-test-native-shell: all $(BUILD)/tests/test-native-format
+test-native-shell: all $(BUILD)/tests/test-native-format \
+		$(BUILD)/tests/make-native-smoke
 	$(BUILD)/tests/test-native-format $(BUILD)/tests/native-image
 	scripts/link-native-shell.sh $(BUILD)/tests/native-image \
 	  $(BUILD)/tests/native-shell.la64
@@ -106,6 +117,11 @@ test-native-shell: all $(BUILD)/tests/test-native-format
 	  grep -q '.latc.image'
 	! loongarch64-unknown-linux-gnu-readelf -d $(BUILD)/tests/native-shell.la64 | \
 	  grep -q 'liblat.so.1'
+	$(BUILD)/tests/make-native-smoke $(BUILD)/tests/native-smoke-image
+	scripts/link-native-shell.sh $(BUILD)/tests/native-smoke-image \
+	  $(BUILD)/tests/native-smoke.la64
+	loongarch64-unknown-linux-gnu-readelf -h $(BUILD)/tests/native-smoke.la64 | \
+	  grep -q 'DYN (Position-Independent Executable file)'
 
 test-aot-native: all
 	@test -n "$(RUNNER)" -a -n "$(X86_GUEST)" || \

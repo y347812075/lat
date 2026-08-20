@@ -49,6 +49,12 @@ the instruction cache, changes the mapping from RW to RX, then unmaps it.
 Runtime symbols are still aborting placeholders, so translated TBs must not be
 entered yet.
 
+The first execution test is intentionally independent of x86 and LAT context
+switching. `tests/make-native-smoke.c` creates one TB containing two hand-coded
+LoongArch instructions which return `42` under the normal C ABI. The PIE runs
+it only when the image carries `LAT_NATIVE_IMAGE_C_ABI_SMOKE`; normal exported
+LAT images cannot use this path.
+
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
 AOT image use LAT's JIT translator unless strict verification is enabled.

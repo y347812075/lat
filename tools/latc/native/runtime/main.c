@@ -1,6 +1,7 @@
 #include "native-image.h"
 #include "guest-loader.h"
 #include "relocate.h"
+#include "dispatch.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -67,11 +68,38 @@ int main(int argc, char **argv)
         lat_native_code_unload(&code);
         return 0;
     }
+    if (argc == 2 && strcmp(argv[1], "--latc-run-smoke") == 0) {
+        if (!(header->flags & LAT_NATIVE_IMAGE_C_ABI_SMOKE)) {
+            fprintf(stderr, "latc: image is not a C ABI smoke test\n");
+            return 122;
+        }
+        const LatNativeTbV1 *tb = lat_native_tb_find(
+            header, latc_embedded_image_start, image_size,
+            header->guest_entry, 0);
+        if (!tb) {
+            fprintf(stderr, "latc: smoke entry TB is missing\n");
+            return 121;
+        }
+        LatNativeCode code = {0};
+        if (lat_native_code_load(header, latc_embedded_image_start, image_size,
+                                 &code, error, sizeof(error))) {
+            fprintf(stderr, "latc: cannot load smoke code: %s\n", error);
+            return 120;
+        }
+        int (*entry)(void) = (void *)((unsigned char *)code.address +
+                                      tb->code_offset);
+        int result = entry();
+        lat_native_code_unload(&code);
+        printf("smoke_result=%d\n", result);
+        return result == 42 ? 0 : 119;
+    }
     if (argc > 1 && (strcmp(argv[1], "--latc-inspect") == 0 ||
                      strcmp(argv[1], "--latc-map") == 0 ||
-                     strcmp(argv[1], "--latc-relocate") == 0)) {
+                     strcmp(argv[1], "--latc-relocate") == 0 ||
+                     strcmp(argv[1], "--latc-run-smoke") == 0)) {
         fprintf(stderr,
-                "usage: %s [--latc-inspect|--latc-map|--latc-relocate]\n",
+                "usage: %s [--latc-inspect|--latc-map|--latc-relocate|"
+                "--latc-run-smoke]\n",
                 argv[0]);
         return 2;
     }
