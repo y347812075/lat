@@ -53,23 +53,27 @@ static int inspect_bundle(const char *path, int json)
         fprintf(stderr, "latc: %s\n", error); return 1;
     }
     if (json) {
-        printf("{\"bundle\":\"%s\",\"runner_size\":%" PRIu64
+        printf("{\"bundle\":\"%s\",\"execution_model\":\"%s\""
+               ",\"runner_size\":%" PRIu64
                ",\"guest_size\":%" PRIu64 ",\"cfg_size\":%" PRIu64
                ",\"functions\":%" PRIu64 ",\"tbs\":%" PRIu64
                ",\"edges\":%" PRIu64 ",\"profiled_tbs\":%" PRIu64
                ",\"aot_size\":%" PRIu64 ",\"aot_name\":\"%s\""
                ",\"guest_sha256\":\"%s\"}\n",
-               path, info.runner_size, info.guest_size, info.cfg_size,
+               path, LATC_EXECUTION_MODEL, info.runner_size, info.guest_size,
+               info.cfg_size,
                info.function_count, info.tb_count, info.edge_count,
                info.profiled_tb_count,
                info.aot_size, info.aot_name,
                info.guest_sha256);
     } else {
-        printf("bundle=%s\nrunner_size=%" PRIu64 "\nguest_size=%" PRIu64
+        printf("bundle=%s\nexecution_model=%s\nrunner_size=%" PRIu64
+               "\nguest_size=%" PRIu64
                "\ncfg_size=%" PRIu64 "\nfunctions=%" PRIu64
                "\ntbs=%" PRIu64 "\nedges=%" PRIu64 "\nprofiled_tbs=%" PRIu64
                "\naot_size=%" PRIu64 "\naot_name=%s"
-               "\nguest_sha256=%s\n", path, info.runner_size,
+               "\nguest_sha256=%s\n", path, LATC_EXECUTION_MODEL,
+               info.runner_size,
                info.guest_size, info.cfg_size, info.function_count,
                info.tb_count, info.edge_count, info.profiled_tb_count,
                info.aot_size, info.aot_name,

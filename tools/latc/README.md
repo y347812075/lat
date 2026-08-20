@@ -6,6 +6,17 @@ parent LAT build. `latc compile` builds a startup-pretranslation bundle;
 `compile-aot.sh` runs LAT's relocatable code generator on a LoongArch build host
 and embeds the resulting native code and relocation records.
 
+`latc inspect` reports this existing format as
+`execution_model=lat-aot-bundle`. It is deliberately not called a standalone
+native ELF: the file still contains the LAT runner and can enter LAT's JIT.
+
+The standalone native ELF work uses the versioned interface in
+`native/include/lat-fallback.h`. The small native runtime will load
+`liblat.so.1` only when execution reaches a guest TB missing from the compiled
+image. It rejects a library whose ABI version or LAT build ID differs from the
+image. `LATC_LIBLAT` exists only as a test/development override; installed
+programs otherwise resolve the system `liblat.so.1`.
+
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
 AOT image use LAT's JIT translator unless strict verification is enabled.

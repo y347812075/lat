@@ -6,6 +6,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define LATC_EXECUTION_MODEL "lat-aot-bundle"
+
 typedef struct LatcBundleInfo {
     uint64_t runner_size;
     uint64_t guest_offset;
