@@ -65,6 +65,13 @@ adding LAT's context-switch assembly.
 24 and clears `rip`. The runtime performs two `(rip, flags)` lookups and stops
 when `rip` becomes zero.
 
+`tests/x86-exit42.S` is the first real x86 input. It performs only
+`exit(42)`. Its native image must be explicitly marked by
+`mark-native-exit-smoke` and must match the recorded LAT build ID before the
+specialised entry path will run it. No other syscall is accepted.
+The marker and runtime both require the exact fixture SHA-256, so the flag
+cannot be applied to gzip or another x86 ELF.
+
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
 AOT image use LAT's JIT translator unless strict verification is enabled.
