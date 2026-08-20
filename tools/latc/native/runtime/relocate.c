@@ -121,8 +121,23 @@ int lat_native_code_load(const LatNativeImageHeaderV1 *header,
                 header, image, image_size, (uint64_t)relocation->addend,
                 relocation->target);
             if (!target_tb) {
-                errno = ENOENT;
-                result = -1;
+                target_tb = lat_native_tb_find_unique_pc(
+                    header, image, image_size,
+                    (uint64_t)relocation->addend);
+            }
+            if (!target_tb) {
+                uintptr_t target = lat_runtime_symbol_address(
+                    relocation->reserved);
+                if (!target) {
+                    errno = ENOENT;
+                    result = -1;
+                } else {
+                    result = relocation->slots == 2 ?
+                        patch_pc_relative(instructions,
+                                          (uintptr_t)instructions, target) :
+                        patch_absolute(instructions, relocation->slots,
+                                       target);
+                }
             } else {
                 uintptr_t target = (uintptr_t)address + target_tb->code_offset;
                 result = relocation->slots == 2 ?

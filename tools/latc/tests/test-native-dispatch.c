@@ -15,7 +15,10 @@ int main(void)
     if (lat_native_tb_find(header, image, sizeof(image), 0x1000, 4) !=
             &tbs[1] ||
         lat_native_tb_find(header, image, sizeof(image), 0x1000, 2) ||
-        lat_native_tb_find(header, image, sizeof(image), 0x3000, 0)) {
+        lat_native_tb_find(header, image, sizeof(image), 0x3000, 0) ||
+        lat_native_tb_find_unique_pc(header, image, sizeof(image), 0x1000) ||
+        lat_native_tb_find_unique_pc(header, image, sizeof(image), 0x2000) !=
+            &tbs[2]) {
         fprintf(stderr, "native TB lookup failed\n");
         return 1;
     }

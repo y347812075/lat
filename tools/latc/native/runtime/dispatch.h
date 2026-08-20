@@ -10,6 +10,9 @@ const LatNativeTbV1 *lat_native_tb_find(const LatNativeImageHeaderV1 *header,
                                         const unsigned char *image,
                                         size_t image_size,
                                         uint64_t guest_pc, uint32_t flags);
+const LatNativeTbV1 *lat_native_tb_find_unique_pc(
+    const LatNativeImageHeaderV1 *header, const unsigned char *image,
+    size_t image_size, uint64_t guest_pc);
 
 void lat_native_x86_dispatch_configure(const LatNativeImageHeaderV1 *header,
                                        const unsigned char *image,
