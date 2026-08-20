@@ -71,6 +71,8 @@ when `rip` becomes zero.
 specialised entry path will run it. No other syscall is accepted.
 The marker and runtime both require the exact fixture SHA-256, so the flag
 cannot be applied to gzip or another x86 ELF.
+`tests/x86-exit-add42.S` uses real x86 arithmetic to compute 42 before the
+same restricted exit syscall.
 
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
