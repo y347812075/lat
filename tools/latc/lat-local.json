@@ -1,0 +1,34 @@
+{
+  "added": [
+    {
+      "path": "lat/include/latc-bundle-format.h",
+      "reason": "shared stable on-disk bundle layout"
+    },
+    {
+      "path": "lat/linux-user/latc-bundle-loader.h",
+      "reason": "self-contained runner argument injection interface"
+    },
+    {
+      "path": "lat/linux-user/latc-bundle-loader.c",
+      "reason": "verify and restore embedded x86 guest, CFG, and LAT AOT data"
+    },
+    {
+      "path": "lat/target/i386/latx/include/latc-verify.h",
+      "reason": "stable CFG to LAT TB boundary verification interface"
+    },
+    {
+      "path": "lat/target/i386/latx/ir1/latc-verify.c",
+      "reason": "decode CFG TBs with the copied LAT IR1 decoder"
+    }
+  ],
+  "modified": [
+    {
+      "path": "lat/linux-user/main.c",
+      "reason": "detect bundles, pretranslate CFG input, and support compile-time AOT emission"
+    },
+    {
+      "path": "lat/accel/tcg/translate-all.c",
+      "reason": "count and reject runtime TB generation for strict AOT verification"
+    }
+  ]
+}
