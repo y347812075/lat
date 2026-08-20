@@ -55,6 +55,11 @@ LoongArch instructions which return `42` under the normal C ABI. The PIE runs
 it only when the image carries `LAT_NATIVE_IMAGE_C_ABI_SMOKE`; normal exported
 LAT images cannot use this path.
 
+`tests/make-native-state-smoke.c` is the next layer. Its TB receives a
+`LatX86StateV1 *`, changes `gpr[0]` from 35 to 42, writes `rip=0x1234`, and
+returns 42. This verifies the shared state layout and calling convention before
+adding LAT's context-switch assembly.
+
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
 AOT image use LAT's JIT translator unless strict verification is enabled.

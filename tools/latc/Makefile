@@ -101,13 +101,18 @@ $(BUILD)/tests/make-native-smoke: tests/make-native-smoke.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
 
+$(BUILD)/tests/make-native-state-smoke: tests/make-native-state-smoke.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
+
 test-native: all
 	@test -n "$(RUNNER)" -a -n "$(X86_GUEST)" || \
 	  { echo "usage: make test-native RUNNER=/path/to/runner X86_GUEST=/path/to/static-x86"; exit 2; }
 	sh tests/test-bundle-runner.sh $(BUILD)/latc $(RUNNER) $(X86_GUEST) $(BUILD)/native-test
 
 test-native-shell: all $(BUILD)/tests/test-native-format \
-		$(BUILD)/tests/make-native-smoke
+		$(BUILD)/tests/make-native-smoke \
+		$(BUILD)/tests/make-native-state-smoke
 	$(BUILD)/tests/test-native-format $(BUILD)/tests/native-image
 	scripts/link-native-shell.sh $(BUILD)/tests/native-image \
 	  $(BUILD)/tests/native-shell.la64
@@ -122,6 +127,10 @@ test-native-shell: all $(BUILD)/tests/test-native-format \
 	  $(BUILD)/tests/native-smoke.la64
 	loongarch64-unknown-linux-gnu-readelf -h $(BUILD)/tests/native-smoke.la64 | \
 	  grep -q 'DYN (Position-Independent Executable file)'
+	$(BUILD)/tests/make-native-state-smoke \
+	  $(BUILD)/tests/native-state-smoke-image
+	scripts/link-native-shell.sh $(BUILD)/tests/native-state-smoke-image \
+	  $(BUILD)/tests/native-state-smoke.la64
 
 test-aot-native: all
 	@test -n "$(RUNNER)" -a -n "$(X86_GUEST)" || \

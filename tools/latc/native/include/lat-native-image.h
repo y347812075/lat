@@ -13,6 +13,7 @@ enum LatNativeImageFlags {
     LAT_NATIVE_IMAGE_LBT = 1u << 2,
     LAT_NATIVE_IMAGE_LSX = 1u << 3,
     LAT_NATIVE_IMAGE_NO_PRECISE_SIGNAL_MAP = 1u << 4,
+    LAT_NATIVE_IMAGE_C_ABI_STATE_SMOKE = 1u << 30,
     LAT_NATIVE_IMAGE_C_ABI_SMOKE = 1u << 31,
 };
 
