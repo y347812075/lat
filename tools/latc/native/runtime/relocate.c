@@ -104,6 +104,7 @@ int lat_native_code_load(const LatNativeImageHeaderV1 *header,
         return fail(error, error_size, "cannot allocate native code");
     }
     memcpy(address, image + header->code_offset, header->code_size);
+    lat_runtime_symbols_configure(header->flags);
     const LatNativeRelocationV1 *relocations =
         (const void *)(image + header->relocation_offset);
     for (uint64_t i = 0; i < header->relocation_count; i++) {
