@@ -15,7 +15,8 @@ static int fail(char *error, size_t size, const char *message)
 }
 
 int latc_profile_apply(const char *path, CfgProgram *program,
-                       size_t *matched, size_t *unmatched,
+                       bool ignore_outside_exec, size_t *matched,
+                       size_t *unmatched, size_t *ignored,
                        char *error, size_t error_size)
 {
     FILE *fp = fopen(path, "r");
@@ -24,7 +25,7 @@ int latc_profile_apply(const char *path, CfgProgram *program,
             snprintf(error, error_size, "%s: %s", path, strerror(errno));
         return -1;
     }
-    size_t hit = 0, miss = 0, line_no = 0;
+    size_t hit = 0, miss = 0, skip = 0, line_no = 0;
     char *line = NULL;
     size_t cap = 0;
     while (getline(&line, &cap, fp) >= 0) {
@@ -69,6 +70,8 @@ int latc_profile_apply(const char *path, CfgProgram *program,
                 .terminator = CFG_TB_FALLTHROUGH,
             };
             miss++;
+        } else if (ignore_outside_exec) {
+            skip++;
         } else {
             free(line); fclose(fp);
             if (error && error_size)
@@ -95,5 +98,6 @@ malformed:
     fclose(fp);
     if (matched) *matched = hit;
     if (unmatched) *unmatched = miss;
+    if (ignored) *ignored = skip;
     return 0;
 }

@@ -22,26 +22,59 @@ static bool pretranslation_complete;
 static uint64_t stat_cfg_tbs, stat_profiled, stat_pretranslated, stat_failed;
 static uint64_t stat_same_extent, stat_shorter_extent, stat_longer_extent;
 static uint64_t stat_runtime_tb_gen_calls, stat_runtime_first_pc;
+static uint64_t stat_runtime_tb_gen_attempts;
 static uint64_t stat_runtime_program_tb_gen_calls;
 static uint64_t stat_runtime_system_tb_gen_calls;
+static uint64_t stat_runtime_program_tb_gen_attempts;
+static uint64_t stat_runtime_system_tb_gen_attempts;
+static uint32_t stat_runtime_first_cflags;
 static bool stat_pretranslation_disabled;
+static bool stat_aot_cache_hit;
+static uint64_t stat_bundle_verify_ns, stat_guest_extract_ns;
+static uint64_t stat_aot_prepare_ns;
 static LatcDiskExecRange *bundle_exec_ranges;
 static uint64_t bundle_exec_range_count;
 
+static char *expand_pid_path(const char *pattern)
+{
+    GString *path = g_string_new(NULL);
+    char pid[32];
+    snprintf(pid, sizeof(pid), "%ld", (long)getpid());
+    for (const char *p = pattern; *p; p++) {
+        if (p[0] == '%' && p[1] == 'p') {
+            g_string_append(path, pid);
+            p++;
+        } else {
+            g_string_append_c(path, *p);
+        }
+    }
+    return g_string_free(path, false);
+}
+
 static void write_stats(void)
 {
-    const char *stats_path = getenv("LATC_STATS_OUT");
-    if (!stats_path || !*stats_path) return;
+    const char *stats_pattern = getenv("LATC_STATS_OUT");
+    if (!stats_pattern || !*stats_pattern) return;
+    char *stats_path = expand_pid_path(stats_pattern);
     FILE *stats = fopen(stats_path, "w");
-    if (!stats) return;
-    fprintf(stats, "{\"cfg_tbs\":%llu,\"profiled_tbs\":%llu,"
+    if (!stats) {
+        g_free(stats_path);
+        return;
+    }
+    fprintf(stats, "{\"pid\":%ld,\"cfg_tbs\":%llu,\"profiled_tbs\":%llu,"
             "\"pretranslated\":%llu,\"failed\":%llu,"
             "\"same_extent\":%llu,\"shorter_than_cfg\":%llu,"
             "\"longer_than_cfg\":%llu,\"runtime_tb_gen_calls\":%llu,"
+            "\"runtime_tb_gen_attempts\":%llu,"
             "\"runtime_program_tb_gen_calls\":%llu,"
             "\"runtime_system_tb_gen_calls\":%llu,"
-            "\"runtime_first_pc\":%llu,\"pretranslation_disabled\":%s}\n",
-            (unsigned long long)stat_cfg_tbs,
+            "\"runtime_program_tb_gen_attempts\":%llu,"
+            "\"runtime_system_tb_gen_attempts\":%llu,"
+            "\"runtime_first_pc\":%llu,\"runtime_first_cflags\":%u,"
+            "\"pretranslation_disabled\":%s,\"aot_cache_hit\":%s,"
+            "\"bundle_verify_ns\":%llu,\"guest_extract_ns\":%llu,"
+            "\"aot_prepare_ns\":%llu}\n",
+            (long)getpid(), (unsigned long long)stat_cfg_tbs,
             (unsigned long long)stat_profiled,
             (unsigned long long)stat_pretranslated,
             (unsigned long long)stat_failed,
@@ -49,28 +82,43 @@ static void write_stats(void)
             (unsigned long long)stat_shorter_extent,
             (unsigned long long)stat_longer_extent,
             (unsigned long long)stat_runtime_tb_gen_calls,
+            (unsigned long long)stat_runtime_tb_gen_attempts,
             (unsigned long long)stat_runtime_program_tb_gen_calls,
             (unsigned long long)stat_runtime_system_tb_gen_calls,
+            (unsigned long long)stat_runtime_program_tb_gen_attempts,
+            (unsigned long long)stat_runtime_system_tb_gen_attempts,
             (unsigned long long)stat_runtime_first_pc,
-            stat_pretranslation_disabled ? "true" : "false");
+            stat_runtime_first_cflags,
+            stat_pretranslation_disabled ? "true" : "false",
+            stat_aot_cache_hit ? "true" : "false",
+            (unsigned long long)stat_bundle_verify_ns,
+            (unsigned long long)stat_guest_extract_ns,
+            (unsigned long long)stat_aot_prepare_ns);
     fclose(stats);
+    g_free(stats_path);
 }
 
-void latc_bundle_note_tb_generated(uint64_t guest_pc)
+static bool program_address(uint64_t guest_pc)
 {
-    if (bundle_self_fd < 0 || !pretranslation_complete) return;
-    if (!stat_runtime_tb_gen_calls) stat_runtime_first_pc = guest_pc;
-    stat_runtime_tb_gen_calls++;
-    bool program_pc = false;
     for (uint64_t i = 0; i < bundle_exec_range_count; i++) {
         LatcDiskExecRange *range = &bundle_exec_ranges[i];
-        if (guest_pc >= range->start && guest_pc - range->start < range->size) {
-            program_pc = true;
-            break;
-        }
+        if (guest_pc >= range->start && guest_pc - range->start < range->size)
+            return true;
     }
-    if (program_pc) stat_runtime_program_tb_gen_calls++;
-    else stat_runtime_system_tb_gen_calls++;
+    return false;
+}
+
+void latc_bundle_note_tb_attempt(uint64_t guest_pc, uint32_t cflags)
+{
+    if (bundle_self_fd < 0 || !pretranslation_complete) return;
+    bool program_pc = program_address(guest_pc);
+    if (!stat_runtime_tb_gen_attempts) {
+        stat_runtime_first_pc = guest_pc;
+        stat_runtime_first_cflags = cflags;
+    }
+    stat_runtime_tb_gen_attempts++;
+    if (program_pc) stat_runtime_program_tb_gen_attempts++;
+    else stat_runtime_system_tb_gen_attempts++;
     const char *profile_path = getenv("LATC_PROFILE_OUT");
     if (profile_path && *profile_path) {
         FILE *profile = fopen(profile_path, "a");
@@ -87,6 +135,15 @@ void latc_bundle_note_tb_generated(uint64_t guest_pc)
                 (unsigned long long)guest_pc);
         _exit(125);
     }
+}
+
+void latc_bundle_note_tb_generated(uint64_t guest_pc, uint32_t cflags)
+{
+    (void)cflags;
+    if (bundle_self_fd < 0 || !pretranslation_complete) return;
+    stat_runtime_tb_gen_calls++;
+    if (program_address(guest_pc)) stat_runtime_program_tb_gen_calls++;
+    else stat_runtime_system_tb_gen_calls++;
 }
 
 static int copy_range(int src, uint64_t offset, uint64_t size, int dst)
@@ -129,6 +186,88 @@ static int verify_range(int fd, uint64_t offset, uint64_t size,
     return match ? 0 : -1;
 }
 
+static uint64_t monotonic_ns(void)
+{
+    struct timespec ts;
+    return clock_gettime(CLOCK_MONOTONIC, &ts) ? 0 :
+        (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static bool cached_aot_matches(const char *path, const char *marker_path,
+                               const LatcDiskFooter *footer)
+{
+    struct stat aot_st, marker_st;
+    if (lstat(path, &aot_st) || lstat(marker_path, &marker_st) ||
+        !S_ISREG(aot_st.st_mode) || !S_ISREG(marker_st.st_mode) ||
+        aot_st.st_uid != geteuid() || marker_st.st_uid != geteuid() ||
+        (aot_st.st_mode & 0222) || aot_st.st_size != (off_t)footer->aot_size)
+        return false;
+    FILE *marker = fopen(marker_path, "r");
+    if (!marker) return false;
+    char digest[65] = {0};
+    unsigned long long dev, ino, size, sec, nsec;
+    int fields = fscanf(marker, "%64s %llu %llu %llu %llu %llu",
+                        digest, &dev, &ino, &size, &sec, &nsec);
+    fclose(marker);
+    return fields == 6 && !memcmp(digest, footer->aot_sha256, 64) &&
+        dev == (unsigned long long)aot_st.st_dev &&
+        ino == (unsigned long long)aot_st.st_ino &&
+        size == (unsigned long long)aot_st.st_size &&
+        sec == (unsigned long long)aot_st.st_mtim.tv_sec &&
+        nsec == (unsigned long long)aot_st.st_mtim.tv_nsec;
+}
+
+static int install_cached_aot(int self, const LatcDiskFooter *footer,
+                              const char *path, const char *marker_path)
+{
+    char *tmp = g_strdup_printf("%s.tmp.%ld", path, (long)getpid());
+    char *marker_tmp = g_strdup_printf("%s.tmp.%ld", marker_path,
+                                       (long)getpid());
+    int fd = -1, marker_fd = -1, rc = -1;
+    unlink(tmp);
+    unlink(marker_tmp);
+    fd = open(tmp, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+    if (fd < 0 || copy_range(self, footer->aot_offset,
+                             footer->aot_size, fd) || fsync(fd) ||
+        fchmod(fd, 0400) || close(fd)) {
+        if (fd >= 0) close(fd);
+        fd = -1;
+        goto out;
+    }
+    fd = -1;
+    if (rename(tmp, path)) goto out;
+    struct stat st;
+    if (stat(path, &st)) goto out;
+    marker_fd = open(marker_tmp, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC,
+                     0600);
+    if (marker_fd < 0 ||
+        dprintf(marker_fd, "%.64s %llu %llu %llu %llu %llu\n",
+                footer->aot_sha256,
+                (unsigned long long)st.st_dev,
+                (unsigned long long)st.st_ino,
+                (unsigned long long)st.st_size,
+                (unsigned long long)st.st_mtim.tv_sec,
+                (unsigned long long)st.st_mtim.tv_nsec) < 0 ||
+        fsync(marker_fd) || fchmod(marker_fd, 0400) || close(marker_fd)) {
+        if (marker_fd >= 0) close(marker_fd);
+        marker_fd = -1;
+        goto out;
+    }
+    marker_fd = -1;
+    if (rename(marker_tmp, marker_path)) goto out;
+    rc = 0;
+out:
+    if (fd >= 0) close(fd);
+    if (marker_fd >= 0) close(marker_fd);
+    if (rc) {
+        unlink(tmp);
+        unlink(marker_tmp);
+    }
+    g_free(tmp);
+    g_free(marker_tmp);
+    return rc;
+}
+
 int latc_bundle_inject_argv(int *argc, char ***argv)
 {
     int self = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
@@ -151,13 +290,12 @@ int latc_bundle_inject_argv(int *argc, char ***argv)
                             strchr(footer.aot_name, '/')))) {
         errno = EINVAL; rc = -1; goto out;
     }
+    uint64_t started = monotonic_ns();
     if (verify_range(self, footer.guest_offset, footer.guest_size,
-                     footer.guest_sha256) ||
-        (footer.aot_size && verify_range(self, footer.aot_offset,
-                                         footer.aot_size,
-                                         footer.aot_sha256))) {
+                     footer.guest_sha256)) {
         errno = EINVAL; rc = -1; goto out;
     }
+    stat_bundle_verify_ns = monotonic_ns() - started;
     char automatic_guest[PATH_MAX];
     const char *named_guest = getenv("LATC_NAMED_GUEST");
     if ((!named_guest || !*named_guest) && footer.aot_size) {
@@ -165,6 +303,7 @@ int latc_bundle_inject_argv(int *argc, char ***argv)
                  "/tmp/latc-%.16s-x86-guest", footer.guest_sha256);
         named_guest = automatic_guest;
     }
+    started = monotonic_ns();
     int guest = named_guest && *named_guest ?
         open(named_guest, O_CREAT | O_TRUNC | O_RDWR | O_CLOEXEC, 0700) :
         (int)syscall(SYS_memfd_create, "latc-x86-guest", 0);
@@ -182,26 +321,36 @@ int latc_bundle_inject_argv(int *argc, char ***argv)
             close(guest); rc = -1; goto out;
         }
     }
+    stat_guest_extract_ns = monotonic_ns() - started;
     bundle_footer = footer;
     bundle_self_fd = self;
     self = -1;
     if (footer.aot_size) {
+        started = monotonic_ns();
         const char *home = getenv("HOME");
         char *cache_dir = home && *home ?
             g_build_filename(home, ".cache", "latx", NULL) : NULL;
         char *aot_path = cache_dir ?
             g_build_filename(cache_dir, footer.aot_name, NULL) : NULL;
-        if (!cache_dir || !aot_path || g_mkdir_with_parents(cache_dir, 0700) ||
-            strlen(aot_path) >= PATH_MAX) {
+        char *marker_path = aot_path ?
+            g_strdup_printf("%s.latc-cache", aot_path) : NULL;
+        if (!cache_dir || !aot_path || !marker_path ||
+            g_mkdir_with_parents(cache_dir, 0700) ||
+            strlen(aot_path) >= PATH_MAX || strlen(marker_path) >= PATH_MAX) {
+            g_free(marker_path);
             g_free(cache_dir); g_free(aot_path); close(guest); rc = -1; goto out;
         }
-        int aot_fd = open(aot_path, O_CREAT | O_TRUNC | O_RDWR | O_CLOEXEC, 0600);
-        if (aot_fd < 0 || copy_range(bundle_self_fd, footer.aot_offset,
-                                     footer.aot_size, aot_fd)) {
-            if (aot_fd >= 0) close(aot_fd);
-            g_free(cache_dir); g_free(aot_path); close(guest); rc = -1; goto out;
+        stat_aot_cache_hit = cached_aot_matches(aot_path, marker_path, &footer);
+        if (!stat_aot_cache_hit &&
+            (verify_range(bundle_self_fd, footer.aot_offset, footer.aot_size,
+                          footer.aot_sha256) ||
+             install_cached_aot(bundle_self_fd, &footer, aot_path,
+                                marker_path))) {
+            g_free(marker_path); g_free(cache_dir); g_free(aot_path);
+            close(guest); rc = -1; goto out;
         }
-        close(aot_fd);
+        stat_aot_prepare_ns = monotonic_ns() - started;
+        g_free(marker_path);
         g_free(cache_dir);
         g_free(aot_path);
         setenv("LATX_AOT", "1", 1);

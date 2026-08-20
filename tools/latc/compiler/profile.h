@@ -6,7 +6,8 @@
 #include <stddef.h>
 
 int latc_profile_apply(const char *path, CfgProgram *program,
-                       size_t *matched, size_t *unmatched,
+                       bool ignore_outside_exec, size_t *matched,
+                       size_t *unmatched, size_t *ignored,
                        char *error, size_t error_size);
 
 #endif

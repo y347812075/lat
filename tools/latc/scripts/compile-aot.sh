@@ -14,7 +14,7 @@ profile=${5:-}
 work=$(mktemp -d "${TMPDIR:-/tmp}/latc-aot.XXXXXX")
 guest_hash=$(sha256sum "$guest" | awk '{print $1}')
 guest_prefix=$(printf '%s' "$guest_hash" | cut -c1-16)
-named_guest="${TMPDIR:-/tmp}/latc-${guest_prefix}-x86-guest"
+named_guest="/tmp/latc-${guest_prefix}-x86-guest"
 
 cleanup()
 {
@@ -25,7 +25,7 @@ trap cleanup EXIT HUP INT TERM
 
 if [ -n "$profile" ]; then
     "$latc" compile "$guest" -o "$work/stage1.la64" --runner "$runner" \
-        --profile "$profile" >/dev/null
+        --profile "$profile" --profile-ignore-outside-exec >/dev/null
 else
     "$latc" compile "$guest" -o "$work/stage1.la64" --runner "$runner" \
         >/dev/null
@@ -41,7 +41,7 @@ fi
 
 if [ -n "$profile" ]; then
     "$latc" compile "$guest" -o "$output" --runner "$runner" \
-        --profile "$profile" --aot "$aot"
+        --profile "$profile" --profile-ignore-outside-exec --aot "$aot"
 else
     "$latc" compile "$guest" -o "$output" --runner "$runner" --aot "$aot"
 fi
