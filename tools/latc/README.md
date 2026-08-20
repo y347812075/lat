@@ -1,0 +1,98 @@
+# latc
+
+`latc` is an internal x86-64 to LoongArch64 binary compiler experiment. It is
+built independently and does not modify or link against objects from the
+parent LAT build. `latc compile` builds a startup-pretranslation bundle;
+`compile-aot.sh` runs LAT's relocatable code generator on a LoongArch build host
+and embeds the resulting native code and relocation records.
+
+The AOT output is a static LoongArch PIE containing the copied LAT runner, the
+x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
+AOT image use LAT's JIT translator unless strict verification is enabled.
+
+Build and test with:
+
+```sh
+make -C tools/latc
+make -C tools/latc test
+tools/latc/build/latc analyze --json /path/to/static-x86_64-elf
+tools/latc/build/latc compile /path/to/static-x86_64-elf \
+  -o program.la64 --runner /path/to/loongarch64/latc-runner
+```
+
+On a LoongArch build host, generate and embed relocatable LAT AOT code with:
+
+```sh
+tools/latc/scripts/compile-aot.sh tools/latc/build/latc \
+  /path/to/static/latc-runner x86-program program.la64
+```
+
+Set `LATC_STRICT_AOT=1` when testing the output. The runner exits with status
+125 if any TB is generated after embedded AOT loading.
+
+An optional train profile marks hot TBs so the runner translates them first:
+
+```text
+# x86 guest address  execution count
+0x401000 120034
+0x401038 98211
+```
+
+Pass it with `--profile profile.txt`. Missing CFG addresses inside executable
+ELF sections are added as supplemental TB starts. Addresses outside executable
+sections and malformed lines fail compilation.
+
+On LoongArch, validate a copied LAT runner and real x86 guest with:
+
+```sh
+make -C tools/latc test-native \
+  RUNNER=/path/to/latc-runner X86_GUEST=/path/to/static-x86_64-elf
+```
+
+Build a statically linked runner from the matching full LAT checkout on a
+LoongArch machine:
+
+```sh
+tools/latc/scripts/build-runner.sh /path/to/full/lat /path/to/build-latc-runner
+```
+
+The script treats `/path/to/full/lat` as read-only. It creates a disposable
+`/path/to/build-latc-runner.source` staging tree and applies the local adapter
+there. Delete both build directories after copying out `latx-x86_64`.
+
+Analyze all twelve SPECint2000 integer executables with:
+
+```sh
+make -C tools/latc test-spec-analyze \
+  SPECINT_BINDIR=/path/to/specbin/x64_gcc12_2_0
+```
+
+Current limitation: generated LoongArch instructions are regenerated when the
+output starts unless the bundle was produced by `compile-aot.sh`. An AOT bundle
+stores LAT's LoongArch code and relocation records and loads them before guest
+execution. Unresolved paths use JIT unless `LATC_STRICT_AOT=1` is set.
+
+`LATC_STATS_OUT=/path/stats.json` records both startup pretranslation and
+`runtime_tb_gen_calls`. The latter must be checked before claiming that a test
+ran without runtime translation. `LATC_DISABLE_PRETRANSLATE=1` provides a JIT
+baseline for the same bundle.
+
+`LATC_PROFILE_OUT=/path/missing.profile` records runtime-generated guest PCs.
+Passing that file back through `--profile` adds missing addresses that are
+inside executable ELF sections; addresses outside executable sections fail the
+compile instead of being trusted blindly.
+
+All twelve SPECint2000 integer programs pass the official test workloads with
+zero main-ELF runtime code generation. Ten pass full strict mode with no JIT at
+all. Perlbmk and vortex use two and four guest VDSO/signal-helper TBs
+respectively; they pass main-program strict mode with only that explicit system
+JIT fallback. See [spec2000/SPEC2000.md](spec2000/SPEC2000.md) for counts and
+AOT sizes. The same strict gzip AOT output runs on AOSC Linux and Loongnix Linux
+4.19 3A6000 systems.
+
+Current limitations: AOT generation itself must run on a LoongArch build host;
+the runner extracts the embedded AOT into `$HOME/.cache/latx` and the x86 guest
+into `/tmp`, so both locations must be writable. Guest VDSO and anonymous
+signal-helper pages are not yet serialised as AOT segments. Test workloads are
+validated; train and ref profiles still need separate collection because they
+may expose additional indirect targets.
