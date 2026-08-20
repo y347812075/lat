@@ -1,7 +1,11 @@
+#define _GNU_SOURCE
+
 #include "runtime-symbols.h"
 
 #include "lat-native-image.h"
 
+#include <errno.h>
+#include <sys/mman.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -9,6 +13,45 @@ static const unsigned char placeholder_pftable[256];
 static uint32_t configured_flags;
 
 #if defined(__loongarch__)
+static unsigned char *guest_brk_base;
+static unsigned char *guest_brk_current;
+static size_t guest_brk_capacity;
+
+static uint64_t x86_result(long result)
+{
+    return result < 0 ? (uint64_t)-(int64_t)errno : (uint64_t)result;
+}
+
+static uint64_t x86_guest_brk(uint64_t requested)
+{
+    if (!guest_brk_base) {
+        guest_brk_capacity = 16 * 1024 * 1024;
+        guest_brk_base = mmap(NULL, guest_brk_capacity, PROT_NONE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (guest_brk_base == MAP_FAILED) {
+            guest_brk_base = NULL;
+            guest_brk_capacity = 0;
+            return 0;
+        }
+        guest_brk_current = guest_brk_base;
+    }
+    if (!requested) return (uint64_t)(uintptr_t)guest_brk_current;
+    if (requested < (uint64_t)(uintptr_t)guest_brk_base ||
+        requested > (uint64_t)(uintptr_t)guest_brk_base + guest_brk_capacity) {
+        return (uint64_t)(uintptr_t)guest_brk_current;
+    }
+    long page_size = sysconf(_SC_PAGESIZE);
+    uintptr_t end = (requested + (uint64_t)page_size - 1) &
+                    ~((uint64_t)page_size - 1);
+    if (end > (uintptr_t)guest_brk_base &&
+        mprotect(guest_brk_base, end - (uintptr_t)guest_brk_base,
+                 PROT_READ | PROT_WRITE)) {
+        return (uint64_t)(uintptr_t)guest_brk_current;
+    }
+    guest_brk_current = (unsigned char *)(uintptr_t)requested;
+    return requested;
+}
+
 extern void lat_native_x86_dispatch_jirl(void);
 
 static void x86_exit_smoke_syscall(void)
@@ -26,6 +69,22 @@ static void x86_exit_smoke_syscall(void)
                                (const void *)(uintptr_t)second_argument,
                                (size_t)third_argument);
         *(uint64_t *)(env + 344) = (uint64_t)result;
+        return;
+    }
+    if (syscall_number == 9) {
+        uint64_t length = *(uint64_t *)(env + 392);
+        int prot = (int)*(uint64_t *)(env + 360);
+        int flags = (int)*(uint64_t *)(env + 424);
+        int fd = (int)*(uint64_t *)(env + 408);
+        uint64_t offset = *(uint64_t *)(env + 416);
+        void *result = mmap((void *)(uintptr_t)first_argument, length, prot,
+                            flags, fd, offset);
+        *(uint64_t *)(env + 344) = result == MAP_FAILED ?
+            x86_result(-1) : (uint64_t)(uintptr_t)result;
+        return;
+    }
+    if (syscall_number == 12) {
+        *(uint64_t *)(env + 344) = x86_guest_brk(first_argument);
         return;
     }
     _exit(127);
