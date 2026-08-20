@@ -2,7 +2,9 @@ CC ?= cc
 AR ?= ar
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=c11
 CPPFLAGS += -Icfg/include
-CPPFLAGS += -Iformat -Ilat/include $(shell pkg-config --cflags glib-2.0)
+CPPFLAGS += -Iformat -Ilat/include -Inative/include -Inative/format \
+	-Inative/runtime \
+	$(shell pkg-config --cflags glib-2.0)
 LDLIBS += $(shell pkg-config --libs glib-2.0)
 
 BUILD := build
@@ -38,7 +40,8 @@ $(BUILD)/tests/test-cfg: tests/test-cfg.c $(BUILD)/liblatc_cfg.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 
-test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg
+test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
+	$(BUILD)/tests/test-fallback-loader $(BUILD)/tests/test-native-format
 	$(BUILD)/tests/test-cfg $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc analyze $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc compile $(BUILD)/tests/cfg-fixture -o $(BUILD)/tests/cfg-bundle --runner $(BUILD)/tests/cfg-fixture
@@ -49,7 +52,34 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg
 	  tests/fake.aot2 $(BUILD)/tests/cfg-aot-bundle
 	sh tests/test-bundle-corruption.sh $(BUILD)/latc $(BUILD)/tests/cfg-bundle $(BUILD)/tests/cfg-bundle.bad
 	sh tests/test-spec-tools.sh $(BUILD)/tests/spec-tools
+	$(BUILD)/tests/test-fallback-loader \
+	  $(abspath $(BUILD)/tests/liblat-good.so) \
+	  $(abspath $(BUILD)/tests/liblat-bad.so)
+	$(BUILD)/tests/test-native-format
 	$(MAKE) check-import
+
+$(BUILD)/tests/liblat-good.so: tests/fake-liblat.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared \
+	  -DLAT_FAKE_BUILD_ID='"test-build"' -o $@ $<
+
+$(BUILD)/tests/liblat-bad.so: tests/fake-liblat.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared \
+	  -DLAT_FAKE_BUILD_ID='"other-build"' -o $@ $<
+
+$(BUILD)/tests/test-fallback-loader: tests/test-fallback-loader.c \
+		$(BUILD)/native/runtime/fallback-loader.o \
+		$(BUILD)/tests/liblat-good.so $(BUILD)/tests/liblat-bad.so
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
+	  tests/test-fallback-loader.c \
+	  $(BUILD)/native/runtime/fallback-loader.o -ldl
+
+$(BUILD)/tests/test-native-format: tests/test-native-format.c \
+		$(BUILD)/native/format/native-image.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 
 test-native: all
 	@test -n "$(RUNNER)" -a -n "$(X86_GUEST)" || \
