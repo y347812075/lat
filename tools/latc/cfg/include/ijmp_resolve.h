@@ -35,6 +35,17 @@ typedef struct {
     size_t insn_count;
 
     /*
+     * Whole-program instruction boundaries. GCC may place cold partitions in
+     * a separate function symbol while still using their internal labels as
+     * switch-table case targets.
+     */
+    const uint64_t *program_insn_addrs;
+    size_t program_insn_count;
+
+    const uint64_t *direct_targets;
+    size_t direct_target_count;
+
+    /*
      * Optional whole-program function-entry predicate. This lets qword
      * function-pointer tables resolve interprocedural tail-dispatch targets
      * without accepting arbitrary cross-function instruction addresses.

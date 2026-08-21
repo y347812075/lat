@@ -1,6 +1,8 @@
 #include "dispatch.h"
 
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 int main(void)
 {
@@ -11,7 +13,9 @@ int main(void)
     LatNativeTbV1 *tbs = (void *)(image + header->tb_table_offset);
     tbs[0] = (LatNativeTbV1){ .guest_pc = 0x1000, .flags = 0 };
     tbs[1] = (LatNativeTbV1){ .guest_pc = 0x1000, .flags = 4 };
-    tbs[2] = (LatNativeTbV1){ .guest_pc = 0x2000, .flags = 0 };
+    tbs[2] = (LatNativeTbV1){
+        .guest_pc = 0x2000, .code_offset = 8, .flags = 0,
+    };
     if (lat_native_tb_find(header, image, sizeof(image), 0x1000, 4) !=
             &tbs[1] ||
         lat_native_tb_find(header, image, sizeof(image), 0x1000, 2) ||
@@ -22,6 +26,25 @@ int main(void)
         fprintf(stderr, "native TB lookup failed\n");
         return 1;
     }
+    LatNativeX86FastTb *cache = calloc(LAT_NATIVE_X86_JMP_CACHE_SIZE,
+                                       sizeof(*cache));
+    unsigned char code[16] = {0};
+    if (!cache) return 1;
+    lat_native_x86_dispatch_configure(header, image, sizeof(image), code,
+                                       cache,
+                                       LAT_NATIVE_X86_JMP_CACHE_SIZE);
+    if (lat_native_x86_dispatch_lookup(0x2000) != code + 8) {
+        fprintf(stderr, "native dispatch target failed\n");
+        free(cache);
+        return 1;
+    }
+    tbs[2].code_offset = 4;
+    if (lat_native_x86_dispatch_lookup(0x2000) != code + 8) {
+        fprintf(stderr, "native C dispatch cache failed\n");
+        free(cache);
+        return 1;
+    }
+    free(cache);
     puts("test-native-dispatch: PASS");
     return 0;
 }

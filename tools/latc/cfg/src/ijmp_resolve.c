@@ -121,12 +121,45 @@ static bool is_func_entry(const IjmpContext *ctx, uint64_t addr)
            ctx->is_func_entry(ctx->func_entry_data, addr);
 }
 
+static bool is_program_insn(const IjmpContext *ctx, uint64_t addr)
+{
+    size_t lo = 0;
+    size_t hi = ctx->program_insn_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (ctx->program_insn_addrs[mid] < addr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo < ctx->program_insn_count &&
+           ctx->program_insn_addrs[lo] == addr;
+}
+
+static bool is_direct_target(const IjmpContext *ctx, uint64_t addr)
+{
+    size_t lo = 0;
+    size_t hi = ctx->direct_target_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (ctx->direct_targets[mid] < addr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo < ctx->direct_target_count &&
+           ctx->direct_targets[lo] == addr;
+}
+
 static bool is_valid_target(const IjmpContext *ctx, uint64_t target)
 {
     if (in_func(ctx, target)) {
         return is_insn_addr(ctx, target);
     }
-    return is_func_entry(ctx, target);
+    return is_func_entry(ctx, target) || is_program_insn(ctx, target) ||
+           is_direct_target(ctx, target);
 }
 
 static const uint8_t *va_ptr(const IjmpContext *ctx, uint64_t addr, size_t len)

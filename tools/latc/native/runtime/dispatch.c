@@ -10,6 +10,7 @@ static const LatNativeImageHeaderV1 *dispatch_header;
 static const unsigned char *dispatch_image;
 static size_t dispatch_image_size;
 static const unsigned char *dispatch_code;
+static LatNativeX86FastTb dispatch_lookup_cache[LAT_NATIVE_X86_JMP_CACHE_SIZE];
 
 const LatNativeTbV1 *lat_native_tb_find(const LatNativeImageHeaderV1 *header,
                                         const unsigned char *image,
@@ -75,16 +76,32 @@ const LatNativeTbV1 *lat_native_tb_find_unique_pc(
 void lat_native_x86_dispatch_configure(const LatNativeImageHeaderV1 *header,
                                        const unsigned char *image,
                                        size_t image_size,
-                                       const void *code_address)
+                                       const void *code_address,
+                                       LatNativeX86FastTb *jump_cache,
+                                       size_t jump_cache_count)
 {
     dispatch_header = header;
     dispatch_image = image;
     dispatch_image_size = image_size;
     dispatch_code = code_address;
+    for (size_t i = 0; i < jump_cache_count; i++) {
+        jump_cache[i].pc = UINT64_MAX;
+        jump_cache[i].ptr = NULL;
+    }
+    for (size_t i = 0; i < LAT_NATIVE_X86_JMP_CACHE_SIZE; i++) {
+        dispatch_lookup_cache[i].pc = UINT64_MAX;
+        dispatch_lookup_cache[i].ptr = NULL;
+    }
 }
 
 void *lat_native_x86_dispatch_lookup(uint64_t guest_pc)
 {
+    size_t hash = (guest_pc ^
+        (guest_pc >> LAT_NATIVE_X86_JMP_CACHE_BITS)) &
+        (LAT_NATIVE_X86_JMP_CACHE_SIZE - 1);
+    if (dispatch_lookup_cache[hash].pc == guest_pc) {
+        return (void *)dispatch_lookup_cache[hash].ptr;
+    }
     const LatNativeTbV1 *tb = lat_native_tb_find(
         dispatch_header, dispatch_image, dispatch_image_size, guest_pc, 0);
     if (!tb || !dispatch_code) {
@@ -93,5 +110,8 @@ void *lat_native_x86_dispatch_lookup(uint64_t guest_pc)
                 (unsigned long long)guest_pc);
         _exit(127);
     }
-    return (void *)(dispatch_code + tb->code_offset);
+    void *target = (void *)(dispatch_code + tb->code_offset);
+    dispatch_lookup_cache[hash].ptr = target;
+    dispatch_lookup_cache[hash].pc = guest_pc;
+    return target;
 }

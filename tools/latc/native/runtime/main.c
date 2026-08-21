@@ -298,8 +298,9 @@ int main(int argc, char **argv, char **envp)
         void *environment = calloc(1, 4096);
         size_t stack_size = 1024 * 1024;
         void *stack = malloc(stack_size);
-        size_t jump_cache_size = 1024 * 1024;
-        void *jump_cache = calloc(1, jump_cache_size);
+        size_t jump_cache_count = LAT_NATIVE_X86_JMP_CACHE_SIZE;
+        LatNativeX86FastTb *jump_cache = calloc(jump_cache_count,
+                                                sizeof(*jump_cache));
         if (!environment || !stack || !jump_cache) {
             fprintf(stderr, "latc: cannot allocate static x86 state\n");
             free(environment);
@@ -311,7 +312,8 @@ int main(int argc, char **argv, char **envp)
         }
         void *entry = (unsigned char *)code.address + tb->code_offset;
         lat_native_x86_dispatch_configure(header, latc_embedded_image_start,
-                                           image_size, code.address);
+                                           image_size, code.address,
+                                           jump_cache, jump_cache_count);
         void *stack_top = prepare_x86_initial_stack(stack, stack_size,
                                                     &mapping, argc, argv,
                                                     envp);

@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -11,7 +12,11 @@
 #include <sys/random.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/sysinfo.h>
 #include <sys/syscall.h>
+#include <sys/ioctl.h>
+#include <sys/times.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Kept structurally aligned with linux-user/syscall.c's x86-64 cases. */
@@ -59,10 +64,41 @@ typedef struct TargetStatX86_64 {
     int64_t unused[3];
 } TargetStatX86_64;
 
+typedef struct TargetSigactionX86_64 {
+    uint64_t handler;
+    uint64_t flags;
+    uint64_t restorer;
+    uint64_t mask;
+} TargetSigactionX86_64;
+
+typedef struct TargetSysinfoX86_64 {
+    int64_t uptime;
+    uint64_t loads[3];
+    uint64_t totalram;
+    uint64_t freeram;
+    uint64_t sharedram;
+    uint64_t bufferram;
+    uint64_t totalswap;
+    uint64_t freeswap;
+    uint16_t procs;
+    uint16_t pad;
+    uint32_t align_pad;
+    uint64_t totalhigh;
+    uint64_t freehigh;
+    uint32_t mem_unit;
+    uint32_t tail_pad;
+} TargetSysinfoX86_64;
+
+_Static_assert(sizeof(TargetSigactionX86_64) == 32,
+               "unexpected x86-64 sigaction layout");
+_Static_assert(sizeof(TargetSysinfoX86_64) == 112,
+               "unexpected x86-64 sysinfo layout");
+
 static unsigned char *guest_brk_base;
 static unsigned char *guest_brk_current;
 static size_t guest_brk_capacity;
 static uint64_t guest_clear_tid;
+static TargetSigactionX86_64 guest_sigactions[65];
 
 static uint64_t *reg(unsigned char *env, size_t offset)
 {
@@ -116,6 +152,46 @@ static void host_to_target_stat(TargetStatX86_64 *target,
     target->st_mtime_nsec = host->st_mtim.tv_nsec;
     target->st_ctime_sec = host->st_ctim.tv_sec;
     target->st_ctime_nsec = host->st_ctim.tv_nsec;
+}
+
+static void host_to_target_sysinfo(TargetSysinfoX86_64 *target,
+                                   const struct sysinfo *host)
+{
+    memset(target, 0, sizeof(*target));
+    target->uptime = host->uptime;
+    target->loads[0] = host->loads[0];
+    target->loads[1] = host->loads[1];
+    target->loads[2] = host->loads[2];
+    target->totalram = host->totalram;
+    target->freeram = host->freeram;
+    target->sharedram = host->sharedram;
+    target->bufferram = host->bufferram;
+    target->totalswap = host->totalswap;
+    target->freeswap = host->freeswap;
+    target->procs = host->procs;
+    target->totalhigh = host->totalhigh;
+    target->freehigh = host->freehigh;
+    target->mem_unit = host->mem_unit;
+}
+
+static long guest_rt_sigaction(uint64_t signal_number, uint64_t action_address,
+                               uint64_t old_action_address,
+                               uint64_t sigset_size)
+{
+    if (sigset_size != sizeof(uint64_t) || signal_number < 1 ||
+        signal_number > 64 || signal_number == SIGKILL ||
+        signal_number == SIGSTOP) {
+        errno = EINVAL;
+        return -1;
+    }
+    TargetSigactionX86_64 *saved = &guest_sigactions[signal_number];
+    if (old_action_address) {
+        memcpy((void *)(uintptr_t)old_action_address, saved, sizeof(*saved));
+    }
+    if (action_address) {
+        memcpy(saved, (const void *)(uintptr_t)action_address, sizeof(*saved));
+    }
+    return 0;
 }
 
 static long guest_readlinkat(int dirfd, const char *path, void *buffer,
@@ -190,6 +266,9 @@ void lat_x86_linux_user_syscall(unsigned char *env)
         }
         break;
     }
+    case 8:
+        result = lseek((int)arg1, (off_t)(int64_t)arg2, (int)arg3);
+        break;
     case 9: {
         void *mapped = mmap((void *)(uintptr_t)arg1, (size_t)arg2, (int)arg3,
                             (int)arg4, (int)arg5, (off_t)arg6);
@@ -206,12 +285,61 @@ void lat_x86_linux_user_syscall(unsigned char *env)
     case 12:
         *reg(env, ENV_RAX) = guest_brk(arg1);
         return;
+    case 13:
+        result = guest_rt_sigaction(arg1, arg2, arg3, arg4);
+        break;
+    case 16:
+        result = ioctl((int)arg1, (unsigned long)arg2,
+                       (void *)(uintptr_t)arg3);
+        break;
+    case 39:
+        result = getpid();
+        break;
     case 60:
         _exit((int)arg1);
+    case 72:
+        result = fcntl((int)arg1, (int)arg2, arg3);
+        break;
+    case 82:
+        result = rename((const char *)(uintptr_t)arg1,
+                        (const char *)(uintptr_t)arg2);
+        break;
+    case 87:
+        result = unlink((const char *)(uintptr_t)arg1);
+        break;
     case 89:
         result = guest_readlinkat(AT_FDCWD,
                                   (const void *)(uintptr_t)arg1,
                                   (void *)(uintptr_t)arg2, (size_t)arg3);
+        break;
+    case 98:
+        result = getrusage((int)arg1, (struct rusage *)(uintptr_t)arg2);
+        break;
+    case 99: {
+        struct sysinfo host;
+        result = sysinfo(&host);
+        if (result >= 0 && arg1) {
+            host_to_target_sysinfo((void *)(uintptr_t)arg1, &host);
+        }
+        break;
+    }
+    case 100:
+        result = times((struct tms *)(uintptr_t)arg1);
+        break;
+    case 102:
+        result = getuid();
+        break;
+    case 104:
+        result = getgid();
+        break;
+    case 107:
+        result = geteuid();
+        break;
+    case 108:
+        result = getegid();
+        break;
+    case 110:
+        result = getppid();
         break;
     case 158:
         switch ((uint32_t)arg1) {
@@ -224,9 +352,26 @@ void lat_x86_linux_user_syscall(unsigned char *env)
         default: errno = EINVAL; result = -1; break;
         }
         break;
+    case 201: {
+        time_t now = time(NULL);
+        result = now;
+        if (now != (time_t)-1 && arg1) {
+            *(int64_t *)(uintptr_t)arg1 = (int64_t)now;
+        }
+        break;
+    }
+    case 202:
+        result = syscall(SYS_futex, (uint32_t *)(uintptr_t)arg1, (int)arg2,
+                         (uint32_t)arg3, (void *)(uintptr_t)arg4,
+                         (uint32_t *)(uintptr_t)arg5, (uint32_t)arg6);
+        break;
     case 218:
         guest_clear_tid = arg1;
         result = syscall(SYS_gettid);
+        break;
+    case 228:
+        result = clock_gettime((clockid_t)arg1,
+                               (struct timespec *)(uintptr_t)arg2);
         break;
     case 231:
         _exit((int)arg1);
@@ -282,8 +427,13 @@ void lat_x86_linux_user_syscall(unsigned char *env)
         result = -1;
         break;
     default:
-        dprintf(STDERR_FILENO, "latc: unsupported x86 syscall %llu\n",
-                (unsigned long long)number);
+        dprintf(STDERR_FILENO,
+                "latc: unsupported x86 syscall %llu args=%#llx,%#llx,%#llx,"
+                "%#llx,%#llx,%#llx\n",
+                (unsigned long long)number,
+                (unsigned long long)arg1, (unsigned long long)arg2,
+                (unsigned long long)arg3, (unsigned long long)arg4,
+                (unsigned long long)arg5, (unsigned long long)arg6);
         _exit(127);
     }
     *reg(env, ENV_RAX) = target_errno(result);

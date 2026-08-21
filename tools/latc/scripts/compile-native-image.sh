@@ -19,18 +19,36 @@ esac
 work=$(mktemp -d "${TMPDIR:-/tmp}/latc-native.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
+supplements="$work/supplements.profile"
 if [ -n "$profile" ]; then
-    LATC_NATIVE_IMAGE_OUT="$output" \
-        "$(dirname "$0")/compile-aot.sh" "$latc" "$runner" "$guest" \
-        "$work/compatibility-bundle" "$profile" >/dev/null
+    cp "$profile" "$supplements"
 else
-    LATC_NATIVE_IMAGE_OUT="$output" \
-        "$(dirname "$0")/compile-aot.sh" "$latc" "$runner" "$guest" \
-        "$work/compatibility-bundle" >/dev/null
+    : >"$supplements"
 fi
 
+round=1
+while [ "$round" -le 20 ]; do
+    missing="$work/missing-$round.profile"
+    rm -f "$output" "$missing"
+    if LATC_NATIVE_IMAGE_OUT="$output" LATC_NATIVE_MISSING_OUT="$missing" \
+        "$(dirname "$0")/compile-aot.sh" "$latc" "$runner" "$guest" \
+        "$work/compatibility-bundle" "$supplements" >/dev/null; then
+        break
+    fi
+    if [ ! -s "$missing" ]; then
+        echo "latc: native compilation failed without static missing targets" >&2
+        exit 1
+    fi
+    cat "$supplements" "$missing" | \
+        awk '{ count[$1] += $2 } END { for (pc in count) print pc, count[pc] }' | \
+        sort -k1,1 >"$work/supplements-next.profile"
+    mv "$work/supplements-next.profile" "$supplements"
+    echo "latc: static supplement round $round added $(wc -l <"$missing") targets" >&2
+    round=$((round + 1))
+done
+
 if [ ! -s "$output" ]; then
-    echo "latc: LAT did not export a native image" >&2
+    echo "latc: static supplement rounds exhausted" >&2
     exit 1
 fi
 "$latc" mark-native-x86 "$output"
