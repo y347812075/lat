@@ -25,6 +25,53 @@ static gint compare_native_tb(gconstpointer left, gconstpointer right)
     return 0;
 }
 
+static bool native_tb_target_exists(const GArray *tbs, uint64_t guest_pc,
+                                    uint32_t flags)
+{
+    guint left = 0;
+    guint right = tbs->len;
+    while (left < right) {
+        guint middle = left + (right - left) / 2;
+        const LatNativeTbV1 *tb = &g_array_index(
+            tbs, LatNativeTbV1, middle);
+        if (tb->guest_pc < guest_pc ||
+            (tb->guest_pc == guest_pc && tb->flags < flags)) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+    if (left < tbs->len) {
+        const LatNativeTbV1 *tb = &g_array_index(
+            tbs, LatNativeTbV1, left);
+        if (tb->guest_pc == guest_pc && tb->flags == flags) {
+            return true;
+        }
+    }
+
+    left = 0;
+    right = tbs->len;
+    while (left < right) {
+        guint middle = left + (right - left) / 2;
+        const LatNativeTbV1 *tb = &g_array_index(
+            tbs, LatNativeTbV1, middle);
+        if (tb->guest_pc < guest_pc) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+    if (left >= tbs->len) {
+        return false;
+    }
+    const LatNativeTbV1 *tb = &g_array_index(tbs, LatNativeTbV1, left);
+    if (tb->guest_pc != guest_pc) {
+        return false;
+    }
+    return left + 1 == tbs->len ||
+        g_array_index(tbs, LatNativeTbV1, left + 1).guest_pc != guest_pc;
+}
+
 static int runtime_symbol(aot_rel_kind kind)
 {
     switch (kind) {
@@ -364,6 +411,19 @@ int latc_native_export(const char *path, const char *guest_path,
             previous->flags == current->flags) {
             fprintf(stderr, "latc: duplicate native TB pc=0x%llx flags=0x%x\n",
                     (unsigned long long)current->guest_pc, current->flags);
+            goto out;
+        }
+    }
+    for (guint i = 0; i < native_relocations->len; i++) {
+        const LatNativeRelocationV1 *relocation = &g_array_index(
+            native_relocations, LatNativeRelocationV1, i);
+        if (relocation->kind == LAT_NATIVE_RELOC_TB_TARGET &&
+            !native_tb_target_exists(native_tbs,
+                                     (uint64_t)relocation->addend,
+                                     relocation->target)) {
+            fprintf(stderr, "latc: native relocation %u targets missing TB pc=0x%llx flags=0x%x\n",
+                    i, (unsigned long long)relocation->addend,
+                    relocation->target);
             goto out;
         }
     }

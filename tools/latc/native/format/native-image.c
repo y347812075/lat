@@ -23,6 +23,39 @@ static int range_valid(uint64_t offset, uint64_t length, size_t size)
     return offset <= size && length <= size - offset;
 }
 
+static int tb_target_valid(const LatNativeTbV1 *tbs, uint64_t count,
+                           uint64_t guest_pc, uint32_t flags)
+{
+    uint64_t left = 0;
+    uint64_t right = count;
+    while (left < right) {
+        uint64_t middle = left + (right - left) / 2;
+        const LatNativeTbV1 *tb = &tbs[middle];
+        if (tb->guest_pc < guest_pc ||
+            (tb->guest_pc == guest_pc && tb->flags < flags)) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+    if (left < count && tbs[left].guest_pc == guest_pc &&
+        tbs[left].flags == flags) {
+        return 1;
+    }
+    left = 0;
+    right = count;
+    while (left < right) {
+        uint64_t middle = left + (right - left) / 2;
+        if (tbs[middle].guest_pc < guest_pc) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+    return left < count && tbs[left].guest_pc == guest_pc &&
+        (left + 1 == count || tbs[left + 1].guest_pc != guest_pc);
+}
+
 int lat_native_image_validate(const void *data, size_t size,
                               char *error, size_t error_size)
 {
@@ -124,6 +157,15 @@ int lat_native_image_validate(const void *data, size_t size,
             relocations[i].target != 0) {
             return invalid(error, error_size,
                            "native relocation %llu has an invalid guest target",
+                           (unsigned long long)i);
+        }
+        if ((header->flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC) &&
+            relocations[i].kind == LAT_NATIVE_RELOC_TB_TARGET &&
+            !tb_target_valid(tbs, header->tb_count,
+                             (uint64_t)relocations[i].addend,
+                             relocations[i].target)) {
+            return invalid(error, error_size,
+                           "native relocation %llu targets a missing TB",
                            (unsigned long long)i);
         }
     }
@@ -238,6 +280,9 @@ int lat_native_image_mark_x86_static_file(const char *path,
     }
     LatNativeImageHeaderV1 *header = (void *)data;
     header->flags |= LAT_NATIVE_IMAGE_X86_STATIC_EXEC;
+    if (lat_native_image_validate(data, size, error, error_size)) {
+        goto out;
+    }
     if (fseek(image, 0, SEEK_SET) ||
         fwrite(header, sizeof(*header), 1, image) != 1 || fflush(image)) {
         goto out;

@@ -28,7 +28,9 @@ import sys
 
 data = json.load(open(sys.argv[1]))
 assert data["cfg_tbs"] > 0, data
-assert data["pretranslated"] == data["cfg_tbs"], data
+assert data["pretranslated"] == \
+    data["cfg_tbs"] + data["continuation_tbs"] + \
+    data["edge_target_tbs"], data
 assert data["failed"] == 0, data
 assert (data["same_extent"] + data["shorter_than_cfg"] +
         data["longer_than_cfg"]) == data["cfg_tbs"], data

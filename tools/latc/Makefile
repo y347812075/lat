@@ -1,4 +1,5 @@
 CC ?= cc
+X86_CC ?= $(CC)
 AR ?= ar
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=c11
 CPPFLAGS += -Icfg/include
@@ -18,7 +19,9 @@ CFG_SRC := \
 CFG_OBJ := $(CFG_SRC:%.c=$(BUILD)/%.o)
 FORMAT_OBJ := $(BUILD)/format/bundle.o
 
-.PHONY: all clean test test-native test-native-shell test-aot-native test-spec-analyze test-spec-gzip test-spec-gzip-aot check-import
+.PHONY: all clean test test-native test-native-shell test-native-long-tb \
+	test-aot-native test-spec-analyze test-spec-gzip test-spec-gzip-aot \
+	test-spec-gzip-native check-import
 
 all: $(BUILD)/latc $(BUILD)/liblatc_cfg.a
 
@@ -148,6 +151,10 @@ $(BUILD)/tests/x86-entry-regs42: tests/x86-entry-regs42.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
 
+$(BUILD)/tests/x86-long-tb-exit42: tests/x86-long-tb-exit42.S
+	@mkdir -p $(dir $@)
+	$(X86_CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
 $(BUILD)/tests/x86-exit-group42: tests/x86-exit-group42.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
@@ -192,6 +199,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/x86-mprotect42 \
 	$(BUILD)/tests/x86-fstat42 \
 	$(BUILD)/tests/x86-entry-regs42 \
+	$(BUILD)/tests/x86-long-tb-exit42 \
 	$(BUILD)/tests/x86-exit-group42 \
 	$(BUILD)/tests/x86-argv-env42 \
 	$(BUILD)/tests/x86-static-hello $(BUILD)/tests/x86-glibc-hello
@@ -267,6 +275,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 7; assert d["error_functions"] == 0'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-entry-regs42 | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 17; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-long-tb-exit42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 3; assert d["error_functions"] == 0'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-exit-group42 | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 1; assert d["error_functions"] == 0'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-argv-env42 | \
@@ -359,6 +369,12 @@ test-native-shell: all $(BUILD)/tests/test-native-format \
 	scripts/link-native-shell.sh $(BUILD)/tests/native-dispatch-smoke-image \
 	  $(BUILD)/tests/native-dispatch-smoke.la64
 
+test-native-long-tb: all $(BUILD)/tests/x86-long-tb-exit42
+	@test -n "$(RUNNER)" || \
+	  { echo "usage: make test-native-long-tb RUNNER=/path/to/runner"; exit 2; }
+	sh tests/test-native-long-tb.sh $(BUILD)/latc $(RUNNER) \
+	  $(BUILD)/tests/x86-long-tb-exit42 $(BUILD)/native-long-tb
+
 test-aot-native: all
 	@test -n "$(RUNNER)" -a -n "$(X86_GUEST)" || \
 	  { echo "usage: make test-aot-native RUNNER=/path/to/runner X86_GUEST=/path/to/static-x86"; exit 2; }
@@ -381,6 +397,14 @@ test-spec-gzip-aot: all
 	  -a -n "$(SPEC_GZIP_EXPECTED)" || { echo "usage: make test-spec-gzip-aot RUNNER=... SPEC_GZIP=... SPEC_GZIP_INPUT=... SPEC_GZIP_EXPECTED=..."; exit 2; }
 	sh spec2000/test-gzip-aot.sh $(BUILD)/latc $(RUNNER) $(SPEC_GZIP) \
 	  $(SPEC_GZIP_INPUT) $(SPEC_GZIP_EXPECTED) $(BUILD)/spec-gzip-aot
+
+test-spec-gzip-native: all
+	@test -n "$(RUNNER)" -a -n "$(SPEC_GZIP)" -a -n "$(SPEC_GZIP_INPUT)" \
+	  -a -n "$(SPEC_GZIP_SIZE)" -a -n "$(SPEC_GZIP_EXPECTED)" || \
+	  { echo "usage: make test-spec-gzip-native RUNNER=... SPEC_GZIP=... SPEC_GZIP_INPUT=... SPEC_GZIP_SIZE=... SPEC_GZIP_EXPECTED=..."; exit 2; }
+	sh spec2000/test-gzip-native.sh $(BUILD)/latc $(RUNNER) $(SPEC_GZIP) \
+	  $(SPEC_GZIP_INPUT) $(SPEC_GZIP_SIZE) $(SPEC_GZIP_EXPECTED) \
+	  $(BUILD)/spec-gzip-native
 
 check-import:
 	python3 scripts/check-import.py

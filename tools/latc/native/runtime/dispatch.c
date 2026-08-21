@@ -1,6 +1,10 @@
+#define _GNU_SOURCE
+
 #include "dispatch.h"
 
+#include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 static const LatNativeImageHeaderV1 *dispatch_header;
 static const unsigned char *dispatch_image;
@@ -83,6 +87,11 @@ void *lat_native_x86_dispatch_lookup(uint64_t guest_pc)
 {
     const LatNativeTbV1 *tb = lat_native_tb_find(
         dispatch_header, dispatch_image, dispatch_image_size, guest_pc, 0);
-    if (!tb || !dispatch_code) abort();
+    if (!tb || !dispatch_code) {
+        dprintf(STDERR_FILENO,
+                "latc: static native image is missing TB pc=0x%llx\n",
+                (unsigned long long)guest_pc);
+        _exit(127);
+    }
     return (void *)(dispatch_code + tb->code_offset);
 }
