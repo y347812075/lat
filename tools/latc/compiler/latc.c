@@ -15,6 +15,7 @@ static void usage(const char *name)
             " [--profile-ignore-outside-exec] [--aot FILE]\n"
             "  %s inspect [--json] BUNDLE\n", name, name, name);
     fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
+    fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
 }
 
 static int inspect_native(const char *path, int json)
@@ -192,6 +193,16 @@ int main(int argc, char **argv)
         }
         if (!path) { usage(argv[0]); return 2; }
         return inspect_native(path, json);
+    }
+    if (strcmp(argv[1], "mark-native-x86") == 0) {
+        char error[256] = {0};
+        if (argc != 3) { usage(argv[0]); return 2; }
+        if (lat_native_image_mark_x86_static_file(argv[2], error,
+                                                  sizeof(error))) {
+            fprintf(stderr, "latc: %s\n", error);
+            return 1;
+        }
+        return 0;
     }
     if (strcmp(argv[1], "analyze") != 0) { usage(argv[0]); return 2; }
     int json = 0;

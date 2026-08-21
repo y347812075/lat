@@ -71,11 +71,10 @@ adding LAT's context-switch assembly.
 when `rip` becomes zero.
 
 `tests/x86-exit42.S` is the first real x86 input. It performs only
-`exit(42)`. Its native image must be explicitly marked by
-`mark-native-exit-smoke` and must match the recorded LAT build ID before the
-specialised entry path will run it. No other syscall is accepted.
-The marker and runtime both require the exact fixture SHA-256, so the flag
-cannot be applied to gzip or another x86 ELF.
+`exit(42)`. `compile-native-image.sh` verifies that the embedded guest is an
+x86-64 ELF without `PT_INTERP`, marks it for static execution, and records the
+LAT build ID required by the runtime. Guest SHA-256 values are recorded for
+identity and diagnostics, not used as an execution allowlist.
 `tests/x86-exit-add42.S` uses real x86 arithmetic to compute 42 before the
 same restricted exit syscall.
 `tests/x86-exit-loop42.S` executes a six-iteration x86 loop across four CFG
@@ -128,14 +127,19 @@ corresponding cases in `linux-user/syscall.c`.
 `tests/x86-entry-regs42.S` checks that the initial guest GPRs are deterministic
 and that static ELF `%rdx` is zero, as required for the dynamic-linker finalizer
 hook passed to glibc startup.
+`tests/x86-argv-env42.S` checks that normal LoongArch command-line arguments
+and environment variables appear in the x86 Linux initial stack. Runtime
+options beginning with `--latc-` remain reserved for image inspection and
+diagnostics.
 `tests/x86-static-hello.S` is a static x86-64 ELF with no interpreter and no
 host libraries. Its `_start` writes `Hello, LATC!` with the x86 Linux `write`
 syscall and exits with the x86 Linux `exit` syscall. This is the first direct
 static-translation test. `tests/x86-glibc-hello.c` is the separate full static
 glibc fixture used after the smaller call, helper, IFUNC, and auxv tests pass.
-It now prints `Hello from glibc!` and exits successfully on the 3A6000 test
-host. The generated LoongArch shell currently links the small host runtime
-dynamically; producing a fully static LoongArch ELF remains separate work.
+It validates `argc`, `argv`, and `getenv`, then prints `Hello from glibc!` and
+exits successfully on the 3A6000 test host. The generated LoongArch shell
+currently links the small host runtime dynamically; producing a fully static
+LoongArch ELF remains separate work.
 
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the

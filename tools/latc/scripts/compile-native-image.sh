@@ -33,4 +33,5 @@ if [ ! -s "$output" ]; then
     echo "latc: LAT did not export a native image" >&2
     exit 1
 fi
+"$latc" mark-native-x86 "$output"
 "$latc" inspect-native --json "$output"

@@ -2,6 +2,7 @@
 #include "lat-native-image.h"
 #include "native-image.h"
 
+#include <elf.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -17,6 +18,12 @@ _Static_assert(sizeof(LatNativeTbV1) == 24,
 _Static_assert(sizeof(LatNativeRelocationV1) == 32,
                "native relocation record size changed");
 
+static int write_image(const char *path, const void *image, size_t size)
+{
+    FILE *output = fopen(path, "wb");
+    return !output || fwrite(image, size, 1, output) != 1 || fclose(output);
+}
+
 int main(int argc, char **argv)
 {
     unsigned char image[512] = {0};
@@ -30,7 +37,7 @@ int main(int argc, char **argv)
     header->version = LAT_NATIVE_IMAGE_VERSION;
     header->header_size = sizeof(*header);
     header->guest_image_offset = sizeof(*header);
-    header->guest_image_size = 16;
+    header->guest_image_size = sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr);
     header->code_offset = header->guest_image_offset + header->guest_image_size;
     header->code_size = 32;
     header->tb_table_offset = header->code_offset + header->code_size;
@@ -38,6 +45,23 @@ int main(int argc, char **argv)
     header->relocation_offset = header->tb_table_offset + sizeof(*tb);
     header->relocation_count = 1;
     strcpy(header->lat_build_id, "test-build");
+    Elf64_Ehdr *elf = (void *)(image + header->guest_image_offset);
+    memcpy(elf->e_ident, ELFMAG, SELFMAG);
+    elf->e_ident[EI_CLASS] = ELFCLASS64;
+    elf->e_ident[EI_DATA] = ELFDATA2LSB;
+    elf->e_type = ET_EXEC;
+    elf->e_machine = EM_X86_64;
+    elf->e_entry = 0x401000;
+    elf->e_phoff = sizeof(*elf);
+    elf->e_ehsize = sizeof(*elf);
+    elf->e_phentsize = sizeof(Elf64_Phdr);
+    elf->e_phnum = 1;
+    Elf64_Phdr *phdr = (void *)((unsigned char *)elf + elf->e_phoff);
+    phdr->p_type = PT_LOAD;
+    phdr->p_flags = PF_R | PF_X;
+    phdr->p_vaddr = elf->e_entry;
+    phdr->p_memsz = 16;
+    header->guest_entry = elf->e_entry;
     tb = (void *)(image + header->tb_table_offset);
     tb->guest_pc = 0x401000;
     tb->code_offset = 0;
@@ -55,10 +79,32 @@ int main(int argc, char **argv)
         return 1;
     }
     if (argc == 2) {
-        FILE *output = fopen(argv[1], "wb");
-        if (!output || fwrite(image, image_size, 1, output) != 1 ||
-            fclose(output)) {
+        if (write_image(argv[1], image, image_size)) {
             fprintf(stderr, "cannot write native image fixture\n");
+            return 1;
+        }
+        if (lat_native_image_mark_x86_static_file(argv[1], error,
+                                                  sizeof(error)) != 0 ||
+            lat_native_image_inspect_file(argv[1], header, error,
+                                          sizeof(error)) != 0 ||
+            !(header->flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC)) {
+            fprintf(stderr, "cannot mark static x86 image: %s\n", error);
+            return 1;
+        }
+        phdr->p_type = PT_INTERP;
+        if (write_image(argv[1], image, image_size)) return 1;
+        error[0] = '\0';
+        if (lat_native_image_mark_x86_static_file(argv[1], error,
+                                                  sizeof(error)) == 0 ||
+            !strstr(error, "dynamically linked")) {
+            fprintf(stderr, "dynamic x86 image accepted: %s\n", error);
+            return 1;
+        }
+        phdr->p_type = PT_LOAD;
+        if (write_image(argv[1], image, image_size) ||
+            lat_native_image_mark_x86_static_file(argv[1], error,
+                                                  sizeof(error))) {
+            fprintf(stderr, "cannot restore static x86 image: %s\n", error);
             return 1;
         }
     } else if (argc != 1) {

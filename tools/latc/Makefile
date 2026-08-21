@@ -144,6 +144,10 @@ $(BUILD)/tests/x86-exit-group42: tests/x86-exit-group42.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
 
+$(BUILD)/tests/x86-argv-env42: tests/x86-argv-env42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
 $(BUILD)/tests/x86-static-hello: tests/x86-static-hello.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
@@ -179,6 +183,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/x86-fstat42 \
 	$(BUILD)/tests/x86-entry-regs42 \
 	$(BUILD)/tests/x86-exit-group42 \
+	$(BUILD)/tests/x86-argv-env42 \
 	$(BUILD)/tests/x86-static-hello $(BUILD)/tests/x86-glibc-hello
 	$(BUILD)/tests/test-cfg $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc analyze $(BUILD)/tests/cfg-fixture
@@ -248,6 +253,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 17; assert d["error_functions"] == 0'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-exit-group42 | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 1; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-argv-env42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 15; assert d["error_functions"] == 0'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-static-hello | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 3; assert d["error_functions"] == 0'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-glibc-hello | \
@@ -303,10 +310,6 @@ $(BUILD)/tests/make-native-dispatch-smoke: tests/make-native-dispatch-smoke.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
 
-$(BUILD)/tests/mark-native-exit-smoke: tests/mark-native-exit-smoke.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
-
 test-native: all
 	@test -n "$(RUNNER)" -a -n "$(X86_GUEST)" || \
 	  { echo "usage: make test-native RUNNER=/path/to/runner X86_GUEST=/path/to/static-x86"; exit 2; }
@@ -315,12 +318,9 @@ test-native: all
 test-native-shell: all $(BUILD)/tests/test-native-format \
 		$(BUILD)/tests/make-native-smoke \
 		$(BUILD)/tests/make-native-state-smoke \
-		$(BUILD)/tests/make-native-dispatch-smoke \
-		$(BUILD)/tests/mark-native-exit-smoke
+		$(BUILD)/tests/make-native-dispatch-smoke
 	$(BUILD)/tests/test-native-format $(BUILD)/tests/native-image
-	cp $(BUILD)/tests/native-image $(BUILD)/tests/not-exit-smoke-image
-	! $(BUILD)/tests/mark-native-exit-smoke \
-	  $(BUILD)/tests/not-exit-smoke-image
+	$(BUILD)/latc mark-native-x86 $(BUILD)/tests/native-image
 	scripts/link-native-shell.sh $(BUILD)/tests/native-image \
 	  $(BUILD)/tests/native-shell.la64
 	loongarch64-unknown-linux-gnu-readelf -h $(BUILD)/tests/native-shell.la64 | \

@@ -1,5 +1,6 @@
 #include "native-image.h"
 
+#include <elf.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -165,5 +166,88 @@ out:
     }
     free(data);
     fclose(input);
+    return result;
+}
+
+static int validate_static_x86_guest(const LatNativeImageHeaderV1 *header,
+                                     const unsigned char *data, size_t size,
+                                     char *error, size_t error_size)
+{
+    if (!range_valid(header->guest_image_offset, header->guest_image_size,
+                     size) || header->guest_image_size < sizeof(Elf64_Ehdr)) {
+        return invalid(error, error_size, "embedded x86 ELF is truncated");
+    }
+    const unsigned char *guest = data + header->guest_image_offset;
+    const Elf64_Ehdr *elf = (const void *)guest;
+    if (memcmp(elf->e_ident, ELFMAG, SELFMAG) ||
+        elf->e_ident[EI_CLASS] != ELFCLASS64 ||
+        elf->e_ident[EI_DATA] != ELFDATA2LSB ||
+        elf->e_machine != EM_X86_64 ||
+        elf->e_type != ET_EXEC ||
+        elf->e_entry != header->guest_entry ||
+        elf->e_phentsize != sizeof(Elf64_Phdr) || !elf->e_phnum ||
+        elf->e_phoff > header->guest_image_size ||
+        elf->e_phnum > (header->guest_image_size - elf->e_phoff) /
+                       sizeof(Elf64_Phdr)) {
+        return invalid(error, error_size,
+                       "embedded guest is not a supported x86-64 ELF");
+    }
+    const Elf64_Phdr *phdrs = (const void *)(guest + elf->e_phoff);
+    int entry_is_executable = 0;
+    for (uint16_t i = 0; i < elf->e_phnum; i++) {
+        if (phdrs[i].p_type == PT_INTERP) {
+            return invalid(error, error_size,
+                           "embedded x86 ELF is dynamically linked");
+        }
+        if (phdrs[i].p_type == PT_LOAD && (phdrs[i].p_flags & PF_X) &&
+            elf->e_entry >= phdrs[i].p_vaddr &&
+            elf->e_entry - phdrs[i].p_vaddr < phdrs[i].p_memsz) {
+            entry_is_executable = 1;
+        }
+    }
+    if (!entry_is_executable) {
+        return invalid(error, error_size,
+                       "embedded x86 ELF entry is not executable");
+    }
+    return 0;
+}
+
+int lat_native_image_mark_x86_static_file(const char *path,
+                                          char *error, size_t error_size)
+{
+    FILE *image = fopen(path, "r+b");
+    unsigned char *data = NULL;
+    int result = -1;
+    if (!image) {
+        return invalid(error, error_size, "cannot open native image");
+    }
+    if (fseek(image, 0, SEEK_END)) goto out;
+    long end = ftell(image);
+    if (end < 0 || fseek(image, 0, SEEK_SET)) {
+        goto out;
+    }
+    size_t size = (size_t)end;
+    if ((long)size != end || !(data = malloc(size ? size : 1)) ||
+        (size && fread(data, size, 1, image) != 1)) {
+        goto out;
+    }
+    if (lat_native_image_validate(data, size, error, error_size) ||
+        validate_static_x86_guest((const void *)data, data, size,
+                                  error, error_size)) {
+        goto out;
+    }
+    LatNativeImageHeaderV1 *header = (void *)data;
+    header->flags |= LAT_NATIVE_IMAGE_X86_STATIC_EXEC;
+    if (fseek(image, 0, SEEK_SET) ||
+        fwrite(header, sizeof(*header), 1, image) != 1 || fflush(image)) {
+        goto out;
+    }
+    result = 0;
+out:
+    if (result && error && error_size && !error[0]) {
+        snprintf(error, error_size, "cannot update native image");
+    }
+    free(data);
+    if (image) fclose(image);
     return result;
 }
