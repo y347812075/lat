@@ -21,7 +21,7 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 
 .PHONY: all clean test test-native test-native-shell test-native-long-tb \
 	test-aot-native test-spec-analyze test-spec-gzip test-spec-gzip-aot \
-	test-spec-gzip-native check-import
+	test-spec-gzip-native test-specint-native check-import
 
 all: $(BUILD)/latc $(BUILD)/liblatc_cfg.a
 
@@ -178,6 +178,7 @@ $(BUILD)/tests/test-cfg: tests/test-cfg.c $(BUILD)/liblatc_cfg.a
 test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-fallback-loader $(BUILD)/tests/test-native-format \
 	$(BUILD)/tests/test-native-relocate $(BUILD)/tests/test-native-dispatch \
+	$(BUILD)/tests/test-x86-linux-user \
 	$(BUILD)/tests/x86-exit42 $(BUILD)/tests/x86-exit-add42 \
 	$(BUILD)/tests/x86-exit-loop42 $(BUILD)/tests/x86-exit-memory42 \
 	$(BUILD)/tests/x86-exit-call42 $(BUILD)/tests/x86-write-exit42 \
@@ -221,6 +222,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-native-format $(BUILD)/tests/native-image
 	$(BUILD)/tests/test-native-relocate
 	$(BUILD)/tests/test-native-dispatch
+	$(BUILD)/tests/test-x86-linux-user
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-exit42 | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] == 2'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-exit-add42 | \
@@ -324,6 +326,11 @@ $(BUILD)/tests/test-native-dispatch: tests/test-native-dispatch.c \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 
+$(BUILD)/tests/test-x86-linux-user: tests/test-x86-linux-user.c \
+		native/runtime/x86-linux-user.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+
 $(BUILD)/tests/make-native-smoke: tests/make-native-smoke.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
@@ -405,6 +412,14 @@ test-spec-gzip-native: all
 	sh spec2000/test-gzip-native.sh $(BUILD)/latc $(RUNNER) $(SPEC_GZIP) \
 	  $(SPEC_GZIP_INPUT) $(SPEC_GZIP_SIZE) $(SPEC_GZIP_EXPECTED) \
 	  $(BUILD)/spec-gzip-native
+
+test-specint-native: all
+	@test -n "$(RUNNER)" -a -n "$(SPEC_ROOT)" || \
+	  { echo "usage: make test-specint-native RUNNER=... SPEC_ROOT=... [SPEC_BENCHMARK=181.mcf]"; exit 2; }
+	python3 spec2000/run-specint-native.py --latc $(BUILD)/latc \
+	  --runner $(RUNNER) --spec-root $(SPEC_ROOT) \
+	  --workdir $(BUILD)/specint-native \
+	  $(if $(SPEC_BENCHMARK),--benchmark $(SPEC_BENCHMARK),)
 
 check-import:
 	python3 scripts/check-import.py

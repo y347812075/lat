@@ -13,7 +13,13 @@ case "$2" in
 esac
 root=$(cd "$(dirname "$0")/.." && pwd)
 cc=${LATC_LA64_CC:-loongarch64-unknown-linux-gnu-gcc}
-objcopy=${LATC_LA64_OBJCOPY:-loongarch64-unknown-linux-gnu-objcopy}
+if [ -n "${LATC_LA64_OBJCOPY:-}" ]; then
+    objcopy=$LATC_LA64_OBJCOPY
+elif command -v loongarch64-unknown-linux-gnu-objcopy >/dev/null 2>&1; then
+    objcopy=loongarch64-unknown-linux-gnu-objcopy
+else
+    objcopy=loongarch64-aosc-linux-gnu-objcopy
+fi
 ldflags=${LATC_LA64_LDFLAGS:--pie}
 work=$(mktemp -d "${TMPDIR:-/tmp}/latc-link.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM

@@ -50,3 +50,4 @@ PY
 
 python3 "$(dirname "$0")/../spec2000/prepare-specint-train.py" --help >/dev/null
 python3 "$(dirname "$0")/../spec2000/bench-specint-train.py" --help >/dev/null
+python3 "$(dirname "$0")/../spec2000/run-specint-native.py" --help >/dev/null
