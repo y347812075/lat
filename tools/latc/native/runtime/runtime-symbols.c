@@ -252,23 +252,23 @@ uintptr_t lat_runtime_symbol_address(uint32_t symbol)
     }
 #if defined(__loongarch__)
     if (symbol == LAT_NATIVE_SYMBOL_EPILOGUE_RET_0 &&
-        (configured_flags & LAT_NATIVE_IMAGE_X86_EXIT_SMOKE)) {
+        (configured_flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC)) {
         return (uintptr_t)lat_native_x86_dispatch_jirl;
     }
     if (symbol == LAT_NATIVE_SYMBOL_RAISE_SYSCALL &&
-        (configured_flags & LAT_NATIVE_IMAGE_X86_EXIT_SMOKE)) {
+        (configured_flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC)) {
         return (uintptr_t)lat_native_x86_syscall;
     }
     if (symbol == LAT_NATIVE_SYMBOL_PCMPISTRI_XMM &&
-        (configured_flags & LAT_NATIVE_IMAGE_X86_EXIT_SMOKE)) {
+        (configured_flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC)) {
         return (uintptr_t)lat_helper_pcmpistri_xmm;
     }
     if (symbol == LAT_NATIVE_SYMBOL_PCMPISTRM_XMM &&
-        (configured_flags & LAT_NATIVE_IMAGE_X86_EXIT_SMOKE)) {
+        (configured_flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC)) {
         return (uintptr_t)lat_helper_pcmpistrm_xmm;
     }
     if (symbol == LAT_NATIVE_SYMBOL_CPUID &&
-        (configured_flags & LAT_NATIVE_IMAGE_X86_EXIT_SMOKE)) {
+        (configured_flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC)) {
         return (uintptr_t)lat_helper_cpuid;
     }
 #endif

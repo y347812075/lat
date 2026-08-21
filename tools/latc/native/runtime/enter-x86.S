@@ -1,8 +1,8 @@
 .text
 .align 2
-.global lat_native_enter_x86_exit_smoke
-.type lat_native_enter_x86_exit_smoke, @function
-lat_native_enter_x86_exit_smoke:
+.global lat_native_enter_x86_static_exec
+.type lat_native_enter_x86_static_exec, @function
+lat_native_enter_x86_static_exec:
     move $t0, $a0
     move $s8, $a1
     move $s4, $a2
@@ -24,4 +24,4 @@ lat_native_enter_x86_exit_smoke:
     move $t7, $zero
     move $t8, $zero
     jr $t0
-.size lat_native_enter_x86_exit_smoke, .-lat_native_enter_x86_exit_smoke
+.size lat_native_enter_x86_static_exec, .-lat_native_enter_x86_static_exec
