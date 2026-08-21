@@ -90,9 +90,67 @@ $(BUILD)/tests/x86-indirect-call42: tests/x86-indirect-call42.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
 
+$(BUILD)/tests/x86-runtime-indirect-call42: tests/x86-runtime-indirect-call42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-helper-state42: tests/x86-helper-state42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-ifunc-like42: tests/x86-ifunc-like42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-auxv42: tests/x86-auxv42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-addr32-call42: tests/x86-addr32-call42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-tls42: tests/x86-tls-start.S tests/x86-tls42.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -fno-stack-protector -fno-tree-vectorize \
+	  -fno-tree-loop-distribute-patterns -nostdlib -static -no-pie \
+	  -Wl,--build-id=none -o $@ $^
+
+$(BUILD)/tests/x86-prlimit42: tests/x86-prlimit42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-getrandom42: tests/x86-getrandom42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-readlinkat42: tests/x86-readlinkat42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-mprotect42: tests/x86-mprotect42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-fstat42: tests/x86-fstat42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-entry-regs42: tests/x86-entry-regs42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-exit-group42: tests/x86-exit-group42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
 $(BUILD)/tests/x86-static-hello: tests/x86-static-hello.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-glibc-hello: tests/x86-glibc-hello.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -static -no-pie -Wl,--build-id=none -o $@ $<
 
 $(BUILD)/tests/test-cfg: tests/test-cfg.c $(BUILD)/liblatc_cfg.a
 	@mkdir -p $(dir $@)
@@ -107,7 +165,21 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/x86-stack-exit42 $(BUILD)/tests/x86-brk-exit42 \
 	$(BUILD)/tests/x86-mmap-exit42 $(BUILD)/tests/x86-file-exit42 \
 	$(BUILD)/tests/x86-open-error42 $(BUILD)/tests/x86-c-exit42 \
-	$(BUILD)/tests/x86-indirect-call42 $(BUILD)/tests/x86-static-hello
+	$(BUILD)/tests/x86-indirect-call42 \
+	$(BUILD)/tests/x86-runtime-indirect-call42 \
+	$(BUILD)/tests/x86-helper-state42 \
+	$(BUILD)/tests/x86-ifunc-like42 \
+	$(BUILD)/tests/x86-auxv42 \
+	$(BUILD)/tests/x86-addr32-call42 \
+	$(BUILD)/tests/x86-tls42 \
+	$(BUILD)/tests/x86-prlimit42 \
+	$(BUILD)/tests/x86-getrandom42 \
+	$(BUILD)/tests/x86-readlinkat42 \
+	$(BUILD)/tests/x86-mprotect42 \
+	$(BUILD)/tests/x86-fstat42 \
+	$(BUILD)/tests/x86-entry-regs42 \
+	$(BUILD)/tests/x86-exit-group42 \
+	$(BUILD)/tests/x86-static-hello $(BUILD)/tests/x86-glibc-hello
 	$(BUILD)/tests/test-cfg $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc analyze $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc compile $(BUILD)/tests/cfg-fixture -o $(BUILD)/tests/cfg-bundle --runner $(BUILD)/tests/cfg-fixture
@@ -150,8 +222,36 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] >= 3; assert d["tbs"] >= 7'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-indirect-call42 | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 2; assert d["tbs"] >= 4; assert d["open_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-runtime-indirect-call42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] >= 3; assert d["tbs"] >= 10; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-helper-state42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 15; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-ifunc-like42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] >= 3; assert d["tbs"] >= 8; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-auxv42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 20; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-addr32-call42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 2; assert d["tbs"] >= 8; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-tls42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] >= 2; assert d["tbs"] >= 20; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-prlimit42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 5; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-getrandom42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 5; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-readlinkat42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 6; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-mprotect42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 9; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-fstat42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 7; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-entry-regs42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 17; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-exit-group42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 1; assert d["error_functions"] == 0'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-static-hello | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 3; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-glibc-hello | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] >= 1000; assert d["tbs"] >= 30000; assert d["error_functions"] == 0'
 	$(BUILD)/latc inspect-native --json $(BUILD)/tests/native-image | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["execution_model"] == "lat-native-image"; assert d["tbs"] == 1; assert d["relocations"] == 1'
 	$(MAKE) check-import
@@ -181,6 +281,7 @@ $(BUILD)/tests/test-native-format: tests/test-native-format.c \
 
 $(BUILD)/tests/test-native-relocate: tests/test-native-relocate.c \
 		native/runtime/relocate.c native/runtime/runtime-symbols.c \
+		native/runtime/x86-linux-user.c \
 		native/runtime/dispatch.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^

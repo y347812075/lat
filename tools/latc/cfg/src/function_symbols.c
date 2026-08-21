@@ -254,6 +254,28 @@ static void dedup_functions(FuncVec *funcs)
     funcs->n = out;
 }
 
+static void infer_zero_function_sizes(const ElfFile *elf, FuncVec *funcs)
+{
+    for (size_t i = 0; i < funcs->n; i++) {
+        FuncSym *fn = &funcs->v[i];
+        if (fn->size || fn->shndx >= elf->eh->e_shnum) {
+            continue;
+        }
+        const Elf64_Shdr *section = &elf->sh[fn->shndx];
+        uint64_t end = section->sh_addr + section->sh_size;
+        for (size_t j = i + 1; j < funcs->n; j++) {
+            if (funcs->v[j].shndx == fn->shndx &&
+                funcs->v[j].addr > fn->addr) {
+                end = funcs->v[j].addr;
+                break;
+            }
+        }
+        if (fn->addr >= section->sh_addr && fn->addr < end) {
+            fn->size = end - fn->addr;
+        }
+    }
+}
+
 static bool special_section_func(const ElfFile *elf, const char *section_name,
                                  const char *func_name, FuncSym *out)
 {
@@ -280,6 +302,15 @@ static void load_special_section_functions(const ElfFile *elf, FuncVec *funcs)
         func_push(funcs, fn);
     }
     if (special_section_func(elf, ".fini", "_fini", &fn)) {
+        func_push(funcs, fn);
+    }
+    if (special_section_func(elf, ".plt", "_plt", &fn)) {
+        func_push(funcs, fn);
+    }
+    if (special_section_func(elf, ".plt.got", "_plt_got", &fn)) {
+        func_push(funcs, fn);
+    }
+    if (special_section_func(elf, ".plt.sec", "_plt_sec", &fn)) {
         func_push(funcs, fn);
     }
     dedup_functions(funcs);
@@ -404,29 +435,17 @@ static void load_functions(const ElfFile *elf, FuncVec *funcs)
             if (!*name) {
                 continue;
             }
-            uint64_t size = sym->st_size;
-            if (size == 0 && strcmp(name, "_init") != 0 &&
-                strcmp(name, "_fini") != 0) {
-                continue;
-            }
-            if (size == 0) {
-                Elf64_Shdr *sec = &elf->sh[sym->st_shndx];
-                if (sym->st_value < sec->sh_addr ||
-                    sym->st_value >= sec->sh_addr + sec->sh_size) {
-                    continue;
-                }
-                size = sec->sh_addr + sec->sh_size - sym->st_value;
-            }
             func_push(funcs, (FuncSym){
                 .name = xstrdup(name),
                 .addr = sym->st_value,
-                .size = size,
+                .size = sym->st_size,
                 .shndx = sym->st_shndx,
             });
         }
     }
 
     dedup_functions(funcs);
+    infer_zero_function_sizes(elf, funcs);
 }
 
 

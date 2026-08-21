@@ -31,8 +31,29 @@ static void test_program(const char *path)
     char error[256] = {0};
     assert(cfg_analyze_elf(path, &options, &p, error, sizeof(error)) == 0);
     const CfgProgramFunction *start = NULL;
+    const CfgProgramFunction *jump_source = NULL;
+    const CfgProgramFunction *jump_container = NULL;
+    const CfgProgramFunction *jump_plt_source = NULL;
+    const CfgProgramFunction *plt = NULL;
+    const CfgProgramFunction *fallthrough_check = NULL;
+    const CfgProgramFunction *fallthrough_next = NULL;
+    const CfgProgramFunction *zero_sized = NULL;
     for (size_t i = 0; i < p.function_count; i++) {
         if (strcmp(p.functions[i].name, "_start") == 0) start = &p.functions[i];
+        if (strcmp(p.functions[i].name, "jump_source") == 0)
+            jump_source = &p.functions[i];
+        if (strcmp(p.functions[i].name, "jump_container") == 0)
+            jump_container = &p.functions[i];
+        if (strcmp(p.functions[i].name, "jump_plt_source") == 0)
+            jump_plt_source = &p.functions[i];
+        if (strcmp(p.functions[i].name, "_plt") == 0)
+            plt = &p.functions[i];
+        if (strcmp(p.functions[i].name, "fallthrough_check") == 0)
+            fallthrough_check = &p.functions[i];
+        if (strcmp(p.functions[i].name, "fallthrough_next") == 0)
+            fallthrough_next = &p.functions[i];
+        if (strcmp(p.functions[i].name, "zero_sized") == 0)
+            zero_sized = &p.functions[i];
     }
     assert(start && start->tb_count >= 4);
     int call = 0, jcc = 0, icall = 0, syscall = 0;
@@ -44,6 +65,47 @@ static void test_program(const char *path)
     }
     assert(call == 1 && jcc == 1 && icall == 1 && syscall == 1);
     assert(start->status == CFG_FUNCTION_OPEN);
+    assert(jump_source && jump_source->tb_count == 1 && jump_container);
+    const CfgTb *source_tb = &p.tbs[jump_source->first_tb];
+    assert(source_tb->terminator == CFG_TB_JUMP && source_tb->edge_count == 1);
+    uint64_t cross_target = p.edges[source_tb->first_edge].to;
+    assert(cross_target > jump_container->start &&
+           cross_target < jump_container->start + jump_container->size);
+    int target_is_leader = 0;
+    for (size_t i = jump_container->first_tb;
+         i < jump_container->first_tb + jump_container->tb_count; i++) {
+        target_is_leader |= p.tbs[i].start == cross_target;
+    }
+    assert(target_is_leader);
+
+    assert(jump_plt_source && jump_plt_source->tb_count == 1 && plt);
+    source_tb = &p.tbs[jump_plt_source->first_tb];
+    assert(source_tb->terminator == CFG_TB_JUMP && source_tb->edge_count == 1);
+    cross_target = p.edges[source_tb->first_edge].to;
+    assert(cross_target > plt->start && cross_target < plt->start + plt->size);
+    target_is_leader = 0;
+    for (size_t i = plt->first_tb; i < plt->first_tb + plt->tb_count; i++) {
+        target_is_leader |= p.tbs[i].start == cross_target;
+    }
+    assert(target_is_leader);
+
+    assert(fallthrough_check && fallthrough_next);
+    int found_cross_symbol_fallthrough = 0;
+    for (size_t i = fallthrough_check->first_tb;
+         i < fallthrough_check->first_tb + fallthrough_check->tb_count; i++) {
+        const CfgTb *tb = &p.tbs[i];
+        if (tb->terminator != CFG_TB_CONDITIONAL) continue;
+        for (size_t j = tb->first_edge; j < tb->first_edge + tb->edge_count;
+             j++) {
+            const CfgProgramEdge *edge = &p.edges[j];
+            if (edge->kind == CFG_EDGE_FALSE &&
+                edge->to < fallthrough_next->start) {
+                found_cross_symbol_fallthrough = 1;
+            }
+        }
+    }
+    assert(found_cross_symbol_fallthrough);
+    assert(zero_sized && zero_sized->size > 0 && zero_sized->tb_count == 1);
     cfg_program_destroy(&p);
 }
 
