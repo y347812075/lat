@@ -10,12 +10,11 @@ and embeds the resulting native code and relocation records.
 `execution_model=lat-aot-bundle`. It is deliberately not called a standalone
 native ELF: the file still contains the LAT runner and can enter LAT's JIT.
 
-The standalone native ELF work uses the versioned interface in
-`native/include/lat-fallback.h`. The small native runtime will load
-`liblat.so.1` only when execution reaches a guest TB missing from the compiled
-image. It rejects a library whose ABI version or LAT build ID differs from the
-image. `LATC_LIBLAT` exists only as a test/development override; installed
-programs otherwise resolve the system `liblat.so.1`.
+The standalone native ELF work retains the versioned fallback interface in
+`native/include/lat-fallback.h`, but direct static execution currently requires
+every referenced guest TB to be present. Export, image validation, relocation,
+and runtime dispatch reject a missing TB instead of silently entering LAT's
+JIT or another translated address.
 
 Generate the current stable native image on a LoongArch build host with:
 
@@ -25,8 +24,8 @@ tools/latc/scripts/compile-native-image.sh build/latc \
 build/latc inspect-native --json program.latnative
 ```
 
-This image is an input to the forthcoming ELF linker. It is not directly
-executable yet.
+This `.latnative` image is an intermediate file. Use `compile-native-elf.sh`
+to link it with the small runtime and produce the executable LoongArch ELF.
 
 Build the current LoongArch PIE shell with:
 
@@ -53,9 +52,9 @@ static libc objects and the output must have no ELF interpreter or shared
 library dependency.
 
 The shell embeds the image in read-only `.latc.image` and validates it on the
-target host. Images explicitly marked for the restricted x86 execution path
-run the guest directly when invoked without arguments. Other images still exit
-with status 126 because their required runtime helpers are not linked yet.
+target host. Images marked for static x86 execution run the guest directly and
+pass normal command-line arguments and environment variables through the x86
+Linux initial stack.
 
 `--latc-map` validates and maps the embedded static x86 ELF `PT_LOAD` segments
 at their recorded addresses, applies final page permissions, prints the mapped
@@ -64,8 +63,6 @@ range, then unmaps it. This is a loader test only; it does not enter guest code.
 `--latc-relocate` copies the LoongArch code into an anonymous mapping near the
 PIE, applies every stable guest-address and runtime-symbol relocation, flushes
 the instruction cache, changes the mapping from RW to RX, then unmaps it.
-Runtime symbols are still aborting placeholders, so translated TBs must not be
-entered yet.
 
 The first execution test is intentionally independent of x86 and LAT context
 switching. `tests/make-native-smoke.c` creates one TB containing two hand-coded
@@ -144,6 +141,9 @@ hook passed to glibc startup.
 and environment variables appear in the x86 Linux initial stack. Runtime
 options beginning with `--latc-` remain reserved for image inspection and
 diagnostics.
+`tests/x86-long-tb-exit42.S` contains more than 255 straight-line x86
+instructions. It verifies that pretranslation continues at LAT's TB length
+limit instead of leaving a missing target in the native image.
 `tests/x86-static-hello.S` is a static x86-64 ELF with no interpreter and no
 host libraries. Its `_start` writes `Hello, LATC!` with the x86 Linux `write`
 syscall and exits with the x86 Linux `exit` syscall. This is the first direct
@@ -233,7 +233,9 @@ execution. Unresolved paths use JIT unless `LATC_STRICT_AOT=1` is set.
 `runtime_tb_gen_attempts` and `runtime_tb_gen_calls`. The attempt count must be
 checked before claiming that a test ran without entering the runtime
 translator. `LATC_DISABLE_PRETRANSLATE=1` provides a JIT baseline for the same
-bundle.
+bundle. `continuation_tbs` counts TBs added after LAT reaches its instruction
+limit; `edge_target_tbs` counts executable static-edge targets not represented
+by a standalone CFG block.
 
 `LATC_PROFILE_OUT=/path/missing.profile` records runtime-generated guest PCs.
 Passing that file back through `--profile` adds missing addresses that are

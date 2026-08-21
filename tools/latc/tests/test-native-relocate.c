@@ -77,6 +77,15 @@ int main(void)
     if (code.address || code.size) {
         return 1;
     }
+    header->flags = LAT_NATIVE_IMAGE_X86_STATIC_EXEC;
+    error[0] = '\0';
+    if (lat_native_code_load(header, image, image_size, &code,
+                             error, sizeof(error)) == 0 ||
+        !strstr(error, "relocation")) {
+        fprintf(stderr, "missing static TB target accepted: %s\n", error);
+        lat_native_code_unload(&code);
+        return 1;
+    }
     puts("test-native-relocate: PASS");
     return 0;
 }

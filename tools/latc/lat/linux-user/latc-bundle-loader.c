@@ -6,6 +6,7 @@
 #include "accel/tcg/internal.h"
 #include "exec/exec-all.h"
 #include "jrra.h"
+#include "tcg/tcg.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -20,6 +21,7 @@ static int bundle_self_fd = -1;
 static LatcDiskFooter bundle_footer;
 static bool pretranslation_complete;
 static uint64_t stat_cfg_tbs, stat_profiled, stat_pretranslated, stat_failed;
+static uint64_t stat_continuation_tbs, stat_edge_target_tbs;
 static uint64_t stat_same_extent, stat_shorter_extent, stat_longer_extent;
 static uint64_t stat_runtime_tb_gen_calls, stat_runtime_first_pc;
 static uint64_t stat_runtime_tb_gen_attempts;
@@ -62,7 +64,8 @@ static void write_stats(void)
         return;
     }
     fprintf(stats, "{\"pid\":%ld,\"cfg_tbs\":%llu,\"profiled_tbs\":%llu,"
-            "\"pretranslated\":%llu,\"failed\":%llu,"
+            "\"pretranslated\":%llu,\"continuation_tbs\":%llu,"
+            "\"edge_target_tbs\":%llu,\"failed\":%llu,"
             "\"same_extent\":%llu,\"shorter_than_cfg\":%llu,"
             "\"longer_than_cfg\":%llu,\"runtime_tb_gen_calls\":%llu,"
             "\"runtime_tb_gen_attempts\":%llu,"
@@ -77,6 +80,8 @@ static void write_stats(void)
             (long)getpid(), (unsigned long long)stat_cfg_tbs,
             (unsigned long long)stat_profiled,
             (unsigned long long)stat_pretranslated,
+            (unsigned long long)stat_continuation_tbs,
+            (unsigned long long)stat_edge_target_tbs,
             (unsigned long long)stat_failed,
             (unsigned long long)stat_same_extent,
             (unsigned long long)stat_shorter_extent,
@@ -426,8 +431,11 @@ void latc_bundle_pretranslate(struct CPUState *cpu)
     cpu_get_tb_cpu_state(env, &current_pc, &cs_base, &flags);
     (void)current_pc;
     uint32_t cflags = curr_cflags(cpu);
-    uint64_t translated = 0, failed = 0, profiled = 0;
+    uint64_t translated = 0, continuations = 0, edge_targets = 0;
+    uint64_t failed = 0, profiled = 0;
     uint64_t same_extent = 0, shorter_extent = 0, longer_extent = 0;
+    GHashTable *translated_pcs = g_hash_table_new(g_direct_hash,
+                                                  g_direct_equal);
 
     /* Profiled TBs are translated first; an empty profile keeps old behavior. */
     for (unsigned pass = 0; pass < 2; pass++) {
@@ -441,34 +449,88 @@ void latc_bundle_pretranslate(struct CPUState *cpu)
             bool is_profiled = disk_tb.profile_count != 0;
             if ((pass == 0) != is_profiled) continue;
             profiled += pass == 0;
-            mmap_lock();
-            TranslationBlock *tb = tb_gen_code(cpu, disk_tb.start, cs_base,
-                                               flags, cflags);
-            if (tb) jrra_pre_translate((void **)&tb, 1, cpu, flags, cflags);
-            mmap_unlock();
-            if (!tb) {
-                failed++;
-            } else {
-                translated++;
-                uint64_t cfg_size = disk_tb.end - disk_tb.start;
-                if (tb->size == cfg_size) {
-                    same_extent++;
-                } else if (tb->size < cfg_size) {
-                    shorter_extent++;
-                    if (getenv("LATC_DEBUG_CFG"))
-                        fprintf(stderr, "latc: shorter TB pc=0x%llx cfg=%llu lat=%u\n",
-                                (unsigned long long)disk_tb.start,
-                                (unsigned long long)cfg_size, tb->size);
-                } else {
-                    /* CFG blocks stop at incoming targets; LAT TBs need not. */
-                    longer_extent++;
+            target_ulong pc = disk_tb.start;
+            bool first = true;
+            while (pc < disk_tb.end) {
+                mmap_lock();
+                TranslationBlock *tb = tb_gen_code(cpu, pc, cs_base,
+                                                   flags, cflags);
+                if (tb) {
+                    jrra_pre_translate((void **)&tb, 1, cpu, flags, cflags);
                 }
+                mmap_unlock();
+                if (!tb) {
+                    failed++;
+                    break;
+                }
+                translated++;
+                g_hash_table_add(translated_pcs,
+                                 (gpointer)(uintptr_t)pc);
+                uint64_t tb_end = (uint64_t)pc + tb->size;
+                if (first) {
+                    uint64_t cfg_size = disk_tb.end - disk_tb.start;
+                    if (tb->size == cfg_size) {
+                        same_extent++;
+                    } else if (tb->size < cfg_size) {
+                        shorter_extent++;
+                        if (getenv("LATC_DEBUG_CFG")) {
+                            fprintf(stderr, "latc: shorter TB pc=0x%llx cfg=%llu lat=%u\n",
+                                    (unsigned long long)disk_tb.start,
+                                    (unsigned long long)cfg_size, tb->size);
+                        }
+                    } else {
+                        /* CFG blocks stop at incoming targets; LAT TBs need not. */
+                        longer_extent++;
+                    }
+                    first = false;
+                }
+                if (tb_end >= disk_tb.end) {
+                    break;
+                }
+                if (!tb->size || tb->icount != TCG_MAX_INSNS) {
+                    break;
+                }
+                pc = tb_end;
+                continuations++;
             }
         }
     }
+    uint64_t edge_offset = tb_offset +
+        header.tb_count * sizeof(LatcDiskTb);
+    for (uint64_t i = 0; i < header.edge_count; i++) {
+        LatcDiskEdge edge;
+        if (read_cfg(&edge, sizeof(edge),
+                     edge_offset + i * sizeof(edge))) {
+            failed++;
+            continue;
+        }
+        if (!edge.to || !program_address(edge.to) ||
+            g_hash_table_contains(translated_pcs,
+                                  (gpointer)(uintptr_t)edge.to)) {
+            continue;
+        }
+        target_ulong pc = edge.to;
+        mmap_lock();
+        TranslationBlock *tb = tb_gen_code(cpu, pc, cs_base,
+                                           flags, cflags);
+        if (tb) {
+            jrra_pre_translate((void **)&tb, 1, cpu, flags, cflags);
+        }
+        mmap_unlock();
+        if (!tb) {
+            failed++;
+            continue;
+        }
+        translated++;
+        edge_targets++;
+        g_hash_table_add(translated_pcs, (gpointer)(uintptr_t)pc);
+    }
+    g_hash_table_destroy(translated_pcs);
     stat_cfg_tbs = header.tb_count;
     stat_profiled = profiled;
     stat_pretranslated = translated;
+    stat_continuation_tbs = continuations;
+    stat_edge_target_tbs = edge_targets;
     stat_failed = failed;
     stat_same_extent = same_extent;
     stat_shorter_extent = shorter_extent;

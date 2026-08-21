@@ -11,7 +11,7 @@ cat >"$workdir/input.profile" <<'EOF'
 0x401020 4
 EOF
 cat >"$workdir/one.json" <<'EOF'
-{"cfg_tbs":5,"runtime_tb_gen_calls":2,"runtime_tb_gen_attempts":3,"runtime_program_tb_gen_calls":1,"runtime_system_tb_gen_calls":1,"runtime_program_tb_gen_attempts":1,"runtime_system_tb_gen_attempts":2,"runtime_first_pc":4198400,"runtime_first_cflags":16384,"aot_cache_hit":true,"bundle_verify_ns":10,"guest_extract_ns":20,"aot_prepare_ns":30}
+{"cfg_tbs":5,"continuation_tbs":2,"edge_target_tbs":1,"runtime_tb_gen_calls":2,"runtime_tb_gen_attempts":3,"runtime_program_tb_gen_calls":1,"runtime_system_tb_gen_calls":1,"runtime_program_tb_gen_attempts":1,"runtime_system_tb_gen_attempts":2,"runtime_first_pc":4198400,"runtime_first_cflags":16384,"aot_cache_hit":true,"bundle_verify_ns":10,"guest_extract_ns":20,"aot_prepare_ns":30}
 EOF
 cat >"$workdir/two.json" <<'EOF'
 {"cfg_tbs":5,"runtime_tb_gen_calls":0,"runtime_program_tb_gen_calls":0,"runtime_system_tb_gen_calls":0,"runtime_first_pc":0}
@@ -31,6 +31,8 @@ assert work.joinpath("merged.profile").read_text() == \
 stats = aggregate_stats([work / "one.json", work / "two.json"])
 assert stats["processes"] == 2, stats
 assert stats["cfg_tbs"] == 10, stats
+assert stats["continuation_tbs"] == 2, stats
+assert stats["edge_target_tbs"] == 1, stats
 assert stats["runtime_tb_gen_calls"] == 2, stats
 assert stats["runtime_tb_gen_attempts"] == 3, stats
 assert stats["runtime_system_tb_gen_attempts"] == 2, stats
