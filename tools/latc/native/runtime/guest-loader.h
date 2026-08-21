@@ -10,6 +10,9 @@ typedef struct LatGuestMapping {
     uint64_t base;
     uint64_t end;
     uint64_t entry;
+    uint64_t phdr;
+    uint16_t phent;
+    uint16_t phnum;
 } LatGuestMapping;
 
 int lat_guest_map(const LatNativeImageHeaderV1 *header,

@@ -147,9 +147,79 @@ static CfgTbTerm term_from_insn(InsnKind kind)
     }
 }
 
+static int collect_direct_targets(const ElfFile *elf, const FuncVec *funcs,
+                                  AddrVec *targets)
+{
+    for (size_t i = 0; i < funcs->n; i++) {
+        const FuncSym *fn = &funcs->v[i];
+        uint64_t file_off;
+        if (!fn->size || !elf_function_file_offset(
+                elf, fn->addr, fn->size, fn->shndx, &file_off)) {
+            continue;
+        }
+        const uint8_t *buf = elf->data + file_off;
+        size_t size = (size_t)fn->size;
+        for (size_t off = 0; off < size;) {
+            Insn in = cfg_decode_insn(buf, size, fn->addr, off);
+            if (!in.len) in.len = 1;
+            if (in.has_target &&
+                (in.kind == INSN_CALL || in.kind == INSN_JCC ||
+                 in.kind == INSN_JMP) &&
+                !addr_push(targets, in.target)) {
+                return -1;
+            }
+            off += in.len;
+        }
+    }
+    sort_unique(targets);
+    return 0;
+}
+
+static bool insn_can_fall_through(InsnKind kind)
+{
+    return kind == INSN_CALL || kind == INSN_ICALL || kind == INSN_JCC ||
+           kind == INSN_SYSCALL;
+}
+
+/*
+ * Some glibc assembly functions end in a conditional branch and deliberately
+ * fall through alignment NOPs into the next symbol. Include only these proven
+ * fallthrough gaps; arbitrary executable-section gaps may contain data.
+ */
+static void extend_symbol_fallthroughs(const ElfFile *elf, FuncVec *funcs)
+{
+    for (size_t i = 0; i + 1 < funcs->n; i++) {
+        FuncSym *fn = &funcs->v[i];
+        const FuncSym *next = &funcs->v[i + 1];
+        uint64_t file_off;
+        if (!fn->size || fn->shndx != next->shndx ||
+            fn->addr + fn->size >= next->addr ||
+            !elf_function_file_offset(elf, fn->addr, fn->size, fn->shndx,
+                                      &file_off)) {
+            continue;
+        }
+
+        const uint8_t *buf = elf->data + file_off;
+        size_t size = (size_t)fn->size;
+        Insn last = {0};
+        for (size_t off = 0; off < size;) {
+            last = cfg_decode_insn(buf, size, fn->addr, off);
+            if (!last.len) {
+                last.len = 1;
+            }
+            off += last.len;
+        }
+        if (last.addr + last.len == fn->addr + fn->size &&
+            insn_can_fall_through(last.kind)) {
+            fn->size = next->addr - fn->addr;
+        }
+    }
+}
+
 static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
                             const IjmpSection *sections, size_t section_count,
-                            const FuncSym *fn, bool resolve_jt, CfgProgram *out,
+                            const AddrVec *direct_targets, const FuncSym *fn,
+                            bool resolve_jt, CfgProgram *out,
                             size_t *tb_cap, size_t *edge_cap,
                             CfgProgramFunction *result)
 {
@@ -180,6 +250,12 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
     };
 
     if (!addr_push(&leaders, fn->addr)) goto done;
+    for (size_t i = 0; i < direct_targets->n; i++) {
+        if (addr_in_function(direct_targets->v[i], fn) &&
+            !addr_push(&leaders, direct_targets->v[i])) {
+            goto done;
+        }
+    }
     for (size_t i = 0; i < insns.n; i++) {
         Insn *in = &insns.v[i];
         uint64_t next = in->addr + in->len;
@@ -310,6 +386,8 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     memset(program, 0, sizeof(*program));
     ElfFile elf = {0};
     FuncVec funcs = {0};
+    AddrVec direct_targets = {0};
+    IjmpSection *sections = NULL;
     const char *source = NULL;
     size_t function_cap = 0, tb_cap = 0, edge_cap = 0;
     int rc = -1;
@@ -320,8 +398,10 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     elf_load(path, &elf);
     funcs_load_all(&elf, &funcs, &source);
     (void)source;
+    extend_symbol_fallthroughs(&elf, &funcs);
+    if (collect_direct_targets(&elf, &funcs, &direct_targets)) goto out;
     size_t section_count = 0;
-    IjmpSection *sections = elf_build_ijmp_sections(&elf, &section_count);
+    sections = elf_build_ijmp_sections(&elf, &section_count);
     program->exec_ranges = calloc(elf.eh->e_shnum,
                                   sizeof(*program->exec_ranges));
     if (!program->exec_ranges) goto out;
@@ -343,7 +423,8 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
         };
         if (!fn.name) goto out;
         int ar = analyze_function(&elf, &funcs, sections, section_count,
-                                  &funcs.v[i], !options || options->resolve_jump_tables,
+                                  &direct_targets, &funcs.v[i],
+                                  !options || options->resolve_jump_tables,
                                   program, &tb_cap, &edge_cap, &fn);
         if (ar < 0) { free(fn.name); goto out; }
         if (ar > 0) { free(fn.name); continue; }
@@ -353,6 +434,7 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     }
     rc = 0;
 out:
+    free(direct_targets.v);
     free(sections);
     funcs_free(&funcs);
     elf_free(&elf);

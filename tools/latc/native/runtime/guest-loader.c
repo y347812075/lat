@@ -82,8 +82,10 @@ int lat_guest_map(const LatNativeImageHeaderV1 *header,
         (const void *)(guest + elf->e_phoff);
     uint64_t base = UINT64_MAX;
     uint64_t end = 0;
+    uint64_t phdr_address = 0;
     for (uint16_t i = 0; i < elf->e_phnum; i++) {
         const Elf64_Phdr *segment = &program_headers[i];
+        if (segment->p_type == PT_PHDR) phdr_address = segment->p_vaddr;
         if (segment->p_type != PT_LOAD) continue;
         if (!segment->p_memsz) continue;
         if (segment->p_filesz > segment->p_memsz ||
@@ -102,8 +104,24 @@ int lat_guest_map(const LatNativeImageHeaderV1 *header,
         if (segment_base < base) base = segment_base;
         if (segment_end > end) end = segment_end;
     }
+    if (!phdr_address) {
+        uint64_t phdr_size = (uint64_t)elf->e_phnum * elf->e_phentsize;
+        for (uint16_t i = 0; i < elf->e_phnum; i++) {
+            const Elf64_Phdr *segment = &program_headers[i];
+            if (segment->p_type != PT_LOAD || elf->e_phoff < segment->p_offset ||
+                phdr_size > segment->p_filesz ||
+                elf->e_phoff - segment->p_offset >
+                    segment->p_filesz - phdr_size) {
+                continue;
+            }
+            phdr_address = segment->p_vaddr +
+                           (elf->e_phoff - segment->p_offset);
+            break;
+        }
+    }
     if (base == UINT64_MAX || end <= base || base != header->preferred_guest_base ||
-        elf->e_entry != header->guest_entry || end - base > SIZE_MAX) {
+        elf->e_entry != header->guest_entry || end - base > SIZE_MAX ||
+        !phdr_address) {
         errno = ENOEXEC;
         return fail(error, error_size, "guest layout does not match native image");
     }
@@ -168,6 +186,9 @@ int lat_guest_map(const LatNativeImageHeaderV1 *header,
     mapping->base = base;
     mapping->end = end;
     mapping->entry = elf->e_entry;
+    mapping->phdr = phdr_address;
+    mapping->phent = elf->e_phentsize;
+    mapping->phnum = elf->e_phnum;
     result = 0;
 out:
     free(page_protection);

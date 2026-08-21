@@ -40,8 +40,9 @@ static libc objects and the output must have no ELF interpreter or shared
 library dependency.
 
 The shell embeds the image in read-only `.latc.image` and validates it on the
-target host. Normal execution currently exits with status 126 because guest
-state setup, real runtime helpers, and translated-code entry are not linked yet.
+target host. Images explicitly marked for the restricted x86 execution path
+run the guest directly when invoked without arguments. Other images still exit
+with status 126 because their required runtime helpers are not linked yet.
 
 `--latc-map` validates and maps the embedded static x86 ELF `PT_LOAD` segments
 at their recorded addresses, applies final page permissions, prints the mapped
@@ -97,12 +98,44 @@ the descriptor, and exits with 42.
 function calls. A minimal assembly `_start` exits with the C return value.
 `tests/x86-indirect-call42.S` loads a function pointer from the guest data
 segment and calls it indirectly before exiting with 42.
+`tests/x86-runtime-indirect-call42.S` derives two function pointers from
+`argc`, performs two nested runtime indirect calls, and checks both x86 return
+addresses and a callee-saved register before writing `INDIRECT OK`.
+`tests/x86-helper-state42.S` executes `cpuid`, `pcmpistri`, and `pcmpistrm`,
+checking their results, x86 flags, RSP, and a callee-saved register before
+writing `HELPERS OK`.
+`tests/x86-ifunc-like42.S` calls a resolver, invokes the returned function
+pointer, and verifies RSP after both returns before writing `IFUNC OK`.
+`tests/x86-auxv42.S` validates the Linux x86-64 initial stack, including the
+program headers, page size, entry point, platform, random bytes, and executable
+name supplied through auxv.
+`tests/x86-addr32-call42.S` checks the address-size-prefixed direct call form
+used by static glibc and verifies its pushed return address and restored RSP.
+`tests/x86-tls42.c` parses `PT_TLS`, copies its initial image into a new static
+TLS block, sets FS with `arch_prctl`, and verifies a `__thread` value before
+writing `TLS OK`.
+`tests/x86-prlimit42.S` queries `RLIMIT_STACK` through x86 `prlimit64` and
+checks the returned limit before exiting with 42.
+`tests/x86-getrandom42.S` fills 16 bytes through x86 `getrandom`, checks the
+result, and exits with 42.
+`tests/x86-readlinkat42.S` reads `/proc/self/exe` through x86 `readlinkat`,
+checks that an absolute path was returned, and exits with 42.
+`tests/x86-mprotect42.S`, `tests/x86-fstat42.S`, and
+`tests/x86-exit-group42.S` cover the additional Linux calls used by static
+glibc startup and shutdown. The syscall switch and x86 ABI structure
+conversions are kept in `native/runtime/x86-linux-user.c`, following the
+corresponding cases in `linux-user/syscall.c`.
+`tests/x86-entry-regs42.S` checks that the initial guest GPRs are deterministic
+and that static ELF `%rdx` is zero, as required for the dynamic-linker finalizer
+hook passed to glibc startup.
 `tests/x86-static-hello.S` is a static x86-64 ELF with no interpreter and no
 host libraries. Its `_start` writes `Hello, LATC!` with the x86 Linux `write`
 syscall and exits with the x86 Linux `exit` syscall. This is the first direct
-static-translation test. A normal glibc-linked `puts` program is not supported
-yet because indirect calls selected by glibc's CPU dispatch need correct x86
-call/return stack handling in the native runtime.
+static-translation test. `tests/x86-glibc-hello.c` is the separate full static
+glibc fixture used after the smaller call, helper, IFUNC, and auxv tests pass.
+It now prints `Hello from glibc!` and exits successfully on the 3A6000 test
+host. The generated LoongArch shell currently links the small host runtime
+dynamically; producing a fully static LoongArch ELF remains separate work.
 
 The AOT output is a static LoongArch PIE containing the copied LAT runner, the
 x86-64 guest, its control-flow graph, and LAT AOT code. Paths not present in the
