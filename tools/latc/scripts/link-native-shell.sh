@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 2 ]; then
-    echo "usage: $0 IMAGE OUTPUT" >&2
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+    echo "usage: $0 IMAGE OUTPUT [X86_ENV_OFFSETS]" >&2
     exit 2
 fi
 
@@ -12,6 +12,11 @@ case "$2" in
     *) output=$(pwd)/$2 ;;
 esac
 root=$(cd "$(dirname "$0")/.." && pwd)
+offsets=${3:-$root/native/include/latx-x86-env-offsets.h}
+if [ ! -f "$offsets" ]; then
+    echo "latc: missing x86 environment offsets: $offsets" >&2
+    exit 1
+fi
 cc=${LATC_LA64_CC:-loongarch64-unknown-linux-gnu-gcc}
 if [ -n "${LATC_LA64_OBJCOPY:-}" ]; then
     objcopy=$LATC_LA64_OBJCOPY
@@ -25,6 +30,7 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/latc-link.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
 cp "$image" "$work/image.bin"
+cp "$offsets" "$work/latx-x86-env-offsets.h"
 (
     cd "$work"
     "$objcopy" -I binary -O elf64-loongarch -B loongarch64 \
@@ -36,7 +42,7 @@ cp "$image" "$work/image.bin"
 )
 
 "$cc" -O2 -g -fPIE $ldflags -Wall -Wextra -Werror -std=c11 \
-    -I"$root/native/include" -I"$root/native/format" \
+    -I"$work" -I"$root/native/include" -I"$root/native/format" \
     -I"$root/native/runtime" \
     "$root/native/runtime/main.c" "$root/native/runtime/guest-loader.c" \
     "$root/native/runtime/relocate.c" \

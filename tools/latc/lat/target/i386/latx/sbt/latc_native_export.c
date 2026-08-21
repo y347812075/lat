@@ -79,6 +79,21 @@ static bool native_tb_target_exists(const GArray *tbs, uint64_t guest_pc,
         g_array_index(tbs, LatNativeTbV1, left + 1).guest_pc != guest_pc;
 }
 
+static bool guest_executable_address(const GByteArray *guest, uint64_t pc)
+{
+    const Elf64_Ehdr *elf = (const void *)guest->data;
+    const Elf64_Phdr *program_headers =
+        (const void *)(guest->data + elf->e_phoff);
+    for (uint16_t i = 0; i < elf->e_phnum; i++) {
+        const Elf64_Phdr *header = &program_headers[i];
+        if (header->p_type == PT_LOAD && (header->p_flags & PF_X) &&
+            pc >= header->p_vaddr && pc - header->p_vaddr < header->p_memsz) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static int runtime_symbol(aot_rel_kind kind)
 {
     switch (kind) {
@@ -421,6 +436,25 @@ int latc_native_export(const char *path, const char *guest_path,
             goto out;
         }
     }
+    for (guint i = 0; i < native_relocations->len; i++) {
+        LatNativeRelocationV1 *relocation = &g_array_index(
+            native_relocations, LatNativeRelocationV1, i);
+        if (relocation->kind != LAT_NATIVE_RELOC_TB_TARGET ||
+            guest_executable_address(guest, relocation->addend)) {
+            continue;
+        }
+        if (relocation->reserved == LAT_NATIVE_SYMBOL_INVALID) {
+            fprintf(stderr,
+                    "latc: native TB target 0x%llx is outside executable segments\n",
+                    (unsigned long long)relocation->addend);
+            goto out;
+        }
+        relocation->kind = LAT_NATIVE_RELOC_RUNTIME_SYMBOL;
+        relocation->target = relocation->reserved;
+        relocation->reserved = 0;
+        relocation->addend = 0;
+    }
+
     GArray *missing_targets = g_array_new(FALSE, FALSE, sizeof(uint64_t));
     GHashTable *missing_seen = g_hash_table_new(g_direct_hash, g_direct_equal);
     for (guint i = 0; i < native_relocations->len; i++) {

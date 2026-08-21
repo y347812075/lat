@@ -4,6 +4,7 @@
 #include "relocate.h"
 #include "dispatch.h"
 #include "enter-x86.h"
+#include "latx-x86-env-offsets.h"
 
 #include <elf.h>
 #include <errno.h>
@@ -16,9 +17,6 @@
 
 extern const unsigned char latc_embedded_image_start[];
 extern const unsigned char latc_embedded_image_end[];
-
-#define LATC_X86_STATIC_EXEC_BUILD_ID \
-    "lat-42c042301e107b34063773e118c825dd644d476c-x64-v1"
 
 typedef struct LatAuxvEntry {
     uint64_t type;
@@ -276,7 +274,7 @@ int main(int argc, char **argv, char **envp)
     }
     if ((header->flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC) &&
         (argc == 1 || strncmp(argv[1], "--latc-", 7))) {
-        if (strcmp(header->lat_build_id, LATC_X86_STATIC_EXEC_BUILD_ID)) {
+        if (strcmp(header->lat_build_id, LATC_X86_ENV_BUILD_ID)) {
             fprintf(stderr, "latc: native image LAT build ID does not match\n");
             return 112;
         }

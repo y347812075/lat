@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 
 #include "x86-linux-user.h"
+#include "latc-x86-syscall-abi.h"
+#include "latx-x86-env-offsets.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -19,159 +21,20 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Kept structurally aligned with linux-user/syscall.c's x86-64 cases. */
-enum {
-    ENV_RAX = 344,
-    ENV_RCX = 352,
-    ENV_RDX = 360,
-    ENV_RSI = 392,
-    ENV_RDI = 400,
-    ENV_R8 = 408,
-    ENV_R9 = 416,
-    ENV_R10 = 424,
-    ENV_FS_BASE = 632,
-    ENV_GS_BASE = 656,
-};
-
-typedef struct TargetRlimit64 {
-    uint64_t rlim_cur;
-    uint64_t rlim_max;
-} TargetRlimit64;
-
 typedef struct HostRlimit64 {
     uint64_t rlim_cur;
     uint64_t rlim_max;
 } HostRlimit64;
 
-typedef struct TargetStatX86_64 {
-    uint64_t st_dev;
-    uint64_t st_ino;
-    uint64_t st_nlink;
-    uint32_t st_mode;
-    uint32_t st_uid;
-    uint32_t st_gid;
-    uint32_t pad0;
-    uint64_t st_rdev;
-    int64_t st_size;
-    int64_t st_blksize;
-    int64_t st_blocks;
-    uint64_t st_atime_sec;
-    uint64_t st_atime_nsec;
-    uint64_t st_mtime_sec;
-    uint64_t st_mtime_nsec;
-    uint64_t st_ctime_sec;
-    uint64_t st_ctime_nsec;
-    int64_t unused[3];
-} TargetStatX86_64;
-
-typedef struct TargetSigactionX86_64 {
-    uint64_t handler;
-    uint64_t flags;
-    uint64_t restorer;
-    uint64_t mask;
-} TargetSigactionX86_64;
-
-typedef struct TargetSysinfoX86_64 {
-    int64_t uptime;
-    uint64_t loads[3];
-    uint64_t totalram;
-    uint64_t freeram;
-    uint64_t sharedram;
-    uint64_t bufferram;
-    uint64_t totalswap;
-    uint64_t freeswap;
-    uint16_t procs;
-    uint16_t pad;
-    uint32_t align_pad;
-    uint64_t totalhigh;
-    uint64_t freehigh;
-    uint32_t mem_unit;
-    uint32_t tail_pad;
-} TargetSysinfoX86_64;
-
-_Static_assert(sizeof(TargetSigactionX86_64) == 32,
-               "unexpected x86-64 sigaction layout");
-_Static_assert(sizeof(TargetSysinfoX86_64) == 112,
-               "unexpected x86-64 sysinfo layout");
-
 static unsigned char *guest_brk_base;
 static unsigned char *guest_brk_current;
 static size_t guest_brk_capacity;
 static uint64_t guest_clear_tid;
-static TargetSigactionX86_64 guest_sigactions[65];
+static LatcX86Sigaction guest_sigactions[65];
 
 static uint64_t *reg(unsigned char *env, size_t offset)
 {
     return (void *)(env + offset);
-}
-
-static uint64_t target_errno(long result)
-{
-    return result < 0 ? (uint64_t)-(int64_t)errno : (uint64_t)result;
-}
-
-static int target_to_host_resource(int code)
-{
-    switch (code) {
-    case 0: return RLIMIT_CPU;
-    case 1: return RLIMIT_FSIZE;
-    case 2: return RLIMIT_DATA;
-    case 3: return RLIMIT_STACK;
-    case 4: return RLIMIT_CORE;
-    case 5: return RLIMIT_RSS;
-    case 6: return RLIMIT_NPROC;
-    case 7: return RLIMIT_NOFILE;
-    case 8: return RLIMIT_MEMLOCK;
-    case 9: return RLIMIT_AS;
-    case 10: return RLIMIT_LOCKS;
-    case 11: return RLIMIT_SIGPENDING;
-    case 12: return RLIMIT_MSGQUEUE;
-    case 13: return RLIMIT_NICE;
-    case 14: return RLIMIT_RTPRIO;
-    default: return code;
-    }
-}
-
-static void host_to_target_stat(TargetStatX86_64 *target,
-                                const struct stat *host)
-{
-    memset(target, 0, sizeof(*target));
-    target->st_dev = host->st_dev;
-    target->st_ino = host->st_ino;
-    target->st_nlink = host->st_nlink;
-    target->st_mode = host->st_mode;
-    target->st_uid = host->st_uid;
-    target->st_gid = host->st_gid;
-    target->st_rdev = host->st_rdev;
-    target->st_size = host->st_size;
-    target->st_blksize = host->st_blksize;
-    target->st_blocks = host->st_blocks;
-    target->st_atime_sec = host->st_atim.tv_sec;
-    target->st_atime_nsec = host->st_atim.tv_nsec;
-    target->st_mtime_sec = host->st_mtim.tv_sec;
-    target->st_mtime_nsec = host->st_mtim.tv_nsec;
-    target->st_ctime_sec = host->st_ctim.tv_sec;
-    target->st_ctime_nsec = host->st_ctim.tv_nsec;
-}
-
-static void host_to_target_sysinfo(TargetSysinfoX86_64 *target,
-                                   const struct sysinfo *host)
-{
-    memset(target, 0, sizeof(*target));
-    target->uptime = host->uptime;
-    target->loads[0] = host->loads[0];
-    target->loads[1] = host->loads[1];
-    target->loads[2] = host->loads[2];
-    target->totalram = host->totalram;
-    target->freeram = host->freeram;
-    target->sharedram = host->sharedram;
-    target->bufferram = host->bufferram;
-    target->totalswap = host->totalswap;
-    target->freeswap = host->freeswap;
-    target->procs = host->procs;
-    target->totalhigh = host->totalhigh;
-    target->freehigh = host->freehigh;
-    target->mem_unit = host->mem_unit;
 }
 
 static long guest_rt_sigaction(uint64_t signal_number, uint64_t action_address,
@@ -184,7 +47,7 @@ static long guest_rt_sigaction(uint64_t signal_number, uint64_t action_address,
         errno = EINVAL;
         return -1;
     }
-    TargetSigactionX86_64 *saved = &guest_sigactions[signal_number];
+    LatcX86Sigaction *saved = &guest_sigactions[signal_number];
     if (old_action_address) {
         memcpy((void *)(uintptr_t)old_action_address, saved, sizeof(*saved));
     }
@@ -239,13 +102,13 @@ static uint64_t guest_brk(uint64_t requested)
 
 void lat_x86_linux_user_syscall(unsigned char *env)
 {
-    uint64_t number = *reg(env, ENV_RAX);
-    uint64_t arg1 = *reg(env, ENV_RDI);
-    uint64_t arg2 = *reg(env, ENV_RSI);
-    uint64_t arg3 = *reg(env, ENV_RDX);
-    uint64_t arg4 = *reg(env, ENV_R10);
-    uint64_t arg5 = *reg(env, ENV_R8);
-    uint64_t arg6 = *reg(env, ENV_R9);
+    uint64_t number = *reg(env, LATC_X86_ENV_RAX_OFFSET);
+    uint64_t arg1 = *reg(env, LATC_X86_ENV_RDI_OFFSET);
+    uint64_t arg2 = *reg(env, LATC_X86_ENV_RSI_OFFSET);
+    uint64_t arg3 = *reg(env, LATC_X86_ENV_RDX_OFFSET);
+    uint64_t arg4 = *reg(env, LATC_X86_ENV_R10_OFFSET);
+    uint64_t arg5 = *reg(env, LATC_X86_ENV_R8_OFFSET);
+    uint64_t arg6 = *reg(env, LATC_X86_ENV_R9_OFFSET);
     long result;
 
     switch (number) {
@@ -262,7 +125,7 @@ void lat_x86_linux_user_syscall(unsigned char *env)
         struct stat host;
         result = fstat((int)arg1, &host);
         if (result >= 0) {
-            host_to_target_stat((void *)(uintptr_t)arg2, &host);
+            latc_x86_host_to_target_stat((void *)(uintptr_t)arg2, &host);
         }
         break;
     }
@@ -272,8 +135,9 @@ void lat_x86_linux_user_syscall(unsigned char *env)
     case 9: {
         void *mapped = mmap((void *)(uintptr_t)arg1, (size_t)arg2, (int)arg3,
                             (int)arg4, (int)arg5, (off_t)arg6);
-        *reg(env, ENV_RAX) = mapped == MAP_FAILED ?
-            target_errno(-1) : (uint64_t)(uintptr_t)mapped;
+        *reg(env, LATC_X86_ENV_RAX_OFFSET) = mapped == MAP_FAILED ?
+            latc_x86_syscall_result(-1, errno) :
+            (uint64_t)(uintptr_t)mapped;
         return;
     }
     case 10:
@@ -283,7 +147,7 @@ void lat_x86_linux_user_syscall(unsigned char *env)
         result = munmap((void *)(uintptr_t)arg1, (size_t)arg2);
         break;
     case 12:
-        *reg(env, ENV_RAX) = guest_brk(arg1);
+        *reg(env, LATC_X86_ENV_RAX_OFFSET) = guest_brk(arg1);
         return;
     case 13:
         result = guest_rt_sigaction(arg1, arg2, arg3, arg4);
@@ -319,7 +183,7 @@ void lat_x86_linux_user_syscall(unsigned char *env)
         struct sysinfo host;
         result = sysinfo(&host);
         if (result >= 0 && arg1) {
-            host_to_target_sysinfo((void *)(uintptr_t)arg1, &host);
+            latc_x86_host_to_target_sysinfo((void *)(uintptr_t)arg1, &host);
         }
         break;
     }
@@ -343,11 +207,15 @@ void lat_x86_linux_user_syscall(unsigned char *env)
         break;
     case 158:
         switch ((uint32_t)arg1) {
-        case 0x1001: *reg(env, ENV_GS_BASE) = arg2; result = 0; break;
-        case 0x1002: *reg(env, ENV_FS_BASE) = arg2; result = 0; break;
-        case 0x1003: *(uint64_t *)(uintptr_t)arg2 = *reg(env, ENV_FS_BASE);
+        case 0x1001: *reg(env, LATC_X86_ENV_GS_BASE_OFFSET) = arg2;
                      result = 0; break;
-        case 0x1004: *(uint64_t *)(uintptr_t)arg2 = *reg(env, ENV_GS_BASE);
+        case 0x1002: *reg(env, LATC_X86_ENV_FS_BASE_OFFSET) = arg2;
+                     result = 0; break;
+        case 0x1003: *(uint64_t *)(uintptr_t)arg2 =
+                         *reg(env, LATC_X86_ENV_FS_BASE_OFFSET);
+                     result = 0; break;
+        case 0x1004: *(uint64_t *)(uintptr_t)arg2 =
+                         *reg(env, LATC_X86_ENV_GS_BASE_OFFSET);
                      result = 0; break;
         default: errno = EINVAL; result = -1; break;
         }
@@ -384,7 +252,7 @@ void lat_x86_linux_user_syscall(unsigned char *env)
         result = fstatat((int)arg1, (const char *)(uintptr_t)arg2, &host,
                          (int)arg4);
         if (result >= 0) {
-            host_to_target_stat((void *)(uintptr_t)arg3, &host);
+            latc_x86_host_to_target_stat((void *)(uintptr_t)arg3, &host);
         }
         break;
     }
@@ -398,12 +266,12 @@ void lat_x86_linux_user_syscall(unsigned char *env)
         result = -1;
         break;
     case 302: {
-        int resource = target_to_host_resource((int)arg2);
+        int resource = latc_x86_target_to_host_resource((int)arg2);
         HostRlimit64 new_limit;
         HostRlimit64 old_limit;
         HostRlimit64 *new_pointer = NULL;
         if (arg3) {
-            const TargetRlimit64 *target = (const void *)(uintptr_t)arg3;
+            const LatcX86Rlimit64 *target = (const void *)(uintptr_t)arg3;
             new_limit.rlim_cur = target->rlim_cur;
             new_limit.rlim_max = target->rlim_max;
             new_pointer = &new_limit;
@@ -411,7 +279,7 @@ void lat_x86_linux_user_syscall(unsigned char *env)
         result = syscall(SYS_prlimit64, (pid_t)arg1, resource, new_pointer,
                          arg4 ? &old_limit : NULL);
         if (result >= 0 && arg4) {
-            TargetRlimit64 *target = (void *)(uintptr_t)arg4;
+            LatcX86Rlimit64 *target = (void *)(uintptr_t)arg4;
             target->rlim_cur = old_limit.rlim_cur;
             target->rlim_max = old_limit.rlim_max;
         }
@@ -436,5 +304,6 @@ void lat_x86_linux_user_syscall(unsigned char *env)
                 (unsigned long long)arg5, (unsigned long long)arg6);
         _exit(127);
     }
-    *reg(env, ENV_RAX) = target_errno(result);
+    *reg(env, LATC_X86_ENV_RAX_OFFSET) =
+        latc_x86_syscall_result(result, errno);
 }

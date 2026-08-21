@@ -236,8 +236,8 @@ translator. `LATC_DISABLE_PRETRANSLATE=1` provides a JIT baseline for the same
 bundle. `continuation_tbs` counts TBs added when LAT ends a TB before the end of
 its containing CFG block, including instruction-limit and internal translator
 splits. `edge_target_tbs` counts executable static-edge targets not represented
-by a standalone CFG block. `interior_target_tbs` counts entries immediately
-after standard x86 alignment NOPs at the beginning of CFG blocks.
+by a standalone CFG block. Jump-table case targets must be CFG TB leaders; the
+runner does not scan past alignment NOPs to compensate for missing targets.
 
 `LATC_PROFILE_OUT=/path/missing.profile` records runtime-generated guest PCs.
 Passing that file back through `--profile` adds missing addresses that are

@@ -46,6 +46,9 @@ def main() -> None:
     shutil.copy2(Path(__file__).resolve().parents[1] /
                  "native/include/lat-native-image.h",
                  source / "include/lat-native-image.h")
+    shutil.copy2(Path(__file__).resolve().parents[1] /
+                 "native/include/latc-x86-syscall-abi.h",
+                 source / "include/latc-x86-syscall-abi.h")
     manifest = json.loads((Path(__file__).resolve().parents[1] /
                            "lat-import.json").read_text())
     build_id = f"lat-{manifest['source_commit']}-x64-v1"

@@ -4,6 +4,7 @@
 
 #include "lat-native-image.h"
 #include "x86-linux-user.h"
+#include "latx-x86-env-offsets.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,12 +14,6 @@ static const unsigned char placeholder_pftable[256];
 static uint32_t configured_flags;
 
 #if defined(__loongarch__)
-enum {
-    LAT_ENV_EFLAGS_OFFSET = 480,
-    LAT_ENV_XMM0_OFFSET = 1176,
-    LAT_ENV_RCX_OFFSET = 352,
-};
-
 typedef union LatXmm128 {
     uint8_t b[16];
     uint16_t w[8];
@@ -62,7 +57,7 @@ static unsigned pcmp_result(unsigned char *env, const LatXmm128 *d,
     int valid_d = pcmp_ilen(d, control) - 1;
     int upper = (control & 1) ? 7 : 15;
     unsigned result = 0;
-    uint64_t *eflags = (void *)(env + LAT_ENV_EFLAGS_OFFSET);
+    uint64_t *eflags = (void *)(env + LATC_X86_ENV_EFLAGS_OFFSET);
 
     if (valid_s < upper) *eflags |= X86_CC_Z;
     else *eflags &= ~X86_CC_Z;
@@ -137,7 +132,7 @@ static void lat_helper_pcmpistri_xmm(unsigned char *env, LatXmm128 *d,
                                      LatXmm128 *s, uint32_t control)
 {
     unsigned result = pcmp_result(env, d, s, (uint8_t)control);
-    *(uint64_t *)(env + LAT_ENV_RCX_OFFSET) = result ?
+    *(uint64_t *)(env + LATC_X86_ENV_RCX_OFFSET) = result ?
         ((control & (1 << 6)) ? 31u - (unsigned)__builtin_clz(result) :
                                (unsigned)__builtin_ctz(result)) :
         16u >> (control & 1);
@@ -147,7 +142,7 @@ static void lat_helper_pcmpistrm_xmm(unsigned char *env, LatXmm128 *d,
                                      LatXmm128 *s, uint32_t control)
 {
     unsigned result = pcmp_result(env, d, s, (uint8_t)control);
-    LatXmm128 *xmm0 = (void *)(env + LAT_ENV_XMM0_OFFSET);
+    LatXmm128 *xmm0 = (void *)(env + LATC_X86_ENV_XMM0_OFFSET);
     if ((control >> 6) & 1) {
         if (control & 1) {
             for (int i = 0; i < 8; i++, result >>= 1) {
@@ -166,10 +161,10 @@ static void lat_helper_pcmpistrm_xmm(unsigned char *env, LatXmm128 *d,
 
 static void lat_helper_cpuid(unsigned char *env)
 {
-    uint64_t *rax = (void *)(env + 344);
-    uint64_t *rcx = (void *)(env + 352);
-    uint64_t *rdx = (void *)(env + 360);
-    uint64_t *rbx = (void *)(env + 368);
+    uint64_t *rax = (void *)(env + LATC_X86_ENV_RAX_OFFSET);
+    uint64_t *rcx = (void *)(env + LATC_X86_ENV_RCX_OFFSET);
+    uint64_t *rdx = (void *)(env + LATC_X86_ENV_RDX_OFFSET);
+    uint64_t *rbx = (void *)(env + LATC_X86_ENV_RBX_OFFSET);
     uint32_t leaf = (uint32_t)*rax;
     uint32_t subleaf = (uint32_t)*rcx;
     uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;

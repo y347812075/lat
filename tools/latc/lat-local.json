@@ -22,7 +22,7 @@
     },
     {
       "path": "lat/target/i386/latx/sbt/latc_native_export.c",
-      "reason": "export LAT AOT code into the stable standalone image format"
+      "reason": "export LAT AOT code into the stable standalone image format and reject invalid executable targets"
     },
     {
       "path": "lat/target/i386/latx/sbt/latc_native_export.h",
@@ -33,6 +33,10 @@
     {
       "path": "lat/linux-user/main.c",
       "reason": "detect bundles, pretranslate CFG input, and support compile-time AOT emission"
+    },
+    {
+      "path": "lat/linux-user/syscall.c",
+      "reason": "share x86-64 syscall ABI definitions and resource conversion with the native runtime"
     },
     {
       "path": "lat/accel/tcg/translate-all.c",
