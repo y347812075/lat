@@ -200,6 +200,9 @@ void lat_x86_linux_user_syscall(unsigned char *env)
     case 10:
         result = mprotect((void *)(uintptr_t)arg1, (size_t)arg2, (int)arg3);
         break;
+    case 11:
+        result = munmap((void *)(uintptr_t)arg1, (size_t)arg2);
+        break;
     case 12:
         *reg(env, ENV_RAX) = guest_brk(arg1);
         return;
