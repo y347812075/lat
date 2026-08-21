@@ -118,6 +118,19 @@ static void host_to_target_stat(TargetStatX86_64 *target,
     target->st_ctime_nsec = host->st_ctim.tv_nsec;
 }
 
+static long guest_readlinkat(int dirfd, const char *path, void *buffer,
+                             size_t size)
+{
+    if (!strcmp(path, "/proc/self/exe")) {
+        static const char guest_exe[] = "/latc-guest";
+        size_t length = sizeof(guest_exe) - 1;
+        if (length > size) length = size;
+        memcpy(buffer, guest_exe, length);
+        return (long)length;
+    }
+    return readlinkat(dirfd, path, buffer, size);
+}
+
 static uint64_t guest_brk(uint64_t requested)
 {
     if (!guest_brk_base) {
@@ -192,6 +205,11 @@ void lat_x86_linux_user_syscall(unsigned char *env)
         return;
     case 60:
         _exit((int)arg1);
+    case 89:
+        result = guest_readlinkat(AT_FDCWD,
+                                  (const void *)(uintptr_t)arg1,
+                                  (void *)(uintptr_t)arg2, (size_t)arg3);
+        break;
     case 158:
         switch ((uint32_t)arg1) {
         case 0x1001: *reg(env, ENV_GS_BASE) = arg2; result = 0; break;
@@ -213,20 +231,20 @@ void lat_x86_linux_user_syscall(unsigned char *env)
         result = openat((int)arg1, (const char *)(uintptr_t)arg2,
                         (int)arg3, (mode_t)arg4);
         break;
-    case 267: {
-        const char *path = (const void *)(uintptr_t)arg2;
-        if (!strcmp(path, "/proc/self/exe")) {
-            static const char guest_exe[] = "/latc-guest";
-            size_t length = sizeof(guest_exe) - 1;
-            if (length > arg4) length = (size_t)arg4;
-            memcpy((void *)(uintptr_t)arg3, guest_exe, length);
-            result = (long)length;
-        } else {
-            result = readlinkat((int)arg1, path, (void *)(uintptr_t)arg3,
-                                (size_t)arg4);
+    case 262: {
+        struct stat host;
+        result = fstatat((int)arg1, (const char *)(uintptr_t)arg2, &host,
+                         (int)arg4);
+        if (result >= 0) {
+            host_to_target_stat((void *)(uintptr_t)arg3, &host);
         }
         break;
     }
+    case 267:
+        result = guest_readlinkat((int)arg1,
+                                  (const void *)(uintptr_t)arg2,
+                                  (void *)(uintptr_t)arg3, (size_t)arg4);
+        break;
     case 273:
         errno = ENOSYS;
         result = -1;

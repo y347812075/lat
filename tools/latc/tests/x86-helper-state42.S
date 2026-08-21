@@ -8,15 +8,17 @@ _start:
     xor %eax, %eax
     xor %ecx, %ecx
     cpuid
+    cmp $0xd, %eax
+    jne failed
     cmp %r12, %rsp
     jne failed
     cmp $0x12345678, %r15d
     jne failed
-    cmp $0x756e6547, %ebx
+    cmp $0x68747541, %ebx
     jne failed
-    cmp $0x49656e69, %edx
+    cmp $0x69746e65, %edx
     jne failed
-    cmp $0x6c65746e, %ecx
+    cmp $0x444d4163, %ecx
     jne failed
 
     movdqu string_a(%rip), %xmm0
