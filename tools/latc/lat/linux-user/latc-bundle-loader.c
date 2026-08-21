@@ -22,7 +22,6 @@ static LatcDiskFooter bundle_footer;
 static bool pretranslation_complete;
 static uint64_t stat_cfg_tbs, stat_profiled, stat_pretranslated, stat_failed;
 static uint64_t stat_continuation_tbs, stat_edge_target_tbs;
-static uint64_t stat_interior_target_tbs;
 static uint64_t stat_same_extent, stat_shorter_extent, stat_longer_extent;
 static uint64_t stat_runtime_tb_gen_calls, stat_runtime_first_pc;
 static uint64_t stat_runtime_tb_gen_attempts;
@@ -66,7 +65,7 @@ static void write_stats(void)
     }
     fprintf(stats, "{\"pid\":%ld,\"cfg_tbs\":%llu,\"profiled_tbs\":%llu,"
             "\"pretranslated\":%llu,\"continuation_tbs\":%llu,"
-            "\"edge_target_tbs\":%llu,\"interior_target_tbs\":%llu,"
+            "\"edge_target_tbs\":%llu,"
             "\"failed\":%llu,"
             "\"same_extent\":%llu,\"shorter_than_cfg\":%llu,"
             "\"longer_than_cfg\":%llu,\"runtime_tb_gen_calls\":%llu,"
@@ -84,7 +83,6 @@ static void write_stats(void)
             (unsigned long long)stat_pretranslated,
             (unsigned long long)stat_continuation_tbs,
             (unsigned long long)stat_edge_target_tbs,
-            (unsigned long long)stat_interior_target_tbs,
             (unsigned long long)stat_failed,
             (unsigned long long)stat_same_extent,
             (unsigned long long)stat_shorter_extent,
@@ -114,31 +112,6 @@ static bool program_address(uint64_t guest_pc)
             return true;
     }
     return false;
-}
-
-static size_t x86_nop_size(const uint8_t *code, size_t available)
-{
-    static const struct {
-        uint8_t size;
-        uint8_t bytes[9];
-    } nops[] = {
-        { 9, { 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 } },
-        { 8, { 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 } },
-        { 7, { 0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00 } },
-        { 6, { 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00 } },
-        { 5, { 0x0f, 0x1f, 0x44, 0x00, 0x00 } },
-        { 4, { 0x0f, 0x1f, 0x40, 0x00 } },
-        { 3, { 0x0f, 0x1f, 0x00 } },
-        { 2, { 0x66, 0x90 } },
-        { 1, { 0x90 } },
-    };
-    for (size_t i = 0; i < G_N_ELEMENTS(nops); i++) {
-        if (available >= nops[i].size &&
-            !memcmp(code, nops[i].bytes, nops[i].size)) {
-            return nops[i].size;
-        }
-    }
-    return 0;
 }
 
 void latc_bundle_note_tb_attempt(uint64_t guest_pc, uint32_t cflags)
@@ -460,7 +433,6 @@ void latc_bundle_pretranslate(struct CPUState *cpu)
     (void)current_pc;
     uint32_t cflags = curr_cflags(cpu);
     uint64_t translated = 0, continuations = 0, edge_targets = 0;
-    uint64_t interior_targets = 0;
     uint64_t failed = 0, profiled = 0;
     uint64_t same_extent = 0, shorter_extent = 0, longer_extent = 0;
     GHashTable *translated_pcs = g_hash_table_new(g_direct_hash,
@@ -524,40 +496,6 @@ void latc_bundle_pretranslate(struct CPUState *cpu)
             }
         }
     }
-    for (uint64_t i = 0; i < header.tb_count; i++) {
-        LatcDiskTb disk_tb;
-        if (read_cfg(&disk_tb, sizeof(disk_tb),
-                     tb_offset + i * sizeof(disk_tb))) {
-            failed++;
-            continue;
-        }
-        uint64_t pc = disk_tb.start;
-        while (pc < disk_tb.end) {
-            size_t nop = x86_nop_size((const void *)(uintptr_t)pc,
-                                      disk_tb.end - pc);
-            if (!nop) break;
-            pc += nop;
-        }
-        if (pc == disk_tb.start || pc >= disk_tb.end ||
-            g_hash_table_contains(translated_pcs,
-                                  (gpointer)(uintptr_t)pc)) {
-            continue;
-        }
-        mmap_lock();
-        TranslationBlock *tb = tb_gen_code(cpu, pc, cs_base,
-                                           flags, cflags);
-        if (tb) {
-            jrra_pre_translate((void **)&tb, 1, cpu, flags, cflags);
-        }
-        mmap_unlock();
-        if (!tb) {
-            failed++;
-            continue;
-        }
-        translated++;
-        interior_targets++;
-        g_hash_table_add(translated_pcs, (gpointer)(uintptr_t)pc);
-    }
     uint64_t edge_offset = tb_offset +
         header.tb_count * sizeof(LatcDiskTb);
     for (uint64_t i = 0; i < header.edge_count; i++) {
@@ -594,7 +532,6 @@ void latc_bundle_pretranslate(struct CPUState *cpu)
     stat_pretranslated = translated;
     stat_continuation_tbs = continuations;
     stat_edge_target_tbs = edge_targets;
-    stat_interior_target_tbs = interior_targets;
     stat_failed = failed;
     stat_same_extent = same_extent;
     stat_shorter_extent = shorter_extent;

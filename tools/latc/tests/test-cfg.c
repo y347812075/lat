@@ -98,7 +98,7 @@ static void test_program(const char *path)
             }
         }
     }
-    assert(case_edges == 3 && local_case_edges == 2);
+    assert(case_edges == 8 && local_case_edges == 5);
 
     assert(jump_plt_source && jump_plt_source->tb_count == 1 && plt);
     source_tb = &p.tbs[jump_plt_source->first_tb];

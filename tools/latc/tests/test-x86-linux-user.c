@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 
 #include "x86-linux-user.h"
+#include "latc-x86-syscall-abi.h"
+#include "latx-x86-env-offsets.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -17,39 +19,6 @@
 #include <time.h>
 #include <unistd.h>
 
-enum {
-    ENV_RAX = 344,
-    ENV_RDX = 360,
-    ENV_RSI = 392,
-    ENV_RDI = 400,
-    ENV_R10 = 424,
-};
-
-typedef struct TargetSigactionX86_64 {
-    uint64_t handler;
-    uint64_t flags;
-    uint64_t restorer;
-    uint64_t mask;
-} TargetSigactionX86_64;
-
-typedef struct TargetSysinfoX86_64 {
-    int64_t uptime;
-    uint64_t loads[3];
-    uint64_t totalram;
-    uint64_t freeram;
-    uint64_t sharedram;
-    uint64_t bufferram;
-    uint64_t totalswap;
-    uint64_t freeswap;
-    uint16_t procs;
-    uint16_t pad;
-    uint32_t align_pad;
-    uint64_t totalhigh;
-    uint64_t freehigh;
-    uint32_t mem_unit;
-    uint32_t tail_pad;
-} TargetSysinfoX86_64;
-
 static uint64_t *reg(unsigned char *env, size_t offset)
 {
     return (void *)(env + offset);
@@ -60,13 +29,13 @@ static uint64_t run_syscall(unsigned char *env, uint64_t number,
                             uint64_t arg4)
 {
     memset(env, 0, 1024);
-    *reg(env, ENV_RAX) = number;
-    *reg(env, ENV_RDI) = arg1;
-    *reg(env, ENV_RSI) = arg2;
-    *reg(env, ENV_RDX) = arg3;
-    *reg(env, ENV_R10) = arg4;
+    *reg(env, LATC_X86_ENV_RAX_OFFSET) = number;
+    *reg(env, LATC_X86_ENV_RDI_OFFSET) = arg1;
+    *reg(env, LATC_X86_ENV_RSI_OFFSET) = arg2;
+    *reg(env, LATC_X86_ENV_RDX_OFFSET) = arg3;
+    *reg(env, LATC_X86_ENV_R10_OFFSET) = arg4;
     lat_x86_linux_user_syscall(env);
-    return *reg(env, ENV_RAX);
+    return *reg(env, LATC_X86_ENV_RAX_OFFSET);
 }
 
 int main(void)
@@ -80,13 +49,13 @@ int main(void)
         return 1;
     }
 
-    *reg(env, ENV_RAX) = 11;
-    *reg(env, ENV_RDI) = (uintptr_t)mapping;
-    *reg(env, ENV_RSI) = (uint64_t)page_size;
+    *reg(env, LATC_X86_ENV_RAX_OFFSET) = 11;
+    *reg(env, LATC_X86_ENV_RDI_OFFSET) = (uintptr_t)mapping;
+    *reg(env, LATC_X86_ENV_RSI_OFFSET) = (uint64_t)page_size;
     lat_x86_linux_user_syscall(env);
-    if (*reg(env, ENV_RAX) != 0) {
+    if (*reg(env, LATC_X86_ENV_RAX_OFFSET) != 0) {
         fprintf(stderr, "x86 munmap returned %lld\n",
-                (long long)*reg(env, ENV_RAX));
+                (long long)*reg(env, LATC_X86_ENV_RAX_OFFSET));
         return 1;
     }
     errno = 0;
@@ -107,13 +76,13 @@ int main(void)
     }
     fclose(file);
 
-    TargetSigactionX86_64 action = {
+    LatcX86Sigaction action = {
         .handler = 0x12345678,
         .flags = 0x04000000,
         .restorer = 0x87654321,
         .mask = 0x55,
     };
-    TargetSigactionX86_64 old_action = {0};
+    LatcX86Sigaction old_action = {0};
     if (run_syscall(env, 13, SIGUSR1, (uintptr_t)&action, 0, 8) != 0 ||
         run_syscall(env, 13, SIGUSR1, 0, (uintptr_t)&old_action, 8) != 0 ||
         memcmp(&action, &old_action, sizeof(action))) {
@@ -121,7 +90,7 @@ int main(void)
         return 1;
     }
 
-    TargetSysinfoX86_64 info = {0};
+    LatcX86Sysinfo info = {0};
     if (run_syscall(env, 99, (uintptr_t)&info, 0, 0, 0) != 0 ||
         info.mem_unit == 0 || info.procs == 0) {
         fprintf(stderr, "x86 sysinfo failed\n");

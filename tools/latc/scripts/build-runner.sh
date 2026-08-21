@@ -23,4 +23,6 @@ cd "$build_dir"
     --disable-bzip2 --disable-lzo --disable-snappy --disable-libssh \
     --disable-slirp --disable-capstone --extra-ldflags=-ldl
 ninja latx-x86_64
+./latx-x86_64 --latc-print-x86-env-offsets >latc-x86-env-offsets.h
+test -s latc-x86-env-offsets.h
 file latx-x86_64

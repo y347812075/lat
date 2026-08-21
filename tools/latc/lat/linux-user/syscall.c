@@ -146,6 +146,17 @@
 #include "ioctl/mpt3sas_ctl.h"
 
 #include "qemu.h"
+#include "latc-x86-syscall-abi.h"
+#ifdef TARGET_X86_64
+_Static_assert(sizeof(struct target_stat) == sizeof(LatcX86Stat),
+               "LATC x86 stat ABI drifted from linux-user");
+_Static_assert(sizeof(struct target_sigaction) == sizeof(LatcX86Sigaction),
+               "LATC x86 sigaction ABI drifted from linux-user");
+_Static_assert(sizeof(struct target_sysinfo) == sizeof(LatcX86Sysinfo),
+               "LATC x86 sysinfo ABI drifted from linux-user");
+_Static_assert(sizeof(struct target_rlimit64) == sizeof(LatcX86Rlimit64),
+               "LATC x86 rlimit64 ABI drifted from linux-user");
+#endif
 #include "guest-seccomp.h"
 #include "signal-common.h"
 #include "qemu/guest-random.h"
@@ -1220,10 +1231,16 @@ static inline int target_to_host_errno(int err)
 
 static inline abi_long get_errno(abi_long ret)
 {
-    if (ret == -1)
+    if (ret == -1) {
+#ifdef TARGET_X86_64
+        return (abi_long)latc_x86_syscall_result(
+            ret, host_to_target_errno(errno));
+#else
         return -host_to_target_errno(errno);
-    else
+#endif
+    } else {
         return ret;
+    }
 }
 
 const char *target_strerror(int err)
@@ -1747,6 +1764,9 @@ static inline abi_ulong host_to_target_rlim(rlim_t rlim)
 
 static inline int target_to_host_resource(int code)
 {
+#ifdef TARGET_X86_64
+    return latc_x86_target_to_host_resource(code);
+#else
     switch (code) {
     case TARGET_RLIMIT_AS:
         return RLIMIT_AS;
@@ -1781,6 +1801,7 @@ static inline int target_to_host_resource(int code)
     default:
         return code;
     }
+#endif
 }
 
 static inline abi_long copy_from_user_timeval(struct timeval *tv,

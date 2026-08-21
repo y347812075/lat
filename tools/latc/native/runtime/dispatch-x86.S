@@ -1,3 +1,5 @@
+#include "latx-x86-env-offsets.h"
+
 .text
 .align 2
 .global lat_native_x86_dispatch_jirl
@@ -36,7 +38,7 @@ lat_native_x86_dispatch_jirl:
 .global lat_native_x86_dispatch_env_eip
 .type lat_native_x86_dispatch_env_eip, @function
 lat_native_x86_dispatch_env_eip:
-    ld.d $r21, $s8, 320
+    ld.d $r21, $s8, LATC_X86_ENV_EXCEPTION_NEXT_EIP_OFFSET
     b lat_native_x86_dispatch_jirl
 .size lat_native_x86_dispatch_env_eip, .-lat_native_x86_dispatch_env_eip
 
@@ -45,54 +47,54 @@ lat_native_x86_dispatch_env_eip:
 .type lat_native_x86_syscall, @function
 lat_native_x86_syscall:
     bl lat_native_x86_syscall_impl
-    ld.d $a0, $s8, 320
+    ld.d $a0, $s8, LATC_X86_ENV_EXCEPTION_NEXT_EIP_OFFSET
     bl lat_native_x86_dispatch_lookup
 
-    ld.d $s0, $s8, 344
-    ld.d $s1, $s8, 352
-    ld.d $s2, $s8, 360
-    ld.d $s3, $s8, 368
-    ld.d $s4, $s8, 376
-    ld.d $s5, $s8, 384
-    ld.d $s6, $s8, 392
-    ld.d $s7, $s8, 400
-    ld.d $a2, $s8, 408
-    ld.d $a3, $s8, 416
-    ld.d $a4, $s8, 424
-    ld.d $a5, $s8, 432
-    ld.d $t5, $s8, 440
-    ld.d $t6, $s8, 448
-    ld.d $t7, $s8, 456
-    ld.d $t8, $s8, 464
-    ld.d $a6, $s8, 480
+    ld.d $s0, $s8, LATC_X86_ENV_RAX_OFFSET
+    ld.d $s1, $s8, LATC_X86_ENV_RCX_OFFSET
+    ld.d $s2, $s8, LATC_X86_ENV_RDX_OFFSET
+    ld.d $s3, $s8, LATC_X86_ENV_RBX_OFFSET
+    ld.d $s4, $s8, LATC_X86_ENV_RSP_OFFSET
+    ld.d $s5, $s8, LATC_X86_ENV_RBP_OFFSET
+    ld.d $s6, $s8, LATC_X86_ENV_RSI_OFFSET
+    ld.d $s7, $s8, LATC_X86_ENV_RDI_OFFSET
+    ld.d $a2, $s8, LATC_X86_ENV_R8_OFFSET
+    ld.d $a3, $s8, LATC_X86_ENV_R9_OFFSET
+    ld.d $a4, $s8, LATC_X86_ENV_R10_OFFSET
+    ld.d $a5, $s8, LATC_X86_ENV_R11_OFFSET
+    ld.d $t5, $s8, LATC_X86_ENV_R12_OFFSET
+    ld.d $t6, $s8, LATC_X86_ENV_R13_OFFSET
+    ld.d $t7, $s8, LATC_X86_ENV_R14_OFFSET
+    ld.d $t8, $s8, LATC_X86_ENV_R15_OFFSET
+    ld.d $a6, $s8, LATC_X86_ENV_EFLAGS_OFFSET
 
-    fld.d $f0, $s8, 928
-    fld.d $f1, $s8, 944
-    fld.d $f2, $s8, 960
-    fld.d $f3, $s8, 976
-    fld.d $f4, $s8, 992
-    fld.d $f5, $s8, 1008
-    fld.d $f6, $s8, 1024
-    fld.d $f7, $s8, 1040
+    fld.d $f0, $s8, LATC_X86_ENV_FPREG0_OFFSET
+    fld.d $f1, $s8, LATC_X86_ENV_FPREG1_OFFSET
+    fld.d $f2, $s8, LATC_X86_ENV_FPREG2_OFFSET
+    fld.d $f3, $s8, LATC_X86_ENV_FPREG3_OFFSET
+    fld.d $f4, $s8, LATC_X86_ENV_FPREG4_OFFSET
+    fld.d $f5, $s8, LATC_X86_ENV_FPREG5_OFFSET
+    fld.d $f6, $s8, LATC_X86_ENV_FPREG6_OFFSET
+    fld.d $f7, $s8, LATC_X86_ENV_FPREG7_OFFSET
 
-    addi.d $t0, $s8, 2032
-    xvld $xr16, $t0, -856
-    xvld $xr17, $t0, -792
-    xvld $xr18, $t0, -728
-    xvld $xr19, $t0, -664
-    xvld $xr20, $t0, -600
-    xvld $xr21, $t0, -536
-    xvld $xr22, $t0, -472
-    xvld $xr23, $t0, -408
-    xvld $xr24, $t0, -344
-    xvld $xr25, $t0, -280
-    xvld $xr26, $t0, -216
-    xvld $xr27, $t0, -152
-    xvld $xr28, $t0, -88
-    xvld $xr29, $t0, -24
-    xvld $xr30, $t0, 40
-    xvld $xr31, $t0, 104
+    addi.d $t0, $s8, LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr16, $t0, LATC_X86_ENV_XMM0_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr17, $t0, LATC_X86_ENV_XMM1_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr18, $t0, LATC_X86_ENV_XMM2_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr19, $t0, LATC_X86_ENV_XMM3_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr20, $t0, LATC_X86_ENV_XMM4_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr21, $t0, LATC_X86_ENV_XMM5_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr22, $t0, LATC_X86_ENV_XMM6_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr23, $t0, LATC_X86_ENV_XMM7_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr24, $t0, LATC_X86_ENV_XMM8_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr25, $t0, LATC_X86_ENV_XMM9_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr26, $t0, LATC_X86_ENV_XMM10_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr27, $t0, LATC_X86_ENV_XMM11_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr28, $t0, LATC_X86_ENV_XMM12_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr29, $t0, 0
+    xvld $xr30, $t0, LATC_X86_ENV_XMM14_OFFSET-LATC_X86_ENV_XMM13_OFFSET
+    xvld $xr31, $t0, LATC_X86_ENV_XMM15_OFFSET-LATC_X86_ENV_XMM13_OFFSET
 
-    ld.d $r21, $s8, 320
+    ld.d $r21, $s8, LATC_X86_ENV_EXCEPTION_NEXT_EIP_OFFSET
     jr $a0
 .size lat_native_x86_syscall, .-lat_native_x86_syscall

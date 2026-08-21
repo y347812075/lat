@@ -116,7 +116,7 @@ def merge_profile(source, destination):
 def aggregate_stats(paths):
     additive = (
         "cfg_tbs", "profiled_tbs", "pretranslated", "continuation_tbs",
-        "edge_target_tbs", "interior_target_tbs", "failed",
+        "edge_target_tbs", "failed",
         "same_extent", "shorter_than_cfg", "longer_than_cfg",
         "runtime_tb_gen_calls", "runtime_program_tb_gen_calls",
         "runtime_system_tb_gen_calls", "runtime_tb_gen_attempts",
