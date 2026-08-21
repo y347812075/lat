@@ -28,6 +28,8 @@ def main():
     parser.add_argument("--workdir", required=True, type=Path)
     parser.add_argument("--guest-dir", default="specbin/x64_gcc12_2_0")
     parser.add_argument("--benchmark", action="append", default=[])
+    parser.add_argument("--timeout", type=float, default=60.0,
+                        help="seconds allowed for each benchmark harness run")
     args = parser.parse_args()
 
     args.latc = args.latc.resolve()
@@ -74,6 +76,7 @@ def main():
     manifest_path = args.workdir / "manifest.json"
     env = os.environ.copy()
 
+    entries = {}
     try:
         for benchmark, filename, _strict_mode in programs:
             print("compile %s" % benchmark, flush=True)
@@ -95,17 +98,7 @@ def main():
             if "execution_model=lat-native-pie-shell" not in inspect:
                 raise RuntimeError("native ELF inspection failed: %s" % native)
 
-            replace_run_link(args.spec_root, native_bin)
-            home = homes / benchmark
-            home.mkdir(exist_ok=True)
-            run_env = env.copy()
-            run_env["HOME"] = str(home)
-            log = logs / (benchmark + ".log")
-            reported_time, raw, valid = run_spec(
-                args.spec_root, "train", benchmark, run_env, log)
-            saved_raw = raws / (benchmark + ".raw")
-            shutil.copy2(raw, saved_raw)
-            manifest["programs"].append({
+            entry = {
                 "benchmark": benchmark,
                 "filename": filename,
                 "guest": str(guest),
@@ -113,11 +106,32 @@ def main():
                 "native_elf": str(native),
                 "native_elf_sha256": sha256(native),
                 "native_elf_size": native.stat().st_size,
-                "reported_time": reported_time,
-                "valid": valid,
                 "inspect": inspect.splitlines(),
-                "log": str(log),
-                "raw": str(saved_raw),
+                "generated": True,
+                "valid": False,
+            }
+            entries[benchmark] = entry
+            manifest["programs"].append(entry)
+            save_manifest(manifest_path, manifest)
+            print("GENERATED %s" % benchmark, flush=True)
+
+        replace_run_link(args.spec_root, native_bin)
+        for benchmark, _filename, _strict_mode in programs:
+            print("run %s train" % benchmark, flush=True)
+            home = homes / benchmark
+            home.mkdir(exist_ok=True)
+            run_env = env.copy()
+            run_env["HOME"] = str(home)
+            log = logs / (benchmark + ".log")
+            reported_time, raw, valid = run_spec(
+                args.spec_root, "train", benchmark, run_env, log,
+                timeout=args.timeout)
+            saved_raw = raws / (benchmark + ".raw")
+            shutil.copy2(raw, saved_raw)
+            entry = entries[benchmark]
+            entry.update({
+                "reported_time": reported_time, "valid": valid,
+                "log": str(log), "raw": str(saved_raw),
             })
             save_manifest(manifest_path, manifest)
             print("PASS %s %.6f" % (benchmark, reported_time), flush=True)

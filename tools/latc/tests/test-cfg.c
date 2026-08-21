@@ -33,6 +33,7 @@ static void test_program(const char *path)
     const CfgProgramFunction *start = NULL;
     const CfgProgramFunction *jump_source = NULL;
     const CfgProgramFunction *jump_container = NULL;
+    const CfgProgramFunction *jump_table_source = NULL;
     const CfgProgramFunction *jump_plt_source = NULL;
     const CfgProgramFunction *plt = NULL;
     const CfgProgramFunction *fallthrough_check = NULL;
@@ -44,6 +45,8 @@ static void test_program(const char *path)
             jump_source = &p.functions[i];
         if (strcmp(p.functions[i].name, "jump_container") == 0)
             jump_container = &p.functions[i];
+        if (strcmp(p.functions[i].name, "jump_table_source") == 0)
+            jump_table_source = &p.functions[i];
         if (strcmp(p.functions[i].name, "jump_plt_source") == 0)
             jump_plt_source = &p.functions[i];
         if (strcmp(p.functions[i].name, "_plt") == 0)
@@ -77,6 +80,25 @@ static void test_program(const char *path)
         target_is_leader |= p.tbs[i].start == cross_target;
     }
     assert(target_is_leader);
+
+    assert(jump_table_source);
+    int case_edges = 0;
+    int local_case_edges = 0;
+    for (size_t i = jump_table_source->first_tb;
+         i < jump_table_source->first_tb + jump_table_source->tb_count; i++) {
+        const CfgTb *tb = &p.tbs[i];
+        for (size_t j = tb->first_edge; j < tb->first_edge + tb->edge_count;
+             j++) {
+            const CfgProgramEdge *edge = &p.edges[j];
+            if (edge->kind != CFG_EDGE_CASE) continue;
+            case_edges++;
+            if (edge->to > jump_table_source->start &&
+                edge->to < jump_table_source->start + jump_table_source->size) {
+                local_case_edges++;
+            }
+        }
+    }
+    assert(case_edges == 3 && local_case_edges == 2);
 
     assert(jump_plt_source && jump_plt_source->tb_count == 1 && plt);
     source_tb = &p.tbs[jump_plt_source->first_tb];

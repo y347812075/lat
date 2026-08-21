@@ -140,8 +140,13 @@ int lat_native_code_load(const LatNativeImageHeaderV1 *header,
                          ~(page_size - 1);
     uintptr_t anchor = lat_runtime_symbol_address(
         LAT_NATIVE_SYMBOL_EPILOGUE_RET_ID_1);
-    uintptr_t hint_value = (anchor + 16 * 1024 * 1024 + page_size - 1) &
-                           ~(uintptr_t)(page_size - 1);
+    if (image_size > UINTPTR_MAX - anchor - 64 * 1024 * 1024 - page_size) {
+        errno = EOVERFLOW;
+        return fail(error, error_size, "native code mapping hint overflows");
+    }
+    uintptr_t hint_value =
+        (anchor + image_size + 64 * 1024 * 1024 + page_size - 1) &
+        ~(uintptr_t)(page_size - 1);
     void *address = mmap((void *)hint_value, mapped_size,
                          PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

@@ -25,6 +25,13 @@ static gint compare_native_tb(gconstpointer left, gconstpointer right)
     return 0;
 }
 
+static gint compare_uint64(gconstpointer left, gconstpointer right)
+{
+    uint64_t a = *(const uint64_t *)left;
+    uint64_t b = *(const uint64_t *)right;
+    return a < b ? -1 : a > b;
+}
+
 static bool native_tb_target_exists(const GArray *tbs, uint64_t guest_pc,
                                     uint32_t flags)
 {
@@ -414,6 +421,8 @@ int latc_native_export(const char *path, const char *guest_path,
             goto out;
         }
     }
+    GArray *missing_targets = g_array_new(FALSE, FALSE, sizeof(uint64_t));
+    GHashTable *missing_seen = g_hash_table_new(g_direct_hash, g_direct_equal);
     for (guint i = 0; i < native_relocations->len; i++) {
         const LatNativeRelocationV1 *relocation = &g_array_index(
             native_relocations, LatNativeRelocationV1, i);
@@ -421,12 +430,44 @@ int latc_native_export(const char *path, const char *guest_path,
             !native_tb_target_exists(native_tbs,
                                      (uint64_t)relocation->addend,
                                      relocation->target)) {
-            fprintf(stderr, "latc: native relocation %u targets missing TB pc=0x%llx flags=0x%x\n",
-                    i, (unsigned long long)relocation->addend,
-                    relocation->target);
-            goto out;
+            gpointer key = (gpointer)(uintptr_t)relocation->addend;
+            if (!g_hash_table_contains(missing_seen, key)) {
+                uint64_t pc = relocation->addend;
+                g_hash_table_add(missing_seen, key);
+                g_array_append_val(missing_targets, pc);
+            }
         }
     }
+    g_hash_table_destroy(missing_seen);
+    if (missing_targets->len) {
+        g_array_sort(missing_targets, compare_uint64);
+        const char *missing_path = getenv("LATC_NATIVE_MISSING_OUT");
+        if (missing_path && *missing_path) {
+            FILE *missing = fopen(missing_path, "w");
+            if (!missing) {
+                fprintf(stderr, "latc: cannot create missing-target list %s: %s\n",
+                        missing_path, strerror(errno));
+                g_array_free(missing_targets, TRUE);
+                goto out;
+            }
+            for (guint i = 0; i < missing_targets->len; i++) {
+                fprintf(missing, "0x%llx 1\n", (unsigned long long)
+                        g_array_index(missing_targets, uint64_t, i));
+            }
+            if (fclose(missing)) {
+                fprintf(stderr, "latc: cannot write missing-target list %s\n",
+                        missing_path);
+                g_array_free(missing_targets, TRUE);
+                goto out;
+            }
+        }
+        fprintf(stderr, "latc: native image has %u missing TB targets; first pc=0x%llx\n",
+                missing_targets->len, (unsigned long long)
+                g_array_index(missing_targets, uint64_t, 0));
+        g_array_free(missing_targets, TRUE);
+        goto out;
+    }
+    g_array_free(missing_targets, TRUE);
 
     LatNativeImageHeaderV1 native_header = {0};
     memcpy(native_header.magic, LAT_NATIVE_IMAGE_MAGIC, 8);

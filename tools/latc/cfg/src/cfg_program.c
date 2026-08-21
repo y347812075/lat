@@ -147,8 +147,10 @@ static CfgTbTerm term_from_insn(InsnKind kind)
     }
 }
 
-static int collect_direct_targets(const ElfFile *elf, const FuncVec *funcs,
-                                  AddrVec *targets)
+static int collect_program_insns_and_direct_targets(const ElfFile *elf,
+                                                    const FuncVec *funcs,
+                                                    AddrVec *insn_addrs,
+                                                    AddrVec *targets)
 {
     for (size_t i = 0; i < funcs->n; i++) {
         const FuncSym *fn = &funcs->v[i];
@@ -162,6 +164,9 @@ static int collect_direct_targets(const ElfFile *elf, const FuncVec *funcs,
         for (size_t off = 0; off < size;) {
             Insn in = cfg_decode_insn(buf, size, fn->addr, off);
             if (!in.len) in.len = 1;
+            if (!addr_push(insn_addrs, in.addr)) {
+                return -1;
+            }
             if (in.has_target &&
                 (in.kind == INSN_CALL || in.kind == INSN_JCC ||
                  in.kind == INSN_JMP) &&
@@ -171,6 +176,7 @@ static int collect_direct_targets(const ElfFile *elf, const FuncVec *funcs,
             off += in.len;
         }
     }
+    sort_unique(insn_addrs);
     sort_unique(targets);
     return 0;
 }
@@ -218,6 +224,7 @@ static void extend_symbol_fallthroughs(const ElfFile *elf, FuncVec *funcs)
 
 static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
                             const IjmpSection *sections, size_t section_count,
+                            const AddrVec *program_insns,
                             const AddrVec *direct_targets, const FuncSym *fn,
                             bool resolve_jt, CfgProgram *out,
                             size_t *tb_cap, size_t *edge_cap,
@@ -245,6 +252,10 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
         .file = elf->data, .file_size = elf->size,
         .sections = sections, .section_count = section_count,
         .insn_addrs = insn_addrs.v, .insn_count = insn_addrs.n,
+        .program_insn_addrs = program_insns->v,
+        .program_insn_count = program_insns->n,
+        .direct_targets = direct_targets->v,
+        .direct_target_count = direct_targets->n,
         .is_func_entry = is_function_entry, .func_entry_data = funcs,
         .func_addr = fn->addr, .func_size = fn->size,
     };
@@ -386,7 +397,7 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     memset(program, 0, sizeof(*program));
     ElfFile elf = {0};
     FuncVec funcs = {0};
-    AddrVec direct_targets = {0};
+    AddrVec program_insns = {0}, direct_targets = {0};
     IjmpSection *sections = NULL;
     const char *source = NULL;
     size_t function_cap = 0, tb_cap = 0, edge_cap = 0;
@@ -399,7 +410,8 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     funcs_load_all(&elf, &funcs, &source);
     (void)source;
     extend_symbol_fallthroughs(&elf, &funcs);
-    if (collect_direct_targets(&elf, &funcs, &direct_targets)) goto out;
+    if (collect_program_insns_and_direct_targets(
+            &elf, &funcs, &program_insns, &direct_targets)) goto out;
     size_t section_count = 0;
     sections = elf_build_ijmp_sections(&elf, &section_count);
     program->exec_ranges = calloc(elf.eh->e_shnum,
@@ -423,7 +435,7 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
         };
         if (!fn.name) goto out;
         int ar = analyze_function(&elf, &funcs, sections, section_count,
-                                  &direct_targets, &funcs.v[i],
+                                  &program_insns, &direct_targets, &funcs.v[i],
                                   !options || options->resolve_jump_tables,
                                   program, &tb_cap, &edge_cap, &fn);
         if (ar < 0) { free(fn.name); goto out; }
@@ -434,6 +446,7 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     }
     rc = 0;
 out:
+    free(program_insns.v);
     free(direct_targets.v);
     free(sections);
     funcs_free(&funcs);

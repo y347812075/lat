@@ -31,6 +31,41 @@ jump_target_mid:
     ret
 .size jump_container, .-jump_container
 
+.type jump_table_source,@function
+jump_table_source:
+    cmp $2, %edi
+    ja jump_table_default
+    lea jump_table(%rip), %rdx
+    movslq (%rdx,%rdi,4), %rax
+    add %rdx, %rax
+    jmp *%rax
+jump_table_case0:
+    mov $10, %eax
+    ret
+jump_table_case2:
+    mov $12, %eax
+    ret
+jump_table_default:
+    xor %eax, %eax
+    ret
+.size jump_table_source, .-jump_table_source
+
+.type jump_table_cold,@function
+jump_table_cold:
+    nop
+jump_table_cold_case:
+    mov $11, %eax
+    ret
+.size jump_table_cold, .-jump_table_cold
+
+.section .rodata
+.align 4
+jump_table:
+    .long jump_table_case0 - jump_table
+    .long jump_table_cold_case - jump_table
+    .long jump_table_case2 - jump_table
+.text
+
 .type jump_plt_source,@function
 jump_plt_source:
     jmp synthetic_plt_second

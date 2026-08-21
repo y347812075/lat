@@ -11,7 +11,7 @@ cat >"$workdir/input.profile" <<'EOF'
 0x401020 4
 EOF
 cat >"$workdir/one.json" <<'EOF'
-{"cfg_tbs":5,"continuation_tbs":2,"edge_target_tbs":1,"runtime_tb_gen_calls":2,"runtime_tb_gen_attempts":3,"runtime_program_tb_gen_calls":1,"runtime_system_tb_gen_calls":1,"runtime_program_tb_gen_attempts":1,"runtime_system_tb_gen_attempts":2,"runtime_first_pc":4198400,"runtime_first_cflags":16384,"aot_cache_hit":true,"bundle_verify_ns":10,"guest_extract_ns":20,"aot_prepare_ns":30}
+{"cfg_tbs":5,"continuation_tbs":2,"edge_target_tbs":1,"interior_target_tbs":3,"runtime_tb_gen_calls":2,"runtime_tb_gen_attempts":3,"runtime_program_tb_gen_calls":1,"runtime_system_tb_gen_calls":1,"runtime_program_tb_gen_attempts":1,"runtime_system_tb_gen_attempts":2,"runtime_first_pc":4198400,"runtime_first_cflags":16384,"aot_cache_hit":true,"bundle_verify_ns":10,"guest_extract_ns":20,"aot_prepare_ns":30}
 EOF
 cat >"$workdir/two.json" <<'EOF'
 {"cfg_tbs":5,"runtime_tb_gen_calls":0,"runtime_program_tb_gen_calls":0,"runtime_system_tb_gen_calls":0,"runtime_first_pc":0}
@@ -21,7 +21,7 @@ PYTHONPATH="$(dirname "$0")/../spec2000" python3 - "$workdir" <<'PY'
 import pathlib
 import sys
 
-from specint import (aggregate_stats, geometric_mean, merge_profile,
+from specint import (aggregate_stats, geometric_mean, merge_profile, run_spec,
                      sample_summary, selected_programs)
 
 work = pathlib.Path(sys.argv[1])
@@ -33,6 +33,7 @@ assert stats["processes"] == 2, stats
 assert stats["cfg_tbs"] == 10, stats
 assert stats["continuation_tbs"] == 2, stats
 assert stats["edge_target_tbs"] == 1, stats
+assert stats["interior_target_tbs"] == 3, stats
 assert stats["runtime_tb_gen_calls"] == 2, stats
 assert stats["runtime_tb_gen_attempts"] == 3, stats
 assert stats["runtime_system_tb_gen_attempts"] == 2, stats
@@ -45,6 +46,18 @@ summary = sample_summary([1.0, 2.0, 3.0])
 assert summary["median"] == 2.0, summary
 assert abs(geometric_mean([2.0, 8.0]) - 4.0) < 1e-12
 assert selected_programs(["164.gzip"])[0][1] == "gzip_base.Of.gcc830.dyn"
+spec = (work / "timeout-spec").resolve()
+(spec / "result").mkdir(parents=True)
+runner = spec / "myrun1.sh"
+runner.write_text("#!/bin/sh\nsleep 1\n")
+runner.chmod(0o755)
+try:
+    run_spec(spec, "train", "164.gzip", {}, work / "timeout.log",
+             timeout=0.01)
+except RuntimeError as error:
+    assert "timed out" in str(error), error
+else:
+    raise AssertionError("run_spec timeout was not enforced")
 print("test-spec-tools: PASS")
 PY
 

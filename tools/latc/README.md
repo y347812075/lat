@@ -233,9 +233,11 @@ execution. Unresolved paths use JIT unless `LATC_STRICT_AOT=1` is set.
 `runtime_tb_gen_attempts` and `runtime_tb_gen_calls`. The attempt count must be
 checked before claiming that a test ran without entering the runtime
 translator. `LATC_DISABLE_PRETRANSLATE=1` provides a JIT baseline for the same
-bundle. `continuation_tbs` counts TBs added after LAT reaches its instruction
-limit; `edge_target_tbs` counts executable static-edge targets not represented
-by a standalone CFG block.
+bundle. `continuation_tbs` counts TBs added when LAT ends a TB before the end of
+its containing CFG block, including instruction-limit and internal translator
+splits. `edge_target_tbs` counts executable static-edge targets not represented
+by a standalone CFG block. `interior_target_tbs` counts entries immediately
+after standard x86 alignment NOPs at the beginning of CFG blocks.
 
 `LATC_PROFILE_OUT=/path/missing.profile` records runtime-generated guest PCs.
 Passing that file back through `--profile` adds missing addresses that are
@@ -261,6 +263,12 @@ python3 spec2000/bench-specint-train.py \
   --bundle-dir /path/to/train-bundles/bundles \
   --workdir /path/to/train-benchmark --rounds 5
 ```
+
+All twelve SPECint2000 integer train workloads passed on the AOSC 3A6000 host
+on 2026-08-21. Each individual command used a 30-second hard timeout; the
+slowest command completed in 16.76 seconds. VPR was checked with the official
+numeric tolerances and all other outputs matched byte for byte. Ref inputs have
+not been run.
 
 This proves that the main x86 ELF executes from LAT AOT without entering the
 runtime translator for the measured workload. It does not yet produce a

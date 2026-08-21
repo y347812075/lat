@@ -65,13 +65,20 @@ def newest_raw(spec_root, before):
     return max(candidates, key=lambda path: path.stat().st_mtime_ns)
 
 
-def run_spec(spec_root, size, benchmark, env, log_path, require_valid=True):
+def run_spec(spec_root, size, benchmark, env, log_path, require_valid=True,
+             timeout=None):
     result_dir = Path(spec_root) / "result"
     before = set(result_dir.glob("CINT2000.*.raw"))
     command = [str(Path(spec_root) / "myrun1.sh"), size, benchmark]
     with Path(log_path).open("w") as log:
-        process = subprocess.run(command, cwd=str(spec_root), env=env,
-                                 stdout=log, stderr=subprocess.STDOUT)
+        try:
+            process = subprocess.run(command, cwd=str(spec_root), env=env,
+                                     stdout=log, stderr=subprocess.STDOUT,
+                                     timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("runspec timed out after %s seconds for %s; "
+                               "see %s" %
+                               (timeout, benchmark, log_path)) from exc
     if process.returncode:
         raise RuntimeError("runspec failed for %s; see %s" %
                            (benchmark, log_path))
@@ -109,7 +116,7 @@ def merge_profile(source, destination):
 def aggregate_stats(paths):
     additive = (
         "cfg_tbs", "profiled_tbs", "pretranslated", "continuation_tbs",
-        "edge_target_tbs", "failed",
+        "edge_target_tbs", "interior_target_tbs", "failed",
         "same_extent", "shorter_than_cfg", "longer_than_cfg",
         "runtime_tb_gen_calls", "runtime_program_tb_gen_calls",
         "runtime_system_tb_gen_calls", "runtime_tb_gen_attempts",
