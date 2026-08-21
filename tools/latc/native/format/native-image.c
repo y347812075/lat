@@ -137,14 +137,17 @@ int lat_native_image_validate(const void *data, size_t size,
                                  header->relocation_offset);
     for (uint64_t i = 0; i < header->relocation_count; i++) {
         if (relocations[i].code_offset >= header->code_size ||
-            !relocations[i].slots || relocations[i].slots > 3 ||
+            !relocations[i].slots || relocations[i].slots > 4 ||
             relocations[i].slots * 4 >
                 header->code_size - relocations[i].code_offset ||
             relocations[i].kind < LAT_NATIVE_RELOC_RUNTIME_SYMBOL ||
-            relocations[i].kind > LAT_NATIVE_RELOC_GUEST_ADDRESS) {
+            relocations[i].kind > LAT_NATIVE_RELOC_JRRA_TARGET) {
             return invalid(error, error_size,
-                           "native relocation %llu is invalid",
-                           (unsigned long long)i);
+                           "native relocation %llu is invalid "
+                           "(kind=%u slots=%u offset=0x%llx)",
+                           (unsigned long long)i, relocations[i].kind,
+                           relocations[i].slots,
+                           (unsigned long long)relocations[i].code_offset);
         }
         if (relocations[i].kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL &&
             (relocations[i].target <= LAT_NATIVE_SYMBOL_INVALID ||
@@ -159,8 +162,15 @@ int lat_native_image_validate(const void *data, size_t size,
                            "native relocation %llu has an invalid guest target",
                            (unsigned long long)i);
         }
+        if (relocations[i].kind == LAT_NATIVE_RELOC_JRRA_TARGET &&
+            relocations[i].slots != 4) {
+            return invalid(error, error_size,
+                           "native JRRA relocation %llu must use 4 slots",
+                           (unsigned long long)i);
+        }
         if ((header->flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC) &&
-            relocations[i].kind == LAT_NATIVE_RELOC_TB_TARGET &&
+            (relocations[i].kind == LAT_NATIVE_RELOC_TB_TARGET ||
+             relocations[i].kind == LAT_NATIVE_RELOC_JRRA_TARGET) &&
             !tb_target_valid(tbs, header->tb_count,
                              (uint64_t)relocations[i].addend,
                              relocations[i].target)) {

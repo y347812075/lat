@@ -297,6 +297,35 @@ static void append_tu_relocations(GArray *output, const aot_tb *tb,
 #endif
 }
 
+static void append_jrra_relocation(GArray *output, const aot_tb *tb,
+        uint64_t tb_code_offset, const aot_segment *segment,
+        const GByteArray *guest)
+{
+#ifdef CONFIG_LATX_JRRA
+    if (!tb->return_target_ptr_offset) {
+        return;
+    }
+    uint64_t target_pc = segment->details.seg_begin + tb->next_86_pc_offset;
+    if (!guest_executable_address(guest, target_pc)) {
+        return;
+    }
+    LatNativeRelocationV1 relocation = {
+        .code_offset = tb_code_offset + tb->return_target_ptr_offset,
+        .addend = target_pc,
+        .kind = LAT_NATIVE_RELOC_JRRA_TARGET,
+        .target = tb->cflags,
+        .slots = 4,
+    };
+    g_array_append_val(output, relocation);
+#else
+    (void)output;
+    (void)tb;
+    (void)tb_code_offset;
+    (void)segment;
+    (void)guest;
+#endif
+}
+
 static int strip_process_local_search_data(uint8_t *code, uint64_t code_size,
         const aot_tb *tbs, size_t tb_count, uint64_t aot_code_offset)
 {
@@ -405,6 +434,8 @@ int latc_native_export(const char *path, const char *guest_path,
         if (tbs[i].rel_start_index == -1) {
             append_tu_relocations(native_relocations, &tbs[i], code_offset,
                                   pc);
+            append_jrra_relocation(native_relocations, &tbs[i], code_offset,
+                                   segment, guest);
             continue;
         }
         if (tbs[i].rel_start_index < 0 ||
@@ -421,6 +452,8 @@ int latc_native_export(const char *path, const char *guest_path,
             }
         }
         append_tu_relocations(native_relocations, &tbs[i], code_offset, pc);
+        append_jrra_relocation(native_relocations, &tbs[i], code_offset,
+                               segment, guest);
     }
 
     g_array_sort(native_tbs, compare_native_tb);
@@ -460,7 +493,8 @@ int latc_native_export(const char *path, const char *guest_path,
     for (guint i = 0; i < native_relocations->len; i++) {
         const LatNativeRelocationV1 *relocation = &g_array_index(
             native_relocations, LatNativeRelocationV1, i);
-        if (relocation->kind == LAT_NATIVE_RELOC_TB_TARGET &&
+        if ((relocation->kind == LAT_NATIVE_RELOC_TB_TARGET ||
+             relocation->kind == LAT_NATIVE_RELOC_JRRA_TARGET) &&
             !native_tb_target_exists(native_tbs,
                                      (uint64_t)relocation->addend,
                                      relocation->target)) {

@@ -10,6 +10,8 @@ static const LatNativeImageHeaderV1 *dispatch_header;
 static const unsigned char *dispatch_image;
 static size_t dispatch_image_size;
 static const unsigned char *dispatch_code;
+static LatNativeX86FastTb *dispatch_jump_cache;
+static size_t dispatch_jump_cache_count;
 static LatNativeX86FastTb dispatch_lookup_cache[LAT_NATIVE_X86_JMP_CACHE_SIZE];
 
 const LatNativeTbV1 *lat_native_tb_find(const LatNativeImageHeaderV1 *header,
@@ -84,6 +86,8 @@ void lat_native_x86_dispatch_configure(const LatNativeImageHeaderV1 *header,
     dispatch_image = image;
     dispatch_image_size = image_size;
     dispatch_code = code_address;
+    dispatch_jump_cache = jump_cache;
+    dispatch_jump_cache_count = jump_cache_count;
     for (size_t i = 0; i < jump_cache_count; i++) {
         jump_cache[i].pc = UINT64_MAX;
         jump_cache[i].ptr = NULL;
@@ -113,5 +117,9 @@ void *lat_native_x86_dispatch_lookup(uint64_t guest_pc)
     void *target = (void *)(dispatch_code + tb->code_offset);
     dispatch_lookup_cache[hash].ptr = target;
     dispatch_lookup_cache[hash].pc = guest_pc;
+    if (hash < dispatch_jump_cache_count) {
+        dispatch_jump_cache[hash].ptr = target;
+        dispatch_jump_cache[hash].pc = guest_pc;
+    }
     return target;
 }

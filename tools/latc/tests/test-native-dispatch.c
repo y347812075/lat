@@ -38,6 +38,13 @@ int main(void)
         free(cache);
         return 1;
     }
+    size_t hash = (0x2000 ^ (0x2000 >> LAT_NATIVE_X86_JMP_CACHE_BITS)) &
+        (LAT_NATIVE_X86_JMP_CACHE_SIZE - 1);
+    if (cache[hash].pc != 0x2000 || cache[hash].ptr != code + 8) {
+        fprintf(stderr, "native translated jump cache was not populated\n");
+        free(cache);
+        return 1;
+    }
     tbs[2].code_offset = 4;
     if (lat_native_x86_dispatch_lookup(0x2000) != code + 8) {
         fprintf(stderr, "native C dispatch cache failed\n");
