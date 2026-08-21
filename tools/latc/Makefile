@@ -195,6 +195,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  tests/fake.aot2 $(BUILD)/tests/cfg-aot-bundle
 	sh tests/test-bundle-corruption.sh $(BUILD)/latc $(BUILD)/tests/cfg-bundle $(BUILD)/tests/cfg-bundle.bad
 	sh tests/test-spec-tools.sh $(BUILD)/tests/spec-tools
+	sh -n scripts/compile-native-elf.sh scripts/compile-native-image.sh \
+	  scripts/link-native-shell.sh
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)

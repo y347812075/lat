@@ -35,6 +35,19 @@ tools/latc/scripts/link-native-shell.sh program.latnative program.la64
 program.la64 --latc-inspect
 ```
 
+The normal one-step command accepts a static x86-64 ELF and writes the final
+LoongArch executable directly:
+
+```sh
+tools/latc/scripts/compile-native-elf.sh build/latc \
+  /path/to/latx-x86_64 /path/to/static-x86-program program.la64
+./program.la64 arg1 arg2
+```
+
+The command generates the native image in a temporary directory, verifies and
+marks the embedded static x86 ELF, then links the runtime shell. An optional
+fifth argument supplies a profile file.
+
 Set `LATC_LA64_LDFLAGS=-static-pie` when the LoongArch toolchain provides
 static libc objects and the output must have no ELF interpreter or shared
 library dependency.
