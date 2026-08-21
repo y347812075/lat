@@ -33,6 +33,14 @@ lat_native_x86_dispatch_jirl:
 .size lat_native_x86_dispatch_jirl, .-lat_native_x86_dispatch_jirl
 
 .align 2
+.global lat_native_x86_dispatch_env_eip
+.type lat_native_x86_dispatch_env_eip, @function
+lat_native_x86_dispatch_env_eip:
+    ld.d $r21, $s8, 320
+    b lat_native_x86_dispatch_jirl
+.size lat_native_x86_dispatch_env_eip, .-lat_native_x86_dispatch_env_eip
+
+.align 2
 .global lat_native_x86_syscall
 .type lat_native_x86_syscall, @function
 lat_native_x86_syscall:

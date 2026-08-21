@@ -176,25 +176,61 @@ static void lat_helper_cpuid(unsigned char *env)
 
     switch (leaf) {
     case 0:
-        eax = 7;
-        ebx = 0x756e6547; /* GenuineIntel */
-        edx = 0x49656e69;
-        ecx = 0x6c65746e;
+        eax = 0x0d;
+        ebx = 0x68747541; /* AuthenticAMD */
+        edx = 0x69746e65;
+        ecx = 0x444d4163;
         break;
     case 1:
-        eax = 0x00000663;
-        edx = (1u << 0) | (1u << 4) | (1u << 5) | (1u << 8) |
-              (1u << 15) | (1u << 23) | (1u << 24) | (1u << 25) |
-              (1u << 26);
+        eax = 0x00060fb1;
+        ebx = 0x00000800;
+        ecx = 0x82982203;
+        edx = 0x078bfbfd;
         break;
-    case 7:
-        if (subleaf == 0) eax = 0;
+    case 2:
+        eax = 0x00000001;
+        ecx = 0x0000004d;
+        edx = 0x002c307d;
         break;
+    case 4: {
+        static const uint32_t cache[4][4] = {
+            { 0x00000121, 0x01c0003f, 0x0000003f, 0x00000001 },
+            { 0x00000122, 0x01c0003f, 0x0000003f, 0x00000001 },
+            { 0x00000143, 0x03c0003f, 0x00000fff, 0x00000001 },
+            { 0x00000163, 0x03c0003f, 0x00003fff, 0x00000006 },
+        };
+        if (subleaf < 4) {
+            eax = cache[subleaf][0];
+            ebx = cache[subleaf][1];
+            ecx = cache[subleaf][2];
+            edx = cache[subleaf][3];
+        }
+        break;
+    }
     case 0x80000000u:
-        eax = 0x80000001u;
+        eax = 0x8000000au;
+        ebx = 0x68747541;
+        edx = 0x69746e65;
+        ecx = 0x444d4163;
         break;
     case 0x80000001u:
-        edx = 1u << 29;
+        eax = 0x00060fb1;
+        ecx = 0x00000005;
+        edx = 0x2193fbfd;
+        break;
+    case 0x80000005u:
+        eax = 0x01ff01ff;
+        ebx = 0x01ff01ff;
+        ecx = 0x40020140;
+        edx = 0x40020140;
+        break;
+    case 0x80000006u:
+        ebx = 0x42004200;
+        ecx = 0x02008140;
+        edx = 0x00808140;
+        break;
+    case 0x80000008u:
+        eax = 0x00003028;
         break;
     default:
         break;
@@ -205,7 +241,17 @@ static void lat_helper_cpuid(unsigned char *env)
     *rdx = edx;
 }
 
+static void lat_helper_preserve_fpregs(void)
+{
+}
+
+static void lat_helper_update_fp_status(unsigned char *env)
+{
+    (void)env;
+}
+
 extern void lat_native_x86_dispatch_jirl(void);
+extern void lat_native_x86_dispatch_env_eip(void);
 extern void lat_native_x86_syscall(void);
 
 void lat_native_x86_syscall_impl(void)
@@ -251,6 +297,13 @@ uintptr_t lat_runtime_symbol_address(uint32_t symbol)
         return (uintptr_t)placeholder_pftable;
     }
 #if defined(__loongarch__)
+    if ((symbol == LAT_NATIVE_SYMBOL_EPILOGUE_RET_ID_1 ||
+         symbol == LAT_NATIVE_SYMBOL_EPILOGUE_RET_ID_0 ||
+         symbol == LAT_NATIVE_SYMBOL_JIRL_EPILOGUE_RET_ID_1 ||
+         symbol == LAT_NATIVE_SYMBOL_JIRL_EPILOGUE_RET_ID_0) &&
+        (configured_flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC)) {
+        return (uintptr_t)lat_native_x86_dispatch_env_eip;
+    }
     if (symbol == LAT_NATIVE_SYMBOL_EPILOGUE_RET_0 &&
         (configured_flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC)) {
         return (uintptr_t)lat_native_x86_dispatch_jirl;
@@ -270,6 +323,19 @@ uintptr_t lat_runtime_symbol_address(uint32_t symbol)
     if (symbol == LAT_NATIVE_SYMBOL_CPUID &&
         (configured_flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC)) {
         return (uintptr_t)lat_helper_cpuid;
+    }
+    if ((symbol == LAT_NATIVE_SYMBOL_FPREGS_X80_TO_64 ||
+         symbol == LAT_NATIVE_SYMBOL_FPREGS_64_TO_X80) &&
+        (configured_flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC)) {
+        return (uintptr_t)lat_helper_preserve_fpregs;
+    }
+    if (symbol == LAT_NATIVE_SYMBOL_UPDATE_FP_STATUS &&
+        (configured_flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC)) {
+        return (uintptr_t)lat_helper_update_fp_status;
+    }
+    if (symbol == LAT_NATIVE_SYMBOL_UPDATE_MXCSR_STATUS &&
+        (configured_flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC)) {
+        return (uintptr_t)lat_helper_update_fp_status;
     }
 #endif
     switch (symbol) {

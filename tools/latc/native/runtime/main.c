@@ -104,8 +104,8 @@ static void *prepare_x86_initial_stack(void *stack, size_t stack_size,
         { AT_EXECFN, argv_addresses[0] },
         { AT_NULL, 0 },
     };
-    size_t word_count = 1 + (size_t)argc + 1 + envc + 1 +
-                        sizeof(auxv) / sizeof(uint64_t);
+    size_t auxv_count = sizeof(auxv) / sizeof(auxv[0]);
+    size_t word_count = 1 + (size_t)argc + 1 + envc + 1 + auxv_count * 2;
     size_t word_bytes = word_count * sizeof(uint64_t);
     if (word_bytes > cursor - bottom) goto fail;
     cursor = (cursor - word_bytes) & ~(uintptr_t)15;

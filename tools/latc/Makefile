@@ -128,6 +128,14 @@ $(BUILD)/tests/x86-readlinkat42: tests/x86-readlinkat42.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
 
+$(BUILD)/tests/x86-readlink42: tests/x86-readlink42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-newfstatat42: tests/x86-newfstatat42.S
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
 $(BUILD)/tests/x86-mprotect42: tests/x86-mprotect42.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
@@ -178,6 +186,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/x86-tls42 \
 	$(BUILD)/tests/x86-prlimit42 \
 	$(BUILD)/tests/x86-getrandom42 \
+	$(BUILD)/tests/x86-readlink42 \
+	$(BUILD)/tests/x86-newfstatat42 \
 	$(BUILD)/tests/x86-readlinkat42 \
 	$(BUILD)/tests/x86-mprotect42 \
 	$(BUILD)/tests/x86-fstat42 \
@@ -245,6 +255,10 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 5; assert d["error_functions"] == 0'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-getrandom42 | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 5; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-readlink42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 6; assert d["error_functions"] == 0'
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-newfstatat42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 6; assert d["error_functions"] == 0'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-readlinkat42 | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] >= 6; assert d["error_functions"] == 0'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-mprotect42 | \
