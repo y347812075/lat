@@ -111,6 +111,25 @@ static int patch_absolute(uint32_t *instructions, uint32_t slots,
     return 0;
 }
 
+static int patch_jrra(uint32_t *instructions, uintptr_t patch_address,
+                      uintptr_t target)
+{
+    if ((instructions[0] & 0xfe00001fu) != 0x1a00000cu ||
+        (instructions[1] & 0xffc003ffu) != 0x0380018cu ||
+        instructions[2] != (0x00000801u | 12u << 5) ||
+        instructions[3] != (0x00000800u | 13u << 5)) {
+        errno = ENOEXEC;
+        return -1;
+    }
+    uint32_t high = ((target >> 12) - (patch_address >> 12)) & 0xfffff;
+    instructions[0] = 0x1a000000u | high << 5 | 12u;
+    instructions[1] = 0x03800000u | (target & 0xfff) << 10 |
+        12u << 5 | 12u;
+    instructions[2] = 0x00000801u | 12u << 5;
+    instructions[3] = 0x00000800u | 13u << 5;
+    return 0;
+}
+
 int lat_native_code_load(const LatNativeImageHeaderV1 *header,
                          const unsigned char *image, size_t image_size,
                          LatNativeCode *code, char *error,
@@ -165,7 +184,8 @@ int lat_native_code_load(const LatNativeImageHeaderV1 *header,
         if (relocation->kind == LAT_NATIVE_RELOC_GUEST_ADDRESS) {
             result = patch_absolute(instructions, relocation->slots,
                                     (uint64_t)relocation->addend);
-        } else if (relocation->kind == LAT_NATIVE_RELOC_TB_TARGET) {
+        } else if (relocation->kind == LAT_NATIVE_RELOC_TB_TARGET ||
+                   relocation->kind == LAT_NATIVE_RELOC_JRRA_TARGET) {
             const LatNativeTbV1 *target_tb = lat_native_tb_find(
                 header, image, image_size, (uint64_t)relocation->addend,
                 relocation->target);
@@ -192,6 +212,15 @@ int lat_native_code_load(const LatNativeImageHeaderV1 *header,
                             patch_absolute(instructions, relocation->slots,
                                            target);
                     }
+                }
+            } else if (relocation->kind == LAT_NATIVE_RELOC_JRRA_TARGET) {
+                uintptr_t target = (uintptr_t)address + target_tb->code_offset;
+                if (relocation->slots != 4) {
+                    errno = ENOEXEC;
+                    result = -1;
+                } else {
+                    result = patch_jrra(instructions,
+                                        (uintptr_t)instructions, target);
                 }
             } else {
                 uintptr_t target = (uintptr_t)address + target_tb->code_offset;

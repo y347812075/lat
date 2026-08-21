@@ -14,12 +14,12 @@ int main(void)
     char error[128] = {0};
 
     header->code_offset = sizeof(*header);
-    header->code_size = 40;
+    header->code_size = 56;
     header->tb_table_offset = header->code_offset + header->code_size;
     header->tb_count = 1;
     header->relocation_offset = header->tb_table_offset +
                                 sizeof(LatNativeTbV1);
-    header->relocation_count = 5;
+    header->relocation_count = 6;
     instructions = (void *)(image + header->code_offset);
     instructions[0] = 0x1400000c;
     instructions[1] = 0x0380018c;
@@ -31,6 +31,10 @@ int main(void)
     instructions[7] = 0x1e00000c;
     instructions[8] = 0x4c000180;
     instructions[9] = 0x50000000;
+    instructions[10] = 0x1a00000c;
+    instructions[11] = 0x0380018c;
+    instructions[12] = 0x00000981;
+    instructions[13] = 0x000009a0;
     LatNativeTbV1 *tb = (void *)(image + header->tb_table_offset);
     tb->guest_pc = 0x402000;
     tb->code_offset = 0;
@@ -57,18 +61,29 @@ int main(void)
     relocations[4].kind = LAT_NATIVE_RELOC_TB_TARGET;
     relocations[4].addend = 0x402000;
     relocations[4].slots = 1;
+    relocations[5].code_offset = 40;
+    relocations[5].kind = LAT_NATIVE_RELOC_JRRA_TARGET;
+    relocations[5].addend = 0x402000;
+    relocations[5].slots = 4;
 
     size_t image_size = header->relocation_offset +
-                        5 * sizeof(*relocations);
+                        6 * sizeof(*relocations);
     if (lat_native_code_load(header, image, image_size, &code,
                              error, sizeof(error))) {
         fprintf(stderr, "native relocation failed: %s\n", error);
         return 1;
     }
     const uint32_t *loaded = code.address;
+    uint32_t jrra_high = (loaded[10] >> 5) & 0xfffff;
+    int64_t jrra_page_delta = (int32_t)(jrra_high << 12) >> 12;
+    uintptr_t jrra_target = (((uintptr_t)&loaded[10] >> 12) +
+                             jrra_page_delta) << 12;
+    jrra_target |= (loaded[11] >> 10) & 0xfff;
     if ((loaded[5] == instructions[5] && loaded[6] == instructions[6]) ||
         (loaded[7] == instructions[7] && loaded[8] == instructions[8]) ||
-        loaded[9] == instructions[9]) {
+        loaded[9] == instructions[9] ||
+        jrra_target != (uintptr_t)code.address ||
+        loaded[12] != instructions[12] || loaded[13] != instructions[13]) {
         fprintf(stderr, "native TB target was not relocated or preserved\n");
         lat_native_code_unload(&code);
         return 1;

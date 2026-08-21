@@ -1,14 +1,15 @@
 #ifndef LATC_NATIVE_DISPATCH_H
 #define LATC_NATIVE_DISPATCH_H
 
+#define LAT_NATIVE_X86_JMP_CACHE_BITS 16
+#define LAT_NATIVE_X86_JMP_CACHE_SIZE \
+    (1u << LAT_NATIVE_X86_JMP_CACHE_BITS)
+
+#ifndef __ASSEMBLER__
 #include "lat-native-image.h"
 
 #include <stddef.h>
 #include <stdint.h>
-
-#define LAT_NATIVE_X86_JMP_CACHE_BITS 16
-#define LAT_NATIVE_X86_JMP_CACHE_SIZE \
-    (1u << LAT_NATIVE_X86_JMP_CACHE_BITS)
 
 typedef struct LatNativeX86FastTb {
     uint64_t pc;
@@ -30,5 +31,6 @@ void lat_native_x86_dispatch_configure(const LatNativeImageHeaderV1 *header,
                                        LatNativeX86FastTb *jump_cache,
                                        size_t jump_cache_count);
 void *lat_native_x86_dispatch_lookup(uint64_t guest_pc);
+#endif
 
 #endif

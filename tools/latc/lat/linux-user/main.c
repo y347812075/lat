@@ -1358,6 +1358,7 @@ int main(int argc, char **argv, char **envp)
         LATC_ENV_OFFSET("EFLAGS", eflags);
         LATC_ENV_OFFSET("FS_BASE", segs[R_FS].base);
         LATC_ENV_OFFSET("GS_BASE", segs[R_GS].base);
+        LATC_ENV_OFFSET("TB_JMP_CACHE_PTR", tb_jmp_cache_ptr);
         LATC_ENV_OFFSET("FPREG0", fpregs[0]);
         LATC_ENV_OFFSET("FPREG1", fpregs[1]);
         LATC_ENV_OFFSET("FPREG2", fpregs[2]);

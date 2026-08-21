@@ -24,6 +24,7 @@ enum LatNativeRelocationKind {
     LAT_NATIVE_RELOC_RUNTIME_SYMBOL = 1,
     LAT_NATIVE_RELOC_TB_TARGET = 2,
     LAT_NATIVE_RELOC_GUEST_ADDRESS = 3,
+    LAT_NATIVE_RELOC_JRRA_TARGET = 4,
 };
 
 enum LatNativeRuntimeSymbolV1 {

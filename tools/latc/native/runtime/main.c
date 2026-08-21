@@ -294,7 +294,7 @@ int main(int argc, char **argv, char **envp)
             return 111;
         }
         void *environment = calloc(1, 4096);
-        size_t stack_size = 1024 * 1024;
+        size_t stack_size = 128 * 1024 * 1024;
         void *stack = malloc(stack_size);
         size_t jump_cache_count = LAT_NATIVE_X86_JMP_CACHE_SIZE;
         LatNativeX86FastTb *jump_cache = calloc(jump_cache_count,
@@ -312,6 +312,8 @@ int main(int argc, char **argv, char **envp)
         lat_native_x86_dispatch_configure(header, latc_embedded_image_start,
                                            image_size, code.address,
                                            jump_cache, jump_cache_count);
+        *(void **)((unsigned char *)environment +
+                   LATC_X86_ENV_TB_JMP_CACHE_PTR_OFFSET) = jump_cache;
         void *stack_top = prepare_x86_initial_stack(stack, stack_size,
                                                     &mapping, argc, argv,
                                                     envp);
