@@ -268,7 +268,10 @@ All twelve SPECint2000 integer train workloads passed on the AOSC 3A6000 host
 on 2026-08-21. Each individual command used a 30-second hard timeout; the
 slowest command completed in 16.76 seconds. VPR was checked with the official
 numeric tolerances and all other outputs matched byte for byte. Ref inputs have
-not been run.
+not been run. A subsequent full run through `myrun1.sh train` regenerated all
+twelve ELFs first, then produced twelve official SPEC `.raw` results with
+`valid=1`; the slowest whole benchmark was perlbmk at 44.11 seconds under the
+60-second per-benchmark limit.
 
 This proves that the main x86 ELF executes from LAT AOT without entering the
 runtime translator for the measured workload. It does not yet produce a
