@@ -1,3 +1,4 @@
+#include "dispatch.h"
 #include "latx-x86-env-offsets.h"
 
 .text
@@ -5,6 +6,16 @@
 .global lat_native_x86_dispatch_jirl
 .type lat_native_x86_dispatch_jirl, @function
 lat_native_x86_dispatch_jirl:
+    srli.d $t0, $r21, LAT_NATIVE_X86_JMP_CACHE_BITS
+    xor $t0, $r21, $t0
+    bstrpick.d $t0, $t0, LAT_NATIVE_X86_JMP_CACHE_BITS - 1, 0
+    alsl.d $t0, $t0, $fp, 3
+    ld.d $t1, $t0, 0
+    bne $t1, $r21, .Ldispatch_jirl_miss
+    ld.d $t0, $t0, 8
+    jr $t0
+
+.Ldispatch_jirl_miss:
     addi.d $sp, $sp, -96
     st.d $ra, $sp, 0
     st.d $a2, $sp, 8
