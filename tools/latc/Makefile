@@ -1,10 +1,11 @@
 CC ?= cc
 X86_CC ?= $(CC)
 AR ?= ar
+HOST_ARCH := $(shell uname -m)
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=c11
 CPPFLAGS += -Icfg/include
 CPPFLAGS += -Iformat -Ilat/include -Inative/include -Inative/format \
-	-Inative/runtime \
+	-Inative/runtime -Iaot-v2/include -Iaot-v2/runtime \
 	$(shell pkg-config --cflags glib-2.0)
 LDLIBS += $(shell pkg-config --libs glib-2.0)
 
@@ -21,7 +22,7 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 
 .PHONY: all clean test test-native test-native-shell test-native-long-tb \
 	test-aot-native test-spec-analyze test-spec-gzip test-spec-gzip-aot \
-	test-spec-gzip-native test-specint-native check-import
+	test-spec-gzip-native test-specint-native test-aot-v2 check-import
 
 all: $(BUILD)/latc $(BUILD)/liblatc_cfg.a
 
@@ -289,7 +290,101 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] >= 1000; assert d["tbs"] >= 30000; assert d["error_functions"] == 0'
 	$(BUILD)/latc inspect-native --json $(BUILD)/tests/native-image | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["execution_model"] == "lat-native-image"; assert d["tbs"] == 1; assert d["relocations"] == 1'
+	$(MAKE) test-aot-v2
 	$(MAKE) check-import
+
+$(BUILD)/tests/test-aot-v2-format: aot-v2/tests/test-format.c \
+		$(BUILD)/aot-v2/runtime/elf-validate.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+
+$(BUILD)/tests/test-aot-v2-registry: aot-v2/tests/test-registry.c \
+		$(BUILD)/aot-v2/runtime/registry.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ -pthread
+
+ifeq ($(HOST_ARCH),loongarch64)
+$(BUILD)/aot-v2/liblat-aot-runtime.so.2: aot-v2/runtime/runtime-abi.c \
+		aot-v2/runtime/runtime.map
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -O2 -fPIC -shared -nostdlib \
+	  -Wl,-soname,liblat-aot-runtime.so.2 \
+	  -Wl,--version-script=aot-v2/runtime/runtime.map \
+	  -Wl,--build-id=sha1 -o $@ $<
+
+$(BUILD)/aot-v2/fixture.so: aot-v2/tests/fixture.c \
+		aot-v2/tests/fixture-entry.S aot-v2/tests/module.map \
+		$(BUILD)/aot-v2/liblat-aot-runtime.so.2
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -O2 -fPIC -shared -nostdlib \
+	  -Wl,-z,defs -Wl,-z,now -Wl,-z,relro \
+	  -Wl,--unique=.text.lat.tu -Wl,--unique=.rodata.lat.tb \
+	  -Wl,--unique=.data.rel.ro.lat.module \
+	  -Wl,--version-script=aot-v2/tests/module.map \
+	  -Wl,--build-id=sha1 \
+	  -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
+	  -l:liblat-aot-runtime.so.2 -o $@ \
+	  aot-v2/tests/fixture.c aot-v2/tests/fixture-entry.S
+
+$(BUILD)/aot-v2/fixture-bad-descriptor.so: aot-v2/tests/fixture.c \
+		aot-v2/tests/fixture-entry.S aot-v2/tests/module.map \
+		$(BUILD)/aot-v2/liblat-aot-runtime.so.2
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -O2 -fPIC -shared -nostdlib \
+	  -DLAT_AOT_FIXTURE_DESCRIPTOR_SOURCE_BYTE=0x12 \
+	  -Wl,-z,defs -Wl,-z,now -Wl,-z,relro \
+	  -Wl,--unique=.text.lat.tu -Wl,--unique=.rodata.lat.tb \
+	  -Wl,--unique=.data.rel.ro.lat.module \
+	  -Wl,--version-script=aot-v2/tests/module.map \
+	  -Wl,--build-id=sha1 \
+	  -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
+	  -l:liblat-aot-runtime.so.2 -o $@ \
+	  aot-v2/tests/fixture.c aot-v2/tests/fixture-entry.S
+
+$(BUILD)/tests/test-aot-v2-loader: aot-v2/tests/test-loader.c \
+		$(BUILD)/aot-v2/runtime/module-loader.o \
+		$(BUILD)/aot-v2/runtime/elf-validate.o \
+		$(BUILD)/aot-v2/runtime/registry.o \
+		$(BUILD)/aot-v2/liblat-aot-runtime.so.2
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
+	  aot-v2/tests/test-loader.c \
+	  $(BUILD)/aot-v2/runtime/module-loader.o \
+	  $(BUILD)/aot-v2/runtime/elf-validate.o \
+	  $(BUILD)/aot-v2/runtime/registry.o \
+	  -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
+	  -l:liblat-aot-runtime.so.2 -ldl -pthread
+
+AOT_V2_NATIVE_TESTS := $(BUILD)/aot-v2/liblat-aot-runtime.so.2 \
+	$(BUILD)/aot-v2/fixture.so \
+	$(BUILD)/aot-v2/fixture-bad-descriptor.so \
+	$(BUILD)/tests/test-aot-v2-loader
+endif
+
+test-aot-v2: $(BUILD)/tests/test-aot-v2-format \
+		$(BUILD)/tests/test-aot-v2-registry $(AOT_V2_NATIVE_TESTS)
+	$(BUILD)/tests/test-aot-v2-format
+	$(BUILD)/tests/test-aot-v2-registry
+ifeq ($(HOST_ARCH),loongarch64)
+	readelf -h $(BUILD)/aot-v2/fixture.so | grep -q 'DYN (Shared object file)'
+	readelf -lW $(BUILD)/aot-v2/fixture.so | \
+	  awk '/ LOAD / && $$0 ~ /W/ && $$0 ~ /E/ { bad=1 } END { exit bad }'
+	readelf -d $(BUILD)/aot-v2/fixture.so | \
+	  grep -q 'Shared library: \[liblat-aot-runtime.so.2\]'
+	! readelf -d $(BUILD)/aot-v2/fixture.so | grep -Eq 'RPATH|RUNPATH'
+	readelf --dyn-syms -W $(BUILD)/aot-v2/fixture.so | \
+	  grep -q 'lat_aot_module_v2'
+	readelf -SW $(BUILD)/aot-v2/fixture.so | grep -q '.note.lat.aot'
+	readelf -SW $(BUILD)/aot-v2/fixture.so | grep -q '.rodata.lat.tb'
+	readelf -SW $(BUILD)/aot-v2/fixture.so | grep -q '.text.lat.tu'
+	readelf -SW $(BUILD)/aot-v2/fixture.so | grep -q '.data.rel.ro.lat.module'
+	LD_LIBRARY_PATH=$(abspath $(BUILD)/aot-v2) \
+	  $(BUILD)/tests/test-aot-v2-loader \
+	  $(abspath $(BUILD)/aot-v2/fixture.so)
+	LD_LIBRARY_PATH=$(abspath $(BUILD)/aot-v2) \
+	  $(BUILD)/tests/test-aot-v2-loader --expect-reject \
+	  $(abspath $(BUILD)/aot-v2/fixture-bad-descriptor.so)
+endif
 
 $(BUILD)/tests/liblat-good.so: tests/fake-liblat.c
 	@mkdir -p $(dir $@)
@@ -428,4 +523,7 @@ clean:
 	rm -rf $(BUILD)
 
 -include $(CFG_OBJ:.o=.d) $(BUILD)/compiler/latc.d \
-	$(BUILD)/compiler/profile.d $(BUILD)/format/bundle.d
+	$(BUILD)/compiler/profile.d $(BUILD)/format/bundle.d \
+	$(BUILD)/aot-v2/runtime/elf-validate.d \
+	$(BUILD)/aot-v2/runtime/registry.d \
+	$(BUILD)/aot-v2/runtime/module-loader.d

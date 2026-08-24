@@ -1,0 +1,6 @@
+LAT_AOT_RUNTIME_2.0 {
+    global:
+        lat_aot_runtime_abi_version;
+    local:
+        *;
+};

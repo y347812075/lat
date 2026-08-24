@@ -1,0 +1,171 @@
+#define _GNU_SOURCE
+
+#include "module-loader.h"
+
+#include "elf-validate.h"
+
+#include <dlfcn.h>
+#include <elf.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+static int fail(char *error, size_t error_size, const char *format, ...)
+{
+    if (error && error_size) {
+        va_list arguments;
+        va_start(arguments, format);
+        vsnprintf(error, error_size, format, arguments);
+        va_end(arguments);
+    }
+    return -1;
+}
+
+static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
+                                   const LatAotNoteV2 *note,
+                                   char *error, size_t error_size)
+{
+    if (!descriptor || !lat_aot_v2_magic_valid(descriptor->magic) ||
+        descriptor->abi_version != LAT_AOT_V2_ABI_VERSION ||
+        descriptor->struct_size != sizeof(*descriptor)) {
+        return fail(error, error_size, "AOT descriptor ABI is invalid");
+    }
+    if (descriptor->module_flags != note->module_flags ||
+        descriptor->required_features != note->required_features ||
+        memcmp(descriptor->source_sha256, note->source_sha256,
+               sizeof(note->source_sha256)) ||
+        memcmp(descriptor->codegen_id, note->codegen_id,
+               sizeof(note->codegen_id)) ||
+        memcmp(descriptor->profile_digest, note->profile_digest,
+               sizeof(note->profile_digest))) {
+        return fail(error, error_size,
+                    "AOT descriptor does not match its ELF note");
+    }
+    Dl_info info;
+    if (!dladdr(descriptor, &info) || !info.dli_fbase) {
+        return fail(error, error_size, "cannot locate the loaded AOT ELF");
+    }
+    const unsigned char *base = info.dli_fbase;
+    const Elf64_Ehdr *header = (const void *)base;
+    if (memcmp(header->e_ident, ELFMAG, SELFMAG) ||
+        header->e_phentsize != sizeof(Elf64_Phdr) || !header->e_phnum) {
+        return fail(error, error_size, "loaded AOT ELF header is invalid");
+    }
+    const Elf64_Phdr *phdrs = (const void *)(base + header->e_phoff);
+    uintptr_t text_begin = (uintptr_t)descriptor->text_begin;
+    uintptr_t text_end = (uintptr_t)descriptor->text_end;
+    uintptr_t tb_begin = (uintptr_t)descriptor->tb_begin;
+    uintptr_t tb_end = (uintptr_t)descriptor->tb_end;
+    uintptr_t pc_begin = (uintptr_t)descriptor->pc_map_begin;
+    uintptr_t pc_end = (uintptr_t)descriptor->pc_map_end;
+    if (!text_begin || text_end <= text_begin || !tb_begin || tb_end < tb_begin ||
+        (tb_end - tb_begin) % sizeof(LatAotTbV2) || pc_end < pc_begin ||
+        (pc_end - pc_begin) % sizeof(LatAotPcMapV2)) {
+        return fail(error, error_size, "AOT descriptor ranges are invalid");
+    }
+    int text_ok = 0;
+    int tb_ok = 0;
+    int pc_ok = pc_begin == pc_end;
+    for (size_t i = 0; i < header->e_phnum; i++) {
+        if (phdrs[i].p_type != PT_LOAD) {
+            continue;
+        }
+        uintptr_t begin = (uintptr_t)base + phdrs[i].p_vaddr;
+        uintptr_t end = begin + phdrs[i].p_memsz;
+        if (end < begin) {
+            return fail(error, error_size, "loaded AOT segment overflows");
+        }
+        if (text_begin >= begin && text_end <= end &&
+            (phdrs[i].p_flags & (PF_R | PF_W | PF_X)) == (PF_R | PF_X)) {
+            text_ok = 1;
+        }
+        if (tb_begin >= begin && tb_end <= end &&
+            (phdrs[i].p_flags & PF_R) && !(phdrs[i].p_flags & PF_W)) {
+            tb_ok = 1;
+        }
+        if (pc_begin >= begin && pc_end <= end &&
+            (phdrs[i].p_flags & PF_R) && !(phdrs[i].p_flags & PF_W)) {
+            pc_ok = 1;
+        }
+    }
+    if (!text_ok || !tb_ok || !pc_ok) {
+        return fail(error, error_size,
+                    "AOT descriptor points outside permitted segments");
+    }
+    size_t tb_count = (tb_end - tb_begin) / sizeof(LatAotTbV2);
+    size_t text_size = text_end - text_begin;
+    for (size_t i = 0; i < tb_count; i++) {
+        const LatAotTbV2 *tb = &descriptor->tb_begin[i];
+        if (tb->host_offset > text_size ||
+            tb->host_size > text_size - tb->host_offset ||
+            (i && (descriptor->tb_begin[i - 1].guest_rva > tb->guest_rva ||
+                   (descriptor->tb_begin[i - 1].guest_rva == tb->guest_rva &&
+                    descriptor->tb_begin[i - 1].flags >= tb->flags)))) {
+            return fail(error, error_size, "AOT TB table is invalid");
+        }
+    }
+    if (!(descriptor->module_flags & LAT_AOT_MODULE_SYNTHETIC_FIXTURE) &&
+        pc_begin == pc_end) {
+        return fail(error, error_size, "AOT precise PC map is empty");
+    }
+    return 0;
+}
+
+int lat_aot_v2_module_open(const char *path,
+                           const LatAotExpectedV2 *expected,
+                           LatAotLoadedModuleV2 *module,
+                           char *error, size_t error_size)
+{
+    if (!path || !expected || !module) {
+        errno = EINVAL;
+        return fail(error, error_size, "invalid AOT module arguments");
+    }
+    memset(module, 0, sizeof(*module));
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        return fail(error, error_size, "cannot open AOT module: %s",
+                    strerror(errno));
+    }
+    LatAotNoteV2 note;
+    if (lat_aot_v2_elf_validate_fd(fd, expected, &note,
+                                   error, error_size)) {
+        close(fd);
+        return -1;
+    }
+    char fd_path[64];
+    int length = snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
+    if (length < 0 || (size_t)length >= sizeof(fd_path)) {
+        close(fd);
+        errno = ENAMETOOLONG;
+        return fail(error, error_size, "AOT module fd path is too long");
+    }
+    dlerror();
+    void *handle = dlopen(fd_path, RTLD_NOW | RTLD_LOCAL);
+    const char *dl_error = dlerror();
+    close(fd);
+    if (!handle) {
+        return fail(error, error_size, "cannot load AOT module: %s",
+                    dl_error ? dl_error : "unknown dlopen failure");
+    }
+    dlerror();
+    const LatAotModuleV2 *descriptor =
+        dlsym(handle, LAT_AOT_V2_DESCRIPTOR_SYMBOL);
+    dl_error = dlerror();
+    if (dl_error || descriptor_matches_note(descriptor, &note,
+                                            error, error_size)) {
+        if (dl_error) {
+            fail(error, error_size, "cannot resolve AOT descriptor: %s",
+                 dl_error);
+        }
+        dlclose(handle);
+        return -1;
+    }
+    module->dl_handle = handle;
+    module->descriptor = descriptor;
+    module->note = note;
+    return 0;
+}
