@@ -27,7 +27,7 @@ int main(void)
     instructions[3] = 0x1400000c;
     instructions[4] = 0x0380018c;
     instructions[5] = 0x1e00000c;
-    instructions[6] = 0x4c000180;
+    instructions[6] = 0x4c000184;
     instructions[7] = 0x1e00000c;
     instructions[8] = 0x4c000180;
     instructions[9] = 0x50000000;
@@ -79,7 +79,8 @@ int main(void)
     uintptr_t jrra_target = (((uintptr_t)&loaded[10] >> 12) +
                              jrra_page_delta) << 12;
     jrra_target |= (loaded[11] >> 10) & 0xfff;
-    if ((loaded[5] == instructions[5] && loaded[6] == instructions[6]) ||
+    if (loaded[5] != 0x18000044u ||
+        (loaded[6] & 0xfc000000u) != 0x50000000u ||
         (loaded[7] == instructions[7] && loaded[8] == instructions[8]) ||
         loaded[9] == instructions[9] ||
         jrra_target != (uintptr_t)code.address ||
