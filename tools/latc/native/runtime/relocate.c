@@ -42,6 +42,28 @@ static int patch_pc_relative(uint32_t *instructions, uintptr_t patch_address,
     return 0;
 }
 
+static int patch_tb_target_pair(uint32_t *instructions,
+                                uintptr_t patch_address, uintptr_t target)
+{
+    if ((instructions[0] & 0xfe00001fu) == 0x1e00000cu &&
+        (instructions[1] & 0xfc0003e0u) == 0x4c000180u) {
+        uintptr_t branch_address = patch_address + sizeof(*instructions);
+        int64_t difference = (int64_t)target - (int64_t)branch_address;
+        int64_t offset = difference >> 2;
+        if (!(difference & 3) && offset >= -(1 << 25) &&
+            offset < (1 << 25)) {
+            uint32_t destination = instructions[1] & 0x1fu;
+            instructions[0] = destination ?
+                0x18000040u | destination : 0x03400000u;
+            instructions[1] = 0x50000000u |
+                ((uint32_t)offset & 0xffffu) << 10 |
+                (((uint32_t)offset >> 16) & 0x3ffu);
+            return 0;
+        }
+    }
+    return patch_pc_relative(instructions, patch_address, target);
+}
+
 static int patch_branch(uint32_t *instruction, uintptr_t patch_address,
                         uintptr_t target)
 {
@@ -227,8 +249,8 @@ int lat_native_code_load(const LatNativeImageHeaderV1 *header,
                 result = relocation->slots == 1 ?
                     patch_branch(instructions, (uintptr_t)instructions,
                                  target) : relocation->slots == 2 ?
-                    patch_pc_relative(instructions,
-                                      (uintptr_t)instructions, target) :
+                    patch_tb_target_pair(instructions,
+                                         (uintptr_t)instructions, target) :
                     patch_absolute(instructions, relocation->slots, target);
             }
         } else if (relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL) {
