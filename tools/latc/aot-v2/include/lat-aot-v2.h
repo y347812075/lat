@@ -1,0 +1,110 @@
+#ifndef LAT_AOT_V2_H
+#define LAT_AOT_V2_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#define LAT_AOT_V2_ABI_VERSION 2u
+#define LAT_AOT_V2_NOTE_TYPE 0x4c415432u
+#define LAT_AOT_V2_NOTE_NAME "LAT"
+#define LAT_AOT_V2_DESCRIPTOR_SYMBOL "lat_aot_module_v2"
+#define LAT_AOT_V2_MODULE_VERSION "LAT_AOT_MODULE_2.0"
+#define LAT_AOT_V2_RUNTIME_SONAME "liblat-aot-runtime.so.2"
+#define LAT_AOT_V2_RUNTIME_ABI_SYMBOL "lat_aot_runtime_abi_version"
+
+enum LatAotFeatureV2 {
+    LAT_AOT_FEATURE_LBT = 1u << 0,
+    LAT_AOT_FEATURE_LSX = 1u << 1,
+    LAT_AOT_FEATURE_LASX = 1u << 2,
+};
+
+#define LAT_AOT_V2_REQUIRED_BASE_FEATURES \
+    (LAT_AOT_FEATURE_LBT | LAT_AOT_FEATURE_LSX)
+
+enum LatAotModuleFlagV2 {
+    LAT_AOT_MODULE_PARTIAL = 1u << 0,
+    LAT_AOT_MODULE_READONLY_TEXT = 1u << 1,
+    LAT_AOT_MODULE_PRECISE_PC_MAP = 1u << 2,
+};
+
+#define LAT_AOT_MODULE_SYNTHETIC_FIXTURE (UINT64_C(1) << 63)
+
+enum LatAotTbFlagV2 {
+    LAT_AOT_TB_CODE64 = 1u << 0,
+    LAT_AOT_TB_PARALLEL = 1u << 1,
+};
+
+typedef struct LatAotNoteV2 {
+    uint8_t magic[8];
+    uint32_t abi_version;
+    uint32_t struct_size;
+    uint64_t module_flags;
+    uint64_t required_features;
+    uint8_t source_sha256[32];
+    uint8_t codegen_id[32];
+    uint8_t profile_digest[32];
+} LatAotNoteV2;
+
+typedef struct LatAotTbV2 {
+    uint64_t guest_rva;
+    uint64_t host_offset;
+    uint32_t host_size;
+    uint32_t flags;
+} LatAotTbV2;
+
+typedef struct LatAotPcMapV2 {
+    uint64_t guest_rva;
+    uint64_t host_offset_begin;
+    uint64_t host_offset_end;
+    uint32_t state_record_offset;
+    uint32_t flags;
+} LatAotPcMapV2;
+
+typedef struct LatAotModuleV2 {
+    uint8_t magic[8];
+    uint32_t abi_version;
+    uint32_t struct_size;
+    uint64_t module_flags;
+    uint64_t required_features;
+    uint8_t source_sha256[32];
+    uint8_t codegen_id[32];
+    uint8_t profile_digest[32];
+    const uint8_t *text_begin;
+    const uint8_t *text_end;
+    const LatAotTbV2 *tb_begin;
+    const LatAotTbV2 *tb_end;
+    const LatAotPcMapV2 *pc_map_begin;
+    const LatAotPcMapV2 *pc_map_end;
+} LatAotModuleV2;
+
+typedef struct LatAotExpectedV2 {
+    uint8_t source_sha256[32];
+    uint8_t codegen_id[32];
+    uint64_t available_features;
+} LatAotExpectedV2;
+
+uint32_t lat_aot_runtime_abi_version(void);
+
+static inline int lat_aot_v2_magic_valid(const uint8_t magic[8])
+{
+    static const uint8_t expected[8] = {
+        'L', 'A', 'T', 'A', 'O', 'T', '2', 0,
+    };
+    for (size_t i = 0; i < sizeof(expected); i++) {
+        if (magic[i] != expected[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+_Static_assert(sizeof(LatAotNoteV2) == 128,
+               "AOT v2 note ABI size changed");
+_Static_assert(sizeof(LatAotTbV2) == 24,
+               "AOT v2 TB ABI size changed");
+_Static_assert(sizeof(LatAotPcMapV2) == 32,
+               "AOT v2 PC map ABI size changed");
+_Static_assert(sizeof(LatAotModuleV2) == 176,
+               "AOT v2 module ABI size changed");
+
+#endif

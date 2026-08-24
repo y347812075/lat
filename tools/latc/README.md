@@ -6,6 +6,25 @@ parent LAT build. `latc compile` builds a startup-pretranslation bundle;
 `compile-aot.sh` runs LAT's relocatable code generator on a LoongArch build host
 and embeds the resulting native code and relocation records.
 
+## AOT v2 module prototype
+
+AOT v2 is the new per-x86-ELF module design. It keeps the original x86 program
+as the user-visible launch target and loads cached LoongArch `ET_DYN` modules
+inside LAT. The design and confirmed runtime rules are in
+[`AOT_V2_DESIGN.md`](AOT_V2_DESIGN.md).
+
+Milestone M0 defines the standalone ABI, validates an artifact before
+`dlopen()`, and provides a minimal multi-instance registry. On a LoongArch
+host, build and execute the real shared-object fixture with:
+
+```sh
+make -C tools/latc test-aot-v2
+```
+
+On other hosts the same target runs the architecture-independent ELF format
+and registry tests. M0 does not yet connect AOT v2 to LAT's ELF loader,
+`target_mmap()`, signal path, or code generator.
+
 `latc inspect` reports this existing format as
 `execution_model=lat-aot-bundle`. It is deliberately not called a standalone
 native ELF: the file still contains the LAT runner and can enter LAT's JIT.
