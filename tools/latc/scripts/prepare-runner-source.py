@@ -9,8 +9,10 @@ from pathlib import Path
 
 def replace_once(path: Path, old: str, new: str) -> None:
     text = path.read_text()
+    if new and new in text:
+        return
     if old not in text:
-        if new in text:
+        if not new:
             return
         raise SystemExit(f"expected text not found in {path}: {old!r}")
     path.write_text(text.replace(old, new, 1))
@@ -30,7 +32,10 @@ def main() -> None:
 
     for relative in (
         "include/latc-bundle-format.h",
+        "include/latc-aot-v2-runner.h",
+        "accel/tcg/cpu-exec.c",
         "accel/tcg/translate-all.c",
+        "linux-user/latc-aot-v2-runner.c",
         "linux-user/latc-bundle-loader.c",
         "linux-user/latc-bundle-loader.h",
         "linux-user/main.c",
@@ -38,6 +43,7 @@ def main() -> None:
         "target/i386/latx/sbt/aot.c",
         "target/i386/latx/sbt/latc_native_export.c",
         "target/i386/latx/sbt/latc_native_export.h",
+        "target/i386/latx/latx-config.c",
     ):
         destination = source / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -49,6 +55,15 @@ def main() -> None:
     shutil.copy2(Path(__file__).resolve().parents[1] /
                  "native/include/latc-x86-syscall-abi.h",
                  source / "include/latc-x86-syscall-abi.h")
+    shutil.copy2(Path(__file__).resolve().parents[1] /
+                 "aot-v2/include/lat-aot-v2.h",
+                 source / "include/lat-aot-v2.h")
+    shutil.copy2(Path(__file__).resolve().parents[1] /
+                 "aot-v2/runtime/registry.h",
+                 source / "include/registry.h")
+    shutil.copy2(Path(__file__).resolve().parents[1] /
+                 "aot-v2/runtime/module-loader.h",
+                 source / "include/module-loader.h")
     manifest = json.loads((Path(__file__).resolve().parents[1] /
                            "lat-import.json").read_text())
     build_id = f"lat-{manifest['source_commit']}-x64-v1"
@@ -58,7 +73,12 @@ def main() -> None:
     )
 
     replace_once(source / "linux-user/meson.build",
-                 "  'main.c',\n", "  'main.c',\n  'latc-bundle-loader.c',\n")
+                 "  'main.c',\n",
+                 "  'main.c',\n  'latc-bundle-loader.c',\n")
+    replace_once(source / "linux-user/meson.build",
+                 "  'latc-bundle-loader.c',\n",
+                 "  'latc-bundle-loader.c',\n"
+                 "  'latc-aot-v2-runner.c',\n")
     replace_once(source / "target/i386/latx/sbt/meson.build",
                  "  'aot.c',\n", "  'aot.c',\n  'latc_native_export.c',\n")
     # The minimal static linux-user runner uses neither OpenSSL nor zlib.

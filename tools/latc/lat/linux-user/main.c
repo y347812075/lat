@@ -72,6 +72,7 @@ int mydebug = 1;
 #include "elfload_dump.h"
 #include "latc-bundle-loader.h"
 #include "latc-build-id.h"
+#include "latc-aot-v2-runner.h"
 #include "librarian.h"
 #include "wrapper.h"
 #if defined(CONFIG_LATX_KZT)
@@ -1880,6 +1881,12 @@ int main(int argc, char **argv, char **envp)
 #endif
 
     target_cpu_copy_regs(env, regs);
+
+#ifdef CONFIG_LATX
+    if (latc_aot_v2_prepare(env) && getenv("LATX_AOT_V2_STRICT")) {
+        exit(EXIT_FAILURE);
+    }
+#endif
 
     /* Prewarm every statically discovered TB before entering the CPU loop. */
     latc_bundle_pretranslate(cpu);

@@ -27,6 +27,14 @@
     {
       "path": "lat/target/i386/latx/sbt/latc_native_export.h",
       "reason": "native image exporter interface"
+    },
+    {
+      "path": "lat/include/latc-aot-v2-runner.h",
+      "reason": "AOT v2 module lookup adapter interface for the disposable LAT runner"
+    },
+    {
+      "path": "lat/linux-user/latc-aot-v2-runner.c",
+      "reason": "load one test AOT v2 module and route translated syscalls through LAT linux-user"
     }
   ],
   "modified": [
@@ -49,6 +57,14 @@
     {
       "path": "lat/target/i386/latx/sbt/aot.c",
       "reason": "provide opt-in diagnostics for static AOT coverage"
+    },
+    {
+      "path": "lat/accel/tcg/cpu-exec.c",
+      "reason": "query the AOT v2 module registry after a normal TB lookup miss"
+    },
+    {
+      "path": "lat/target/i386/latx/latx-config.c",
+      "reason": "reserve per-thread guest address slots immediately before the existing jump cache"
     }
   ]
 }

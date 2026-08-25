@@ -17,6 +17,7 @@
 #include "trace.h"
 #include "translate.h"
 #include "latx-config.h"
+#include "lat-aot-v2.h"
 #include "syscall-tunnel.h"
 #if defined(CONFIG_LATX_KZT)
 #include "wrappertbbridge.h"
@@ -467,6 +468,7 @@ __thread ENV *lsenv;
 #ifdef CONFIG_LATX_FAST_JMPCACHE
 typedef struct LatxFastJmpCache {
     struct rcu_head rcu;
+    uint64_t aot_v2_guest_slots[LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT];
     FastTB entries[TB_JMP_CACHE_SIZE];
 } LatxFastJmpCache;
 

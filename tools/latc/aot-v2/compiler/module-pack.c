@@ -91,6 +91,7 @@ static void select_supported_tbs(ModulePack *pack)
 {
     memset(pack->supported, 1, pack->header->tb_count);
     for (uint64_t i = 0; i < pack->header->tb_count; i++) {
+        int has_syscall = 0;
         if (pack->tbs[i].guest_pc < pack->header->preferred_guest_base) {
             pack->supported[i] = 0;
             continue;
@@ -105,6 +106,12 @@ static void select_supported_tbs(ModulePack *pack)
                 relocation->kind == LAT_NATIVE_RELOC_JRRA_TARGET) {
                 pack->supported[i] = 0;
             }
+            has_syscall |= relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL &&
+                           relocation->target ==
+                               LAT_NATIVE_SYMBOL_RAISE_SYSCALL;
+        }
+        if (!has_syscall) {
+            pack->supported[i] = 0;
         }
     }
     int changed;
@@ -303,7 +310,7 @@ static int emit_metadata(const char *path, const ModulePack *pack,
         "\"LAT\", { MAGIC,2,sizeof(LatAotNoteV2),"
         "LAT_AOT_MODULE_PARTIAL|LAT_AOT_MODULE_READONLY_TEXT|"
         "LAT_AOT_MODULE_M1_TEST_ONLY,"
-        "LAT_AOT_V2_REQUIRED_BASE_FEATURES,{ ");
+        "LAT_AOT_V2_REQUIRED_BASE_FEATURES|LAT_AOT_FEATURE_LASX,{ ");
     print_bytes(file, pack->header->guest_sha256);
     fprintf(file, " },{ ");
     print_bytes(file, codegen);
@@ -345,7 +352,7 @@ static int emit_metadata(const char *path, const ModulePack *pack,
         "MAGIC,2,sizeof(LatAotModuleV2),"
         "LAT_AOT_MODULE_PARTIAL|LAT_AOT_MODULE_READONLY_TEXT|"
         "LAT_AOT_MODULE_M1_TEST_ONLY,"
-        "LAT_AOT_V2_REQUIRED_BASE_FEATURES,{ ");
+        "LAT_AOT_V2_REQUIRED_BASE_FEATURES|LAT_AOT_FEATURE_LASX,{ ");
     print_bytes(file, pack->header->guest_sha256);
     fprintf(file, " },{ ");
     print_bytes(file, codegen);

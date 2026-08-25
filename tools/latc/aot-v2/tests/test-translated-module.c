@@ -170,7 +170,8 @@ int main(int argc, char **argv)
     }
     const LatNativeImageHeaderV1 *header = (const void *)image;
     LatAotExpectedV2 expected = {
-        .available_features = LAT_AOT_V2_REQUIRED_BASE_FEATURES,
+        .available_features = LAT_AOT_V2_REQUIRED_BASE_FEATURES |
+                              LAT_AOT_FEATURE_LASX,
     };
     memcpy(expected.source_sha256, header->guest_sha256,
            sizeof(expected.source_sha256));

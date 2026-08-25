@@ -62,6 +62,7 @@ extern struct elfheader_s * elf_header;
 #endif
 #ifdef CONFIG_LATX
 #include "jrra.h"
+#include "latc-aot-v2-runner.h"
 #endif
 /* -icount align implementation. */
 
@@ -740,6 +741,13 @@ static inline TranslationBlock *tb_find(CPUState *cpu,
     cpu_get_tb_cpu_state(env, &pc, &cs_base, &flags);
 
     tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
+    bool aot_v2 = false;
+#ifdef CONFIG_LATX
+    if (tb == NULL) {
+        tb = latc_aot_v2_find_tb(cpu, pc, flags, cflags);
+        aot_v2 = tb != NULL;
+    }
+#endif
 #ifdef CONFIG_LATX_AOT
     if (tb == NULL && option_aot) {
         mmap_lock();
@@ -791,7 +799,7 @@ static inline TranslationBlock *tb_find(CPUState *cpu,
     }
 #endif
     /* See if we can patch the calling TB. */
-    if (last_tb) {
+    if (last_tb && !aot_v2) {
         tb_add_jump(last_tb, tb_exit, tb);
     }
     return tb;

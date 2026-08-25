@@ -24,7 +24,7 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 .PHONY: all clean test test-native test-native-shell test-native-long-tb \
 	test-aot-native test-spec-analyze test-spec-gzip test-spec-gzip-aot \
 	test-spec-gzip-native test-specint-native test-aot-v2 \
-	test-aot-v2-translated check-import
+	test-aot-v2-translated test-aot-v2-runner check-import
 
 all: $(BUILD)/latc $(BUILD)/liblatc_cfg.a
 
@@ -219,7 +219,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	sh tests/test-bundle-corruption.sh $(BUILD)/latc $(BUILD)/tests/cfg-bundle $(BUILD)/tests/cfg-bundle.bad
 	sh tests/test-spec-tools.sh $(BUILD)/tests/spec-tools
 	sh -n scripts/compile-native-elf.sh scripts/compile-native-image.sh \
-	  scripts/link-native-shell.sh scripts/link-aot-v2-module.sh
+	  scripts/link-native-shell.sh scripts/link-aot-v2-module.sh \
+	  scripts/build-aot-v2-runner.sh tests/test-aot-v2-runner.sh
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
@@ -424,6 +425,14 @@ test-aot-v2-translated: all $(BUILD)/aot-v2/liblat-aot-runtime.so.2 \
 	  $(BUILD)/tests/test-aot-v2-translated-module \
 	  $(abspath $(BUILD)/aot-v2/translated-module.so) \
 	  $(abspath $(NATIVE_IMAGE))
+
+test-aot-v2-runner: all
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_GUEST)" -a -n "$(NATIVE_IMAGE)" || \
+	  { echo "usage: make test-aot-v2-runner AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_GUEST=... NATIVE_IMAGE=..."; exit 2; }
+	sh tests/test-aot-v2-runner.sh $(BUILD)/latc $(AOT_V2_RUNNER) \
+	  $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) $(NATIVE_IMAGE) \
+	  $(BUILD)/aot-v2-runner-test
 
 $(BUILD)/tests/liblat-good.so: tests/fake-liblat.c
 	@mkdir -p $(dir $@)
