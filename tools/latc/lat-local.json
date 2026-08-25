@@ -48,11 +48,15 @@
     },
     {
       "path": "lat/linux-user/syscall.c",
-      "reason": "share x86-64 syscall ABI definitions and resource conversion with the native runtime"
+      "reason": "share x86-64 syscall ABI definitions and drain deferred AOT v2 ELF mappings after releasing the outer mmap lock"
     },
     {
       "path": "lat/linux-user/elfload.c",
       "reason": "disable the runner-provided guest vDSO while a static AOT v2 module is selected"
+    },
+    {
+      "path": "lat/linux-user/mmap.c",
+      "reason": "notify AOT v2 about successful file-backed mappings after releasing the mmap lock"
     },
     {
       "path": "lat/accel/tcg/translate-all.c",

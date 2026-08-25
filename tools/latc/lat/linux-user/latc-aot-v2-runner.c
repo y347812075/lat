@@ -9,6 +9,7 @@
 #include "latc-aot-v2-runner.h"
 #include "latc-bundle-loader.h"
 #include "latc-build-id.h"
+#include "guest-elf-map.h"
 #include "module-loader.h"
 #include "qemu-def.h"
 #include "translate.h"
@@ -21,8 +22,107 @@ static LatAotModuleInstanceV2 module_instance;
 static LatAotRegistryV2 registry;
 static bool prepared;
 static bool active;
+static LatGuestElfTrackerV2 *elf_tracker;
+static pthread_mutex_t elf_tracker_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct LatAotV2PendingMapping {
+    int fd;
+    uint64_t guest_start;
+    uint64_t mapping_size;
+    uint64_t file_offset;
+    struct LatAotV2PendingMapping *next;
+} LatAotV2PendingMapping;
+static LatAotV2PendingMapping *pending_mapping_head;
+static LatAotV2PendingMapping **pending_mapping_tail = &pending_mapping_head;
 static __thread TranslationBlock **aot_v2_tb_proxies;
 static __thread size_t aot_v2_tb_proxy_count;
+
+bool latc_aot_v2_mapping_enabled(void)
+{
+    const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
+    const char *module = getenv("LATX_AOT_V2_MODULE");
+    return (cache && *cache) || (module && *module);
+}
+
+static void drain_mappings(void)
+{
+    if (have_mmap_lock()) {
+        return;
+    }
+    for (;;) {
+        pthread_mutex_lock(&elf_tracker_lock);
+        LatAotV2PendingMapping *pending = pending_mapping_head;
+        if (!pending) {
+            pthread_mutex_unlock(&elf_tracker_lock);
+            break;
+        }
+        pending_mapping_head = pending->next;
+        if (!pending_mapping_head) {
+            pending_mapping_tail = &pending_mapping_head;
+        }
+        if (!elf_tracker) {
+            elf_tracker = lat_guest_elf_tracker_new_v2();
+        }
+        const LatGuestElfInfoV2 *info = NULL;
+        int added = 0;
+        char error[256] = {0};
+        int result = !elf_tracker || lat_guest_elf_tracker_note_v2(
+            elf_tracker, pending->fd, pending->guest_start,
+            pending->mapping_size, pending->file_offset, TARGET_PAGE_SIZE,
+            &info, &added, error, sizeof(error));
+        if (!result && added && getenv("LATX_AOT_V2_REPORT")) {
+            fprintf(stderr,
+                    "latx: AOT v2 discovered ELF dev=%llu ino=%llu "
+                    "bias=0x%llx range=0x%llx-0x%llx exec_ranges=%u\n",
+                    (unsigned long long)info->device,
+                    (unsigned long long)info->inode,
+                    (unsigned long long)info->load_bias,
+                    (unsigned long long)info->guest_begin,
+                    (unsigned long long)info->guest_end,
+                    info->exec_range_count);
+        } else if (result && getenv("LATX_AOT_V2_REPORT")) {
+            fprintf(stderr,
+                    "latx: AOT v2 ignored file mapping "
+                    "start=0x%llx size=0x%llx offset=0x%llx: %s\n",
+                    (unsigned long long)pending->guest_start,
+                    (unsigned long long)pending->mapping_size,
+                    (unsigned long long)pending->file_offset,
+                    error[0] ? error : strerror(errno));
+        }
+        close(pending->fd);
+        free(pending);
+        pthread_mutex_unlock(&elf_tracker_lock);
+    }
+}
+
+void latc_aot_v2_drain_mmaps(void)
+{
+    drain_mappings();
+}
+
+void latc_aot_v2_note_mmap(int fd, uint64_t guest_start,
+                           uint64_t mapping_size, uint64_t file_offset)
+{
+    if (!latc_aot_v2_mapping_enabled()) {
+        close(fd);
+        return;
+    }
+    LatAotV2PendingMapping *pending = g_new0(LatAotV2PendingMapping, 1);
+    if (!pending) {
+        close(fd);
+        return;
+    }
+    *pending = (LatAotV2PendingMapping) {
+        .fd = fd,
+        .guest_start = guest_start,
+        .mapping_size = mapping_size,
+        .file_offset = file_offset,
+    };
+    pthread_mutex_lock(&elf_tracker_lock);
+    *pending_mapping_tail = pending;
+    pending_mapping_tail = &pending->next;
+    pthread_mutex_unlock(&elf_tracker_lock);
+    drain_mappings();
+}
 
 static int bind_runtime_targets(void)
 {
@@ -149,6 +249,7 @@ int latc_aot_v2_prepare(CPUArchState *env)
     const char *module_path = getenv("LATX_AOT_V2_MODULE");
     const char *source_path = getenv("LATX_AOT_V2_SOURCE");
     bool strict = getenv("LATX_AOT_V2_STRICT") != NULL;
+    drain_mappings();
     if (prepared || !module_path || !*module_path) {
         return 0;
     }

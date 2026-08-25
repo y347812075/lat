@@ -3,6 +3,25 @@
 #include "qemu.h"
 #include "latc-aot-v2-runner.h"
 
+bool latc_aot_v2_mapping_enabled(void)
+{
+    return false;
+}
+
+void latc_aot_v2_note_mmap(int fd, uint64_t guest_start,
+                           uint64_t mapping_size, uint64_t file_offset)
+{
+    (void)fd;
+    (void)guest_start;
+    (void)mapping_size;
+    (void)file_offset;
+    close(fd);
+}
+
+void latc_aot_v2_drain_mmaps(void)
+{
+}
+
 int latc_aot_v2_prepare(CPUArchState *env)
 {
     (void)env;
