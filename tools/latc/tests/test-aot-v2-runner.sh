@@ -48,4 +48,17 @@ LC_ALL=C readelf -lW "$work/module.so" | \
 LC_ALL=C readelf -dW "$work/module.so" | \
   grep -q 'Shared library: \[liblat-aot-runtime.so.2\]'
 LC_ALL=C readelf -SW "$work/module.so" | grep -q '.rodata.lat.map'
+
+LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+LATX_AOT_V2_MODULE="$work/module.so" \
+LATX_AOT_V2_SOURCE="$work/missing-source" \
+LATX_AOT_V2_STRICT=1 \
+LATC_DISABLE_PRETRANSLATE=1 \
+LATC_STRICT_AOT=1 \
+LATC_STATS_OUT="$work/bundle-identity-stats.json" \
+  "$work/runner" >"$work/bundle-identity-stdout" \
+  2>"$work/bundle-identity-stderr"
+cmp "$work/expected" "$work/bundle-identity-stdout"
+grep -q '"runtime_tb_gen_attempts":0' "$work/bundle-identity-stats.json"
+grep -q '"runtime_tb_gen_calls":0' "$work/bundle-identity-stats.json"
 echo "test-aot-v2-runner: PASS"

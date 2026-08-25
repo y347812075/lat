@@ -7,6 +7,7 @@
 #include "exec/fasttb.h"
 #endif
 #include "latc-aot-v2-runner.h"
+#include "latc-bundle-loader.h"
 #include "latc-build-id.h"
 #include "module-loader.h"
 #include "qemu-def.h"
@@ -80,6 +81,19 @@ static int inspect_source(const char *path, LatAotExpectedV2 *expected,
                           uint64_t *guest_base, uint64_t *guest_end,
                           char *error, size_t error_size)
 {
+    int bundled = latc_bundle_verified_guest(expected->source_sha256,
+                                              guest_base, guest_end);
+    if (bundled < 0) {
+        snprintf(error, error_size, "cannot read verified bundle identity");
+        return -1;
+    }
+    if (bundled) {
+        digest_bytes(LATC_BUILD_ID, strlen(LATC_BUILD_ID),
+                     expected->codegen_id);
+        expected->available_features = LAT_AOT_V2_REQUIRED_BASE_FEATURES |
+                                       LAT_AOT_FEATURE_LASX;
+        return 0;
+    }
     gchar *file = NULL;
     gsize size = 0;
     if (!g_file_get_contents(path, &file, &size, NULL) ||
