@@ -83,6 +83,26 @@ static size_t selected_pc_map_count(const ModulePack *pack)
     return count;
 }
 
+static int selected_tb_ranges_valid(const ModulePack *pack)
+{
+    uint64_t previous_end = 0;
+    int have_previous = 0;
+    for (guint i = 0; i < pack->code_order->len; i++) {
+        const LatNativeTbV1 *tb = g_array_index(
+            pack->code_order, const LatNativeTbV1 *, i);
+        size_t index = (size_t)(tb - pack->tbs);
+        if (!pack->supported[index] || !tb->code_size) {
+            continue;
+        }
+        if (have_previous && tb->code_offset < previous_end) {
+            return 0;
+        }
+        previous_end = tb->code_offset + tb->code_size;
+        have_previous = 1;
+    }
+    return 1;
+}
+
 static int selected_pc_maps_complete(const ModulePack *pack)
 {
     for (uint64_t i = 0; i < pack->header->tb_count; i++) {
@@ -723,6 +743,9 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
     if (!supported_count) {
         result = fail(error, error_size,
                       "native image has no TB supported by AOT v2 M1");
+    } else if (!selected_tb_ranges_valid(&pack)) {
+        result = fail(error, error_size,
+                      "supported AOT v2 TB host ranges overlap");
     } else if (!pc_map_count || !selected_pc_maps_complete(&pack)) {
         result = fail(error, error_size,
                       "supported AOT v2 TBs have no complete PC map");

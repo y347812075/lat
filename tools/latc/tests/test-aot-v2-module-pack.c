@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static int write_fixture(const char *path)
+static int write_fixture(const char *path, int overlap)
 {
     unsigned char image[1024] = {0};
     LatNativeImageHeaderV2 *header = (void *)image;
@@ -45,7 +45,9 @@ static int write_fixture(const char *path)
         .guest_pc = 0x401000, .code_offset = 0, .code_size = 24,
     };
     tbs[1] = (LatNativeTbV1){
-        .guest_pc = 0x402000, .code_offset = 24, .code_size = 4,
+        .guest_pc = 0x402000,
+        .code_offset = overlap ? 20 : 24,
+        .code_size = overlap ? 8 : 4,
     };
 
     LatNativeRelocationV1 *relocations =
@@ -111,7 +113,7 @@ int main(void)
     }
     char *image_path = g_build_filename(directory, "fixture.latnative", NULL);
     char error[256] = {0};
-    if (write_fixture(image_path) ||
+    if (write_fixture(image_path, 0) ||
         lat_aot_v2_emit_module_sources(image_path, directory,
                                        error, sizeof(error))) {
         fprintf(stderr, "cannot emit test module: %s\n", error);
@@ -135,6 +137,17 @@ int main(void)
         (code[3] & 0xfc000000u) != 0x50000000u ||
         code[4] == 0x50000000u || code[5] != 0x03400000u) {
         fprintf(stderr, "AOT v2 TB target pair was not direct-linked\n");
+        g_free(text);
+        g_free(text_path);
+        g_free(image_path);
+        return 1;
+    }
+    memset(error, 0, sizeof(error));
+    if (write_fixture(image_path, 1) ||
+        !lat_aot_v2_emit_module_sources(image_path, directory,
+                                        error, sizeof(error)) ||
+        !strstr(error, "overlap")) {
+        fprintf(stderr, "overlapping AOT v2 TBs were accepted: %s\n", error);
         g_free(text);
         g_free(text_path);
         g_free(image_path);
