@@ -17,11 +17,32 @@
 #include <elf.h>
 #include <glib.h>
 
-static LatAotLoadedModuleV2 loaded_module;
-static LatAotModuleInstanceV2 module_instance;
+typedef struct LatAotV2RuntimeModule {
+    LatAotLoadedModuleV2 loaded;
+    char *path;
+    struct LatAotV2RuntimeModule *next;
+} LatAotV2RuntimeModule;
+
+typedef struct LatAotV2RuntimeInstance {
+    LatAotModuleInstanceV2 instance;
+    LatAotV2RuntimeModule *runtime_module;
+    struct LatAotV2RuntimeInstance *next;
+} LatAotV2RuntimeInstance;
+
+typedef struct LatAotV2ProxySet {
+    const LatAotLoadedModuleV2 *module;
+    TranslationBlock **proxies;
+    size_t count;
+    struct LatAotV2ProxySet *next;
+} LatAotV2ProxySet;
+
 static LatAotRegistryV2 registry;
+static LatAotV2RuntimeModule *runtime_modules;
+static LatAotV2RuntimeInstance *runtime_instances;
 static bool prepared;
 static bool active;
+static bool registry_initialized;
+static bool runtime_bound;
 static LatGuestElfTrackerV2 *elf_tracker;
 static pthread_mutex_t elf_tracker_lock = PTHREAD_MUTEX_INITIALIZER;
 typedef struct LatAotV2PendingMapping {
@@ -33,8 +54,11 @@ typedef struct LatAotV2PendingMapping {
 } LatAotV2PendingMapping;
 static LatAotV2PendingMapping *pending_mapping_head;
 static LatAotV2PendingMapping **pending_mapping_tail = &pending_mapping_head;
-static __thread TranslationBlock **aot_v2_tb_proxies;
-static __thread size_t aot_v2_tb_proxy_count;
+static __thread LatAotV2ProxySet *aot_v2_proxy_sets;
+static __thread LatAotModuleInstanceV2 *aot_v2_current_instance;
+
+static int register_discovered_module(const LatGuestElfInfoV2 *info,
+                                      char *error, size_t error_size);
 
 bool latc_aot_v2_mapping_enabled(void)
 {
@@ -69,16 +93,25 @@ static void drain_mappings(void)
             elf_tracker, pending->fd, pending->guest_start,
             pending->mapping_size, pending->file_offset, TARGET_PAGE_SIZE,
             &info, &added, error, sizeof(error));
-        if (!result && added && getenv("LATX_AOT_V2_REPORT")) {
-            fprintf(stderr,
-                    "latx: AOT v2 discovered ELF dev=%llu ino=%llu "
-                    "bias=0x%llx range=0x%llx-0x%llx exec_ranges=%u\n",
-                    (unsigned long long)info->device,
-                    (unsigned long long)info->inode,
-                    (unsigned long long)info->load_bias,
-                    (unsigned long long)info->guest_begin,
-                    (unsigned long long)info->guest_end,
-                    info->exec_range_count);
+        if (!result && added) {
+            int registered = register_discovered_module(info, error,
+                                                        sizeof(error));
+            if (getenv("LATX_AOT_V2_REPORT")) {
+                fprintf(stderr,
+                        "latx: AOT v2 discovered ELF dev=%llu ino=%llu "
+                        "bias=0x%llx range=0x%llx-0x%llx exec_ranges=%u "
+                        "module=%s%s%s\n",
+                        (unsigned long long)info->device,
+                        (unsigned long long)info->inode,
+                        (unsigned long long)info->load_bias,
+                        (unsigned long long)info->guest_begin,
+                        (unsigned long long)info->guest_end,
+                        info->exec_range_count,
+                        registered > 0 ? "registered" :
+                        registered == 0 ? "missing" : "rejected",
+                        error[0] ? " reason=" : "",
+                        error);
+            }
         } else if (result && getenv("LATX_AOT_V2_REPORT")) {
             fprintf(stderr,
                     "latx: AOT v2 ignored file mapping "
@@ -177,6 +210,142 @@ static void digest_bytes(const void *data, size_t size, uint8_t digest[32])
     g_checksum_free(checksum);
 }
 
+static void digest_hex(const uint8_t digest[32], char output[65])
+{
+    static const char digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < 32; i++) {
+        output[i * 2] = digits[digest[i] >> 4];
+        output[i * 2 + 1] = digits[digest[i] & 15];
+    }
+    output[64] = '\0';
+}
+
+static int ensure_registry(void)
+{
+    if (!registry_initialized) {
+        if (lat_aot_v2_registry_init(&registry)) {
+            return -1;
+        }
+        registry_initialized = true;
+    }
+    if (!runtime_bound) {
+        if (bind_runtime_targets() ||
+            lat_aot_runtime_bind_syscall(raise_syscall_through_lat, NULL)) {
+            return -1;
+        }
+        runtime_bound = true;
+    }
+    return 0;
+}
+
+static LatAotV2RuntimeModule *find_runtime_module(const uint8_t digest[32])
+{
+    for (LatAotV2RuntimeModule *module = runtime_modules; module;
+         module = module->next) {
+        if (!memcmp(module->loaded.note.source_sha256, digest, 32)) {
+            return module;
+        }
+    }
+    return NULL;
+}
+
+static int register_module_instance(LatAotV2RuntimeModule *module,
+                                    uint64_t load_bias,
+                                    uint64_t guest_begin,
+                                    uint64_t guest_end)
+{
+    LatAotV2RuntimeInstance *runtime_instance = g_new0(
+        LatAotV2RuntimeInstance, 1);
+    if (!runtime_instance) {
+        errno = ENOMEM;
+        return -1;
+    }
+    runtime_instance->runtime_module = module;
+    runtime_instance->instance = (LatAotModuleInstanceV2) {
+        .module = &module->loaded,
+        .guest_load_bias = load_bias,
+        .guest_begin = guest_begin,
+        .guest_end = guest_end,
+    };
+    if (lat_aot_v2_registry_register(&registry,
+                                     &runtime_instance->instance)) {
+        g_free(runtime_instance);
+        return -1;
+    }
+    runtime_instance->next = runtime_instances;
+    runtime_instances = runtime_instance;
+    active = true;
+    return 0;
+}
+
+static int register_discovered_module(const LatGuestElfInfoV2 *info,
+                                      char *error, size_t error_size)
+{
+    const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
+    if (!cache || !*cache) {
+        return 0;
+    }
+    if (ensure_registry()) {
+        snprintf(error, error_size, "cannot initialize AOT v2 registry: %s",
+                 strerror(errno));
+        return -1;
+    }
+    LatAotV2RuntimeModule *module = find_runtime_module(info->source_sha256);
+    if (!module) {
+        char source_hex[65];
+        digest_hex(info->source_sha256, source_hex);
+        char *basename = g_strdup_printf("%s.so", source_hex);
+        char *path = g_build_filename(cache, basename, NULL);
+        g_free(basename);
+        if (!path) {
+            errno = ENOMEM;
+            return -1;
+        }
+        LatAotExpectedV2 expected = {0};
+        memcpy(expected.source_sha256, info->source_sha256,
+               sizeof(expected.source_sha256));
+        digest_bytes(LATC_BUILD_ID, strlen(LATC_BUILD_ID),
+                     expected.codegen_id);
+        expected.available_features = LAT_AOT_V2_REQUIRED_BASE_FEATURES |
+                                      LAT_AOT_FEATURE_LASX;
+        module = g_new0(LatAotV2RuntimeModule, 1);
+        if (!module) {
+            g_free(path);
+            errno = ENOMEM;
+            return -1;
+        }
+        errno = 0;
+        if (lat_aot_v2_module_open(path, &expected, &module->loaded,
+                                   error, error_size)) {
+            int saved_errno = errno;
+            g_free(module);
+            g_free(path);
+            if (saved_errno == ENOENT) {
+                error[0] = '\0';
+                return 0;
+            }
+            errno = saved_errno;
+            return -1;
+        }
+        module->path = path;
+        module->next = runtime_modules;
+        runtime_modules = module;
+    }
+    if (info->load_bias > UINT64_MAX - info->preferred_base) {
+        snprintf(error, error_size, "AOT v2 descriptor load bias overflows");
+        errno = EOVERFLOW;
+        return -1;
+    }
+    if (register_module_instance(module,
+                                 info->load_bias + info->preferred_base,
+                                 info->guest_begin, info->guest_end)) {
+        snprintf(error, error_size, "cannot register AOT v2 instance: %s",
+                 strerror(errno));
+        return -1;
+    }
+    return 1;
+}
+
 static int inspect_source(const char *path, LatAotExpectedV2 *expected,
                           uint64_t *guest_base, uint64_t *guest_end,
                           char *error, size_t error_size)
@@ -249,6 +418,11 @@ int latc_aot_v2_prepare(CPUArchState *env)
     const char *module_path = getenv("LATX_AOT_V2_MODULE");
     const char *source_path = getenv("LATX_AOT_V2_SOURCE");
     bool strict = getenv("LATX_AOT_V2_STRICT") != NULL;
+    if (latc_aot_v2_mapping_enabled() && ensure_registry()) {
+        fprintf(stderr, "latx: cannot initialize AOT v2 registry: %s\n",
+                strerror(errno));
+        return strict ? -1 : 0;
+    }
     drain_mappings();
     if (prepared || !module_path || !*module_path) {
         return 0;
@@ -258,45 +432,42 @@ int latc_aot_v2_prepare(CPUArchState *env)
     LatAotExpectedV2 expected = {0};
     uint64_t guest_base;
     uint64_t guest_end;
+    LatAotV2RuntimeModule *module = g_new0(LatAotV2RuntimeModule, 1);
     if (!source_path || !*source_path ||
+        !module ||
         inspect_source(source_path, &expected, &guest_base, &guest_end,
                        error, sizeof(error)) ||
-        lat_aot_v2_module_open(module_path, &expected, &loaded_module,
-                               error, sizeof(error)) ||
-        bind_runtime_targets() ||
-        lat_aot_runtime_bind_syscall(raise_syscall_through_lat, NULL)) {
+        lat_aot_v2_module_open(module_path, &expected, &module->loaded,
+                               error, sizeof(error))) {
         fprintf(stderr, "latx: cannot prepare AOT v2 module: %s\n",
                 error[0] ? error : strerror(errno));
+        g_free(module);
         return strict ? -1 : 0;
     }
-    module_instance.module = &loaded_module;
-    module_instance.guest_load_bias = guest_base;
-    module_instance.guest_begin = guest_base;
-    module_instance.guest_end = guest_end;
-    if (lat_aot_v2_registry_init(&registry) ||
-        lat_aot_v2_registry_register(&registry, &module_instance) ||
+    module->path = g_strdup(module_path);
+    module->next = runtime_modules;
+    runtime_modules = module;
+    if (register_module_instance(module, guest_base, guest_base, guest_end) ||
         lat_aot_v2_context_apply_guest_slots(
-            loaded_module.descriptor, module_instance.guest_load_bias,
-            env->tb_jmp_cache_ptr)) {
+            module->loaded.descriptor, guest_base, env->tb_jmp_cache_ptr)) {
         fprintf(stderr, "latx: cannot register AOT v2 module: %s\n",
                 strerror(errno));
         return strict ? -1 : 0;
     }
-    active = true;
 
     if (getenv("LATX_AOT_V2_REPORT")) {
-        size_t count = (size_t)(loaded_module.descriptor->tb_end -
-                                loaded_module.descriptor->tb_begin);
+        size_t count = (size_t)(module->loaded.descriptor->tb_end -
+                                module->loaded.descriptor->tb_begin);
         fprintf(stderr, "latx: AOT v2 registered module with %zu TBs from %s\n",
                 count, module_path);
     }
     return 0;
 }
 
-static const LatAotTbV2 *find_descriptor_tb(uint64_t guest_rva,
+static const LatAotTbV2 *find_descriptor_tb(const LatAotModuleV2 *module,
+                                            uint64_t guest_rva,
                                             uint32_t cflags)
 {
-    const LatAotModuleV2 *module = loaded_module.descriptor;
     size_t left = 0;
     size_t right = (size_t)(module->tb_end - module->tb_begin);
     while (left < right) {
@@ -320,35 +491,56 @@ static const LatAotTbV2 *find_descriptor_tb(uint64_t guest_rva,
     return &module->tb_begin[left];
 }
 
+static LatAotV2ProxySet *proxy_set_for(const LatAotLoadedModuleV2 *module)
+{
+    for (LatAotV2ProxySet *set = aot_v2_proxy_sets; set; set = set->next) {
+        if (set->module == module) {
+            return set;
+        }
+    }
+    size_t count = (size_t)(module->descriptor->tb_end -
+                            module->descriptor->tb_begin);
+    LatAotV2ProxySet *set = g_new0(LatAotV2ProxySet, 1);
+    if (!set) {
+        return NULL;
+    }
+    set->proxies = g_new0(TranslationBlock *, count);
+    if (!set->proxies) {
+        g_free(set);
+        return NULL;
+    }
+    set->module = module;
+    set->count = count;
+    set->next = aot_v2_proxy_sets;
+    aot_v2_proxy_sets = set;
+    return set;
+}
+
 TranslationBlock *latc_aot_v2_find_tb(CPUState *cpu,
                                       target_ulong guest_pc,
                                       uint32_t flags, uint32_t cflags)
 {
-    if (!active || !loaded_module.descriptor ||
-        guest_pc < module_instance.guest_load_bias) {
-        return NULL;
-    }
-    uint64_t guest_rva = guest_pc - module_instance.guest_load_bias;
-    const LatAotTbV2 *descriptor_tb = find_descriptor_tb(guest_rva, cflags);
-    if (!descriptor_tb) {
+    if (!active) {
         return NULL;
     }
     LatAotTargetV2 target;
-    if (lat_aot_v2_registry_lookup(&registry, guest_pc,
-                                   descriptor_tb->flags, &target)) {
+    if (lat_aot_v2_registry_lookup(&registry, guest_pc, cflags, &target)) {
         return NULL;
     }
-    size_t count = (size_t)(loaded_module.descriptor->tb_end -
-                            loaded_module.descriptor->tb_begin);
-    size_t index = (size_t)(descriptor_tb - loaded_module.descriptor->tb_begin);
-    if (!aot_v2_tb_proxies) {
-        aot_v2_tb_proxies = g_new0(TranslationBlock *, count);
-        aot_v2_tb_proxy_count = count;
-    }
-    if (aot_v2_tb_proxy_count != count) {
+    const LatAotModuleV2 *module = target.instance->module->descriptor;
+    uint64_t guest_rva = guest_pc - target.instance->guest_load_bias;
+    const LatAotTbV2 *descriptor_tb = find_descriptor_tb(module, guest_rva,
+                                                          cflags);
+    LatAotV2ProxySet *proxy_set = proxy_set_for(target.instance->module);
+    if (!descriptor_tb || !proxy_set ||
+        lat_aot_v2_context_apply_guest_slots(
+            module, target.instance->guest_load_bias,
+            ((CPUArchState *)cpu->env_ptr)->tb_jmp_cache_ptr)) {
         return NULL;
     }
-    TranslationBlock *tb = aot_v2_tb_proxies[index];
+    aot_v2_current_instance = target.instance;
+    size_t index = (size_t)(descriptor_tb - module->tb_begin);
+    TranslationBlock *tb = proxy_set->proxies[index];
     if (!tb) {
         tb = g_new0(TranslationBlock, 1);
         tb->s_data = g_new0(struct separated_data, 1);
@@ -372,7 +564,7 @@ TranslationBlock *latc_aot_v2_find_tb(CPUState *cpu,
         tb->jmp_stub_reset_offset[0] = TB_JMP_RESET_OFFSET_INVALID;
         tb->jmp_stub_reset_offset[1] = TB_JMP_RESET_OFFSET_INVALID;
         tb->first_jmp_align = TB_JMP_RESET_OFFSET_INVALID;
-        aot_v2_tb_proxies[index] = tb;
+        proxy_set->proxies[index] = tb;
     } else if (tb->flags != flags || tb_cflags(tb) != cflags ||
                tb->tc.ptr != target.host_address) {
         return NULL;
@@ -387,16 +579,25 @@ TranslationBlock *latc_aot_v2_find_tb(CPUState *cpu,
 
 bool latc_aot_v2_restore_state(CPUState *cpu, uintptr_t host_pc)
 {
-    if (!active || !loaded_module.descriptor || host_pc < GETPC_ADJ) {
+    if (!active || host_pc < GETPC_ADJ) {
         return false;
     }
-    const LatAotModuleV2 *module = loaded_module.descriptor;
-    uintptr_t text_begin = (uintptr_t)module->text_begin;
     uintptr_t searched_pc = host_pc - GETPC_ADJ;
-    if (searched_pc < text_begin ||
-        searched_pc >= (uintptr_t)module->text_end) {
+    LatAotV2RuntimeModule *runtime_module = NULL;
+    for (LatAotV2RuntimeModule *candidate = runtime_modules; candidate;
+         candidate = candidate->next) {
+        const LatAotModuleV2 *descriptor = candidate->loaded.descriptor;
+        if (searched_pc >= (uintptr_t)descriptor->text_begin &&
+            searched_pc < (uintptr_t)descriptor->text_end) {
+            runtime_module = candidate;
+            break;
+        }
+    }
+    if (!runtime_module) {
         return false;
     }
+    const LatAotModuleV2 *module = runtime_module->loaded.descriptor;
+    uintptr_t text_begin = (uintptr_t)module->text_begin;
     uint64_t host_offset = searched_pc - text_begin;
     size_t count = (size_t)(module->pc_map_end - module->pc_map_begin);
     size_t left = 0;
@@ -418,8 +619,24 @@ bool latc_aot_v2_restore_state(CPUState *cpu, uintptr_t host_pc)
         map->state_record_offset) {
         return false;
     }
+    LatAotModuleInstanceV2 *instance = aot_v2_current_instance;
+    if (!instance || instance->module != &runtime_module->loaded) {
+        instance = NULL;
+        for (LatAotV2RuntimeInstance *candidate = runtime_instances; candidate;
+             candidate = candidate->next) {
+            if (candidate->runtime_module == runtime_module) {
+                if (instance) {
+                    return false;
+                }
+                instance = &candidate->instance;
+            }
+        }
+    }
+    if (!instance) {
+        return false;
+    }
     target_ulong data[TARGET_INSN_START_WORDS] = {
-        module_instance.guest_load_bias + map->guest_rva,
+        instance->guest_load_bias + map->guest_rva,
         CC_OP_DYNAMIC,
     };
     TranslationBlock tb = {
