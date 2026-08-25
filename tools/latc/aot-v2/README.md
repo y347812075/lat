@@ -15,6 +15,8 @@ This directory contains the first implementation slice of the AOT v2 design.
   `.latnative` intermediate into position-independent module text and metadata.
   Runtime helper calls use a local trampoline and guest addresses use negative
   `$fp` offsets; neither operation requires runtime `.text` changes.
+- `compiler/module-inspect.c` validates an AOT ELF without executing it and
+  reports its identity, feature requirements, TB count, and PC-map count.
 - `scripts/link-aot-v2-module.sh` links the generated objects into a
   deterministic LoongArch `ET_DYN` file.
 - `tests/fixture.c` and `tests/fixture-entry.S` build a real LoongArch
@@ -50,10 +52,18 @@ so these test modules declare `LAT_AOT_FEATURE_LASX`. A separate LSX-only
 lowering is still required for CPUs without LASX; LBT and LSX remain mandatory
 for every variant.
 
-These generated modules carry `LAT_AOT_MODULE_M1_TEST_ONLY` because the current
-native intermediate has no precise Host-PC to guest-state map. They must not be
-treated as production cache artifacts. M1 still needs to generate precise PC
-maps and expose the final `compile-module` and `inspect-module` commands.
+Native intermediate v2 contains stable instruction-level Host ranges and guest
+PCs decoded from LAT's existing search data. The packager copies the complete
+map for every published TB into `.rodata.lat.map`; the loader checks that these
+ranges are ordered, non-overlapping, inside read-only module text, and use the
+supported dynamic-state record. Such modules declare
+`LAT_AOT_MODULE_PRECISE_PC_MAP` and no longer carry
+`LAT_AOT_MODULE_M1_TEST_ONLY`.
+
+These modules are still not production cache artifacts. The packager publishes
+only syscall-ending TBs, and LAT's signal path does not yet query the AOT PC
+map. General TB execution, AOT signal recovery, executable mapping
+invalidation, dynamic ELF discovery, and an LSX-only variant remain missing.
 
 On LoongArch, after producing a `.latnative` image with the existing exporter:
 
@@ -61,6 +71,18 @@ On LoongArch, after producing a `.latnative` image with the existing exporter:
 make -C tools/latc test-aot-v2-translated \
   NATIVE_IMAGE=/path/to/program.latnative
 ```
+
+The normal M1 command accepts the x86 ELF directly:
+
+```sh
+build/latc compile-module /path/to/x86-program -o program.so \
+  --runner /path/to/static-exporter/latx-x86_64 \
+  --runtime-dir /path/to/aot-v2-runtime
+build/latc inspect-module --json program.so
+```
+
+`LATC_AOT_RUNNER` and `LATC_AOT_RUNTIME_DIR` may replace the two command-line
+options.
 
 Build and test the disposable dynamic LAT runner with:
 

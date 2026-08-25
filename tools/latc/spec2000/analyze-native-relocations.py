@@ -47,14 +47,18 @@ def increment(counts, key):
 def parse_image(path):
     path = Path(path)
     data = path.read_bytes()
-    if data[:8] != b"LATNAT1\0":
+    if data[:8] != b"LATNAT2\0":
         raise ValueError("%s: invalid LAT native image magic" % path)
     version, header_size = struct.unpack_from("<II", data, 8)
-    if version != 1 or header_size < 168:
+    if version != 2 or header_size != 224 or len(data) < header_size:
         raise ValueError("%s: unsupported LAT native image header" % path)
     flags = struct.unpack_from("<I", data, 16)[0]
     code_offset, code_size, tb_offset, tb_count, reloc_offset, reloc_count = \
         struct.unpack_from("<QQQQQQ", data, 56)
+    pc_map_offset, pc_map_count = struct.unpack_from("<QQ", data, 104)
+    if (reloc_offset + reloc_count * 32 != pc_map_offset or
+            pc_map_offset + pc_map_count * 32 != len(data)):
+        raise ValueError("%s: invalid LAT native PC map" % path)
 
     exact_targets = set()
     pc_counts = collections.Counter()
@@ -110,6 +114,7 @@ def parse_image(path):
         "tu_internal_members": tu_members,
         "tu_internal_percent": tu_members * 100.0 / tb_count if tb_count else 0,
         "relocation_count": reloc_count,
+        "pc_map_count": pc_map_count,
         "counts": dict(sorted(counts.items())),
     }
 

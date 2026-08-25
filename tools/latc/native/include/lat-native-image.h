@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 
-#define LAT_NATIVE_IMAGE_MAGIC "LATNAT1"
-#define LAT_NATIVE_IMAGE_VERSION 1u
+#define LAT_NATIVE_IMAGE_MAGIC "LATNAT2"
+#define LAT_NATIVE_IMAGE_VERSION 2u
 #define LAT_NATIVE_BUILD_ID_SIZE 65u
 
 enum LatNativeImageFlags {
@@ -18,6 +18,10 @@ enum LatNativeImageFlags {
     LAT_NATIVE_IMAGE_C_ABI_DISPATCH_SMOKE = 1u << 29,
     LAT_NATIVE_IMAGE_C_ABI_STATE_SMOKE = 1u << 30,
     LAT_NATIVE_IMAGE_C_ABI_SMOKE = 1u << 31,
+};
+
+enum LatNativePcMapFlagV2 {
+    LAT_NATIVE_PC_MAP_DYNAMIC_STATE = 1u << 0,
 };
 
 enum LatNativeRelocationKind {
@@ -50,7 +54,7 @@ enum LatNativeRuntimeSymbolV1 {
     LAT_NATIVE_SYMBOL_COUNT,
 };
 
-typedef struct LatNativeImageHeaderV1 {
+typedef struct LatNativeImageHeaderV2 {
     uint8_t magic[8];
     uint32_t version;
     uint32_t header_size;
@@ -66,10 +70,12 @@ typedef struct LatNativeImageHeaderV1 {
     uint64_t tb_count;
     uint64_t relocation_offset;
     uint64_t relocation_count;
+    uint64_t pc_map_offset;
+    uint64_t pc_map_count;
     uint8_t guest_sha256[32];
     char lat_build_id[LAT_NATIVE_BUILD_ID_SIZE];
     uint8_t reserved_tail[7];
-} LatNativeImageHeaderV1;
+} LatNativeImageHeaderV2;
 
 typedef struct LatNativeTbV1 {
     uint64_t guest_pc;
@@ -86,5 +92,13 @@ typedef struct LatNativeRelocationV1 {
     uint32_t slots;
     uint32_t reserved;
 } LatNativeRelocationV1;
+
+typedef struct LatNativePcMapV2 {
+    uint64_t guest_pc;
+    uint64_t host_offset_begin;
+    uint64_t host_offset_end;
+    uint32_t state_record_offset;
+    uint32_t flags;
+} LatNativePcMapV2;
 
 #endif

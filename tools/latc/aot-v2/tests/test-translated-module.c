@@ -119,7 +119,7 @@ static int test_hello(const unsigned char *image, size_t image_size,
         return -1;
     }
     LatGuestMapping mapping = {0};
-    const LatNativeImageHeaderV1 *header = (const void *)image;
+    const LatNativeImageHeaderV2 *header = (const void *)image;
     if (lat_guest_map(header, image, image_size, &mapping,
                       error, error_size)) {
         fprintf(stderr, "cannot map hello guest: %s\n", error);
@@ -168,7 +168,7 @@ int main(int argc, char **argv)
         g_free(image);
         return 1;
     }
-    const LatNativeImageHeaderV1 *header = (const void *)image;
+    const LatNativeImageHeaderV2 *header = (const void *)image;
     LatAotExpectedV2 expected = {
         .available_features = LAT_AOT_V2_REQUIRED_BASE_FEATURES |
                               LAT_AOT_FEATURE_LASX,

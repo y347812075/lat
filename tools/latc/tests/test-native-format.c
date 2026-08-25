@@ -11,12 +11,14 @@ _Static_assert(sizeof(LatX86StateV1) == 560,
                "LatX86StateV1 ABI size changed");
 _Static_assert(offsetof(LatX86StateV1, xmm) == 300,
                "LatX86StateV1 XMM offset changed");
-_Static_assert(sizeof(LatNativeImageHeaderV1) == 208,
+_Static_assert(sizeof(LatNativeImageHeaderV2) == 224,
                "native image header size changed");
 _Static_assert(sizeof(LatNativeTbV1) == 24,
                "native TB record size changed");
 _Static_assert(sizeof(LatNativeRelocationV1) == 32,
                "native relocation record size changed");
+_Static_assert(sizeof(LatNativePcMapV2) == 32,
+               "native PC map record size changed");
 
 static int write_image(const char *path, const void *image, size_t size)
 {
@@ -27,7 +29,7 @@ static int write_image(const char *path, const void *image, size_t size)
 int main(int argc, char **argv)
 {
     unsigned char image[512] = {0};
-    LatNativeImageHeaderV1 *header = (void *)image;
+    LatNativeImageHeaderV2 *header = (void *)image;
     LatNativeTbV1 *tb;
     LatNativeRelocationV1 *relocation;
     char error[128] = {0};
@@ -36,6 +38,7 @@ int main(int argc, char **argv)
     memcpy(header->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
     header->version = LAT_NATIVE_IMAGE_VERSION;
     header->header_size = sizeof(*header);
+    header->flags = LAT_NATIVE_IMAGE_NO_PRECISE_SIGNAL_MAP;
     header->guest_image_offset = sizeof(*header);
     header->guest_image_size = sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr);
     header->code_offset = header->guest_image_offset + header->guest_image_size;
@@ -44,6 +47,8 @@ int main(int argc, char **argv)
     header->tb_count = 1;
     header->relocation_offset = header->tb_table_offset + sizeof(*tb);
     header->relocation_count = 1;
+    header->pc_map_offset = header->relocation_offset +
+                            sizeof(LatNativeRelocationV1);
     strcpy(header->lat_build_id, "test-build");
     Elf64_Ehdr *elf = (void *)(image + header->guest_image_offset);
     memcpy(elf->e_ident, ELFMAG, SELFMAG);
@@ -71,7 +76,7 @@ int main(int argc, char **argv)
     relocation->kind = LAT_NATIVE_RELOC_RUNTIME_SYMBOL;
     relocation->target = LAT_NATIVE_SYMBOL_RAISE_SYSCALL;
     relocation->slots = 3;
-    image_size = header->relocation_offset + sizeof(*relocation);
+    image_size = header->pc_map_offset;
 
     if (lat_native_image_validate(image, image_size, error,
                                   sizeof(error)) != 0) {
@@ -124,6 +129,29 @@ int main(int argc, char **argv)
                                   sizeof(error)) == 0 ||
         !strstr(error, "relocation")) {
         fprintf(stderr, "bad relocation range accepted: %s\n", error);
+        return 1;
+    }
+    relocation->code_offset = 8;
+    LatNativePcMapV2 *pc_map = (void *)(image + header->pc_map_offset);
+    *pc_map = (LatNativePcMapV2) {
+        .guest_pc = 0x401000,
+        .host_offset_begin = 0,
+        .host_offset_end = 16,
+        .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+    };
+    header->pc_map_count = 1;
+    header->flags &= ~LAT_NATIVE_IMAGE_NO_PRECISE_SIGNAL_MAP;
+    image_size += sizeof(*pc_map);
+    if (lat_native_image_validate(image, image_size, error,
+                                  sizeof(error)) != 0) {
+        fprintf(stderr, "precise PC map rejected: %s\n", error);
+        return 1;
+    }
+    pc_map->host_offset_end = header->code_size + 1;
+    if (lat_native_image_validate(image, image_size, error,
+                                  sizeof(error)) == 0 ||
+        !strstr(error, "PC map")) {
+        fprintf(stderr, "bad PC map accepted: %s\n", error);
         return 1;
     }
     puts("test-native-format: PASS");

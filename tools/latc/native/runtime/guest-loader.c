@@ -46,7 +46,7 @@ static int elf_protection(uint32_t flags)
     return protection;
 }
 
-int lat_guest_map(const LatNativeImageHeaderV1 *header,
+int lat_guest_map(const LatNativeImageHeaderV2 *header,
                   const unsigned char *image, size_t image_size,
                   LatGuestMapping *mapping, char *error,
                   size_t error_size)

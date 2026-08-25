@@ -20,22 +20,24 @@ int main(int argc, char **argv)
         0x4c000020, /* ret */
     };
     unsigned char image[512] = {0};
-    LatNativeImageHeaderV1 *header = (void *)image;
+    LatNativeImageHeaderV2 *header = (void *)image;
     memcpy(header->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
     header->version = LAT_NATIVE_IMAGE_VERSION;
     header->header_size = sizeof(*header);
     header->flags = LAT_NATIVE_IMAGE_PIE |
-                    LAT_NATIVE_IMAGE_C_ABI_STATE_SMOKE;
+                    LAT_NATIVE_IMAGE_C_ABI_STATE_SMOKE |
+                    LAT_NATIVE_IMAGE_NO_PRECISE_SIGNAL_MAP;
     header->guest_entry = 0x2000;
     header->preferred_guest_base = 0x2000;
     header->guest_image_offset = sizeof(*header);
     header->guest_image_size = 1;
-    header->code_offset = 216;
+    header->code_offset = header->guest_image_offset + 8;
     header->code_size = sizeof(code);
     header->tb_table_offset = header->code_offset + sizeof(code);
     header->tb_count = 1;
     header->relocation_offset = header->tb_table_offset +
                                 sizeof(LatNativeTbV1);
+    header->pc_map_offset = header->relocation_offset;
     strcpy(header->lat_build_id, "state-smoke-v1");
     memcpy(image + header->code_offset, code, sizeof(code));
     LatNativeTbV1 *tb = (void *)(image + header->tb_table_offset);
@@ -43,7 +45,7 @@ int main(int argc, char **argv)
     tb->code_offset = 0;
     tb->code_size = sizeof(code);
     FILE *output = fopen(argv[1], "wb");
-    if (!output || fwrite(image, header->relocation_offset, 1, output) != 1 ||
+    if (!output || fwrite(image, header->pc_map_offset, 1, output) != 1 ||
         fclose(output)) {
         fprintf(stderr, "cannot write state smoke image\n");
         return 1;

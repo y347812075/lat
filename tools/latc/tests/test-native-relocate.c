@@ -7,7 +7,7 @@
 int main(void)
 {
     unsigned char image[512] = {0};
-    LatNativeImageHeaderV1 *header = (void *)image;
+    LatNativeImageHeaderV2 *header = (void *)image;
     uint32_t *instructions;
     LatNativeRelocationV1 *relocations;
     LatNativeCode code = {0};
@@ -20,6 +20,9 @@ int main(void)
     header->relocation_offset = header->tb_table_offset +
                                 sizeof(LatNativeTbV1);
     header->relocation_count = 6;
+    header->pc_map_offset = header->relocation_offset +
+                            header->relocation_count *
+                            sizeof(LatNativeRelocationV1);
     instructions = (void *)(image + header->code_offset);
     instructions[0] = 0x1400000c;
     instructions[1] = 0x0380018c;
@@ -66,8 +69,7 @@ int main(void)
     relocations[5].addend = 0x402000;
     relocations[5].slots = 4;
 
-    size_t image_size = header->relocation_offset +
-                        6 * sizeof(*relocations);
+    size_t image_size = header->pc_map_offset;
     if (lat_native_code_load(header, image, image_size, &code,
                              error, sizeof(error))) {
         fprintf(stderr, "native relocation failed: %s\n", error);

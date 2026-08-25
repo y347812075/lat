@@ -22,8 +22,22 @@ make -C tools/latc test-aot-v2
 ```
 
 On other hosts the same target runs the architecture-independent ELF format
-and registry tests. M0 does not yet connect AOT v2 to LAT's ELF loader,
-`target_mmap()`, signal path, or code generator.
+and registry tests. M1 additionally packages real LAT output and executes a
+static x86 hello through the AOT registry and existing linux-user syscall path.
+
+On a LoongArch build host, compile and inspect an AOT v2 module with:
+
+```sh
+build/latc compile-module /path/to/x86-program -o program.so \
+  --runner /path/to/static-exporter/latx-x86_64 \
+  --runtime-dir /path/to/aot-v2-runtime
+build/latc inspect-module --json program.so
+```
+
+The module contains instruction-level Host-PC to guest-PC records in
+`.rodata.lat.map`. The current M1 packager intentionally publishes only TBs
+that end in a syscall; general TB execution and dynamic ELF discovery are the
+next runtime changes.
 
 `latc inspect` reports this existing format as
 `execution_model=lat-aot-bundle`. It is deliberately not called a standalone

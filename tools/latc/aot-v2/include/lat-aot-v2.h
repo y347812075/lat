@@ -37,6 +37,10 @@ enum LatAotTbFlagV2 {
     LAT_AOT_TB_PARALLEL = 1u << 1,
 };
 
+enum LatAotPcMapFlagV2 {
+    LAT_AOT_PC_MAP_DYNAMIC_STATE = 1u << 0,
+};
+
 typedef struct LatAotNoteV2 {
     uint8_t magic[8];
     uint32_t abi_version;

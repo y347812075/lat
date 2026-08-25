@@ -39,11 +39,22 @@ static const LatAotElfNoteFixtureV2 fixture_note = {
         .struct_size = sizeof(LatAotNoteV2),
         .module_flags = LAT_AOT_MODULE_PARTIAL |
                         LAT_AOT_MODULE_READONLY_TEXT |
+                        LAT_AOT_MODULE_PRECISE_PC_MAP |
                         LAT_AOT_MODULE_SYNTHETIC_FIXTURE,
         .required_features = LAT_AOT_V2_REQUIRED_BASE_FEATURES,
         .source_sha256 = BYTE_32(0x11),
         .codegen_id = BYTE_32(0x22),
         .profile_digest = BYTE_32(0x33),
+    },
+};
+
+__attribute__((section(".rodata.lat.map"), used))
+static const LatAotPcMapV2 fixture_pc_maps[] = {
+    {
+        .guest_rva = 0x1000,
+        .host_offset_begin = 0,
+        .host_offset_end = 28,
+        .flags = LAT_AOT_PC_MAP_DYNAMIC_STATE,
     },
 };
 
@@ -64,6 +75,7 @@ const LatAotModuleV2 lat_aot_module_v2 = {
     .struct_size = sizeof(LatAotModuleV2),
     .module_flags = LAT_AOT_MODULE_PARTIAL |
                     LAT_AOT_MODULE_READONLY_TEXT |
+                    LAT_AOT_MODULE_PRECISE_PC_MAP |
                     LAT_AOT_MODULE_SYNTHETIC_FIXTURE,
     .required_features = LAT_AOT_V2_REQUIRED_BASE_FEATURES,
     .source_sha256 = BYTE_32(LAT_AOT_FIXTURE_DESCRIPTOR_SOURCE_BYTE),
@@ -73,4 +85,6 @@ const LatAotModuleV2 lat_aot_module_v2 = {
     .text_end = lat_aot_fixture_text_end,
     .tb_begin = fixture_tbs,
     .tb_end = fixture_tbs + 1,
+    .pc_map_begin = fixture_pc_maps,
+    .pc_map_end = fixture_pc_maps + 1,
 };
