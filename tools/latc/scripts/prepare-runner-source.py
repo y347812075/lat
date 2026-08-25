@@ -21,6 +21,7 @@ def replace_once(path: Path, old: str, new: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("lat_source", type=Path)
+    parser.add_argument("--without-aot-v2", action="store_true")
     args = parser.parse_args()
     source = args.lat_source.resolve()
     local = Path(__file__).resolve().parents[1] / "lat"
@@ -35,7 +36,6 @@ def main() -> None:
         "include/latc-aot-v2-runner.h",
         "accel/tcg/cpu-exec.c",
         "accel/tcg/translate-all.c",
-        "linux-user/latc-aot-v2-runner.c",
         "linux-user/latc-bundle-loader.c",
         "linux-user/latc-bundle-loader.h",
         "linux-user/main.c",
@@ -49,9 +49,15 @@ def main() -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(local / relative, destination)
 
-    shutil.copy2(Path(__file__).resolve().parents[1] /
-                 "native/include/lat-native-image.h",
-                 source / "include/lat-native-image.h")
+    aot_adapter = ("latc-aot-v2-runner-stub.c" if args.without_aot_v2 else
+                   "latc-aot-v2-runner.c")
+    shutil.copy2(local / "linux-user" / aot_adapter,
+                 source / "linux-user/latc-aot-v2-runner.c")
+
+    native_image_header = (Path(__file__).resolve().parents[1] /
+                           "native/include/lat-native-image.h")
+    shutil.copy2(native_image_header, source / "lat-native-image.h")
+    shutil.copy2(native_image_header, source / "include/lat-native-image.h")
     shutil.copy2(Path(__file__).resolve().parents[1] /
                  "native/include/latc-x86-syscall-abi.h",
                  source / "include/latc-x86-syscall-abi.h")

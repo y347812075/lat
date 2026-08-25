@@ -152,7 +152,7 @@ static int patch_jrra(uint32_t *instructions, uintptr_t patch_address,
     return 0;
 }
 
-int lat_native_code_load(const LatNativeImageHeaderV1 *header,
+int lat_native_code_load(const LatNativeImageHeaderV2 *header,
                          const unsigned char *image, size_t image_size,
                          LatNativeCode *code, char *error,
                          size_t error_size)

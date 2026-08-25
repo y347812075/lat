@@ -428,7 +428,10 @@ Exit criterion: ASLR on/off runs produce identical output, zero runtime TB
 generation for the fixture, and the artifact passes `readelf`, `dlopen()`, and
 format validation.
 
-Status: the static test path is implemented. `latc emit-aot-v2` and
+Status: complete for the static M1 target. `latc compile-module` invokes the
+existing LAT exporter and module linker for an x86 ELF, while
+`latc inspect-module` validates and reports the resulting artifact without
+executing it. The lower-level `latc emit-aot-v2` and
 `link-aot-v2-module.sh` consume the current `.latnative` intermediate, replace
 guest absolute loads with `$fp` slots, replace the syscall helper address with
 a module-local PC-relative trampoline, and produce a byte-identical ET_DYN on
@@ -442,12 +445,22 @@ Its normal TB lookup falls through to the AOT registry, and the syscall
 trampoline calls `helper_raise_syscall`; the existing x86 linux-user CPU loop
 and `linux-user/syscall.c` print `Hello, LATC!` and execute `exit(0)`. With bundle
 pretranslation disabled, the recorded `runtime_tb_gen_attempts` and
-`runtime_tb_gen_calls` are both zero.
+`runtime_tb_gen_calls` are both zero. Repeating the run with
+`setarch loongarch64 -R` disables ASLR and produces byte-identical output with
+the same zero-translation counters.
 
-M1 is not production-complete. The generated module is marked
-`LAT_AOT_MODULE_M1_TEST_ONLY` because it has no precise PC map. The final
-`compile-module` and `inspect-module` commands are also still missing. Those
-items must be completed before removing the test-only flag.
+The native v2 exporter decodes LAT's existing per-instruction search data into
+stable Host offsets and guest PCs before clearing the old packed data from the
+copied executable buffer. The packager emits the fully covered subset as
+`.rodata.lat.map`; the loader validates every range. The static hello native
+image contains 263 records, of which eight cover its two published AOT TBs.
+The module declares `LAT_AOT_MODULE_PRECISE_PC_MAP` and no longer carries
+`LAT_AOT_MODULE_M1_TEST_ONLY`.
+
+This does not yet provide production signal recovery: LAT's signal path still
+needs a Host-PC lookup into the AOT registry and its PC map. M1 also retains the
+thread-local compatibility `TranslationBlock` and publishes only
+syscall-ending TBs. Those restrictions prevent general application coverage.
 
 The copied LAT code generator currently emits LASX vector-state save and load
 instructions, so the M1 artifact correctly declares `LAT_AOT_FEATURE_LASX` and
@@ -456,6 +469,8 @@ LSX-only variant and runtime HWCAP-based variant selection are still required.
 
 ### M2: Dynamically linked hello world
 
+- Change execution to accept `LatAotTargetV2` directly, remove the temporary
+  `TranslationBlock`, and permit general mapped TBs.
 - Discover and register the main executable and `PT_INTERP` before guest entry.
 - Load libc and other startup modules from the executable mmap hook.
 - Keep guest PLT/GOT, TLS, and IFUNC execution under the x86 dynamic linker.
@@ -498,11 +513,12 @@ artifact without races.
 
 ## 11. Current implementation boundary
 
-M0 and the M1 static hello path are complete. The next code change stays within
-M1: emit a precise Host-PC map from the current translator and replace the
-test-only commands with `compile-module` and `inspect-module`. It must not add
-the mmap hook, daemon, or glibc translation until the loader accepts the module
-without `LAT_AOT_MODULE_M1_TEST_ONLY`.
+M0 and M1 are complete. The next code change begins M2 by replacing the
+temporary `TranslationBlock` execution adapter with direct
+`LatAotTargetV2` execution. Only after general TBs can return normally should
+the runtime discover the main executable and `PT_INTERP`, register modules from
+the mmap path, and attempt a dynamically linked hello. The compiler daemon
+remains deferred until that synchronous path works.
 
 ## 12. Rosetta comparison
 

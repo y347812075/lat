@@ -26,6 +26,7 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
       -Wl,-z,defs -Wl,-z,now -Wl,-z,relro \
       -Wl,--unique=.text.lat.tu -Wl,--unique=.rodata.lat.tb \
       -Wl,--unique=.rodata.lat.guest \
+      -Wl,--unique=.rodata.lat.map \
       -Wl,--unique=.data.rel.ro.lat.module \
       -Wl,--version-script="$script_dir/../aot-v2/tests/module.map" \
       -Wl,--build-id=sha1 -L"$runtime_dir" -Wl,--no-as-needed \

@@ -125,7 +125,7 @@ fail:
     return NULL;
 }
 
-static int inspect_image(const LatNativeImageHeaderV1 *header)
+static int inspect_image(const LatNativeImageHeaderV2 *header)
 {
     printf("execution_model=lat-native-pie-shell\n"
            "guest_entry=0x%" PRIx64 "\n"
@@ -152,7 +152,7 @@ int main(int argc, char **argv, char **envp)
         fprintf(stderr, "latc: invalid embedded native image: %s\n", error);
         return 125;
     }
-    const LatNativeImageHeaderV1 *header =
+    const LatNativeImageHeaderV2 *header =
         (const void *)latc_embedded_image_start;
     if (argc == 2 && strcmp(argv[1], "--latc-inspect") == 0) {
         return inspect_image(header);

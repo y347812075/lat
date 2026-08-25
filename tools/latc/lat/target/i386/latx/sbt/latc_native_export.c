@@ -32,6 +32,19 @@ static gint compare_uint64(gconstpointer left, gconstpointer right)
     return a < b ? -1 : a > b;
 }
 
+static gint compare_native_pc_map(gconstpointer left, gconstpointer right)
+{
+    const LatNativePcMapV2 *a = left;
+    const LatNativePcMapV2 *b = right;
+    if (a->host_offset_begin != b->host_offset_begin) {
+        return a->host_offset_begin < b->host_offset_begin ? -1 : 1;
+    }
+    if (a->host_offset_end != b->host_offset_end) {
+        return a->host_offset_end < b->host_offset_end ? -1 : 1;
+    }
+    return 0;
+}
+
 static bool native_tb_target_exists(const GArray *tbs, uint64_t guest_pc,
                                     uint32_t flags)
 {
@@ -326,6 +339,153 @@ static void append_jrra_relocation(GArray *output, const aot_tb *tb,
 #endif
 }
 
+static int decode_sleb128_checked(const uint8_t **cursor, const uint8_t *end,
+                                  int64_t *value)
+{
+    const uint8_t *p = *cursor;
+    uint64_t result = 0;
+    unsigned int shift = 0;
+
+    for (unsigned int i = 0; i < 10 && p < end; i++) {
+        uint8_t byte = *p++;
+        uint64_t payload = byte & 0x7f;
+        if (shift == 63 && payload != 0 && payload != 0x7f) {
+            return -1;
+        }
+        if (shift < 64) {
+            result |= payload << shift;
+        }
+        shift += 7;
+        if (!(byte & 0x80)) {
+            if (shift < 64 && (byte & 0x40)) {
+                result |= UINT64_MAX << shift;
+            }
+            *cursor = p;
+            *value = (int64_t)result;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int add_signed_u64(uint64_t *value, int64_t delta)
+{
+    if ((delta >= 0 && (uint64_t)delta > UINT64_MAX - *value) ||
+        (delta < 0 && (uint64_t)(-(delta + 1)) + 1 > *value)) {
+        return -1;
+    }
+    *value += delta;
+    return 0;
+}
+
+static int append_tb_pc_map(GArray *output, const uint8_t *code,
+                            uint64_t code_size, const aot_tb *tb,
+                            uint64_t code_offset, uint64_t guest_pc,
+                            uint64_t search_limit)
+{
+    if (!tb->icount || !tb->tb_cache_size) {
+        return 0;
+    }
+    if (code_offset > code_size ||
+        tb->tu_search_addr_offset > code_size - code_offset) {
+        return -1;
+    }
+    uint64_t search_offset = code_offset + tb->tu_search_addr_offset;
+    if (search_offset >= search_limit || search_limit > code_size) {
+        return -1;
+    }
+    const uint8_t *cursor = code + search_offset;
+    const uint8_t *end = code + search_limit;
+    uint64_t current_guest_pc = guest_pc;
+    uint64_t host_end = 0;
+    guint first_map = output->len;
+
+    for (uint16_t i = 0; i < tb->icount; i++) {
+        int64_t guest_delta;
+        int64_t state_delta;
+        int64_t host_delta;
+        if (decode_sleb128_checked(&cursor, end, &guest_delta) ||
+            decode_sleb128_checked(&cursor, end, &state_delta) ||
+            decode_sleb128_checked(&cursor, end, &host_delta) ||
+            state_delta != 0 || host_delta < 0 ||
+            add_signed_u64(&current_guest_pc, guest_delta) ||
+            (uint64_t)host_delta > UINT64_MAX - host_end) {
+            return -1;
+        }
+        if (!host_delta) {
+            continue;
+        }
+        uint64_t host_begin = host_end;
+        host_end += host_delta;
+        if (host_end > tb->tb_cache_size) {
+            return -1;
+        }
+        LatNativePcMapV2 map = {
+            .guest_pc = current_guest_pc,
+            .host_offset_begin = code_offset + host_begin,
+            .host_offset_end = code_offset + host_end,
+            .state_record_offset = 0,
+            .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+        };
+        g_array_append_val(output, map);
+    }
+    if (output->len > first_map) {
+        LatNativePcMapV2 *last = &g_array_index(
+            output, LatNativePcMapV2, output->len - 1);
+        last->host_offset_end = code_offset + tb->tb_cache_size;
+    }
+    return 0;
+}
+
+static int extract_native_pc_maps(GArray *output, const uint8_t *code,
+                                  uint64_t code_size, const aot_header *header,
+                                  const aot_segment *segments,
+                                  const aot_tb *tbs, size_t tb_count,
+                                  uint64_t aot_code_offset)
+{
+    for (size_t i = 0; i < tb_count;) {
+        if (!tbs[i].is_first_tb ||
+            tbs[i].tb_cache_offset < aot_code_offset) {
+            return -1;
+        }
+        uint64_t tu_begin = tbs[i].tb_cache_offset - aot_code_offset;
+        uint64_t tu_end = tu_begin + tbs[i].tu_size;
+        if (tu_begin > code_size || tu_end < tu_begin || tu_end > code_size) {
+            return -1;
+        }
+        size_t next = i + 1;
+        while (next < tb_count && !tbs[next].is_first_tb) {
+            next++;
+        }
+        for (size_t j = i; j < next; j++) {
+            const aot_segment *segment = find_tb_segment(header, segments,
+                                                        &tbs[j]);
+            if (!segment || tbs[j].tb_cache_offset < aot_code_offset) {
+                return -1;
+            }
+            uint64_t code_offset = tbs[j].tb_cache_offset - aot_code_offset;
+            uint64_t guest_pc = segment->details.seg_begin +
+                                tbs[j].offset_in_segment;
+            if (append_tb_pc_map(output, code, code_size, &tbs[j],
+                                 code_offset, guest_pc, tu_end)) {
+                return -1;
+            }
+        }
+        i = next;
+    }
+    g_array_sort(output, compare_native_pc_map);
+    for (guint i = 1; i < output->len; i++) {
+        const LatNativePcMapV2 *previous = &g_array_index(
+            output, LatNativePcMapV2, i - 1);
+        const LatNativePcMapV2 *current = &g_array_index(
+            output, LatNativePcMapV2, i);
+        if (previous->host_offset_end > current->host_offset_begin) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int strip_process_local_search_data(uint8_t *code, uint64_t code_size,
         const aot_tb *tbs, size_t tb_count, uint64_t aot_code_offset)
 {
@@ -380,6 +540,7 @@ int latc_native_export(const char *path, const char *guest_path,
     GByteArray *guest = NULL;
     GArray *native_tbs = NULL;
     GArray *native_relocations = NULL;
+    GArray *native_pc_maps = NULL;
     uint8_t *native_code = NULL;
     uint64_t guest_entry = 0;
     uint64_t guest_base = 0;
@@ -399,11 +560,15 @@ int latc_native_export(const char *path, const char *guest_path,
     native_tbs = g_array_new(FALSE, FALSE, sizeof(LatNativeTbV1));
     native_relocations = g_array_new(FALSE, FALSE,
                                      sizeof(LatNativeRelocationV1));
+    native_pc_maps = g_array_new(FALSE, FALSE, sizeof(LatNativePcMapV2));
     size_t tb_count = (tb_table_end - (uintptr_t)tbs) / sizeof(*tbs);
     native_code = g_malloc(code_size);
     memcpy(native_code, code, code_size);
-    if (strip_process_local_search_data(native_code, code_size,
+    if (extract_native_pc_maps(native_pc_maps, native_code, code_size,
+            header, segments, tbs, tb_count, aot_code_offset) ||
+        strip_process_local_search_data(native_code, code_size,
             tbs, tb_count, aot_code_offset)) {
+        fprintf(stderr, "latc: cannot export stable native PC map\n");
         goto out;
     }
     const aot_rel *source_relocations =
@@ -537,7 +702,7 @@ int latc_native_export(const char *path, const char *guest_path,
     }
     g_array_free(missing_targets, TRUE);
 
-    LatNativeImageHeaderV1 native_header = {0};
+    LatNativeImageHeaderV2 native_header = {0};
     memcpy(native_header.magic, LAT_NATIVE_IMAGE_MAGIC, 8);
     native_header.version = LAT_NATIVE_IMAGE_VERSION;
     native_header.header_size = sizeof(native_header);
@@ -558,6 +723,9 @@ int latc_native_export(const char *path, const char *guest_path,
     native_header.relocation_offset = native_header.tb_table_offset +
         native_tbs->len * sizeof(LatNativeTbV1);
     native_header.relocation_count = native_relocations->len;
+    native_header.pc_map_offset = native_header.relocation_offset +
+        native_relocations->len * sizeof(LatNativeRelocationV1);
+    native_header.pc_map_count = native_pc_maps->len;
     memcpy(native_header.guest_sha256, guest_digest, sizeof(guest_digest));
     snprintf(native_header.lat_build_id, sizeof(native_header.lat_build_id),
              "%s", LATC_BUILD_ID);
@@ -590,7 +758,10 @@ int latc_native_export(const char *path, const char *guest_path,
             sizeof(LatNativeTbV1), native_tbs->len, output) != native_tbs->len) ||
         (native_relocations->len && fwrite(native_relocations->data,
             sizeof(LatNativeRelocationV1), native_relocations->len, output) !=
-            native_relocations->len)) {
+            native_relocations->len) ||
+        (native_pc_maps->len && fwrite(native_pc_maps->data,
+            sizeof(LatNativePcMapV2), native_pc_maps->len, output) !=
+            native_pc_maps->len)) {
         goto write_error;
     }
     if (fclose(output)) {
@@ -607,6 +778,7 @@ write_error_unclosed:
 out:
     if (native_tbs) g_array_free(native_tbs, TRUE);
     if (native_relocations) g_array_free(native_relocations, TRUE);
+    if (native_pc_maps) g_array_free(native_pc_maps, TRUE);
     g_free(native_code);
     if (guest) g_byte_array_unref(guest);
     return result;

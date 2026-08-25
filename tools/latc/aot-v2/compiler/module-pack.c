@@ -11,15 +11,69 @@
 #include <stdlib.h>
 #include <string.h>
 
+_Static_assert((unsigned int)LAT_NATIVE_PC_MAP_DYNAMIC_STATE ==
+               (unsigned int)LAT_AOT_PC_MAP_DYNAMIC_STATE,
+               "native and AOT PC map flags differ");
+
 typedef struct ModulePack {
-    const LatNativeImageHeaderV1 *header;
+    const LatNativeImageHeaderV2 *header;
     const LatNativeTbV1 *tbs;
     const LatNativeRelocationV1 *relocations;
+    const LatNativePcMapV2 *pc_maps;
     unsigned char *code;
     unsigned char *supported;
     GArray *guest_rvas;
     uint64_t syscall_trampoline;
 } ModulePack;
+
+static int pc_map_in_tb(const LatNativePcMapV2 *map,
+                        const LatNativeTbV1 *tb)
+{
+    return map->host_offset_begin >= tb->code_offset &&
+           map->host_offset_end <= tb->code_offset + tb->code_size;
+}
+
+static size_t selected_pc_map_count(const ModulePack *pack)
+{
+    size_t count = 0;
+    for (uint64_t i = 0; i < pack->header->pc_map_count; i++) {
+        for (uint64_t j = 0; j < pack->header->tb_count; j++) {
+            if (pack->supported[j] &&
+                pc_map_in_tb(&pack->pc_maps[i], &pack->tbs[j])) {
+                count++;
+                break;
+            }
+        }
+    }
+    return count;
+}
+
+static int selected_pc_maps_complete(const ModulePack *pack)
+{
+    for (uint64_t i = 0; i < pack->header->tb_count; i++) {
+        if (!pack->supported[i]) {
+            continue;
+        }
+        uint64_t expected = pack->tbs[i].code_offset;
+        for (uint64_t j = 0; j < pack->header->pc_map_count; j++) {
+            const LatNativePcMapV2 *map = &pack->pc_maps[j];
+            if (!pc_map_in_tb(map, &pack->tbs[i])) {
+                continue;
+            }
+            if (map->guest_pc < pack->header->preferred_guest_base ||
+                map->state_record_offset != 0 ||
+                map->flags != LAT_NATIVE_PC_MAP_DYNAMIC_STATE ||
+                map->host_offset_begin != expected) {
+                return 0;
+            }
+            expected = map->host_offset_end;
+        }
+        if (expected != pack->tbs[i].code_offset + pack->tbs[i].code_size) {
+            return 0;
+        }
+    }
+    return 1;
+}
 
 static int fail(char *error, size_t error_size, const char *format, ...)
 {
@@ -309,7 +363,7 @@ static int emit_metadata(const char *path, const ModulePack *pack,
         "static const Note note = { {4,sizeof(LatAotNoteV2),0x4c415432},"
         "\"LAT\", { MAGIC,2,sizeof(LatAotNoteV2),"
         "LAT_AOT_MODULE_PARTIAL|LAT_AOT_MODULE_READONLY_TEXT|"
-        "LAT_AOT_MODULE_M1_TEST_ONLY,"
+        "LAT_AOT_MODULE_PRECISE_PC_MAP,"
         "LAT_AOT_V2_REQUIRED_BASE_FEATURES|LAT_AOT_FEATURE_LASX,{ ");
     print_bytes(file, pack->header->guest_sha256);
     fprintf(file, " },{ ");
@@ -333,6 +387,28 @@ static int emit_metadata(const char *path, const ModulePack *pack,
     }
     fprintf(file, "};\n");
     fprintf(file,
+        "__attribute__((section(\".rodata.lat.map\"),used))\n"
+        "static const LatAotPcMapV2 pc_maps[] = {\n");
+    size_t pc_map_count = 0;
+    for (uint64_t i = 0; i < pack->header->pc_map_count; i++) {
+        for (uint64_t j = 0; j < pack->header->tb_count; j++) {
+            if (!pack->supported[j] ||
+                !pc_map_in_tb(&pack->pc_maps[i], &pack->tbs[j])) {
+                continue;
+            }
+            fprintf(file, "{0x%llx,0x%llx,0x%llx,%u,%u},\n",
+                    (unsigned long long)(pack->pc_maps[i].guest_pc -
+                                         pack->header->preferred_guest_base),
+                    (unsigned long long)pack->pc_maps[i].host_offset_begin,
+                    (unsigned long long)pack->pc_maps[i].host_offset_end,
+                    pack->pc_maps[i].state_record_offset,
+                    pack->pc_maps[i].flags);
+            pc_map_count++;
+            break;
+        }
+    }
+    fprintf(file, "};\n");
+    fprintf(file,
         "__attribute__((section(\".rodata.lat.guest\"),used))\n"
         "static const LatAotGuestSlotV2 guest_slots[] = {\n");
     for (guint i = 0; i < pack->guest_rvas->len; i++) {
@@ -351,15 +427,15 @@ static int emit_metadata(const char *path, const ModulePack *pack,
         "const LatAotModuleV2 lat_aot_module_v2 = {"
         "MAGIC,2,sizeof(LatAotModuleV2),"
         "LAT_AOT_MODULE_PARTIAL|LAT_AOT_MODULE_READONLY_TEXT|"
-        "LAT_AOT_MODULE_M1_TEST_ONLY,"
+        "LAT_AOT_MODULE_PRECISE_PC_MAP,"
         "LAT_AOT_V2_REQUIRED_BASE_FEATURES|LAT_AOT_FEATURE_LASX,{ ");
     print_bytes(file, pack->header->guest_sha256);
     fprintf(file, " },{ ");
     print_bytes(file, codegen);
     fprintf(file,
         " },{0},lat_aot_generated_text_begin,lat_aot_generated_text_end,"
-        "tbs,tbs+%zu,0,0,guest_slots,guest_slots+%u};\n",
-        supported_count, pack->guest_rvas->len);
+        "tbs,tbs+%zu,pc_maps,pc_maps+%zu,guest_slots,guest_slots+%u};\n",
+        supported_count, pc_map_count, pack->guest_rvas->len);
     int result = 0;
     if (fclose(file)) {
         result = fail(error, error_size, "cannot close %s", path);
@@ -420,16 +496,18 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
         return fail(error, error_size, "cannot create output directory %s",
                     output_directory);
     }
-    const LatNativeImageHeaderV1 *header = (const void *)image;
+    const LatNativeImageHeaderV2 *header = (const void *)image;
     ModulePack pack = {
         .header = header,
         .tbs = (const void *)(image + header->tb_table_offset),
         .relocations = (const void *)(image + header->relocation_offset),
-        .code = g_memdup2(image + header->code_offset, header->code_size),
+        .pc_maps = (const void *)(image + header->pc_map_offset),
+        .code = g_malloc(header->code_size),
         .supported = g_malloc0(header->tb_count),
         .guest_rvas = g_array_new(FALSE, FALSE, sizeof(uint64_t)),
         .syscall_trampoline = (header->code_size + 3) & ~(uint64_t)3,
     };
+    memcpy(pack.code, image + header->code_offset, header->code_size);
     select_supported_tbs(&pack);
     size_t supported_count = 0;
     int has_syscall = 0;
@@ -446,9 +524,13 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
         }
     }
     int result = 0;
+    size_t pc_map_count = selected_pc_map_count(&pack);
     if (!supported_count) {
         result = fail(error, error_size,
                       "native image has no TB supported by AOT v2 M1");
+    } else if (!pc_map_count || !selected_pc_maps_complete(&pack)) {
+        result = fail(error, error_size,
+                      "supported AOT v2 TBs have no complete PC map");
     } else if (patch_relocations(&pack, error, error_size)) {
         result = -1;
     } else {

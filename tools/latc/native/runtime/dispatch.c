@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-static const LatNativeImageHeaderV1 *dispatch_header;
+static const LatNativeImageHeaderV2 *dispatch_header;
 static const unsigned char *dispatch_image;
 static size_t dispatch_image_size;
 static const unsigned char *dispatch_code;
@@ -14,7 +14,7 @@ static LatNativeX86FastTb *dispatch_jump_cache;
 static size_t dispatch_jump_cache_count;
 static LatNativeX86FastTb dispatch_lookup_cache[LAT_NATIVE_X86_JMP_CACHE_SIZE];
 
-const LatNativeTbV1 *lat_native_tb_find(const LatNativeImageHeaderV1 *header,
+const LatNativeTbV1 *lat_native_tb_find(const LatNativeImageHeaderV2 *header,
                                         const unsigned char *image,
                                         size_t image_size,
                                         uint64_t guest_pc, uint32_t flags)
@@ -46,7 +46,7 @@ const LatNativeTbV1 *lat_native_tb_find(const LatNativeImageHeaderV1 *header,
 }
 
 const LatNativeTbV1 *lat_native_tb_find_unique_pc(
-    const LatNativeImageHeaderV1 *header, const unsigned char *image,
+    const LatNativeImageHeaderV2 *header, const unsigned char *image,
     size_t image_size, uint64_t guest_pc)
 {
     if (!header || !image || header->tb_table_offset > image_size ||
@@ -75,7 +75,7 @@ const LatNativeTbV1 *lat_native_tb_find_unique_pc(
     return &tbs[left];
 }
 
-void lat_native_x86_dispatch_configure(const LatNativeImageHeaderV1 *header,
+void lat_native_x86_dispatch_configure(const LatNativeImageHeaderV2 *header,
                                        const unsigned char *image,
                                        size_t image_size,
                                        const void *code_address,

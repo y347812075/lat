@@ -3,10 +3,16 @@
 #include "profile.h"
 #include "native-image.h"
 #include "module-pack.h"
+#include "module-inspect.h"
 
+#include <errno.h>
+#include <glib.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static void usage(const char *name)
 {
@@ -19,11 +25,16 @@ static void usage(const char *name)
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
     fprintf(stderr, "  %s emit-aot-v2 NATIVE_IMAGE OUTPUT_DIRECTORY\n",
             name);
+    fprintf(stderr,
+            "  %s compile-module X86_ELF -o MODULE --runner RUNNER"
+            " --runtime-dir DIRECTORY [--profile FILE]\n",
+            name);
+    fprintf(stderr, "  %s inspect-module [--json] MODULE\n", name);
 }
 
 static int inspect_native(const char *path, int json)
 {
-    LatNativeImageHeaderV1 header;
+    LatNativeImageHeaderV2 header;
     char error[256] = {0};
     if (lat_native_image_inspect_file(path, &header, error, sizeof(error))) {
         fprintf(stderr, "latc: %s\n", error);
@@ -33,20 +44,122 @@ static int inspect_native(const char *path, int json)
         printf("{\"image\":\"%s\",\"execution_model\":\"lat-native-image\""
                ",\"guest_entry\":%" PRIu64 ",\"guest_size\":%" PRIu64
                ",\"code_size\":%" PRIu64 ",\"tbs\":%" PRIu64
-               ",\"relocations\":%" PRIu64 ",\"lat_build_id\":\"%s\"}\n",
+               ",\"relocations\":%" PRIu64 ",\"pc_maps\":%" PRIu64
+               ",\"lat_build_id\":\"%s\"}\n",
                path, header.guest_entry, header.guest_image_size,
                header.code_size, header.tb_count, header.relocation_count,
-               header.lat_build_id);
+               header.pc_map_count, header.lat_build_id);
     } else {
         printf("image=%s\nexecution_model=lat-native-image\n"
                "guest_entry=0x%" PRIx64 "\nguest_size=%" PRIu64
                "\ncode_size=%" PRIu64 "\ntbs=%" PRIu64
-               "\nrelocations=%" PRIu64 "\nlat_build_id=%s\n",
+               "\nrelocations=%" PRIu64 "\npc_maps=%" PRIu64
+               "\nlat_build_id=%s\n",
                path, header.guest_entry, header.guest_image_size,
                header.code_size, header.tb_count, header.relocation_count,
-               header.lat_build_id);
+               header.pc_map_count, header.lat_build_id);
     }
     return 0;
+}
+
+static void digest_hex(const uint8_t digest[32], char hex[65])
+{
+    static const char digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < 32; i++) {
+        hex[i * 2] = digits[digest[i] >> 4];
+        hex[i * 2 + 1] = digits[digest[i] & 15];
+    }
+    hex[64] = '\0';
+}
+
+static int inspect_module(const char *path, int json)
+{
+    LatAotModuleInfoV2 info;
+    char error[256] = {0};
+    if (lat_aot_v2_module_inspect_file(path, &info, error, sizeof(error))) {
+        fprintf(stderr, "latc: %s\n", error);
+        return 1;
+    }
+    char source[65];
+    char codegen[65];
+    digest_hex(info.note.source_sha256, source);
+    digest_hex(info.note.codegen_id, codegen);
+    int precise = !!(info.note.module_flags & LAT_AOT_MODULE_PRECISE_PC_MAP);
+    int test_only = !!(info.note.module_flags & LAT_AOT_MODULE_M1_TEST_ONLY);
+    if (json) {
+        printf("{\"module\":\"%s\",\"execution_model\":\"lat-aot-v2\""
+               ",\"abi_version\":%u,\"module_flags\":%" PRIu64
+               ",\"required_features\":%" PRIu64
+               ",\"text_size\":%" PRIu64 ",\"tbs\":%" PRIu64
+               ",\"pc_maps\":%" PRIu64
+               ",\"precise_pc_map\":%s,\"test_only\":%s"
+               ",\"source_sha256\":\"%s\",\"codegen_id\":\"%s\"}\n",
+               path, info.note.abi_version, info.note.module_flags,
+               info.note.required_features, info.text_size, info.tb_count,
+               info.pc_map_count, precise ? "true" : "false",
+               test_only ? "true" : "false", source, codegen);
+    } else {
+        printf("module=%s\nexecution_model=lat-aot-v2\nabi_version=%u"
+               "\nmodule_flags=0x%" PRIx64
+               "\nrequired_features=0x%" PRIx64
+               "\ntext_size=%" PRIu64 "\ntbs=%" PRIu64
+               "\npc_maps=%" PRIu64 "\nprecise_pc_map=%s\ntest_only=%s"
+               "\nsource_sha256=%s\ncodegen_id=%s\n",
+               path, info.note.abi_version, info.note.module_flags,
+               info.note.required_features, info.text_size, info.tb_count,
+               info.pc_map_count, precise ? "true" : "false",
+               test_only ? "true" : "false", source, codegen);
+    }
+    return 0;
+}
+
+static int compile_module(const char *input, const char *output,
+                          const char *runner,
+                          const char *runtime_dir, const char *profile)
+{
+    GError *gerror = NULL;
+    gchar *executable = g_file_read_link("/proc/self/exe", &gerror);
+    if (!executable) {
+        fprintf(stderr, "latc: cannot locate compiler executable: %s\n",
+                gerror ? gerror->message : "unknown error");
+        g_clear_error(&gerror);
+        return 1;
+    }
+    gchar *build_dir = g_path_get_dirname(executable);
+    gchar *tool_dir = g_path_get_dirname(build_dir);
+    gchar *script = g_build_filename(tool_dir, "scripts",
+                                     "compile-aot-v2-module.sh", NULL);
+    pid_t child = fork();
+    if (child == 0) {
+        if (profile) {
+            execl(script, script, executable, runner, input, runtime_dir, output,
+                  profile, (char *)NULL);
+        } else {
+            execl(script, script, executable, runner, input, runtime_dir, output,
+                  (char *)NULL);
+        }
+        fprintf(stderr, "latc: cannot execute %s: %s\n", script,
+                strerror(errno));
+        _exit(127);
+    }
+    g_free(script);
+    g_free(tool_dir);
+    g_free(build_dir);
+    g_free(executable);
+    if (child < 0) {
+        fprintf(stderr, "latc: cannot start module compiler: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    int status;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) {
+            fprintf(stderr, "latc: cannot wait for module compiler: %s\n",
+                    strerror(errno));
+            return 1;
+        }
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
 static int compile_bundle(const char *input, const char *output,
@@ -177,6 +290,33 @@ int main(int argc, char **argv)
         return compile_bundle(input, output, runner, profile,
                               profile_ignore_outside_exec, aot);
     }
+    if (strcmp(argv[1], "compile-module") == 0) {
+        const char *input = argv[2];
+        const char *output = NULL;
+        const char *runner = getenv("LATC_AOT_RUNNER");
+        const char *runtime_dir = getenv("LATC_AOT_RUNTIME_DIR");
+        const char *profile = NULL;
+        for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+                output = argv[++i];
+            } else if (strcmp(argv[i], "--runner") == 0 && i + 1 < argc) {
+                runner = argv[++i];
+            } else if (strcmp(argv[i], "--runtime-dir") == 0 &&
+                       i + 1 < argc) {
+                runtime_dir = argv[++i];
+            } else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
+                profile = argv[++i];
+            } else {
+                usage(argv[0]);
+                return 2;
+            }
+        }
+        if (!output || !runner || !*runner || !runtime_dir || !*runtime_dir) {
+            usage(argv[0]);
+            return 2;
+        }
+        return compile_module(input, output, runner, runtime_dir, profile);
+    }
     if (strcmp(argv[1], "inspect") == 0) {
         int json = 0; const char *path = NULL;
         for (int i = 2; i < argc; i++) {
@@ -196,6 +336,25 @@ int main(int argc, char **argv)
         }
         if (!path) { usage(argv[0]); return 2; }
         return inspect_native(path, json);
+    }
+    if (strcmp(argv[1], "inspect-module") == 0) {
+        int json = 0;
+        const char *path = NULL;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--json") == 0) {
+                json = 1;
+            } else if (!path) {
+                path = argv[i];
+            } else {
+                usage(argv[0]);
+                return 2;
+            }
+        }
+        if (!path) {
+            usage(argv[0]);
+            return 2;
+        }
+        return inspect_module(path, json);
     }
     if (strcmp(argv[1], "mark-native-x86") == 0) {
         char error[256] = {0};

@@ -13,7 +13,8 @@ rm -rf "$build_dir" "$staging_dir"
 mkdir -p "$staging_dir"
 rsync -a --delete --exclude 'build*' "$source_dir/" "$staging_dir/"
 touch "$staging_dir/.latc-staging"
-python3 "$(dirname "$0")/prepare-runner-source.py" "$staging_dir"
+python3 "$(dirname "$0")/prepare-runner-source.py" \
+    --without-aot-v2 "$staging_dir"
 mkdir -p "$build_dir"
 cd "$build_dir"
 "$staging_dir/configure" --target-list=x86_64-linux-user --enable-latx \

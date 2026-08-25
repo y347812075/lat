@@ -7,7 +7,7 @@
 int main(void)
 {
     unsigned char image[320] = {0};
-    LatNativeImageHeaderV1 *header = (void *)image;
+    LatNativeImageHeaderV2 *header = (void *)image;
     header->tb_table_offset = sizeof(*header);
     header->tb_count = 3;
     LatNativeTbV1 *tbs = (void *)(image + header->tb_table_offset);

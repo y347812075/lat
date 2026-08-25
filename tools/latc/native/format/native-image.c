@@ -59,9 +59,10 @@ static int tb_target_valid(const LatNativeTbV1 *tbs, uint64_t count,
 int lat_native_image_validate(const void *data, size_t size,
                               char *error, size_t error_size)
 {
-    const LatNativeImageHeaderV1 *header = data;
+    const LatNativeImageHeaderV2 *header = data;
     const LatNativeTbV1 *tbs;
     const LatNativeRelocationV1 *relocations;
+    const LatNativePcMapV2 *pc_maps;
     uint64_t table_size;
 
     if (!data || size < sizeof(*header)) {
@@ -111,9 +112,21 @@ int lat_native_image_validate(const void *data, size_t size,
     if (header->relocation_offset <
             header->tb_table_offset +
             header->tb_count * sizeof(*tbs) ||
-        header->relocation_offset + table_size != size) {
+        header->relocation_offset + table_size != header->pc_map_offset) {
         return invalid(error, error_size,
                        "native image has invalid section boundaries");
+    }
+    if (header->pc_map_count > UINT64_MAX / sizeof(*pc_maps)) {
+        return invalid(error, error_size, "native PC map is too large");
+    }
+    table_size = header->pc_map_count * sizeof(*pc_maps);
+    if (!range_valid(header->pc_map_offset, table_size, size) ||
+        header->pc_map_offset + table_size != size) {
+        return invalid(error, error_size, "native PC map is truncated");
+    }
+    if (!header->pc_map_count &&
+        !(header->flags & LAT_NATIVE_IMAGE_NO_PRECISE_SIGNAL_MAP)) {
+        return invalid(error, error_size, "native image has no precise PC map");
     }
 
     tbs = (const void *)((const unsigned char *)data +
@@ -179,11 +192,27 @@ int lat_native_image_validate(const void *data, size_t size,
                            (unsigned long long)i);
         }
     }
+
+    pc_maps = (const void *)((const unsigned char *)data +
+                             header->pc_map_offset);
+    for (uint64_t i = 0; i < header->pc_map_count; i++) {
+        if (!pc_maps[i].guest_pc ||
+            pc_maps[i].host_offset_begin >= pc_maps[i].host_offset_end ||
+            pc_maps[i].host_offset_end > header->code_size ||
+            pc_maps[i].state_record_offset != 0 ||
+            pc_maps[i].flags != LAT_NATIVE_PC_MAP_DYNAMIC_STATE ||
+            (i && pc_maps[i - 1].host_offset_end >
+                  pc_maps[i].host_offset_begin)) {
+            return invalid(error, error_size,
+                           "native PC map entry %llu is invalid",
+                           (unsigned long long)i);
+        }
+    }
     return 0;
 }
 
 int lat_native_image_inspect_file(const char *path,
-                                  LatNativeImageHeaderV1 *header,
+                                  LatNativeImageHeaderV2 *header,
                                   char *error, size_t error_size)
 {
     FILE *input = fopen(path, "rb");
@@ -221,7 +250,7 @@ out:
     return result;
 }
 
-static int validate_static_x86_guest(const LatNativeImageHeaderV1 *header,
+static int validate_static_x86_guest(const LatNativeImageHeaderV2 *header,
                                      const unsigned char *data, size_t size,
                                      char *error, size_t error_size)
 {
@@ -288,7 +317,7 @@ int lat_native_image_mark_x86_static_file(const char *path,
                                   error, error_size)) {
         goto out;
     }
-    LatNativeImageHeaderV1 *header = (void *)data;
+    LatNativeImageHeaderV2 *header = (void *)data;
     header->flags |= LAT_NATIVE_IMAGE_X86_STATIC_EXEC;
     if (lat_native_image_validate(data, size, error, error_size)) {
         goto out;

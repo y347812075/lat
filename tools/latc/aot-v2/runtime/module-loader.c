@@ -116,6 +116,47 @@ static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
             return fail(error, error_size, "AOT TB table is invalid");
         }
     }
+    size_t pc_count = (pc_end - pc_begin) / sizeof(LatAotPcMapV2);
+    for (size_t i = 0; i < pc_count; i++) {
+        const LatAotPcMapV2 *map = &descriptor->pc_map_begin[i];
+        int belongs_to_tb = 0;
+        for (size_t j = 0; j < tb_count; j++) {
+            const LatAotTbV2 *tb = &descriptor->tb_begin[j];
+            belongs_to_tb |= map->host_offset_begin >= tb->host_offset &&
+                map->host_offset_end <= tb->host_offset + tb->host_size;
+        }
+        if (map->host_offset_begin >= map->host_offset_end ||
+            map->host_offset_end > text_size ||
+            map->state_record_offset != 0 ||
+            map->flags != LAT_AOT_PC_MAP_DYNAMIC_STATE ||
+            !belongs_to_tb ||
+            (i && descriptor->pc_map_begin[i - 1].host_offset_end >
+                  map->host_offset_begin)) {
+            return fail(error, error_size, "AOT precise PC map is invalid");
+        }
+    }
+    if (descriptor->module_flags & LAT_AOT_MODULE_PRECISE_PC_MAP) {
+        for (size_t i = 0; i < tb_count; i++) {
+            const LatAotTbV2 *tb = &descriptor->tb_begin[i];
+            uint64_t expected_offset = tb->host_offset;
+            for (size_t j = 0; j < pc_count; j++) {
+                const LatAotPcMapV2 *map = &descriptor->pc_map_begin[j];
+                if (map->host_offset_begin < tb->host_offset ||
+                    map->host_offset_end > tb->host_offset + tb->host_size) {
+                    continue;
+                }
+                if (map->host_offset_begin != expected_offset) {
+                    return fail(error, error_size,
+                                "AOT precise PC map does not cover a TB");
+                }
+                expected_offset = map->host_offset_end;
+            }
+            if (expected_offset != tb->host_offset + tb->host_size) {
+                return fail(error, error_size,
+                            "AOT precise PC map does not cover a TB");
+            }
+        }
+    }
     size_t slot_count = (slot_end - slot_begin) / sizeof(LatAotGuestSlotV2);
     if (slot_count > LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT) {
         return fail(error, error_size, "AOT guest slot table is too large");
@@ -128,7 +169,8 @@ static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
     }
     if (!(descriptor->module_flags & (LAT_AOT_MODULE_SYNTHETIC_FIXTURE |
                                       LAT_AOT_MODULE_M1_TEST_ONLY)) &&
-        pc_begin == pc_end) {
+        (!(descriptor->module_flags & LAT_AOT_MODULE_PRECISE_PC_MAP) ||
+         pc_begin == pc_end)) {
         return fail(error, error_size, "AOT precise PC map is empty");
     }
     return 0;

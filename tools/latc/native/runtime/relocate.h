@@ -10,7 +10,7 @@ typedef struct LatNativeCode {
     size_t size;
 } LatNativeCode;
 
-int lat_native_code_load(const LatNativeImageHeaderV1 *header,
+int lat_native_code_load(const LatNativeImageHeaderV2 *header,
                          const unsigned char *image, size_t image_size,
                          LatNativeCode *code, char *error,
                          size_t error_size);

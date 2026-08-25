@@ -35,6 +35,10 @@
     {
       "path": "lat/linux-user/latc-aot-v2-runner.c",
       "reason": "load one test AOT v2 module and route translated syscalls through LAT linux-user"
+    },
+    {
+      "path": "lat/linux-user/latc-aot-v2-runner-stub.c",
+      "reason": "disable AOT v2 loading in the static exporter runner without changing shared LAT call sites"
     }
   ],
   "modified": [
