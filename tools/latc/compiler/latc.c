@@ -42,20 +42,26 @@ static int inspect_native(const char *path, int json)
     }
     if (json) {
         printf("{\"image\":\"%s\",\"execution_model\":\"lat-native-image\""
-               ",\"guest_entry\":%" PRIu64 ",\"guest_size\":%" PRIu64
+               ",\"flags\":%u,\"guest_entry\":%" PRIu64
+               ",\"preferred_guest_base\":%" PRIu64
+               ",\"guest_size\":%" PRIu64
                ",\"code_size\":%" PRIu64 ",\"tbs\":%" PRIu64
                ",\"relocations\":%" PRIu64 ",\"pc_maps\":%" PRIu64
                ",\"lat_build_id\":\"%s\"}\n",
-               path, header.guest_entry, header.guest_image_size,
+               path, header.flags, header.guest_entry,
+               header.preferred_guest_base, header.guest_image_size,
                header.code_size, header.tb_count, header.relocation_count,
                header.pc_map_count, header.lat_build_id);
     } else {
         printf("image=%s\nexecution_model=lat-native-image\n"
-               "guest_entry=0x%" PRIx64 "\nguest_size=%" PRIu64
+               "flags=0x%x\nguest_entry=0x%" PRIx64
+               "\npreferred_guest_base=0x%" PRIx64
+               "\nguest_size=%" PRIu64
                "\ncode_size=%" PRIu64 "\ntbs=%" PRIu64
                "\nrelocations=%" PRIu64 "\npc_maps=%" PRIu64
                "\nlat_build_id=%s\n",
-               path, header.guest_entry, header.guest_image_size,
+               path, header.flags, header.guest_entry,
+               header.preferred_guest_base, header.guest_image_size,
                header.code_size, header.tb_count, header.relocation_count,
                header.pc_map_count, header.lat_build_id);
     }

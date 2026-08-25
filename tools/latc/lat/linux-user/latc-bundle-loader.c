@@ -469,9 +469,19 @@ static int read_cfg(void *buffer, size_t size, uint64_t offset)
                  (off_t)(bundle_footer.cfg_offset + offset)) == (ssize_t)size ? 0 : -1;
 }
 
-void latc_bundle_pretranslate(struct CPUState *cpu)
+void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
 {
     if (bundle_self_fd < 0 || !cpu) return;
+    Elf64_Ehdr elf;
+    if (bundle_footer.guest_size < sizeof(elf) ||
+        pread(bundle_self_fd, &elf, sizeof(elf),
+              (off_t)bundle_footer.guest_offset) != sizeof(elf) ||
+        (elf.e_type != ET_EXEC && elf.e_type != ET_DYN) ||
+        (elf.e_type == ET_DYN && guest_entry < elf.e_entry)) {
+        fprintf(stderr, "latc: invalid embedded ELF load bias\n");
+        return;
+    }
+    uint64_t load_bias = elf.e_type == ET_DYN ? guest_entry - elf.e_entry : 0;
     LatcDiskCfgHeader header;
     if (read_cfg(&header, sizeof(header), 0) ||
         memcmp(header.magic, LATC_CFG_MAGIC, 8) ||
@@ -493,6 +503,16 @@ void latc_bundle_pretranslate(struct CPUState *cpu)
         bundle_exec_range_count = 0;
         fprintf(stderr, "latc: invalid embedded executable ranges\n");
         return;
+    }
+    for (uint64_t i = 0; i < bundle_exec_range_count; i++) {
+        if (bundle_exec_ranges[i].start > UINT64_MAX - load_bias) {
+            free(bundle_exec_ranges);
+            bundle_exec_ranges = NULL;
+            bundle_exec_range_count = 0;
+            fprintf(stderr, "latc: embedded executable range overflows\n");
+            return;
+        }
+        bundle_exec_ranges[i].start += load_bias;
     }
     if (getenv("LATC_DISABLE_PRETRANSLATE")) {
         stat_cfg_tbs = header.tb_count;
@@ -528,9 +548,16 @@ void latc_bundle_pretranslate(struct CPUState *cpu)
             bool is_profiled = disk_tb.profile_count != 0;
             if ((pass == 0) != is_profiled) continue;
             profiled += pass == 0;
-            target_ulong pc = disk_tb.start;
+            if (disk_tb.end < disk_tb.start ||
+                disk_tb.end > UINT64_MAX - load_bias) {
+                failed++;
+                continue;
+            }
+            uint64_t translated_start = disk_tb.start + load_bias;
+            uint64_t translated_end = disk_tb.end + load_bias;
+            target_ulong pc = translated_start;
             bool first = true;
-            while (pc < disk_tb.end) {
+            while (pc < translated_end) {
                 mmap_lock();
                 TranslationBlock *tb = tb_gen_code(cpu, pc, cs_base,
                                                    flags, cflags);
@@ -547,14 +574,14 @@ void latc_bundle_pretranslate(struct CPUState *cpu)
                                  (gpointer)(uintptr_t)pc);
                 uint64_t tb_end = (uint64_t)pc + tb->size;
                 if (first) {
-                    uint64_t cfg_size = disk_tb.end - disk_tb.start;
+                    uint64_t cfg_size = translated_end - translated_start;
                     if (tb->size == cfg_size) {
                         same_extent++;
                     } else if (tb->size < cfg_size) {
                         shorter_extent++;
                         if (getenv("LATC_DEBUG_CFG")) {
                             fprintf(stderr, "latc: shorter TB pc=0x%llx cfg=%llu lat=%u\n",
-                                    (unsigned long long)disk_tb.start,
+                                    (unsigned long long)translated_start,
                                     (unsigned long long)cfg_size, tb->size);
                         }
                     } else {
@@ -563,7 +590,7 @@ void latc_bundle_pretranslate(struct CPUState *cpu)
                     }
                     first = false;
                 }
-                if (tb_end >= disk_tb.end) {
+                if (tb_end >= translated_end) {
                     break;
                 }
                 if (!tb->size) {
@@ -583,12 +610,16 @@ void latc_bundle_pretranslate(struct CPUState *cpu)
             failed++;
             continue;
         }
-        if (!edge.to || !program_address(edge.to) ||
-            g_hash_table_contains(translated_pcs,
-                                  (gpointer)(uintptr_t)edge.to)) {
+        if (!edge.to || edge.to > UINT64_MAX - load_bias) {
             continue;
         }
-        target_ulong pc = edge.to;
+        uint64_t edge_pc = edge.to + load_bias;
+        if (!program_address(edge_pc) ||
+            g_hash_table_contains(translated_pcs,
+                                  (gpointer)(uintptr_t)edge_pc)) {
+            continue;
+        }
+        target_ulong pc = edge_pc;
         mmap_lock();
         TranslationBlock *tb = tb_gen_code(cpu, pc, cs_base,
                                            flags, cflags);

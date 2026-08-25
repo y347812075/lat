@@ -92,8 +92,13 @@ static bool native_tb_target_exists(const GArray *tbs, uint64_t guest_pc,
         g_array_index(tbs, LatNativeTbV1, left + 1).guest_pc != guest_pc;
 }
 
-static bool guest_executable_address(const GByteArray *guest, uint64_t pc)
+static bool guest_executable_address(const GByteArray *guest, uint64_t pc,
+                                     uint64_t load_bias)
 {
+    if (pc < load_bias) {
+        return false;
+    }
+    pc -= load_bias;
     const Elf64_Ehdr *elf = (const void *)guest->data;
     const Elf64_Phdr *program_headers =
         (const void *)(guest->data + elf->e_phoff);
@@ -211,6 +216,53 @@ static int copy_guest(const char *path, GByteArray **guest,
     return 0;
 }
 
+static int find_guest_load_bias(const GByteArray *guest,
+                                const aot_header *header,
+                                const aot_segment *segments,
+                                uint64_t *load_bias)
+{
+    const Elf64_Ehdr *elf = (const void *)guest->data;
+    if (elf->e_type == ET_EXEC) {
+        *load_bias = 0;
+        return 0;
+    }
+    if (elf->e_type != ET_DYN) {
+        return -1;
+    }
+
+    const Elf64_Phdr *phdrs =
+        (const void *)(guest->data + elf->e_phoff);
+    bool found = false;
+    uint64_t bias = 0;
+    for (uint32_t i = 0; i < header->segments_num; i++) {
+        const aot_segment *segment = &segments[i];
+        for (uint16_t j = 0; j < elf->e_phnum; j++) {
+            const Elf64_Phdr *phdr = &phdrs[j];
+            if (phdr->p_type != PT_LOAD ||
+                (phdr->p_offset & TARGET_PAGE_MASK) !=
+                    segment->details.file_offset) {
+                continue;
+            }
+            uint64_t preferred = phdr->p_vaddr & TARGET_PAGE_MASK;
+            if (segment->details.seg_begin < preferred) {
+                return -1;
+            }
+            uint64_t candidate = segment->details.seg_begin - preferred;
+            if (found && candidate != bias) {
+                return -1;
+            }
+            bias = candidate;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        return -1;
+    }
+    *load_bias = bias;
+    return 0;
+}
+
 static bool direct_tb_target(const aot_tb *tb, const aot_segment *segment,
         aot_rel_kind kind, uint64_t *guest_pc)
 {
@@ -245,7 +297,7 @@ static bool direct_tb_target(const aot_tb *tb, const aot_segment *segment,
 
 static int append_relocation(GArray *output, const aot_rel *source,
         const aot_tb *tb, uint64_t tb_code_offset,
-        const aot_segment *segment)
+        const aot_segment *segment, uint64_t load_bias)
 {
     LatNativeRelocationV1 relocation = {
         .code_offset = tb_code_offset + source->tc_offset,
@@ -270,6 +322,15 @@ static int append_relocation(GArray *output, const aot_rel *source,
         relocation.kind = LAT_NATIVE_RELOC_RUNTIME_SYMBOL;
         relocation.target = symbol;
         relocation.addend = source->extra_addend;
+    }
+    if ((relocation.kind == LAT_NATIVE_RELOC_GUEST_ADDRESS ||
+         relocation.kind == LAT_NATIVE_RELOC_TB_TARGET) &&
+        relocation.addend < load_bias) {
+        return -1;
+    }
+    if (relocation.kind == LAT_NATIVE_RELOC_GUEST_ADDRESS ||
+        relocation.kind == LAT_NATIVE_RELOC_TB_TARGET) {
+        relocation.addend -= load_bias;
     }
     g_array_append_val(output, relocation);
     return 0;
@@ -312,19 +373,20 @@ static void append_tu_relocations(GArray *output, const aot_tb *tb,
 
 static void append_jrra_relocation(GArray *output, const aot_tb *tb,
         uint64_t tb_code_offset, const aot_segment *segment,
-        const GByteArray *guest)
+        const GByteArray *guest, uint64_t load_bias)
 {
 #ifdef CONFIG_LATX_JRRA
     if (!tb->return_target_ptr_offset) {
         return;
     }
     uint64_t target_pc = segment->details.seg_begin + tb->next_86_pc_offset;
-    if (!guest_executable_address(guest, target_pc)) {
+    if (!guest_executable_address(guest, target_pc, load_bias) ||
+        target_pc < load_bias) {
         return;
     }
     LatNativeRelocationV1 relocation = {
         .code_offset = tb_code_offset + tb->return_target_ptr_offset,
-        .addend = target_pc,
+        .addend = target_pc - load_bias,
         .kind = LAT_NATIVE_RELOC_JRRA_TARGET,
         .target = tb->cflags,
         .slots = 4,
@@ -449,7 +511,8 @@ static int extract_native_pc_maps(GArray *output, const uint8_t *code,
                                   uint64_t code_size, const aot_header *header,
                                   const aot_segment *segments,
                                   const aot_tb *tbs, size_t tb_count,
-                                  uint64_t aot_code_offset)
+                                  uint64_t aot_code_offset,
+                                  uint64_t load_bias)
 {
     for (size_t i = 0; i < tb_count;) {
         if (!tbs[i].is_first_tb ||
@@ -474,6 +537,10 @@ static int extract_native_pc_maps(GArray *output, const uint8_t *code,
             uint64_t code_offset = tbs[j].tb_cache_offset - aot_code_offset;
             uint64_t guest_pc = segment->details.seg_begin +
                                 tbs[j].offset_in_segment;
+            if (guest_pc < load_bias) {
+                return -1;
+            }
+            guest_pc -= load_bias;
             if (append_tb_pc_map(output, code, code_size, &tbs[j],
                                  code_offset, guest_pc, tu_end)) {
                 return -1;
@@ -552,6 +619,7 @@ int latc_native_export(const char *path, const char *guest_path,
     uint8_t *native_code = NULL;
     uint64_t guest_entry = 0;
     uint64_t guest_base = 0;
+    uint64_t guest_load_bias = 0;
     uint8_t guest_digest[32];
     int result = -1;
 
@@ -565,6 +633,10 @@ int latc_native_export(const char *path, const char *guest_path,
                    guest_digest)) {
         return -1;
     }
+    if (find_guest_load_bias(guest, header, segments, &guest_load_bias)) {
+        fprintf(stderr, "latc: cannot determine native guest load bias\n");
+        goto out;
+    }
     native_tbs = g_array_new(FALSE, FALSE, sizeof(LatNativeTbV1));
     native_relocations = g_array_new(FALSE, FALSE,
                                      sizeof(LatNativeRelocationV1));
@@ -573,7 +645,8 @@ int latc_native_export(const char *path, const char *guest_path,
     native_code = g_malloc(code_size);
     memcpy(native_code, code, code_size);
     if (extract_native_pc_maps(native_pc_maps, native_code, code_size,
-            header, segments, tbs, tb_count, aot_code_offset) ||
+            header, segments, tbs, tb_count, aot_code_offset,
+            guest_load_bias) ||
         strip_process_local_search_data(native_code, code_size,
             tbs, tb_count, aot_code_offset)) {
         fprintf(stderr, "latc: cannot export stable native PC map\n");
@@ -586,7 +659,8 @@ int latc_native_export(const char *path, const char *guest_path,
         const aot_segment *segment = find_tb_segment(header, segments, &tbs[i]);
         uint64_t pc = segment ?
             segment->details.seg_begin + tbs[i].offset_in_segment : 0;
-        if (!segment || tbs[i].tb_cache_offset < aot_code_offset) {
+        if (!segment || pc < guest_load_bias ||
+            tbs[i].tb_cache_offset < aot_code_offset) {
             fprintf(stderr, "latc: invalid native TB %zu\n", i);
             goto out;
         }
@@ -597,7 +671,7 @@ int latc_native_export(const char *path, const char *guest_path,
             goto out;
         }
         LatNativeTbV1 native_tb = {
-            .guest_pc = pc,
+            .guest_pc = pc - guest_load_bias,
             .code_offset = code_offset,
             .code_size = tbs[i].tb_cache_size,
             .flags = tbs[i].cflags,
@@ -606,9 +680,9 @@ int latc_native_export(const char *path, const char *guest_path,
 
         if (tbs[i].rel_start_index == -1) {
             append_tu_relocations(native_relocations, &tbs[i], code_offset,
-                                  pc);
+                                  pc - guest_load_bias);
             append_jrra_relocation(native_relocations, &tbs[i], code_offset,
-                                   segment, guest);
+                                   segment, guest, guest_load_bias);
             continue;
         }
         if (tbs[i].rel_start_index < 0 ||
@@ -620,13 +694,15 @@ int latc_native_export(const char *path, const char *guest_path,
         for (int rel = tbs[i].rel_start_index;
              rel <= tbs[i].rel_end_index; rel++) {
             if (append_relocation(native_relocations, &source_relocations[rel],
-                                  &tbs[i], code_offset, segment)) {
+                                  &tbs[i], code_offset, segment,
+                                  guest_load_bias)) {
                 goto out;
             }
         }
-        append_tu_relocations(native_relocations, &tbs[i], code_offset, pc);
+        append_tu_relocations(native_relocations, &tbs[i], code_offset,
+                              pc - guest_load_bias);
         append_jrra_relocation(native_relocations, &tbs[i], code_offset,
-                               segment, guest);
+                               segment, guest, guest_load_bias);
     }
 
     g_array_sort(native_tbs, compare_native_tb);
@@ -646,7 +722,7 @@ int latc_native_export(const char *path, const char *guest_path,
         LatNativeRelocationV1 *relocation = &g_array_index(
             native_relocations, LatNativeRelocationV1, i);
         if (relocation->kind != LAT_NATIVE_RELOC_TB_TARGET ||
-            guest_executable_address(guest, relocation->addend)) {
+            guest_executable_address(guest, relocation->addend, 0)) {
             continue;
         }
         if (relocation->reserved == LAT_NATIVE_SYMBOL_INVALID) {

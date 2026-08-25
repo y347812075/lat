@@ -96,6 +96,28 @@ int main(int argc, char **argv)
             fprintf(stderr, "cannot mark static x86 image: %s\n", error);
             return 1;
         }
+
+        header->flags = LAT_NATIVE_IMAGE_NO_PRECISE_SIGNAL_MAP |
+                        LAT_NATIVE_IMAGE_PIE;
+        elf->e_type = ET_DYN;
+        elf->e_entry = 0x1000;
+        phdr->p_vaddr = elf->e_entry;
+        header->guest_entry = elf->e_entry;
+        if (write_image(argv[1], image, image_size) ||
+            lat_native_image_mark_x86_static_file(argv[1], error,
+                                                  sizeof(error)) != 0 ||
+            lat_native_image_inspect_file(argv[1], header, error,
+                                          sizeof(error)) != 0 ||
+            !(header->flags & LAT_NATIVE_IMAGE_X86_STATIC_EXEC)) {
+            fprintf(stderr, "cannot mark static PIE x86 image: %s\n", error);
+            return 1;
+        }
+
+        header->flags = LAT_NATIVE_IMAGE_NO_PRECISE_SIGNAL_MAP;
+        elf->e_type = ET_EXEC;
+        elf->e_entry = 0x401000;
+        phdr->p_vaddr = elf->e_entry;
+        header->guest_entry = elf->e_entry;
         phdr->p_type = PT_INTERP;
         if (write_image(argv[1], image, image_size)) return 1;
         error[0] = '\0';
