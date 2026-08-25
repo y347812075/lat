@@ -76,6 +76,8 @@
         IR2_OPND eflags = ra_alloc_label();                          \
         la_label(eflags);                                            \
         tb->eflags_target_arg[i] = ir2_opnd_label_id(&eflags);       \
+        instptn_stats_record_eflags_fallback_opcode(                 \
+            (inst)->instptn.opc);                                    \
         generate_eflag_calculation(opnd0, opnd0, opnd1, inst, flags); \
     } while (0)
 
@@ -2384,7 +2386,7 @@ static bool translate_ucomiss_xx_jcc(IR1_INST *pir1)
 #endif
 
 
-bool try_translate_instptn(IR1_INST *pir1)
+static bool try_translate_instptn_impl(IR1_INST *pir1)
 {
     instptn_check_false();
 
@@ -2470,6 +2472,26 @@ bool try_translate_instptn(IR1_INST *pir1)
     }
 
     return false;
+}
+
+bool try_translate_instptn(IR1_INST *pir1)
+{
+    if (!option_instptn_stats) {
+        return try_translate_instptn_impl(pir1);
+    }
+
+    InstPtnOpcode opcode = pir1->instptn.opc;
+    int ir2_before = lsenv->tr_data->ir2_inst_num_current;
+    int host_before = lsenv->tr_data->real_ir2_inst_num;
+    bool translated = try_translate_instptn_impl(pir1);
+
+    if (translated) {
+        instptn_stats_record_codegen_opcode(
+            opcode,
+            lsenv->tr_data->ir2_inst_num_current - ir2_before,
+            lsenv->tr_data->real_ir2_inst_num - host_before);
+    }
+    return translated;
 }
 
 void opt_instptn_fix(CPUState *cpu, TranslationBlock *tb, int index)
