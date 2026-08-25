@@ -22,8 +22,9 @@ make -C tools/latc test-aot-v2
 ```
 
 On other hosts the same target runs the architecture-independent ELF format
-and registry tests. M1 additionally packages real LAT output and executes a
-static x86 hello through the AOT registry and existing linux-user syscall path.
+and registry tests. M1 packages all supported TBs from real LAT output and
+executes no-libc hello, static glibc hello, and SPECint2000 train through the
+AOT registry and existing linux-user syscall path.
 
 On a LoongArch build host, compile and inspect an AOT v2 module with:
 
@@ -35,9 +36,23 @@ build/latc inspect-module --json program.so
 ```
 
 The module contains instruction-level Host-PC to guest-PC records in
-`.rodata.lat.map`. The current M1 packager intentionally publishes only TBs
-that end in a syscall; general TB execution and dynamic ELF discovery are the
-next runtime changes.
+`.rodata.lat.map`. M1 publishes every supported native-image TB, restores x86
+state from those records on a host signal, and populates LAT's fast indirect
+jump cache after the first lookup. Dynamic ELF discovery remains an M2 task.
+
+Run all twelve official SPECint2000 train workloads on LoongArch with:
+
+```sh
+make -C tools/latc test-specint-aot-v2 \
+  RUNNER=/path/to/static-exporter/latx-x86_64 \
+  AOT_V2_RUNNER=/path/to/aot-v2-runner/latx-x86_64 \
+  AOT_V2_RUNTIME_DIR=/path/to/aot-v2-runner \
+  SPEC_ROOT=/path/to/spec2000
+```
+
+The test rejects partial modules, any runtime TB generation, invalid SPEC
+output, and a benchmark that exceeds 60 seconds. M1 passed all twelve train
+workloads on `3a6000-25g` on 2026-08-25. Ref inputs were not run.
 
 `latc inspect` reports this existing format as
 `execution_model=lat-aot-bundle`. It is deliberately not called a standalone

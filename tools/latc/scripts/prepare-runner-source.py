@@ -38,6 +38,7 @@ def main() -> None:
         "accel/tcg/translate-all.c",
         "linux-user/latc-bundle-loader.c",
         "linux-user/latc-bundle-loader.h",
+        "linux-user/elfload.c",
         "linux-user/main.c",
         "target/i386/latx/sbt/aot_recover_tb.c",
         "target/i386/latx/sbt/aot.c",

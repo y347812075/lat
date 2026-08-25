@@ -10,5 +10,6 @@ int latc_aot_v2_prepare(CPUArchState *env);
 TranslationBlock *latc_aot_v2_find_tb(CPUState *cpu,
                                       target_ulong guest_pc,
                                       uint32_t flags, uint32_t cflags);
+bool latc_aot_v2_restore_state(CPUState *cpu, uintptr_t host_pc);
 
 #endif

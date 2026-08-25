@@ -40,6 +40,36 @@ static int reject(char *error, size_t error_size, const char *format, ...)
     return -1;
 }
 
+static int runtime_import_allowed(const char *name)
+{
+    static const char *const imports[] = {
+        LAT_AOT_V2_RUNTIME_ABI_SYMBOL,
+        LAT_AOT_V2_RUNTIME_SYSCALL_SYMBOL,
+        "lat_aot_runtime_epilogue_ret_id_1",
+        "lat_aot_runtime_epilogue_ret_id_0",
+        "lat_aot_runtime_jirl_epilogue_ret_id_1",
+        "lat_aot_runtime_jirl_epilogue_ret_id_0",
+        "lat_aot_runtime_epilogue_ret_0",
+        "lat_aot_runtime_update_mxcsr_status",
+        "lat_aot_runtime_fxsave",
+        "lat_aot_runtime_fxrstor",
+        "lat_aot_runtime_fpregs_x80_to_64",
+        "lat_aot_runtime_fpregs_64_to_x80",
+        "lat_aot_runtime_update_fp_status",
+        "lat_aot_runtime_cpuid",
+        "lat_aot_runtime_raise_illop",
+        "lat_aot_runtime_raise_gpf",
+        "lat_aot_runtime_pcmpistri_xmm",
+        "lat_aot_runtime_pcmpistrm_xmm",
+    };
+    for (size_t i = 0; i < sizeof(imports) / sizeof(imports[0]); i++) {
+        if (!strcmp(name, imports[i])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int range_valid(size_t file_size, uint64_t offset, uint64_t size)
 {
     return offset <= file_size && size <= file_size - offset;
@@ -302,7 +332,7 @@ static int validate_dynamic_symbols(const unsigned char *file,
             !strcmp(name, LAT_AOT_V2_RUNTIME_ABI_SYMBOL)) {
             runtime_abi_imports++;
         } else if (table[i].st_shndx == SHN_UNDEF &&
-                   !strcmp(name, LAT_AOT_V2_RUNTIME_SYSCALL_SYMBOL)) {
+                   runtime_import_allowed(name)) {
             continue;
         } else if (table[i].st_shndx != SHN_UNDEF &&
                    !strcmp(name, LAT_AOT_V2_DESCRIPTOR_SYMBOL)) {
@@ -420,10 +450,8 @@ static int validate_relocations(const unsigned char *file, size_t file_size,
                 !memchr(strings + symbols[symbol_index].st_name, 0,
                         string_section->sh_size -
                         symbols[symbol_index].st_name) ||
-                (strcmp(strings + symbols[symbol_index].st_name,
-                        LAT_AOT_V2_RUNTIME_ABI_SYMBOL) &&
-                 strcmp(strings + symbols[symbol_index].st_name,
-                        LAT_AOT_V2_RUNTIME_SYSCALL_SYMBOL))) {
+                !runtime_import_allowed(
+                    strings + symbols[symbol_index].st_name)) {
                 return reject(error, error_size,
                               "AOT relocation references an unexpected symbol");
             }

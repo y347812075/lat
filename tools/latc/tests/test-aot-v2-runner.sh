@@ -19,6 +19,9 @@ mkdir -p "$work"
 "$script_dir/../scripts/link-aot-v2-module.sh" \
   "$latc" "$native_image" "$runtime_dir" "$work/module.so"
 "$latc" inspect-module --json "$work/module.so" >"$work/module.json"
+"$latc" inspect-native --json "$native_image" >"$work/native.json"
+python3 -c 'import json,sys; n=json.load(open(sys.argv[1])); m=json.load(open(sys.argv[2])); assert m["tbs"] == n["tbs"]; assert m["pc_maps"] == n["pc_maps"]' \
+  "$work/native.json" "$work/module.json"
 grep -q '"pc_maps":[1-9]' "$work/module.json"
 grep -q '"precise_pc_map":true' "$work/module.json"
 grep -q '"test_only":false' "$work/module.json"
@@ -36,7 +39,7 @@ LATC_STATS_OUT="$work/stats.json" \
 
 printf 'Hello, LATC!\n' >"$work/expected"
 cmp "$work/expected" "$work/stdout"
-grep -q 'AOT v2 registered module with 2 TBs' "$work/stderr"
+grep -Eq 'AOT v2 registered module with [1-9][0-9]* TBs' "$work/stderr"
 grep -q '"runtime_tb_gen_attempts":0' "$work/stats.json"
 grep -q '"runtime_tb_gen_calls":0' "$work/stats.json"
 grep -q '"pretranslation_disabled":true' "$work/stats.json"

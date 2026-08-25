@@ -48,15 +48,28 @@ assert selected_programs(["164.gzip"])[0][1] == "gzip_base.Of.gcc830.dyn"
 spec = (work / "timeout-spec").resolve()
 (spec / "result").mkdir(parents=True)
 runner = spec / "myrun1.sh"
-runner.write_text("#!/bin/sh\nsleep 1\n")
+child_pid = (work / "timeout-child.pid").resolve()
+runner.write_text(
+    "#!/bin/sh\n"
+    "%s -c \"import os,time; os.setpgrp(); "
+    "open(%r, 'w').write(str(os.getpid())); time.sleep(30)\" &\n"
+    "wait\n" % (sys.executable, str(child_pid)))
 runner.chmod(0o755)
 try:
     run_spec(spec, "train", "164.gzip", {}, work / "timeout.log",
-             timeout=0.01)
+             timeout=0.2)
 except RuntimeError as error:
     assert "timed out" in str(error), error
 else:
     raise AssertionError("run_spec timeout was not enforced")
+pid = int(child_pid.read_text())
+try:
+    state = pathlib.Path("/proc/%d/stat" % pid).read_text().split()[2]
+except FileNotFoundError:
+    pass
+else:
+    if state != "Z":
+        raise AssertionError("run_spec left child process %d running" % pid)
 print("test-spec-tools: PASS")
 PY
 

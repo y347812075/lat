@@ -23,34 +23,29 @@ This directory contains the first implementation slice of the AOT v2 design.
   `ET_DYN` fixture whose synthetic TB returns `42` through the versioned runtime
   dependency.
 
-The M1 test slice executes real LAT-generated TBs for `x86-exit42` and
-`x86-static-hello`. The module-level test captures the x86 syscall state after
-the translated TB has saved it. It checks `exit(42)`,
-`write(1, "Hello, LATC!\n", 13)`, and `exit(0)`, including two different guest
-load biases using one loaded Host module. It does not emulate the syscalls.
+The M1 tests execute real LAT-generated TBs for `x86-exit42`, the no-libc
+static hello, and a static glibc hello. The module-level test captures x86
+syscall state after translated code saves it. The dynamic runner routes the
+same syscall exit to LAT's existing `helper_raise_syscall`; the normal
+linux-user CPU loop then executes `linux-user/syscall.c`.
 
-The disposable dynamic LAT runner performs the end-to-end test. It registers
-the AOT module once, queries the registry after a normal TB lookup miss, and
-routes the AOT syscall trampoline to LAT's existing `helper_raise_syscall`.
-The normal x86 linux-user CPU loop then executes `linux-user/syscall.c`.
-`x86-static-hello` prints `Hello, LATC!` with zero runtime translation attempts
-and calls.
+The packager publishes every supported TB from the native image. Direct edges
+remain inside the module. On the first indirect lookup the runner creates a
+thread-local compatibility `TranslationBlock`, then fills both LAT's fast jump
+cache and QEMU's TB cache. Repeated indirect jumps go directly to read-only
+module text. Missing TBs still reach the normal lookup path and are rejected by
+the strict M1 tests.
 
-The AOT ELF does not contain LAT `TranslationBlock` objects and loading a
-module does not insert all AOT TBs into QEMU's qht or TCG Host-PC tree. The
-current `cpu_tb_exec()` interface still accepts `TranslationBlock *`, so the
-M1 adapter lazily creates a small thread-local compatibility object for a TB
-that is actually selected. It is never registered in the old TB indexes and
-is never directly linked. A later execution-interface change should accept a
-`LatAotTargetV2` directly and remove this compatibility object.
+The AOT ELF does not contain LAT `TranslationBlock` objects, and module loading
+does not register all TBs in QEMU's qht or TCG Host-PC tree. The current
+`cpu_tb_exec()` interface still accepts `TranslationBlock *`, so the adapter
+creates compatibility objects only for selected TBs. A later execution API
+should accept `LatAotTargetV2` directly and remove them.
 
-The M1 packager publishes only TBs that terminate in
-`helper_raise_syscall`. This guarantees that the temporary compatibility object
-never enters LAT's normal TB-return, direct-link, or invalidation paths. The
-current copied LAT code generator saves vector state with LASX instructions,
-so these test modules declare `LAT_AOT_FEATURE_LASX`. A separate LSX-only
-lowering is still required for CPUs without LASX; LBT and LSX remain mandatory
-for every variant.
+The copied LAT code generator saves vector state with LASX instructions, so
+these modules declare `LAT_AOT_FEATURE_LASX`. A separate LSX-only lowering is
+still required for CPUs without LASX; LBT and LSX remain mandatory for every
+variant.
 
 Native intermediate v2 contains stable instruction-level Host ranges and guest
 PCs decoded from LAT's existing search data. The packager copies the complete
@@ -60,10 +55,35 @@ supported dynamic-state record. Such modules declare
 `LAT_AOT_MODULE_PRECISE_PC_MAP` and no longer carry
 `LAT_AOT_MODULE_M1_TEST_ONLY`.
 
-These modules are still not production cache artifacts. The packager publishes
-only syscall-ending TBs, and LAT's signal path does not yet query the AOT PC
-map. General TB execution, AOT signal recovery, executable mapping
-invalidation, dynamic ELF discovery, and an LSX-only variant remain missing.
+LAT's signal recovery now searches the module PC map and calls the existing
+`restore_state_to_opc()` path. The loader validates PC-map coverage in host
+offset order without the former TB-count times map-count scan. AOT v2 also
+disables the guest vDSO for M1, so libc uses syscall instructions already
+present in the static main ELF instead of requiring JIT for runner-provided
+vDSO code.
+
+On `3a6000-25g`, all official SPECint2000 train workloads passed on 2026-08-25
+with a 60-second limit and zero runtime translation attempts and calls:
+
+| benchmark | SPEC reported time (s) |
+| --- | ---: |
+| 164.gzip | 10.040804 |
+| 175.vpr | 6.155109 |
+| 176.gcc | 1.296400 |
+| 181.mcf | 3.692219 |
+| 186.crafty | 7.028920 |
+| 197.parser | 2.204061 |
+| 252.eon | 2.489437 |
+| 253.perlbmk | 26.198676 |
+| 254.gap | 1.880917 |
+| 255.vortex | 3.947464 |
+| 256.bzip2 | 9.063077 |
+| 300.twolf | 3.837499 |
+
+M1 remains a static `ET_EXEC` milestone. Dynamic `PT_INTERP` startup, shared
+object discovery and registration, executable mapping invalidation, unloading,
+direct `LatAotTargetV2` execution, and an LSX-only artifact remain M2 or later
+work. Ref inputs have not been run.
 
 On LoongArch, after producing a `.latnative` image with the existing exporter:
 
@@ -94,4 +114,19 @@ make -C tools/latc test-aot-v2-runner \
   AOT_V2_RUNTIME_DIR=/path/to/aot-v2-runner \
   X86_GUEST=build/tests/x86-static-hello \
   NATIVE_IMAGE=/path/to/x86-static-hello.latnative
+```
+
+The static glibc and SPEC M1 tests are:
+
+```sh
+make -C tools/latc test-aot-v2-glibc-runner \
+  AOT_V2_RUNNER=/path/to/aot-v2-runner/latx-x86_64 \
+  AOT_V2_RUNTIME_DIR=/path/to/aot-v2-runner \
+  X86_GUEST=/path/to/static-glibc-hello \
+  NATIVE_IMAGE=/path/to/static-glibc-hello.latnative
+make -C tools/latc test-specint-aot-v2 \
+  RUNNER=/path/to/static-exporter/latx-x86_64 \
+  AOT_V2_RUNNER=/path/to/aot-v2-runner/latx-x86_64 \
+  AOT_V2_RUNTIME_DIR=/path/to/aot-v2-runner \
+  SPEC_ROOT=/path/to/spec2000
 ```

@@ -19,3 +19,10 @@ TranslationBlock *latc_aot_v2_find_tb(CPUState *cpu,
     (void)cflags;
     return NULL;
 }
+
+bool latc_aot_v2_restore_state(CPUState *cpu, uintptr_t host_pc)
+{
+    (void)cpu;
+    (void)host_pc;
+    return false;
+}

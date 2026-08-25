@@ -1,10 +1,13 @@
 #include "lat-aot-v2.h"
 
 #include <errno.h>
+#include <string.h>
 #include <stdlib.h>
 
 static _Thread_local LatAotRuntimeSyscallCallbackV2 syscall_callback;
 static _Thread_local void *syscall_opaque;
+__attribute__((visibility("hidden")))
+uintptr_t lat_aot_runtime_target_slots_v2[LAT_AOT_RUNTIME_TARGET_COUNT];
 
 uint32_t lat_aot_runtime_abi_version(void)
 {
@@ -20,6 +23,24 @@ int lat_aot_runtime_bind_syscall(LatAotRuntimeSyscallCallbackV2 callback,
     }
     syscall_callback = callback;
     syscall_opaque = opaque;
+    return 0;
+}
+
+int lat_aot_runtime_bind_targets(const LatAotRuntimeTargetsV2 *targets)
+{
+    if (!targets || targets->struct_size != sizeof(*targets) ||
+        targets->reserved) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (size_t i = 0; i < LAT_AOT_RUNTIME_TARGET_COUNT; i++) {
+        if (!targets->target[i]) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+    memcpy(lat_aot_runtime_target_slots_v2, targets->target,
+           sizeof(lat_aot_runtime_target_slots_v2));
     return 0;
 }
 

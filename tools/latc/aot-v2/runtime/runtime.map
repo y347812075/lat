@@ -2,7 +2,24 @@ LAT_AOT_RUNTIME_2.0 {
     global:
         lat_aot_runtime_abi_version;
         lat_aot_runtime_bind_syscall;
+        lat_aot_runtime_bind_targets;
         lat_aot_runtime_raise_syscall;
+        lat_aot_runtime_epilogue_ret_id_1;
+        lat_aot_runtime_epilogue_ret_id_0;
+        lat_aot_runtime_jirl_epilogue_ret_id_1;
+        lat_aot_runtime_jirl_epilogue_ret_id_0;
+        lat_aot_runtime_epilogue_ret_0;
+        lat_aot_runtime_update_mxcsr_status;
+        lat_aot_runtime_fxsave;
+        lat_aot_runtime_fxrstor;
+        lat_aot_runtime_fpregs_x80_to_64;
+        lat_aot_runtime_fpregs_64_to_x80;
+        lat_aot_runtime_update_fp_status;
+        lat_aot_runtime_cpuid;
+        lat_aot_runtime_raise_illop;
+        lat_aot_runtime_raise_gpf;
+        lat_aot_runtime_pcmpistri_xmm;
+        lat_aot_runtime_pcmpistrm_xmm;
         lat_aot_v2_context_apply_guest_slots;
         lat_aot_v2_module_open;
         lat_aot_v2_registry_deactivate;

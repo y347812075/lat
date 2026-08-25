@@ -51,6 +51,10 @@
       "reason": "share x86-64 syscall ABI definitions and resource conversion with the native runtime"
     },
     {
+      "path": "lat/linux-user/elfload.c",
+      "reason": "disable the runner-provided guest vDSO while a static AOT v2 module is selected"
+    },
+    {
       "path": "lat/accel/tcg/translate-all.c",
       "reason": "count and reject runtime TB generation for strict AOT verification"
     },

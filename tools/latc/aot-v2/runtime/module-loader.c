@@ -9,8 +9,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -23,6 +25,83 @@ static int fail(char *error, size_t error_size, const char *format, ...)
         va_end(arguments);
     }
     return -1;
+}
+
+static int tb_host_compare(const void *left, const void *right)
+{
+    const LatAotTbV2 *a = left;
+    const LatAotTbV2 *b = right;
+    if (a->host_offset != b->host_offset) {
+        return a->host_offset < b->host_offset ? -1 : 1;
+    }
+    if (a->host_size != b->host_size) {
+        return a->host_size < b->host_size ? -1 : 1;
+    }
+    return 0;
+}
+
+static int validate_pc_map_coverage(const LatAotModuleV2 *descriptor,
+                                    size_t tb_count, size_t pc_count,
+                                    char *error, size_t error_size)
+{
+    if (!pc_count) {
+        return 0;
+    }
+    if (!tb_count || tb_count > SIZE_MAX / sizeof(LatAotTbV2)) {
+        return fail(error, error_size, "AOT precise PC map has no TB");
+    }
+    LatAotTbV2 *host_order = malloc(tb_count * sizeof(*host_order));
+    if (!host_order) {
+        return fail(error, error_size, "cannot validate AOT PC map");
+    }
+    memcpy(host_order, descriptor->tb_begin,
+           tb_count * sizeof(*host_order));
+    qsort(host_order, tb_count, sizeof(*host_order), tb_host_compare);
+
+    bool precise = descriptor->module_flags & LAT_AOT_MODULE_PRECISE_PC_MAP;
+    size_t map_index = 0;
+    uint64_t previous_tb_end = 0;
+    int result = 0;
+    for (size_t i = 0; i < tb_count; i++) {
+        const LatAotTbV2 *tb = &host_order[i];
+        uint64_t tb_end = tb->host_offset + tb->host_size;
+        uint64_t expected_offset = tb->host_offset;
+        if ((i && tb->host_offset < previous_tb_end) ||
+            tb_end < tb->host_offset) {
+            result = fail(error, error_size,
+                          "AOT TB host ranges overlap");
+            break;
+        }
+        while (map_index < pc_count &&
+               descriptor->pc_map_begin[map_index].host_offset_begin <
+                   tb_end) {
+            const LatAotPcMapV2 *map =
+                &descriptor->pc_map_begin[map_index];
+            if (map->host_offset_begin < tb->host_offset ||
+                map->host_offset_end > tb_end ||
+                (precise && map->host_offset_begin != expected_offset)) {
+                result = fail(error, error_size,
+                              "AOT precise PC map does not cover a TB");
+                break;
+            }
+            expected_offset = map->host_offset_end;
+            map_index++;
+        }
+        if (result || (precise && expected_offset != tb_end)) {
+            if (!result) {
+                result = fail(error, error_size,
+                              "AOT precise PC map does not cover a TB");
+            }
+            break;
+        }
+        previous_tb_end = tb_end;
+    }
+    if (!result && map_index != pc_count) {
+        result = fail(error, error_size,
+                      "AOT precise PC map is outside every TB");
+    }
+    free(host_order);
+    return result;
 }
 
 static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
@@ -119,43 +198,18 @@ static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
     size_t pc_count = (pc_end - pc_begin) / sizeof(LatAotPcMapV2);
     for (size_t i = 0; i < pc_count; i++) {
         const LatAotPcMapV2 *map = &descriptor->pc_map_begin[i];
-        int belongs_to_tb = 0;
-        for (size_t j = 0; j < tb_count; j++) {
-            const LatAotTbV2 *tb = &descriptor->tb_begin[j];
-            belongs_to_tb |= map->host_offset_begin >= tb->host_offset &&
-                map->host_offset_end <= tb->host_offset + tb->host_size;
-        }
         if (map->host_offset_begin >= map->host_offset_end ||
             map->host_offset_end > text_size ||
             map->state_record_offset != 0 ||
             map->flags != LAT_AOT_PC_MAP_DYNAMIC_STATE ||
-            !belongs_to_tb ||
             (i && descriptor->pc_map_begin[i - 1].host_offset_end >
                   map->host_offset_begin)) {
             return fail(error, error_size, "AOT precise PC map is invalid");
         }
     }
-    if (descriptor->module_flags & LAT_AOT_MODULE_PRECISE_PC_MAP) {
-        for (size_t i = 0; i < tb_count; i++) {
-            const LatAotTbV2 *tb = &descriptor->tb_begin[i];
-            uint64_t expected_offset = tb->host_offset;
-            for (size_t j = 0; j < pc_count; j++) {
-                const LatAotPcMapV2 *map = &descriptor->pc_map_begin[j];
-                if (map->host_offset_begin < tb->host_offset ||
-                    map->host_offset_end > tb->host_offset + tb->host_size) {
-                    continue;
-                }
-                if (map->host_offset_begin != expected_offset) {
-                    return fail(error, error_size,
-                                "AOT precise PC map does not cover a TB");
-                }
-                expected_offset = map->host_offset_end;
-            }
-            if (expected_offset != tb->host_offset + tb->host_size) {
-                return fail(error, error_size,
-                            "AOT precise PC map does not cover a TB");
-            }
-        }
+    if (validate_pc_map_coverage(descriptor, tb_count, pc_count,
+                                 error, error_size)) {
+        return -1;
     }
     size_t slot_count = (slot_end - slot_begin) / sizeof(LatAotGuestSlotV2);
     if (slot_count > LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT) {

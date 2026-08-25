@@ -65,6 +65,7 @@
 #include "loongarch-extcontext.h"
 #ifdef CONFIG_LATX
 #include "latc-bundle-loader.h"
+#include "latc-aot-v2-runner.h"
 #endif
 
 #ifdef CONFIG_LATX_PERF
@@ -517,6 +518,11 @@ bool cpu_restore_state(CPUState *cpu, uintptr_t host_pc, bool will_exit)
      *
      * Either way we need return early as we can't resolve it here.
      */
+#ifdef CONFIG_LATX
+    if (latc_aot_v2_restore_state(cpu, host_pc)) {
+        return true;
+    }
+#endif
     if (in_code_gen_buffer((const void *)(host_pc - tcg_splitwx_diff))) {
         TranslationBlock *tb = tcg_tb_lookup(host_pc);
         if (tb) {

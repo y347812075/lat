@@ -28,6 +28,7 @@ mkdir -p "$build_dir"
   -Wl,--build-id=sha1 \
   -o "$build_dir/liblat-aot-runtime.so.2" \
   "$latc_dir/aot-v2/runtime/runtime-abi.c" \
+  "$latc_dir/aot-v2/runtime/runtime-entry.S" \
   "$latc_dir/aot-v2/runtime/elf-validate.c" \
   "$latc_dir/aot-v2/runtime/module-loader.c" \
   "$latc_dir/aot-v2/runtime/registry.c" -ldl -pthread
