@@ -3,6 +3,13 @@ LAT_AOT_RUNTIME_2.0 {
         lat_aot_runtime_abi_version;
         lat_aot_runtime_bind_syscall;
         lat_aot_runtime_raise_syscall;
+        lat_aot_v2_context_apply_guest_slots;
+        lat_aot_v2_module_open;
+        lat_aot_v2_registry_deactivate;
+        lat_aot_v2_registry_destroy;
+        lat_aot_v2_registry_init;
+        lat_aot_v2_registry_lookup;
+        lat_aot_v2_registry_register;
     local:
         *;
 };
