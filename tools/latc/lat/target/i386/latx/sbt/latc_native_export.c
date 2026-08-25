@@ -397,8 +397,9 @@ static int append_tb_pc_map(GArray *output, const uint8_t *code,
     const uint8_t *cursor = code + search_offset;
     const uint8_t *end = code + search_limit;
     uint64_t current_guest_pc = guest_pc;
-    uint64_t host_end = 0;
+    uint64_t encoded_host_end = 0;
     guint first_map = output->len;
+    bool truncated_unlink_stub = false;
 
     for (uint16_t i = 0; i < tb->icount; i++) {
         int64_t guest_delta;
@@ -409,16 +410,23 @@ static int append_tb_pc_map(GArray *output, const uint8_t *code,
             decode_sleb128_checked(&cursor, end, &host_delta) ||
             state_delta != 0 || host_delta < 0 ||
             add_signed_u64(&current_guest_pc, guest_delta) ||
-            (uint64_t)host_delta > UINT64_MAX - host_end) {
+            (uint64_t)host_delta > UINT64_MAX - encoded_host_end) {
             return -1;
         }
         if (!host_delta) {
             continue;
         }
-        uint64_t host_begin = host_end;
-        host_end += host_delta;
+        uint64_t host_begin = encoded_host_end;
+        encoded_host_end += host_delta;
+        uint64_t host_end = encoded_host_end;
         if (host_end > tb->tb_cache_size) {
-            return -1;
+            if (!(tb->bool_flags & IS_TU_TB) || truncated_unlink_stub ||
+                host_begin >= tb->tb_cache_size) {
+                return -1;
+            }
+            /* TU construction moves this terminal unlink stub out of the TB. */
+            host_end = tb->tb_cache_size;
+            truncated_unlink_stub = true;
         }
         LatNativePcMapV2 map = {
             .guest_pc = current_guest_pc,
