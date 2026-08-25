@@ -8,6 +8,7 @@
 #include "jrra.h"
 #include "tcg/tcg.h"
 
+#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -382,6 +383,83 @@ int latc_bundle_inject_argv(int *argc, char ***argv)
 out:
     if (self >= 0) close(self);
     return rc;
+}
+
+static int hex_nibble(char value)
+{
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    return -1;
+}
+
+int latc_bundle_verified_guest(uint8_t digest[32], uint64_t *guest_begin,
+                               uint64_t *guest_end)
+{
+    if (!digest || !guest_begin || !guest_end) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (bundle_self_fd < 0) {
+        return 0;
+    }
+    Elf64_Ehdr header;
+    if (bundle_footer.guest_size < sizeof(header) ||
+        pread(bundle_self_fd, &header, sizeof(header),
+              (off_t)bundle_footer.guest_offset) != sizeof(header) ||
+        memcmp(header.e_ident, ELFMAG, SELFMAG) ||
+        header.e_ident[EI_CLASS] != ELFCLASS64 ||
+        header.e_machine != EM_X86_64 || header.e_type != ET_EXEC ||
+        header.e_phentsize != sizeof(Elf64_Phdr) || !header.e_phnum ||
+        header.e_phoff > bundle_footer.guest_size ||
+        header.e_phnum > (bundle_footer.guest_size - header.e_phoff) /
+                             sizeof(Elf64_Phdr)) {
+        errno = ENOEXEC;
+        return -1;
+    }
+    size_t phdr_size = header.e_phnum * sizeof(Elf64_Phdr);
+    Elf64_Phdr *phdrs = g_malloc(phdr_size);
+    if (pread(bundle_self_fd, phdrs, phdr_size,
+              (off_t)(bundle_footer.guest_offset + header.e_phoff)) !=
+        (ssize_t)phdr_size) {
+        g_free(phdrs);
+        errno = ENOEXEC;
+        return -1;
+    }
+    uint64_t begin = UINT64_MAX;
+    uint64_t end = 0;
+    for (uint16_t i = 0; i < header.e_phnum; i++) {
+        if (phdrs[i].p_type != PT_LOAD) {
+            continue;
+        }
+        if (phdrs[i].p_vaddr > UINT64_MAX - phdrs[i].p_memsz) {
+            g_free(phdrs);
+            errno = ENOEXEC;
+            return -1;
+        }
+        begin = MIN(begin, phdrs[i].p_vaddr);
+        end = MAX(end, phdrs[i].p_vaddr + phdrs[i].p_memsz);
+    }
+    g_free(phdrs);
+    if (begin == UINT64_MAX || end <= begin) {
+        errno = ENOEXEC;
+        return -1;
+    }
+    for (size_t i = 0; i < 32; i++) {
+        int high = hex_nibble(bundle_footer.guest_sha256[i * 2]);
+        int low = hex_nibble(bundle_footer.guest_sha256[i * 2 + 1]);
+        if (high < 0 || low < 0) {
+            errno = ENOEXEC;
+            return -1;
+        }
+        digest[i] = (uint8_t)((high << 4) | low);
+    }
+    *guest_begin = begin;
+    *guest_end = end;
+    return 1;
 }
 
 static int read_cfg(void *buffer, size_t size, uint64_t offset)
