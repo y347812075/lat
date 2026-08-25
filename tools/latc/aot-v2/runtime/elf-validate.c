@@ -125,7 +125,8 @@ static int validate_note(const unsigned char *file, size_t file_size,
     if ((selected.module_flags & LAT_AOT_MODULE_READONLY_TEXT) == 0) {
         return reject(error, error_size, "AOT module does not require read-only text");
     }
-    if ((selected.module_flags & LAT_AOT_MODULE_SYNTHETIC_FIXTURE) == 0 &&
+    if ((selected.module_flags & (LAT_AOT_MODULE_SYNTHETIC_FIXTURE |
+                                  LAT_AOT_MODULE_M1_TEST_ONLY)) == 0 &&
         (selected.module_flags & LAT_AOT_MODULE_PRECISE_PC_MAP) == 0) {
         return reject(error, error_size, "AOT module lacks a precise PC map");
     }
@@ -283,7 +284,7 @@ static int validate_dynamic_symbols(const unsigned char *file,
     const Elf64_Sym *table = (const void *)(file + symbols->sh_offset);
     size_t count = symbols->sh_size / sizeof(*table);
     int descriptor_exports = 0;
-    int runtime_imports = 0;
+    int runtime_abi_imports = 0;
     for (size_t i = 1; i < count; i++) {
         unsigned bind = ELF64_ST_BIND(table[i].st_info);
         unsigned visibility = ELF64_ST_VISIBILITY(table[i].st_other);
@@ -299,7 +300,10 @@ static int validate_dynamic_symbols(const unsigned char *file,
         const char *name = strings + table[i].st_name;
         if (table[i].st_shndx == SHN_UNDEF &&
             !strcmp(name, LAT_AOT_V2_RUNTIME_ABI_SYMBOL)) {
-            runtime_imports++;
+            runtime_abi_imports++;
+        } else if (table[i].st_shndx == SHN_UNDEF &&
+                   !strcmp(name, LAT_AOT_V2_RUNTIME_SYSCALL_SYMBOL)) {
+            continue;
         } else if (table[i].st_shndx != SHN_UNDEF &&
                    !strcmp(name, LAT_AOT_V2_DESCRIPTOR_SYMBOL)) {
             descriptor_exports++;
@@ -311,7 +315,7 @@ static int validate_dynamic_symbols(const unsigned char *file,
                           "unexpected AOT dynamic symbol: %s", name);
         }
     }
-    if (descriptor_exports != 1 || runtime_imports != 1) {
+    if (descriptor_exports != 1 || runtime_abi_imports != 1) {
         return reject(error, error_size,
                       "AOT descriptor export or runtime import is missing");
     }
@@ -416,8 +420,10 @@ static int validate_relocations(const unsigned char *file, size_t file_size,
                 !memchr(strings + symbols[symbol_index].st_name, 0,
                         string_section->sh_size -
                         symbols[symbol_index].st_name) ||
-                strcmp(strings + symbols[symbol_index].st_name,
-                       LAT_AOT_V2_RUNTIME_ABI_SYMBOL)) {
+                (strcmp(strings + symbols[symbol_index].st_name,
+                        LAT_AOT_V2_RUNTIME_ABI_SYMBOL) &&
+                 strcmp(strings + symbols[symbol_index].st_name,
+                        LAT_AOT_V2_RUNTIME_SYSCALL_SYMBOL))) {
                 return reject(error, error_size,
                               "AOT relocation references an unexpected symbol");
             }

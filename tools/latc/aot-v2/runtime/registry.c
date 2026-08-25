@@ -237,3 +237,36 @@ int lat_aot_v2_registry_lookup(const LatAotRegistryV2 *registry,
                                                memory_order_acquire);
     return 0;
 }
+
+int lat_aot_v2_context_apply_guest_slots(const LatAotModuleV2 *module,
+                                         uint64_t guest_load_bias,
+                                         void *jump_cache)
+{
+    if (!module || !jump_cache) {
+        errno = EINVAL;
+        return -1;
+    }
+    uintptr_t begin = (uintptr_t)module->guest_slot_begin;
+    uintptr_t end = (uintptr_t)module->guest_slot_end;
+    if ((!begin != !end) || end < begin ||
+        (end - begin) % sizeof(LatAotGuestSlotV2)) {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t count = (end - begin) / sizeof(LatAotGuestSlotV2);
+    if (count > LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT) {
+        errno = E2BIG;
+        return -1;
+    }
+    for (size_t i = 0; i < count; i++) {
+        const LatAotGuestSlotV2 *slot = &module->guest_slot_begin[i];
+        if (slot->reserved || slot->fp_offset != -(int32_t)((i + 1) * 8) ||
+            guest_load_bias > UINT64_MAX - slot->guest_rva) {
+            errno = ENOEXEC;
+            return -1;
+        }
+        *(uint64_t *)((unsigned char *)jump_cache + slot->fp_offset) =
+            guest_load_bias + slot->guest_rva;
+    }
+    return 0;
+}

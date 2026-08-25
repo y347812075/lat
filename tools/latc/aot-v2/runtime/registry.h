@@ -46,5 +46,8 @@ int lat_aot_v2_registry_deactivate(LatAotRegistryV2 *registry,
 int lat_aot_v2_registry_lookup(const LatAotRegistryV2 *registry,
                                uint64_t guest_pc, uint32_t flags,
                                LatAotTargetV2 *target);
+int lat_aot_v2_context_apply_guest_slots(const LatAotModuleV2 *module,
+                                         uint64_t guest_load_bias,
+                                         void *jump_cache);
 
 #endif

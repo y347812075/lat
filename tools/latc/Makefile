@@ -6,6 +6,7 @@ CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=c11
 CPPFLAGS += -Icfg/include
 CPPFLAGS += -Iformat -Ilat/include -Inative/include -Inative/format \
 	-Inative/runtime -Iaot-v2/include -Iaot-v2/runtime \
+	-Iaot-v2/compiler \
 	$(shell pkg-config --cflags glib-2.0)
 LDLIBS += $(shell pkg-config --libs glib-2.0)
 
@@ -22,7 +23,8 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 
 .PHONY: all clean test test-native test-native-shell test-native-long-tb \
 	test-aot-native test-spec-analyze test-spec-gzip test-spec-gzip-aot \
-	test-spec-gzip-native test-specint-native test-aot-v2 check-import
+	test-spec-gzip-native test-specint-native test-aot-v2 \
+	test-aot-v2-translated check-import
 
 all: $(BUILD)/latc $(BUILD)/liblatc_cfg.a
 
@@ -30,6 +32,7 @@ $(BUILD)/liblatc_cfg.a: $(CFG_OBJ)
 	$(AR) rcs $@ $^
 
 $(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/profile.o \
+	$(BUILD)/aot-v2/compiler/module-pack.o \
 	$(FORMAT_OBJ) $(BUILD)/native/format/native-image.o $(BUILD)/liblatc_cfg.a
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -216,7 +219,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	sh tests/test-bundle-corruption.sh $(BUILD)/latc $(BUILD)/tests/cfg-bundle $(BUILD)/tests/cfg-bundle.bad
 	sh tests/test-spec-tools.sh $(BUILD)/tests/spec-tools
 	sh -n scripts/compile-native-elf.sh scripts/compile-native-image.sh \
-	  scripts/link-native-shell.sh
+	  scripts/link-native-shell.sh scripts/link-aot-v2-module.sh
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
@@ -355,6 +358,27 @@ $(BUILD)/tests/test-aot-v2-loader: aot-v2/tests/test-loader.c \
 	  -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
 	  -l:liblat-aot-runtime.so.2 -ldl -pthread
 
+$(BUILD)/tests/test-aot-v2-translated-module: \
+		aot-v2/tests/test-translated-module.c \
+		$(BUILD)/aot-v2/runtime/module-loader.o \
+		$(BUILD)/aot-v2/runtime/elf-validate.o \
+		$(BUILD)/aot-v2/runtime/registry.o \
+		$(BUILD)/aot-v2/compiler/module-pack.o \
+		$(BUILD)/native/format/native-image.o \
+		$(BUILD)/aot-v2/liblat-aot-runtime.so.2 \
+		native/runtime/enter-x86.S native/runtime/guest-loader.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
+	  aot-v2/tests/test-translated-module.c \
+	  $(BUILD)/aot-v2/runtime/module-loader.o \
+	  $(BUILD)/aot-v2/runtime/elf-validate.o \
+	  $(BUILD)/aot-v2/runtime/registry.o \
+	  $(BUILD)/aot-v2/compiler/module-pack.o \
+	  $(BUILD)/native/format/native-image.o native/runtime/enter-x86.S \
+	  native/runtime/guest-loader.c \
+	  -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
+	  -l:liblat-aot-runtime.so.2 -ldl -pthread $(LDLIBS)
+
 AOT_V2_NATIVE_TESTS := $(BUILD)/aot-v2/liblat-aot-runtime.so.2 \
 	$(BUILD)/aot-v2/fixture.so \
 	$(BUILD)/aot-v2/fixture-bad-descriptor.so \
@@ -385,6 +409,21 @@ ifeq ($(HOST_ARCH),loongarch64)
 	  $(BUILD)/tests/test-aot-v2-loader --expect-reject \
 	  $(abspath $(BUILD)/aot-v2/fixture-bad-descriptor.so)
 endif
+
+test-aot-v2-translated: all $(BUILD)/aot-v2/liblat-aot-runtime.so.2 \
+		$(BUILD)/tests/test-aot-v2-translated-module
+	@test -n "$(NATIVE_IMAGE)" || \
+	  { echo "usage: make test-aot-v2-translated NATIVE_IMAGE=..."; exit 2; }
+	scripts/link-aot-v2-module.sh $(BUILD)/latc $(NATIVE_IMAGE) \
+	  $(BUILD)/aot-v2 $(BUILD)/aot-v2/translated-module.so
+	readelf -lW $(BUILD)/aot-v2/translated-module.so | \
+	  awk '/ LOAD / && $$0 ~ /W/ && $$0 ~ /E/ { bad=1 } END { exit bad }'
+	readelf -rW $(BUILD)/aot-v2/translated-module.so | \
+	  grep -q 'lat_aot_runtime_raise_syscall'
+	LD_LIBRARY_PATH=$(abspath $(BUILD)/aot-v2) \
+	  $(BUILD)/tests/test-aot-v2-translated-module \
+	  $(abspath $(BUILD)/aot-v2/translated-module.so) \
+	  $(abspath $(NATIVE_IMAGE))
 
 $(BUILD)/tests/liblat-good.so: tests/fake-liblat.c
 	@mkdir -p $(dir $@)
@@ -524,6 +563,7 @@ clean:
 
 -include $(CFG_OBJ:.o=.d) $(BUILD)/compiler/latc.d \
 	$(BUILD)/compiler/profile.d $(BUILD)/format/bundle.d \
+	$(BUILD)/aot-v2/compiler/module-pack.d \
 	$(BUILD)/aot-v2/runtime/elf-validate.d \
 	$(BUILD)/aot-v2/runtime/registry.d \
 	$(BUILD)/aot-v2/runtime/module-loader.d

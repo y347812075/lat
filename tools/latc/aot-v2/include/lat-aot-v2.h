@@ -11,6 +11,8 @@
 #define LAT_AOT_V2_MODULE_VERSION "LAT_AOT_MODULE_2.0"
 #define LAT_AOT_V2_RUNTIME_SONAME "liblat-aot-runtime.so.2"
 #define LAT_AOT_V2_RUNTIME_ABI_SYMBOL "lat_aot_runtime_abi_version"
+#define LAT_AOT_V2_RUNTIME_SYSCALL_SYMBOL "lat_aot_runtime_raise_syscall"
+#define LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT 256u
 
 enum LatAotFeatureV2 {
     LAT_AOT_FEATURE_LBT = 1u << 0,
@@ -28,6 +30,7 @@ enum LatAotModuleFlagV2 {
 };
 
 #define LAT_AOT_MODULE_SYNTHETIC_FIXTURE (UINT64_C(1) << 63)
+#define LAT_AOT_MODULE_M1_TEST_ONLY (UINT64_C(1) << 62)
 
 enum LatAotTbFlagV2 {
     LAT_AOT_TB_CODE64 = 1u << 0,
@@ -60,6 +63,12 @@ typedef struct LatAotPcMapV2 {
     uint32_t flags;
 } LatAotPcMapV2;
 
+typedef struct LatAotGuestSlotV2 {
+    uint64_t guest_rva;
+    int32_t fp_offset;
+    uint32_t reserved;
+} LatAotGuestSlotV2;
+
 typedef struct LatAotModuleV2 {
     uint8_t magic[8];
     uint32_t abi_version;
@@ -75,6 +84,8 @@ typedef struct LatAotModuleV2 {
     const LatAotTbV2 *tb_end;
     const LatAotPcMapV2 *pc_map_begin;
     const LatAotPcMapV2 *pc_map_end;
+    const LatAotGuestSlotV2 *guest_slot_begin;
+    const LatAotGuestSlotV2 *guest_slot_end;
 } LatAotModuleV2;
 
 typedef struct LatAotExpectedV2 {
@@ -84,6 +95,10 @@ typedef struct LatAotExpectedV2 {
 } LatAotExpectedV2;
 
 uint32_t lat_aot_runtime_abi_version(void);
+typedef void (*LatAotRuntimeSyscallCallbackV2)(void *opaque);
+int lat_aot_runtime_bind_syscall(LatAotRuntimeSyscallCallbackV2 callback,
+                                 void *opaque);
+__attribute__((noreturn)) void lat_aot_runtime_raise_syscall(void);
 
 static inline int lat_aot_v2_magic_valid(const uint8_t magic[8])
 {
@@ -104,7 +119,9 @@ _Static_assert(sizeof(LatAotTbV2) == 24,
                "AOT v2 TB ABI size changed");
 _Static_assert(sizeof(LatAotPcMapV2) == 32,
                "AOT v2 PC map ABI size changed");
-_Static_assert(sizeof(LatAotModuleV2) == 176,
+_Static_assert(sizeof(LatAotGuestSlotV2) == 16,
+               "AOT v2 guest slot ABI size changed");
+_Static_assert(sizeof(LatAotModuleV2) == 192,
                "AOT v2 module ABI size changed");
 
 #endif

@@ -62,14 +62,18 @@ static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
     uintptr_t tb_end = (uintptr_t)descriptor->tb_end;
     uintptr_t pc_begin = (uintptr_t)descriptor->pc_map_begin;
     uintptr_t pc_end = (uintptr_t)descriptor->pc_map_end;
+    uintptr_t slot_begin = (uintptr_t)descriptor->guest_slot_begin;
+    uintptr_t slot_end = (uintptr_t)descriptor->guest_slot_end;
     if (!text_begin || text_end <= text_begin || !tb_begin || tb_end < tb_begin ||
         (tb_end - tb_begin) % sizeof(LatAotTbV2) || pc_end < pc_begin ||
-        (pc_end - pc_begin) % sizeof(LatAotPcMapV2)) {
+        (pc_end - pc_begin) % sizeof(LatAotPcMapV2) || slot_end < slot_begin ||
+        (slot_end - slot_begin) % sizeof(LatAotGuestSlotV2)) {
         return fail(error, error_size, "AOT descriptor ranges are invalid");
     }
     int text_ok = 0;
     int tb_ok = 0;
     int pc_ok = pc_begin == pc_end;
+    int slot_ok = slot_begin == slot_end;
     for (size_t i = 0; i < header->e_phnum; i++) {
         if (phdrs[i].p_type != PT_LOAD) {
             continue;
@@ -91,8 +95,12 @@ static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
             (phdrs[i].p_flags & PF_R) && !(phdrs[i].p_flags & PF_W)) {
             pc_ok = 1;
         }
+        if (slot_begin >= begin && slot_end <= end &&
+            (phdrs[i].p_flags & PF_R) && !(phdrs[i].p_flags & PF_W)) {
+            slot_ok = 1;
+        }
     }
-    if (!text_ok || !tb_ok || !pc_ok) {
+    if (!text_ok || !tb_ok || !pc_ok || !slot_ok) {
         return fail(error, error_size,
                     "AOT descriptor points outside permitted segments");
     }
@@ -108,7 +116,18 @@ static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
             return fail(error, error_size, "AOT TB table is invalid");
         }
     }
-    if (!(descriptor->module_flags & LAT_AOT_MODULE_SYNTHETIC_FIXTURE) &&
+    size_t slot_count = (slot_end - slot_begin) / sizeof(LatAotGuestSlotV2);
+    if (slot_count > LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT) {
+        return fail(error, error_size, "AOT guest slot table is too large");
+    }
+    for (size_t i = 0; i < slot_count; i++) {
+        const LatAotGuestSlotV2 *slot = &descriptor->guest_slot_begin[i];
+        if (slot->reserved || slot->fp_offset != -(int32_t)((i + 1) * 8)) {
+            return fail(error, error_size, "AOT guest slot table is invalid");
+        }
+    }
+    if (!(descriptor->module_flags & (LAT_AOT_MODULE_SYNTHETIC_FIXTURE |
+                                      LAT_AOT_MODULE_M1_TEST_ONLY)) &&
         pc_begin == pc_end) {
         return fail(error, error_size, "AOT precise PC map is empty");
     }

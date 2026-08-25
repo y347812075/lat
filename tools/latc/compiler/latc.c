@@ -2,6 +2,7 @@
 #include "bundle.h"
 #include "profile.h"
 #include "native-image.h"
+#include "module-pack.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -16,6 +17,8 @@ static void usage(const char *name)
             "  %s inspect [--json] BUNDLE\n", name, name, name);
     fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
+    fprintf(stderr, "  %s emit-aot-v2 NATIVE_IMAGE OUTPUT_DIRECTORY\n",
+            name);
 }
 
 static int inspect_native(const char *path, int json)
@@ -202,6 +205,17 @@ int main(int argc, char **argv)
             fprintf(stderr, "latc: %s\n", error);
             return 1;
         }
+        return 0;
+    }
+    if (strcmp(argv[1], "emit-aot-v2") == 0) {
+        char error[256] = {0};
+        if (argc != 4) { usage(argv[0]); return 2; }
+        if (lat_aot_v2_emit_module_sources(argv[2], argv[3], error,
+                                           sizeof(error))) {
+            fprintf(stderr, "latc: %s\n", error);
+            return 1;
+        }
+        printf("output_directory=%s\n", argv[3]);
         return 0;
     }
     if (strcmp(argv[1], "analyze") != 0) { usage(argv[0]); return 2; }
