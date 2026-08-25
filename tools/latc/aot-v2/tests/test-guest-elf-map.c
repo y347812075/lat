@@ -63,7 +63,8 @@ int main(int argc, char **argv)
                                           4096, &info, &added,
                                           error, sizeof(error)) || !added ||
             info->load_bias != biases[i] ||
-            info->guest_begin < biases[i] ||
+            info->preferred_base > UINT64_MAX - info->load_bias ||
+            info->guest_begin != info->load_bias + info->preferred_base ||
             info->guest_end <= info->guest_begin ||
             !info->exec_range_count) {
             fprintf(stderr, "cannot track ELF %s: %s\n", argv[i + 1], error);

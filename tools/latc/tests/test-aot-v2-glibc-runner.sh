@@ -43,4 +43,36 @@ grep -q '"runtime_tb_gen_calls":0' "$work/stats.json"
 grep -q '"pretranslation_disabled":true' "$work/stats.json"
 LC_ALL=C readelf -lW "$work/module.so" | \
   awk '/ LOAD / && $0 ~ /W/ && $0 ~ /E/ { bad=1 } END { exit bad }'
+
+mkdir "$work/empty-cache" "$work/hot-cache"
+guest_sha=$(sha256sum "$guest" | awk '{print $1}')
+cp "$work/module.so" "$work/hot-cache/$guest_sha.so"
+
+LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+LATX_AOT_V2_CACHE_DIR="$work/empty-cache" \
+LATX_AOT_V2_REPORT=1 \
+LATC_DISABLE_PRETRANSLATE=1 \
+LATC_STATS_OUT="$work/cache-miss-stats.json" \
+LATC_TEST_ENV=works \
+  "$work/runner" alpha beta >"$work/cache-miss-stdout" \
+  2>"$work/cache-miss-stderr"
+cmp "$work/expected" "$work/cache-miss-stdout"
+grep -q 'module=missing' "$work/cache-miss-stderr"
+grep -Eq '"runtime_tb_gen_attempts":[1-9][0-9]*' \
+  "$work/cache-miss-stats.json"
+
+LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+LATX_AOT_V2_CACHE_DIR="$work/hot-cache" \
+LATX_AOT_V2_STRICT=1 \
+LATX_AOT_V2_REPORT=1 \
+LATC_DISABLE_PRETRANSLATE=1 \
+LATC_STRICT_AOT=1 \
+LATC_STATS_OUT="$work/cache-hit-stats.json" \
+LATC_TEST_ENV=works \
+  "$work/runner" alpha beta >"$work/cache-hit-stdout" \
+  2>"$work/cache-hit-stderr"
+cmp "$work/expected" "$work/cache-hit-stdout"
+grep -q 'module=registered' "$work/cache-hit-stderr"
+grep -q '"runtime_tb_gen_attempts":0' "$work/cache-hit-stats.json"
+grep -q '"runtime_tb_gen_calls":0' "$work/cache-hit-stats.json"
 echo "test-aot-v2-glibc-runner: PASS"

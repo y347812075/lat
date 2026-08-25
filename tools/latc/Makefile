@@ -244,7 +244,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-aot-v2-module-pack
 	$(BUILD)/tests/test-aot-v2-guest-elf-map \
 	  $(BUILD)/tests/x86-pie-exit42 $(BUILD)/tests/x86-pie-exit42 \
-	  $(BUILD)/tests/x86-pie-exit42
+	  $(BUILD)/tests/x86-exit42
 	$(BUILD)/tests/test-x86-linux-user
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-exit42 | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] == 2'
