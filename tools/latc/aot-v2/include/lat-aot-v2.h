@@ -13,6 +13,7 @@
 #define LAT_AOT_V2_RUNTIME_ABI_SYMBOL "lat_aot_runtime_abi_version"
 #define LAT_AOT_V2_RUNTIME_SYSCALL_SYMBOL "lat_aot_runtime_raise_syscall"
 #define LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT 256u
+#define LAT_AOT_RUNTIME_TARGET_COUNT 16u
 
 enum LatAotFeatureV2 {
     LAT_AOT_FEATURE_LBT = 1u << 0,
@@ -98,11 +99,37 @@ typedef struct LatAotExpectedV2 {
     uint64_t available_features;
 } LatAotExpectedV2;
 
+enum LatAotRuntimeTargetV2 {
+    LAT_AOT_TARGET_EPILOGUE_RET_ID_1,
+    LAT_AOT_TARGET_EPILOGUE_RET_ID_0,
+    LAT_AOT_TARGET_JIRL_EPILOGUE_RET_ID_1,
+    LAT_AOT_TARGET_JIRL_EPILOGUE_RET_ID_0,
+    LAT_AOT_TARGET_EPILOGUE_RET_0,
+    LAT_AOT_TARGET_UPDATE_MXCSR_STATUS,
+    LAT_AOT_TARGET_FXSAVE,
+    LAT_AOT_TARGET_FXRSTOR,
+    LAT_AOT_TARGET_FPREGS_X80_TO_64,
+    LAT_AOT_TARGET_FPREGS_64_TO_X80,
+    LAT_AOT_TARGET_UPDATE_FP_STATUS,
+    LAT_AOT_TARGET_CPUID,
+    LAT_AOT_TARGET_RAISE_ILLOP,
+    LAT_AOT_TARGET_RAISE_GPF,
+    LAT_AOT_TARGET_PCMPISTRI_XMM,
+    LAT_AOT_TARGET_PCMPISTRM_XMM,
+};
+
+typedef struct LatAotRuntimeTargetsV2 {
+    uint32_t struct_size;
+    uint32_t reserved;
+    uintptr_t target[LAT_AOT_RUNTIME_TARGET_COUNT];
+} LatAotRuntimeTargetsV2;
+
 uint32_t lat_aot_runtime_abi_version(void);
 typedef void (*LatAotRuntimeSyscallCallbackV2)(void *opaque);
 int lat_aot_runtime_bind_syscall(LatAotRuntimeSyscallCallbackV2 callback,
                                  void *opaque);
 __attribute__((noreturn)) void lat_aot_runtime_raise_syscall(void);
+int lat_aot_runtime_bind_targets(const LatAotRuntimeTargetsV2 *targets);
 
 static inline int lat_aot_v2_magic_valid(const uint8_t magic[8])
 {
@@ -127,5 +154,7 @@ _Static_assert(sizeof(LatAotGuestSlotV2) == 16,
                "AOT v2 guest slot ABI size changed");
 _Static_assert(sizeof(LatAotModuleV2) == 192,
                "AOT v2 module ABI size changed");
+_Static_assert(sizeof(LatAotRuntimeTargetsV2) == 136,
+               "AOT v2 runtime target ABI size changed");
 
 #endif

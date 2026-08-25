@@ -714,7 +714,9 @@ int latc_native_export(const char *path, const char *guest_path,
     memcpy(native_header.magic, LAT_NATIVE_IMAGE_MAGIC, 8);
     native_header.version = LAT_NATIVE_IMAGE_VERSION;
     native_header.header_size = sizeof(native_header);
-    native_header.flags = LAT_NATIVE_IMAGE_PIE |
+    const Elf64_Ehdr *guest_elf = (const void *)guest->data;
+    native_header.flags = (guest_elf->e_type == ET_DYN ?
+                               LAT_NATIVE_IMAGE_PIE : 0) |
                           LAT_NATIVE_IMAGE_NEEDS_FALLBACK |
                           LAT_NATIVE_IMAGE_LBT | LAT_NATIVE_IMAGE_LSX |
                           LAT_NATIVE_IMAGE_NO_PRECISE_SIGNAL_MAP;

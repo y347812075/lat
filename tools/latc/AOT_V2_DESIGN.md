@@ -167,15 +167,14 @@ module registry on a miss. Because the current `cpu_tb_exec()` function still
 accepts a `TranslationBlock *`, M1 lazily creates one thread-local compatibility
 object for an AOT TB that is actually selected. This object points at the
 module's shared read-only `.text`; it is not inserted into the guest qht, TCG
-Host-PC tree, page invalidation lists, or direct-link lists. Production code
-should change the execution interface to accept either a JIT TB or
-`LatAotTargetV2` and remove this compatibility object.
+Host-PC tree, page invalidation lists, or direct-link lists. The selected object
+is placed in LAT's fast indirect jump cache and QEMU's per-CPU TB cache, so a
+repeated indirect target jumps directly to module text. Production code should
+accept either a JIT TB or `LatAotTargetV2` and remove this compatibility object.
 
-For safety, the M1 test packager exposes only TBs that terminate by calling
-`helper_raise_syscall`. Such a TB leaves through LAT's existing `siglongjmp`
-path and cannot return into code that expects TCG Host-PC registration. General
-AOT TBs require the direct `LatAotTargetV2` execution interface before they are
-enabled.
+M1 publishes all supported native-image TBs. Direct intra-module exits are
+resolved while linking the AOT ELF; indirect exits use the existing LAT jump
+cache and return to the normal dispatcher only on a miss.
 
 The first implementation pins Host AOT modules until process exit. Guest
 `dlclose()` deactivates the instance, advances its generation, and invalidates
@@ -435,10 +434,10 @@ executing it. The lower-level `latc emit-aot-v2` and
 `link-aot-v2-module.sh` consume the current `.latnative` intermediate, replace
 guest absolute loads with `$fp` slots, replace the syscall helper address with
 a module-local PC-relative trampoline, and produce a byte-identical ET_DYN on
-repeated builds. On 3A6000, real translated TBs from `x86-exit42` and
-`x86-static-hello` execute from the loaded module at two guest load biases. The
-test observes the saved `write` and `exit` syscall state and verifies the hello
-string in the mapped x86 ELF.
+repeated builds. On 3A6000, real translated TBs from `x86-exit42`, no-libc
+hello, static glibc hello, and all twelve SPECint2000 programs execute from the
+loaded module. The module TB count and PC-map count must exactly match the
+native image before execution.
 
 The disposable dynamic LAT runner now loads the same module before guest entry.
 Its normal TB lookup falls through to the AOT registry, and the syscall
@@ -452,15 +451,20 @@ the same zero-translation counters.
 The native v2 exporter decodes LAT's existing per-instruction search data into
 stable Host offsets and guest PCs before clearing the old packed data from the
 copied executable buffer. The packager emits the fully covered subset as
-`.rodata.lat.map`; the loader validates every range. The static hello native
-image contains 263 records, of which eight cover its two published AOT TBs.
-The module declares `LAT_AOT_MODULE_PRECISE_PC_MAP` and no longer carries
-`LAT_AOT_MODULE_M1_TEST_ONLY`.
+`.rodata.lat.map`; the loader validates every range. LAT's Host signal path
+searches this map and reuses `restore_state_to_opc()` to recover the guest PC
+and mapped registers. The module declares `LAT_AOT_MODULE_PRECISE_PC_MAP` and
+does not carry `LAT_AOT_MODULE_M1_TEST_ONLY`.
 
-This does not yet provide production signal recovery: LAT's signal path still
-needs a Host-PC lookup into the AOT registry and its PC map. M1 also retains the
-thread-local compatibility `TranslationBlock` and publishes only
-syscall-ending TBs. Those restrictions prevent general application coverage.
+The x86-64 guest vDSO is disabled while an M1 AOT v2 module is selected. Static
+glibc then uses syscall instructions from the main ELF, which continue through
+LAT's existing `linux-user/syscall.c`; runner-provided vDSO code never requires
+runtime translation.
+
+On `3a6000-25g` on 2026-08-25, all twelve official SPECint2000 train workloads
+passed under a 60-second per-benchmark limit. Every run recorded zero
+`runtime_tb_gen_attempts` and zero `runtime_tb_gen_calls`. Ref inputs were not
+run.
 
 The copied LAT code generator currently emits LASX vector-state save and load
 instructions, so the M1 artifact correctly declares `LAT_AOT_FEATURE_LASX` and
@@ -470,7 +474,7 @@ LSX-only variant and runtime HWCAP-based variant selection are still required.
 ### M2: Dynamically linked hello world
 
 - Change execution to accept `LatAotTargetV2` directly, remove the temporary
-  `TranslationBlock`, and permit general mapped TBs.
+  `TranslationBlock`, and preserve the full-TB behaviour proven by static M1.
 - Discover and register the main executable and `PT_INTERP` before guest entry.
 - Load libc and other startup modules from the executable mmap hook.
 - Keep guest PLT/GOT, TLS, and IFUNC execution under the x86 dynamic linker.
@@ -513,12 +517,13 @@ artifact without races.
 
 ## 11. Current implementation boundary
 
-M0 and M1 are complete. The next code change begins M2 by replacing the
-temporary `TranslationBlock` execution adapter with direct
-`LatAotTargetV2` execution. Only after general TBs can return normally should
-the runtime discover the main executable and `PT_INTERP`, register modules from
-the mmap path, and attempt a dynamically linked hello. The compiler daemon
-remains deferred until that synchronous path works.
+M0 and static M1 are complete. M1 covers full static modules but retains the
+temporary `TranslationBlock` execution adapter and does not track executable
+mapping changes. M2 must accept `ET_DYN` source images, discover `PT_INTERP` and
+shared objects from the mmap path, register each guest load bias, and run a
+dynamically linked hello. Replacing the compatibility object with direct
+`LatAotTargetV2` execution remains part of that work. The compiler daemon stays
+deferred until the synchronous dynamic-module path works.
 
 ## 12. Rosetta comparison
 

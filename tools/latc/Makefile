@@ -23,8 +23,10 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 
 .PHONY: all clean test test-native test-native-shell test-native-long-tb \
 	test-aot-native test-spec-analyze test-spec-gzip test-spec-gzip-aot \
-	test-spec-gzip-native test-specint-native test-aot-v2 \
-	test-aot-v2-translated test-aot-v2-runner check-import
+		test-spec-gzip-native test-specint-native test-aot-v2 \
+		test-specint-aot-v2 \
+		test-aot-v2-translated test-aot-v2-runner \
+		test-aot-v2-glibc-runner check-import
 
 all: $(BUILD)/latc $(BUILD)/liblatc_cfg.a
 
@@ -223,7 +225,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	sh -n scripts/compile-native-elf.sh scripts/compile-native-image.sh \
 	  scripts/link-native-shell.sh scripts/link-aot-v2-module.sh \
 	  scripts/compile-aot-v2-module.sh scripts/build-aot-v2-runner.sh \
-	  tests/test-aot-v2-runner.sh
+	  tests/test-aot-v2-runner.sh tests/test-aot-v2-glibc-runner.sh
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
@@ -315,12 +317,14 @@ $(BUILD)/tests/test-aot-v2-registry: aot-v2/tests/test-registry.c \
 
 ifeq ($(HOST_ARCH),loongarch64)
 $(BUILD)/aot-v2/liblat-aot-runtime.so.2: aot-v2/runtime/runtime-abi.c \
+		aot-v2/runtime/runtime-entry.S \
 		aot-v2/runtime/runtime.map
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -O2 -fPIC -shared -nostdlib \
 	  -Wl,-soname,liblat-aot-runtime.so.2 \
 	  -Wl,--version-script=aot-v2/runtime/runtime.map \
-	  -Wl,--build-id=sha1 -o $@ $<
+	  -Wl,--build-id=sha1 -o $@ aot-v2/runtime/runtime-abi.c \
+	  aot-v2/runtime/runtime-entry.S
 
 $(BUILD)/aot-v2/fixture.so: aot-v2/tests/fixture.c \
 		aot-v2/tests/fixture-entry.S aot-v2/tests/module.map \
@@ -442,6 +446,14 @@ test-aot-v2-runner: all
 	sh tests/test-aot-v2-runner.sh $(BUILD)/latc $(AOT_V2_RUNNER) \
 	  $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) $(NATIVE_IMAGE) \
 	  $(BUILD)/aot-v2-runner-test
+
+test-aot-v2-glibc-runner: all
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_GUEST)" -a -n "$(NATIVE_IMAGE)" || \
+	  { echo "usage: make test-aot-v2-glibc-runner AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_GUEST=... NATIVE_IMAGE=..."; exit 2; }
+	sh tests/test-aot-v2-glibc-runner.sh $(BUILD)/latc $(AOT_V2_RUNNER) \
+	  $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) $(NATIVE_IMAGE) \
+	  $(BUILD)/aot-v2-glibc-runner-test
 
 $(BUILD)/tests/liblat-good.so: tests/fake-liblat.c
 	@mkdir -p $(dir $@)
@@ -571,6 +583,16 @@ test-specint-native: all
 	python3 spec2000/run-specint-native.py --latc $(BUILD)/latc \
 	  --runner $(RUNNER) --spec-root $(SPEC_ROOT) \
 	  --workdir $(BUILD)/specint-native \
+	  $(if $(SPEC_BENCHMARK),--benchmark $(SPEC_BENCHMARK),)
+
+test-specint-aot-v2: all
+	@test -n "$(RUNNER)" -a -n "$(AOT_V2_RUNNER)" \
+	  -a -n "$(AOT_V2_RUNTIME_DIR)" -a -n "$(SPEC_ROOT)" || \
+	  { echo "usage: make test-specint-aot-v2 RUNNER=... AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... SPEC_ROOT=... [SPEC_BENCHMARK=181.mcf]"; exit 2; }
+	python3 spec2000/run-specint-aot-v2.py --latc $(BUILD)/latc \
+	  --exporter $(RUNNER) --aot-runner $(AOT_V2_RUNNER) \
+	  --runtime-dir $(AOT_V2_RUNTIME_DIR) --spec-root $(SPEC_ROOT) \
+	  --workdir $(BUILD)/specint-aot-v2 \
 	  $(if $(SPEC_BENCHMARK),--benchmark $(SPEC_BENCHMARK),)
 
 check-import:

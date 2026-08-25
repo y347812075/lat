@@ -6,8 +6,10 @@ import json
 import math
 import os
 import re
+import signal
 import statistics
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -65,17 +67,47 @@ def newest_raw(spec_root, before):
     return max(candidates, key=lambda path: path.stat().st_mtime_ns)
 
 
+def process_session_members(session_id):
+    members = []
+    for stat_path in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            stat = stat_path.read_text()
+            fields = stat[stat.rfind(")") + 2:].split()
+            if (len(fields) >= 4 and fields[0] != "Z" and
+                    int(fields[3]) == session_id):
+                members.append(int(stat_path.parent.name))
+        except (FileNotFoundError, ProcessLookupError, ValueError):
+            continue
+    return members
+
+
+def signal_process_session(session_id, sig):
+    for pid in process_session_members(session_id):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+
+
 def run_spec(spec_root, size, benchmark, env, log_path, require_valid=True,
              timeout=None):
     result_dir = Path(spec_root) / "result"
     before = set(result_dir.glob("CINT2000.*.raw"))
     command = [str(Path(spec_root) / "myrun1.sh"), size, benchmark]
     with Path(log_path).open("w") as log:
+        process = subprocess.Popen(command, cwd=str(spec_root), env=env,
+                                   stdout=log, stderr=subprocess.STDOUT,
+                                   start_new_session=True)
         try:
-            process = subprocess.run(command, cwd=str(spec_root), env=env,
-                                     stdout=log, stderr=subprocess.STDOUT,
-                                     timeout=timeout)
+            process.wait(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
+            signal_process_session(process.pid, signal.SIGTERM)
+            deadline = time.monotonic() + 5
+            while process_session_members(process.pid) and \
+                    time.monotonic() < deadline:
+                time.sleep(0.05)
+            signal_process_session(process.pid, signal.SIGKILL)
+            process.wait()
             raise RuntimeError("runspec timed out after %s seconds for %s; "
                                "see %s" %
                                (timeout, benchmark, log_path)) from exc

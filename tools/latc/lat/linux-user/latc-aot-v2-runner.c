@@ -2,9 +2,15 @@
 
 #include "qemu.h"
 #include "exec/exec-all.h"
+#include "exec/tb-hash.h"
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+#include "exec/fasttb.h"
+#endif
 #include "latc-aot-v2-runner.h"
 #include "latc-build-id.h"
 #include "module-loader.h"
+#include "qemu-def.h"
+#include "translate.h"
 
 #include <elf.h>
 #include <glib.h>
@@ -17,7 +23,42 @@ static bool active;
 static __thread TranslationBlock **aot_v2_tb_proxies;
 static __thread size_t aot_v2_tb_proxy_count;
 
-extern void helper_raise_syscall(void);
+static int bind_runtime_targets(void)
+{
+    LatAotRuntimeTargetsV2 targets = {
+        .struct_size = sizeof(targets),
+    };
+    targets.target[LAT_AOT_TARGET_EPILOGUE_RET_ID_1] =
+        context_switch_native_to_bt_ret_id_1;
+    targets.target[LAT_AOT_TARGET_EPILOGUE_RET_ID_0] =
+        context_switch_native_to_bt_ret_id_0;
+    targets.target[LAT_AOT_TARGET_JIRL_EPILOGUE_RET_ID_1] =
+        context_switch_native_to_bt_ret_id_1;
+    targets.target[LAT_AOT_TARGET_JIRL_EPILOGUE_RET_ID_0] =
+        context_switch_native_to_bt_ret_id_0;
+    targets.target[LAT_AOT_TARGET_EPILOGUE_RET_0] =
+        context_switch_native_to_bt_ret_0;
+    targets.target[LAT_AOT_TARGET_UPDATE_MXCSR_STATUS] =
+        (uintptr_t)update_mxcsr_status;
+    targets.target[LAT_AOT_TARGET_FXSAVE] = (uintptr_t)helper_fxsave;
+    targets.target[LAT_AOT_TARGET_FXRSTOR] = (uintptr_t)helper_fxrstor;
+    targets.target[LAT_AOT_TARGET_FPREGS_X80_TO_64] =
+        (uintptr_t)convert_fpregs_x80_to_64;
+    targets.target[LAT_AOT_TARGET_FPREGS_64_TO_X80] =
+        (uintptr_t)convert_fpregs_64_to_x80;
+    targets.target[LAT_AOT_TARGET_UPDATE_FP_STATUS] =
+        (uintptr_t)update_fp_status;
+    targets.target[LAT_AOT_TARGET_CPUID] = (uintptr_t)helper_cpuid;
+    targets.target[LAT_AOT_TARGET_RAISE_ILLOP] =
+        (uintptr_t)helper_raise_illop;
+    targets.target[LAT_AOT_TARGET_RAISE_GPF] =
+        (uintptr_t)helper_raise_gpf;
+    targets.target[LAT_AOT_TARGET_PCMPISTRI_XMM] =
+        (uintptr_t)helper_pcmpistri_xmm;
+    targets.target[LAT_AOT_TARGET_PCMPISTRM_XMM] =
+        (uintptr_t)helper_pcmpistrm_xmm;
+    return lat_aot_runtime_bind_targets(&targets);
+}
 
 static void raise_syscall_through_lat(void *opaque)
 {
@@ -107,6 +148,7 @@ int latc_aot_v2_prepare(CPUArchState *env)
                        error, sizeof(error)) ||
         lat_aot_v2_module_open(module_path, &expected, &loaded_module,
                                error, sizeof(error)) ||
+        bind_runtime_targets() ||
         lat_aot_runtime_bind_syscall(raise_syscall_through_lat, NULL)) {
         fprintf(stderr, "latx: cannot prepare AOT v2 module: %s\n",
                 error[0] ? error : strerror(errno));
@@ -117,7 +159,10 @@ int latc_aot_v2_prepare(CPUArchState *env)
     module_instance.guest_begin = guest_base;
     module_instance.guest_end = guest_end;
     if (lat_aot_v2_registry_init(&registry) ||
-        lat_aot_v2_registry_register(&registry, &module_instance)) {
+        lat_aot_v2_registry_register(&registry, &module_instance) ||
+        lat_aot_v2_context_apply_guest_slots(
+            loaded_module.descriptor, module_instance.guest_load_bias,
+            env->tb_jmp_cache_ptr)) {
         fprintf(stderr, "latx: cannot register AOT v2 module: %s\n",
                 strerror(errno));
         return strict ? -1 : 0;
@@ -133,7 +178,8 @@ int latc_aot_v2_prepare(CPUArchState *env)
     return 0;
 }
 
-static const LatAotTbV2 *find_descriptor_tb(uint64_t guest_rva)
+static const LatAotTbV2 *find_descriptor_tb(uint64_t guest_rva,
+                                            uint32_t cflags)
 {
     const LatAotModuleV2 *module = loaded_module.descriptor;
     size_t left = 0;
@@ -146,8 +192,14 @@ static const LatAotTbV2 *find_descriptor_tb(uint64_t guest_rva)
             right = middle;
         }
     }
+    while (left != (size_t)(module->tb_end - module->tb_begin) &&
+           module->tb_begin[left].guest_rva == guest_rva &&
+           module->tb_begin[left].flags < cflags) {
+        left++;
+    }
     if (left == (size_t)(module->tb_end - module->tb_begin) ||
-        module->tb_begin[left].guest_rva != guest_rva) {
+        module->tb_begin[left].guest_rva != guest_rva ||
+        module->tb_begin[left].flags != cflags) {
         return NULL;
     }
     return &module->tb_begin[left];
@@ -162,18 +214,13 @@ TranslationBlock *latc_aot_v2_find_tb(CPUState *cpu,
         return NULL;
     }
     uint64_t guest_rva = guest_pc - module_instance.guest_load_bias;
-    const LatAotTbV2 *descriptor_tb = find_descriptor_tb(guest_rva);
+    const LatAotTbV2 *descriptor_tb = find_descriptor_tb(guest_rva, cflags);
     if (!descriptor_tb) {
         return NULL;
     }
     LatAotTargetV2 target;
-    CPUArchState *env = cpu->env_ptr;
-    if (lat_aot_runtime_bind_syscall(raise_syscall_through_lat, NULL) ||
-        lat_aot_v2_registry_lookup(&registry, guest_pc,
-                                   descriptor_tb->flags, &target) ||
-        lat_aot_v2_context_apply_guest_slots(
-            loaded_module.descriptor, module_instance.guest_load_bias,
-            env->tb_jmp_cache_ptr)) {
+    if (lat_aot_v2_registry_lookup(&registry, guest_pc,
+                                   descriptor_tb->flags, &target)) {
         return NULL;
     }
     size_t count = (size_t)(loaded_module.descriptor->tb_end -
@@ -215,5 +262,54 @@ TranslationBlock *latc_aot_v2_find_tb(CPUState *cpu,
                tb->tc.ptr != target.host_address) {
         return NULL;
     }
+    uint32_t hash = tb_jmp_cache_hash_func(guest_pc);
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+    latx_fast_jmp_cache_add(cpu, hash, tb);
+#endif
+    qatomic_set(&cpu->tb_jmp_cache[hash], tb);
     return tb;
+}
+
+bool latc_aot_v2_restore_state(CPUState *cpu, uintptr_t host_pc)
+{
+    if (!active || !loaded_module.descriptor || host_pc < GETPC_ADJ) {
+        return false;
+    }
+    const LatAotModuleV2 *module = loaded_module.descriptor;
+    uintptr_t text_begin = (uintptr_t)module->text_begin;
+    uintptr_t searched_pc = host_pc - GETPC_ADJ;
+    if (searched_pc < text_begin ||
+        searched_pc >= (uintptr_t)module->text_end) {
+        return false;
+    }
+    uint64_t host_offset = searched_pc - text_begin;
+    size_t count = (size_t)(module->pc_map_end - module->pc_map_begin);
+    size_t left = 0;
+    size_t right = count;
+    while (left < right) {
+        size_t middle = left + (right - left) / 2;
+        if (module->pc_map_begin[middle].host_offset_begin <= host_offset) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+    if (!left) {
+        return false;
+    }
+    const LatAotPcMapV2 *map = &module->pc_map_begin[left - 1];
+    if (host_offset >= map->host_offset_end ||
+        map->flags != LAT_AOT_PC_MAP_DYNAMIC_STATE ||
+        map->state_record_offset) {
+        return false;
+    }
+    target_ulong data[TARGET_INSN_START_WORDS] = {
+        module_instance.guest_load_bias + map->guest_rva,
+        CC_OP_DYNAMIC,
+    };
+    TranslationBlock tb = {
+        .pc = data[0],
+    };
+    restore_state_to_opc(cpu->env_ptr, &tb, data);
+    return true;
 }

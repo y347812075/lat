@@ -22,9 +22,6 @@ mkdir -p "$work"
 "$latc" inspect-native --json "$native_image" >"$work/native.json"
 python3 -c 'import json,sys; n=json.load(open(sys.argv[1])); m=json.load(open(sys.argv[2])); assert m["tbs"] == n["tbs"]; assert m["pc_maps"] == n["pc_maps"]' \
   "$work/native.json" "$work/module.json"
-grep -q '"pc_maps":[1-9]' "$work/module.json"
-grep -q '"precise_pc_map":true' "$work/module.json"
-grep -q '"test_only":false' "$work/module.json"
 "$latc" compile "$guest" -o "$work/runner" --runner "$runner" >/dev/null
 
 LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
@@ -35,9 +32,10 @@ LATX_AOT_V2_REPORT=1 \
 LATC_DISABLE_PRETRANSLATE=1 \
 LATC_STRICT_AOT=1 \
 LATC_STATS_OUT="$work/stats.json" \
-  "$work/runner" >"$work/stdout" 2>"$work/stderr"
+LATC_TEST_ENV=works \
+  "$work/runner" alpha beta >"$work/stdout" 2>"$work/stderr"
 
-printf 'Hello, LATC!\n' >"$work/expected"
+printf 'Hello from glibc!\n' >"$work/expected"
 cmp "$work/expected" "$work/stdout"
 grep -Eq 'AOT v2 registered module with [1-9][0-9]* TBs' "$work/stderr"
 grep -q '"runtime_tb_gen_attempts":0' "$work/stats.json"
@@ -45,7 +43,4 @@ grep -q '"runtime_tb_gen_calls":0' "$work/stats.json"
 grep -q '"pretranslation_disabled":true' "$work/stats.json"
 LC_ALL=C readelf -lW "$work/module.so" | \
   awk '/ LOAD / && $0 ~ /W/ && $0 ~ /E/ { bad=1 } END { exit bad }'
-LC_ALL=C readelf -dW "$work/module.so" | \
-  grep -q 'Shared library: \[liblat-aot-runtime.so.2\]'
-LC_ALL=C readelf -SW "$work/module.so" | grep -q '.rodata.lat.map'
-echo "test-aot-v2-runner: PASS"
+echo "test-aot-v2-glibc-runner: PASS"
