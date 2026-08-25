@@ -25,7 +25,7 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 	test-aot-native test-spec-analyze test-spec-gzip test-spec-gzip-aot \
 		test-spec-gzip-native test-specint-native test-aot-v2 \
 		test-specint-aot-v2 \
-		test-aot-v2-translated test-aot-v2-runner \
+		test-aot-v2-translated test-aot-v2-pie test-aot-v2-runner \
 		test-aot-v2-glibc-runner check-import
 
 all: $(BUILD)/latc $(BUILD)/liblatc_cfg.a
@@ -51,6 +51,11 @@ $(BUILD)/tests/cfg-fixture: tests/cfg-fixture.S
 $(BUILD)/tests/x86-exit42: tests/x86-exit42.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-pie-exit42: tests/x86-pie-exit42.S
+	@mkdir -p $(dir $@)
+	$(X86_CC) -nostdlib -pie -Wl,--no-dynamic-linker -Wl,--build-id=none \
+	  -o $@ $<
 
 $(BUILD)/tests/x86-exit-add42: tests/x86-exit-add42.S
 	@mkdir -p $(dir $@)
@@ -188,7 +193,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-native-relocate $(BUILD)/tests/test-native-dispatch \
 	$(BUILD)/tests/test-aot-v2-module-pack \
 	$(BUILD)/tests/test-x86-linux-user \
-	$(BUILD)/tests/x86-exit42 $(BUILD)/tests/x86-exit-add42 \
+	$(BUILD)/tests/x86-exit42 $(BUILD)/tests/x86-pie-exit42 \
+	$(BUILD)/tests/x86-exit-add42 \
 	$(BUILD)/tests/x86-exit-loop42 $(BUILD)/tests/x86-exit-memory42 \
 	$(BUILD)/tests/x86-exit-call42 $(BUILD)/tests/x86-write-exit42 \
 	$(BUILD)/tests/x86-stack-exit42 $(BUILD)/tests/x86-brk-exit42 \
@@ -226,7 +232,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	sh -n scripts/compile-native-elf.sh scripts/compile-native-image.sh \
 	  scripts/link-native-shell.sh scripts/link-aot-v2-module.sh \
 	  scripts/compile-aot-v2-module.sh scripts/build-aot-v2-runner.sh \
-	  tests/test-aot-v2-runner.sh tests/test-aot-v2-glibc-runner.sh
+	  tests/test-aot-v2-runner.sh tests/test-aot-v2-glibc-runner.sh \
+	  tests/test-aot-v2-pie.sh
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
@@ -236,6 +243,11 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-aot-v2-module-pack
 	$(BUILD)/tests/test-x86-linux-user
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-exit42 | \
+	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] == 2'
+	LC_ALL=C readelf -h $(BUILD)/tests/x86-pie-exit42 | \
+	  grep -Eq 'Type:.*DYN'
+	! LC_ALL=C readelf -lW $(BUILD)/tests/x86-pie-exit42 | grep -q INTERP
+	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-pie-exit42 | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] == 2'
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-exit-add42 | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] == 2'
@@ -439,7 +451,16 @@ test-aot-v2-translated: all $(BUILD)/aot-v2/liblat-aot-runtime.so.2 \
 	LD_LIBRARY_PATH=$(abspath $(BUILD)/aot-v2) \
 	  $(BUILD)/tests/test-aot-v2-translated-module \
 	  $(abspath $(BUILD)/aot-v2/translated-module.so) \
-	  $(abspath $(NATIVE_IMAGE))
+	  $(abspath $(NATIVE_IMAGE)) $(AOT_V2_TRANSLATED_ARGS)
+
+test-aot-v2-pie: all $(BUILD)/tests/test-aot-v2-translated-module
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_GUEST)" || \
+	  { echo "usage: make test-aot-v2-pie AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_GUEST=..."; exit 2; }
+	sh tests/test-aot-v2-pie.sh $(BUILD)/latc $(AOT_V2_RUNNER) \
+	  $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) \
+	  $(BUILD)/tests/test-aot-v2-translated-module \
+	  $(BUILD)/aot-v2-pie-test
 
 test-aot-v2-runner: all
 	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \

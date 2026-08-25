@@ -10,6 +10,7 @@
 
 #include <setjmp.h>
 #include <glib.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -156,10 +157,13 @@ static int test_hello(const unsigned char *image, size_t image_size,
 
 int main(int argc, char **argv)
 {
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s AOT_MODULE NATIVE_IMAGE\n", argv[0]);
+    if (argc < 3 || argc > 4 ||
+        (argc == 4 && strcmp(argv[3], "--exit42"))) {
+        fprintf(stderr,
+                "usage: %s AOT_MODULE NATIVE_IMAGE [--exit42]\n", argv[0]);
         return 2;
     }
+    bool force_exit42 = argc == 4;
     gchar *image = NULL;
     gsize image_size = 0;
     if (!g_file_get_contents(argv[2], &image, &image_size, NULL) ||
@@ -216,7 +220,8 @@ int main(int argc, char **argv)
     if (!environment || !context || !stack ||
         lat_aot_v2_registry_register(&registry, &first) ||
         lat_aot_v2_registry_register(&registry, &second) ||
-        (((size_t)(module.descriptor->tb_end - module.descriptor->tb_begin) == 1) ?
+        ((force_exit42 ||
+          (size_t)(module.descriptor->tb_end - module.descriptor->tb_begin) == 1) ?
           test_exit42(&registry, &first, &second, entry_rva, environment,
                       stack + 1024 * 1024, jump_cache) :
           test_hello((const unsigned char *)image, image_size, &registry,

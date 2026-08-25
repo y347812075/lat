@@ -11,7 +11,7 @@ int latc_bundle_verified_guest(uint8_t digest[32], uint64_t *guest_begin,
                                uint64_t *guest_end);
 
 struct CPUState;
-void latc_bundle_pretranslate(struct CPUState *cpu);
+void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry);
 
 /* Called at runtime translator entry and after a TB is installed. */
 void latc_bundle_note_tb_attempt(uint64_t guest_pc, uint32_t cflags);

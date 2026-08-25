@@ -1889,7 +1889,7 @@ int main(int argc, char **argv, char **envp)
 #endif
 
     /* Prewarm every statically discovered TB before entering the CPU loop. */
-    latc_bundle_pretranslate(cpu);
+    latc_bundle_pretranslate(cpu, info->exec_entry);
 
 #ifdef CONFIG_LATX_AOT
     if (getenv("LATC_EMIT_AOT")) {

@@ -264,7 +264,7 @@ static int validate_static_x86_guest(const LatNativeImageHeaderV2 *header,
         elf->e_ident[EI_CLASS] != ELFCLASS64 ||
         elf->e_ident[EI_DATA] != ELFDATA2LSB ||
         elf->e_machine != EM_X86_64 ||
-        elf->e_type != ET_EXEC ||
+        (elf->e_type != ET_EXEC && elf->e_type != ET_DYN) ||
         elf->e_entry != header->guest_entry ||
         elf->e_phentsize != sizeof(Elf64_Phdr) || !elf->e_phnum ||
         elf->e_phoff > header->guest_image_size ||
