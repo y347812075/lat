@@ -79,7 +79,7 @@ The artifact is a normal LoongArch64 shared object plus LAT-specific metadata:
 | `.text.lat.tu` | Position-independent LoongArch translated TUs |
 | `.rodata.lat.tb` | Sorted `(guest RVA, flags) -> host text RVA` table |
 | `.rodata.lat.range` | Source executable ranges expressed as guest RVAs |
-| `.rodata.lat.reloc` | Guest-base and unresolved-dispatch fixups not representable by the host linker |
+| `.rodata.lat.guest` | Compile-assigned guest-address slots loaded relative to `$fp` |
 | `.rodata.lat.map` | Host-PC to guest-PC map for signals and diagnostics |
 | `.note.lat.aot` | Format version, source identity, LAT codegen ABI, options, and required CPU features |
 | `.data.rel.ro.lat.module` | `LatAotModuleV2` exported descriptor |
@@ -96,10 +96,10 @@ typedef struct LatAotModuleV2 {
     uint8_t codegen_id[32];
     const LatAotTbV2 *tb_begin;
     const LatAotTbV2 *tb_end;
-    const LatAotGuestRelocV2 *reloc_begin;
-    const LatAotGuestRelocV2 *reloc_end;
     const LatAotPcMapV2 *pc_map_begin;
     const LatAotPcMapV2 *pc_map_end;
+    const LatAotGuestSlotV2 *guest_slot_begin;
+    const LatAotGuestSlotV2 *guest_slot_end;
 } LatAotModuleV2;
 ```
 
@@ -121,10 +121,13 @@ Relocations are divided into four classes:
 3. Cross-module and unresolved guest targets call the global LAT dispatcher.
 4. Guest data addresses use `guest_load_bias + guest_rva`.
 
-AOT v2 never patches `.text`. The code generator loads the guest module base
-from the current execution context and computes `guest_load_bias + guest_rva`.
-The artifact's executable pages remain read-only and shareable from the moment
-the host dynamic linker maps them.
+AOT v2 never patches `.text`. For the first implementation, the compiler
+assigns each referenced guest RVA a context slot. The runtime writes
+`guest_load_bias + guest_rva` to that per-instance slot, and generated code
+loads the value with one `$fp`-relative `ld.d`. The artifact's executable pages
+remain read-only and shareable from the moment the host dynamic linker maps
+them. The initial direct-offset form supports 256 slots; larger modules need a
+two-level table lowering before this becomes a production limit.
 
 Cross-module direct linking is deliberately deferred. The initial runtime
 always uses indirect dispatch across module boundaries. Later it may patch
@@ -144,10 +147,12 @@ links after both modules are registered, but must undo or invalidate them on
 - JIT fallback state.
 
 Each translated thread has a separate `LatAotExecutionContext` for each active
-module instance. `$fp` points to the current execution context. Its first field
-is the fixed-size jump cache used by the existing assembly fast path, followed
-by the module-instance pointer. Multiple guest instances at different load
-biases may share one artifact and its read-only `.text`.
+module instance. `$fp` continues to point at entry zero of the fixed-size jump
+cache, so the existing indirect-dispatch assembly does not change. A fixed
+prefix immediately before `$fp` holds the module-instance data and the first
+guest-address slots; generated code reaches these fields with negative
+offsets. Multiple guest instances at different load biases may share one
+artifact and its read-only `.text`.
 
 Lookup takes `(guest_pc, translation_flags)` and first finds the owning guest
 range, then performs a module-local TB lookup. Writers publish immutable range
@@ -406,6 +411,22 @@ Exit criterion: ASLR on/off runs produce identical output, zero runtime TB
 generation for the fixture, and the artifact passes `readelf`, `dlopen()`, and
 format validation.
 
+Status: partially implemented. `latc emit-aot-v2` and
+`link-aot-v2-module.sh` consume the current `.latnative` intermediate, replace
+guest absolute loads with `$fp` slots, replace the syscall helper address with
+a module-local PC-relative trampoline, and produce a byte-identical ET_DYN on
+repeated builds. On 3A6000, real translated TBs from `x86-exit42` and
+`x86-static-hello` execute from the loaded module at two guest load biases. The
+test observes the saved `write` and `exit` syscall state and verifies the hello
+string in the mapped x86 ELF.
+
+M1 is not complete. The test harness captures syscall entry and does not run
+the syscall. The generated module is marked `LAT_AOT_MODULE_M1_TEST_ONLY`
+because it has no precise PC map. The next change must load and register it in
+the real LAT runner, route its syscall trampoline to `helper_raise_syscall` so
+the existing `linux-user/syscall.c` handles the operation, and add production
+PC maps before removing the test-only flag.
+
 ### M2: Dynamically linked hello world
 
 - Discover and register the main executable and `PT_INTERP` before guest entry.
@@ -448,13 +469,13 @@ artifact without races.
 - Measure startup, RSS, shared text pages, translation coverage, and steady
   performance on real dynamically linked applications.
 
-## 11. First implementation slice
+## 11. Current implementation boundary
 
-The next code change should implement only M0. It should not yet modify x86
-`mmap`, add a daemon, or translate glibc. M0 establishes the host ELF ABI and
-runtime registration API on which all later steps depend. Once the descriptor
-fixture passes on 3A6000, M1 can replace its synthetic TB with code exported by
-the current LATC pipeline.
+M0 is complete and the first M1 test slice now packages real LAT output. The
+next code change stays within M1: integrate module lookup with the disposable
+LAT runner source prepared by `build-runner.sh`. It must not add the mmap hook,
+daemon, or glibc translation yet. Static hello must first print through LAT's
+existing linux-user syscall path with zero runtime TB generation.
 
 ## 12. Rosetta comparison
 
