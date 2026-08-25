@@ -27,6 +27,9 @@
 #endif
 #ifdef CONFIG_LATX
 #include "latx-config.h"
+#ifdef TARGET_X86_64
+#include "latc-aot-v2-runner.h"
+#endif
 #endif
 #if defined(CONFIG_LATX_KZT) && defined(TARGET_X86_64)
 #include "kzt_relro_preprotect.h"
@@ -764,6 +767,15 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
     int page_flags, temp_flags, host_prot;
     uint64_t host_offset;
     int shadow_fd = -1;
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+    int aot_v2_fd = -1;
+    uint64_t aot_v2_offset = offset;
+    uint64_t aot_v2_size = len;
+    if (fd >= 0 && !(flags & MAP_ANONYMOUS) &&
+        latc_aot_v2_mapping_enabled()) {
+        aot_v2_fd = dup(fd);
+    }
+#endif
 
     /* Hacking wine user_shared_data mapping to avoid shadow page */
     if (start == 0x7ffe0000 && len == 0x1000 && (flags == (MAP_FIXED | MAP_SHARED)) && fd > 0
@@ -1190,11 +1202,22 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
         close(shadow_fd);
     }
     mmap_unlock();
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+    if (aot_v2_fd >= 0) {
+        latc_aot_v2_note_mmap(aot_v2_fd, start, aot_v2_size,
+                              aot_v2_offset);
+    }
+#endif
     return start;
 fail:
     if (shadow_fd != -1) {
         close(shadow_fd);
     }
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+    if (aot_v2_fd >= 0) {
+        close(aot_v2_fd);
+    }
+#endif
     mmap_unlock();
     return -1;
 }

@@ -192,6 +192,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-fallback-loader $(BUILD)/tests/test-native-format \
 	$(BUILD)/tests/test-native-relocate $(BUILD)/tests/test-native-dispatch \
 	$(BUILD)/tests/test-aot-v2-module-pack \
+	$(BUILD)/tests/test-aot-v2-guest-elf-map \
 	$(BUILD)/tests/test-x86-linux-user \
 	$(BUILD)/tests/x86-exit42 $(BUILD)/tests/x86-pie-exit42 \
 	$(BUILD)/tests/x86-exit-add42 \
@@ -241,6 +242,9 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-native-relocate
 	$(BUILD)/tests/test-native-dispatch
 	$(BUILD)/tests/test-aot-v2-module-pack
+	$(BUILD)/tests/test-aot-v2-guest-elf-map \
+	  $(BUILD)/tests/x86-pie-exit42 $(BUILD)/tests/x86-pie-exit42 \
+	  $(BUILD)/tests/x86-pie-exit42
 	$(BUILD)/tests/test-x86-linux-user
 	$(BUILD)/latc analyze --json $(BUILD)/tests/x86-exit42 | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["functions"] == 1; assert d["tbs"] == 2'
@@ -517,6 +521,12 @@ $(BUILD)/tests/test-aot-v2-module-pack: \
 		tests/test-aot-v2-module-pack.c \
 		$(BUILD)/aot-v2/compiler/module-pack.o \
 		$(BUILD)/native/format/native-image.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/test-aot-v2-guest-elf-map: \
+		aot-v2/tests/test-guest-elf-map.c \
+		aot-v2/runtime/guest-elf-map.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

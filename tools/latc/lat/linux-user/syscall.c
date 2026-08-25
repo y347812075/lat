@@ -146,6 +146,7 @@
 #include "ioctl/mpt3sas_ctl.h"
 
 #include "qemu.h"
+#include "latc-aot-v2-runner.h"
 #include "latc-x86-syscall-abi.h"
 #ifdef TARGET_X86_64
 _Static_assert(sizeof(struct target_stat) == sizeof(LatcX86Stat),
@@ -16520,6 +16521,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                                         v5, v6, 1));
 #ifdef TARGET_I386
             mmap_unlock();
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+            latc_aot_v2_drain_mmaps();
+#endif
 #endif
         }
 #else
@@ -16549,6 +16553,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                                     arg6, 1));
 #ifdef TARGET_I386
         mmap_unlock();
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+        latc_aot_v2_drain_mmaps();
+#endif
 #endif
 #endif
         return ret;
@@ -16571,6 +16578,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                           arg5, (uint64_t)arg6 << MMAP_SHIFT, 1);
 #ifdef TARGET_I386
         mmap_unlock();
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+        latc_aot_v2_drain_mmaps();
+#endif
 #endif
         return get_errno(ret);
 #endif

@@ -40,6 +40,8 @@ def main() -> None:
         "linux-user/latc-bundle-loader.h",
         "linux-user/elfload.c",
         "linux-user/main.c",
+        "linux-user/mmap.c",
+        "linux-user/syscall.c",
         "target/i386/latx/sbt/aot_recover_tb.c",
         "target/i386/latx/sbt/aot.c",
         "target/i386/latx/sbt/latc_native_export.c",
@@ -71,6 +73,10 @@ def main() -> None:
     shutil.copy2(Path(__file__).resolve().parents[1] /
                  "aot-v2/runtime/module-loader.h",
                  source / "include/module-loader.h")
+    for name in ("guest-elf-map.c", "guest-elf-map.h"):
+        shutil.copy2(Path(__file__).resolve().parents[1] /
+                     "aot-v2/runtime" / name,
+                     source / "linux-user" / name)
     manifest = json.loads((Path(__file__).resolve().parents[1] /
                            "lat-import.json").read_text())
     build_id = f"lat-{manifest['source_commit']}-x64-v1"
@@ -85,6 +91,7 @@ def main() -> None:
     replace_once(source / "linux-user/meson.build",
                  "  'latc-bundle-loader.c',\n",
                  "  'latc-bundle-loader.c',\n"
+                 "  'guest-elf-map.c',\n"
                  "  'latc-aot-v2-runner.c',\n")
     replace_once(source / "target/i386/latx/sbt/meson.build",
                  "  'aot.c',\n", "  'aot.c',\n  'latc_native_export.c',\n")
