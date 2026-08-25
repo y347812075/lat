@@ -14400,6 +14400,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         }
 
         pthread_mutex_unlock(&clone_lock);
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+        latc_aot_v2_report_stats();
+#endif
         preexit_cleanup(cpu_env, arg1);
 
         /* dump basic block here. TODO */
@@ -17182,6 +17185,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #ifdef __NR_exit_group
         /* new thread calls */
     case TARGET_NR_exit_group:
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+        latc_aot_v2_report_stats();
+#endif
         preexit_cleanup(cpu_env, arg1);
         /* dump basic block here. TODO */
 #ifdef CONFIG_LATX_AOT

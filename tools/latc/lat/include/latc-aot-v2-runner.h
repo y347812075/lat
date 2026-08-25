@@ -11,6 +11,7 @@ bool latc_aot_v2_mapping_enabled(void);
 void latc_aot_v2_note_mmap(int fd, uint64_t guest_start,
                            uint64_t mapping_size, uint64_t file_offset);
 void latc_aot_v2_drain_mmaps(void);
+void latc_aot_v2_report_stats(void);
 int latc_aot_v2_prepare(CPUArchState *env);
 TranslationBlock *latc_aot_v2_find_tb(CPUState *cpu,
                                       target_ulong guest_pc,

@@ -22,6 +22,10 @@ void latc_aot_v2_drain_mmaps(void)
 {
 }
 
+void latc_aot_v2_report_stats(void)
+{
+}
+
 int latc_aot_v2_prepare(CPUArchState *env)
 {
     (void)env;

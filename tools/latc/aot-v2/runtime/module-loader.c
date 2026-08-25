@@ -135,6 +135,7 @@ int lat_aot_v2_module_open(const char *path,
         return fail(error, error_size, "invalid AOT module arguments");
     }
     memset(module, 0, sizeof(*module));
+    module->backing_fd = -1;
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
         return fail(error, error_size, "cannot open AOT module: %s",
@@ -156,8 +157,8 @@ int lat_aot_v2_module_open(const char *path,
     dlerror();
     void *handle = dlopen(fd_path, RTLD_NOW | RTLD_LOCAL);
     const char *dl_error = dlerror();
-    close(fd);
     if (!handle) {
+        close(fd);
         return fail(error, error_size, "cannot load AOT module: %s",
                     dl_error ? dl_error : "unknown dlopen failure");
     }
@@ -172,9 +173,11 @@ int lat_aot_v2_module_open(const char *path,
                  dl_error);
         }
         dlclose(handle);
+        close(fd);
         return -1;
     }
     module->dl_handle = handle;
+    module->backing_fd = fd;
     module->descriptor = descriptor;
     module->note = note;
     return 0;

@@ -10,6 +10,7 @@
 
 typedef struct LatAotLoadedModuleV2 {
     void *dl_handle;
+    int backing_fd;
     const LatAotModuleV2 *descriptor;
     LatAotNoteV2 note;
 } LatAotLoadedModuleV2;

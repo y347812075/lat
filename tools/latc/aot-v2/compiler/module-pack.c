@@ -225,6 +225,18 @@ static int runtime_symbol_supported(uint32_t symbol)
     return symbol == LAT_NATIVE_SYMBOL_PFTABLE || runtime_entry(symbol);
 }
 
+static int instruction_falls_through(uint32_t instruction)
+{
+    uint32_t opcode = instruction & 0xfc000000u;
+    if (opcode == 0x50000000u) {
+        return 0;
+    }
+    if (opcode == 0x4c000000u && !(instruction & 0x1f)) {
+        return 0;
+    }
+    return 1;
+}
+
 static int find_tb(const ModulePack *pack, uint64_t guest_pc, uint32_t flags)
 {
     uint64_t left = 0;
@@ -278,6 +290,37 @@ static void select_supported_tbs(ModulePack *pack)
             pack->supported[owner] = 0;
         }
     }
+    if (pack->header->flags & LAT_NATIVE_IMAGE_PIE) {
+        GHashTable *guest_addresses = g_hash_table_new(g_direct_hash,
+                                                        g_direct_equal);
+        for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
+            const LatNativeRelocationV1 *relocation = &pack->relocations[i];
+            if (relocation->kind != LAT_NATIVE_RELOC_GUEST_ADDRESS) {
+                continue;
+            }
+            int owner = find_code_tb(pack, relocation->code_offset);
+            if (owner < 0 || !pack->supported[owner]) {
+                continue;
+            }
+            if ((uint64_t)relocation->addend <
+                pack->header->preferred_guest_base) {
+                pack->supported[owner] = 0;
+                continue;
+            }
+            uint64_t rva = (uint64_t)relocation->addend -
+                           pack->header->preferred_guest_base;
+            gpointer key = (gpointer)(uintptr_t)(rva + 1);
+            if (!g_hash_table_contains(guest_addresses, key)) {
+                if (g_hash_table_size(guest_addresses) ==
+                    LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT) {
+                    pack->supported[owner] = 0;
+                    continue;
+                }
+                g_hash_table_add(guest_addresses, key);
+            }
+        }
+        g_hash_table_destroy(guest_addresses);
+    }
     int changed;
     do {
         changed = 0;
@@ -294,6 +337,36 @@ static void select_supported_tbs(ModulePack *pack)
                                  relocation->target);
             if (target < 0 || !pack->supported[target]) {
                 pack->supported[owner] = 0;
+                changed = 1;
+            }
+        }
+        for (guint i = 0; i + 1 < pack->code_order->len; i++) {
+            const LatNativeTbV1 *owner = g_array_index(
+                pack->code_order, const LatNativeTbV1 *, i);
+            size_t owner_index = (size_t)(owner - pack->tbs);
+            if (!owner->code_size || !pack->supported[owner_index]) {
+                continue;
+            }
+            uint64_t end = owner->code_offset + owner->code_size;
+            const LatNativeTbV1 *next = NULL;
+            for (guint j = i + 1; j < pack->code_order->len; j++) {
+                const LatNativeTbV1 *candidate = g_array_index(
+                    pack->code_order, const LatNativeTbV1 *, j);
+                if (candidate->code_offset > end) {
+                    break;
+                }
+                if (candidate->code_offset == end && candidate->code_size) {
+                    next = candidate;
+                    break;
+                }
+            }
+            uint32_t last_instruction;
+            memcpy(&last_instruction,
+                   pack->code + end - sizeof(last_instruction),
+                   sizeof(last_instruction));
+            if (next && instruction_falls_through(last_instruction) &&
+                !pack->supported[next - pack->tbs]) {
+                pack->supported[owner_index] = 0;
                 changed = 1;
             }
         }
