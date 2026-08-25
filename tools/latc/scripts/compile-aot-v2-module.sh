@@ -18,10 +18,12 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/latc-aot-v2-compile.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
 if [ -n "$profile" ]; then
-    "$script_dir/compile-native-image.sh" "$latc" "$runner" "$guest" \
+    "$script_dir/compile-native-image.sh" --module \
+        "$latc" "$runner" "$guest" \
         "$work/module.latnative" "$profile" >/dev/null
 else
-    "$script_dir/compile-native-image.sh" "$latc" "$runner" "$guest" \
+    "$script_dir/compile-native-image.sh" --module \
+        "$latc" "$runner" "$guest" \
         "$work/module.latnative" >/dev/null
 fi
 "$script_dir/link-aot-v2-module.sh" "$latc" "$work/module.latnative" \

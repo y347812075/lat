@@ -1,8 +1,13 @@
 #!/bin/sh
 set -eu
 
+module=0
+if [ "${1:-}" = "--module" ]; then
+    module=1
+    shift
+fi
 if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
-    echo "usage: $0 LATC STATIC_RUNNER X86_GUEST OUTPUT [PROFILE]" >&2
+    echo "usage: $0 [--module] LATC RUNNER X86_GUEST OUTPUT [PROFILE]" >&2
     exit 2
 fi
 
@@ -51,5 +56,7 @@ if [ ! -s "$output" ]; then
     echo "latc: static supplement rounds exhausted" >&2
     exit 1
 fi
-"$latc" mark-native-x86 "$output"
+if [ "$module" -eq 0 ]; then
+    "$latc" mark-native-x86 "$output"
+fi
 "$latc" inspect-native --json "$output"

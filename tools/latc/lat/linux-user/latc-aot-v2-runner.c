@@ -23,9 +23,26 @@ typedef struct LatAotV2RuntimeModule {
     struct LatAotV2RuntimeModule *next;
 } LatAotV2RuntimeModule;
 
+typedef enum LatAotV2ModuleState {
+    LAT_AOT_V2_MODULE_MISSING,
+    LAT_AOT_V2_MODULE_REJECTED,
+    LAT_AOT_V2_MODULE_REGISTERED,
+} LatAotV2ModuleState;
+
+typedef struct LatAotV2ModuleStats {
+    uint8_t source_sha256[32];
+    uint64_t guest_begin;
+    uint64_t guest_end;
+    LatAotV2ModuleState state;
+    _Atomic uint64_t aot_lookups;
+    _Atomic uint64_t jit_fallbacks;
+    struct LatAotV2ModuleStats *next;
+} LatAotV2ModuleStats;
+
 typedef struct LatAotV2RuntimeInstance {
     LatAotModuleInstanceV2 instance;
     LatAotV2RuntimeModule *runtime_module;
+    LatAotV2ModuleStats *stats;
     struct LatAotV2RuntimeInstance *next;
 } LatAotV2RuntimeInstance;
 
@@ -39,6 +56,7 @@ typedef struct LatAotV2ProxySet {
 static LatAotRegistryV2 registry;
 static LatAotV2RuntimeModule *runtime_modules;
 static LatAotV2RuntimeInstance *runtime_instances;
+static LatAotV2ModuleStats *module_stats;
 static bool prepared;
 static bool active;
 static bool registry_initialized;
@@ -58,7 +76,69 @@ static __thread LatAotV2ProxySet *aot_v2_proxy_sets;
 static __thread LatAotModuleInstanceV2 *aot_v2_current_instance;
 
 static int register_discovered_module(const LatGuestElfInfoV2 *info,
+                                      LatAotV2RuntimeInstance **instance,
                                       char *error, size_t error_size);
+static void digest_hex(const uint8_t digest[32], char output[65]);
+
+static const char *module_state_name(LatAotV2ModuleState state)
+{
+    switch (state) {
+    case LAT_AOT_V2_MODULE_REGISTERED: return "registered";
+    case LAT_AOT_V2_MODULE_REJECTED: return "rejected";
+    default: return "missing";
+    }
+}
+
+void latc_aot_v2_report_stats(void)
+{
+    static _Atomic bool reported;
+    if (atomic_exchange(&reported, true) ||
+        !getenv("LATX_AOT_V2_REPORT")) {
+        return;
+    }
+    for (LatAotV2ModuleStats *stats = module_stats; stats;
+         stats = stats->next) {
+        char source[65];
+        digest_hex(stats->source_sha256, source);
+        fprintf(stderr,
+                "latx: AOT v2 module stats source=%s range=0x%llx-0x%llx "
+                "module=%s aot_lookups=%llu jit_fallbacks=%llu\n",
+                source,
+                (unsigned long long)stats->guest_begin,
+                (unsigned long long)stats->guest_end,
+                module_state_name(stats->state),
+                (unsigned long long)atomic_load(&stats->aot_lookups),
+                (unsigned long long)atomic_load(&stats->jit_fallbacks));
+    }
+}
+
+static LatAotV2ModuleStats *add_module_stats(
+    const LatGuestElfInfoV2 *info, LatAotV2ModuleState state)
+{
+    LatAotV2ModuleStats *stats = g_new0(LatAotV2ModuleStats, 1);
+    if (!stats) {
+        return NULL;
+    }
+    memcpy(stats->source_sha256, info->source_sha256,
+           sizeof(stats->source_sha256));
+    stats->guest_begin = info->guest_begin;
+    stats->guest_end = info->guest_end;
+    stats->state = state;
+    stats->next = module_stats;
+    module_stats = stats;
+    return stats;
+}
+
+static LatAotV2ModuleStats *module_stats_for_pc(uint64_t guest_pc)
+{
+    for (LatAotV2ModuleStats *stats = module_stats; stats;
+         stats = stats->next) {
+        if (guest_pc >= stats->guest_begin && guest_pc < stats->guest_end) {
+            return stats;
+        }
+    }
+    return NULL;
+}
 
 bool latc_aot_v2_mapping_enabled(void)
 {
@@ -94,8 +174,16 @@ static void drain_mappings(void)
             pending->mapping_size, pending->file_offset, TARGET_PAGE_SIZE,
             &info, &added, error, sizeof(error));
         if (!result && added) {
-            int registered = register_discovered_module(info, error,
-                                                        sizeof(error));
+            LatAotV2RuntimeInstance *instance = NULL;
+            int registered = register_discovered_module(
+                info, &instance, error, sizeof(error));
+            LatAotV2ModuleStats *stats = add_module_stats(
+                info, registered > 0 ? LAT_AOT_V2_MODULE_REGISTERED :
+                registered == 0 ? LAT_AOT_V2_MODULE_MISSING :
+                                  LAT_AOT_V2_MODULE_REJECTED);
+            if (instance) {
+                instance->stats = stats;
+            }
             if (getenv("LATX_AOT_V2_REPORT")) {
                 fprintf(stderr,
                         "latx: AOT v2 discovered ELF dev=%llu ino=%llu "
@@ -252,7 +340,8 @@ static LatAotV2RuntimeModule *find_runtime_module(const uint8_t digest[32])
 static int register_module_instance(LatAotV2RuntimeModule *module,
                                     uint64_t load_bias,
                                     uint64_t guest_begin,
-                                    uint64_t guest_end)
+                                    uint64_t guest_end,
+                                    LatAotV2RuntimeInstance **result)
 {
     LatAotV2RuntimeInstance *runtime_instance = g_new0(
         LatAotV2RuntimeInstance, 1);
@@ -274,16 +363,23 @@ static int register_module_instance(LatAotV2RuntimeModule *module,
     }
     runtime_instance->next = runtime_instances;
     runtime_instances = runtime_instance;
+    if (result) {
+        *result = runtime_instance;
+    }
     active = true;
     return 0;
 }
 
 static int register_discovered_module(const LatGuestElfInfoV2 *info,
+                                      LatAotV2RuntimeInstance **instance,
                                       char *error, size_t error_size)
 {
     const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
     if (!cache || !*cache) {
         return 0;
+    }
+    if (instance) {
+        *instance = NULL;
     }
     if (ensure_registry()) {
         snprintf(error, error_size, "cannot initialize AOT v2 registry: %s",
@@ -338,7 +434,8 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
     }
     if (register_module_instance(module,
                                  info->load_bias + info->preferred_base,
-                                 info->guest_begin, info->guest_end)) {
+                                 info->guest_begin, info->guest_end,
+                                 instance)) {
         snprintf(error, error_size, "cannot register AOT v2 instance: %s",
                  strerror(errno));
         return -1;
@@ -447,7 +544,8 @@ int latc_aot_v2_prepare(CPUArchState *env)
     module->path = g_strdup(module_path);
     module->next = runtime_modules;
     runtime_modules = module;
-    if (register_module_instance(module, guest_base, guest_base, guest_end) ||
+    if (register_module_instance(module, guest_base, guest_base, guest_end,
+                                 NULL) ||
         lat_aot_v2_context_apply_guest_slots(
             module->loaded.descriptor, guest_base, env->tb_jmp_cache_ptr)) {
         fprintf(stderr, "latx: cannot register AOT v2 module: %s\n",
@@ -520,12 +618,26 @@ TranslationBlock *latc_aot_v2_find_tb(CPUState *cpu,
                                       target_ulong guest_pc,
                                       uint32_t flags, uint32_t cflags)
 {
+    if (!registry_initialized) {
+        return NULL;
+    }
+    LatAotV2ModuleStats *stats = module_stats_for_pc(guest_pc);
     if (!active) {
+        if (stats) {
+            atomic_fetch_add(&stats->jit_fallbacks, 1);
+        }
         return NULL;
     }
     LatAotTargetV2 target;
     if (lat_aot_v2_registry_lookup(&registry, guest_pc, cflags, &target)) {
+        if (stats) {
+            atomic_fetch_add(&stats->jit_fallbacks, 1);
+        }
         return NULL;
+    }
+    LatAotV2RuntimeInstance *runtime_instance = (void *)target.instance;
+    if (runtime_instance->stats) {
+        stats = runtime_instance->stats;
     }
     const LatAotModuleV2 *module = target.instance->module->descriptor;
     uint64_t guest_rva = guest_pc - target.instance->guest_load_bias;
@@ -536,7 +648,13 @@ TranslationBlock *latc_aot_v2_find_tb(CPUState *cpu,
         lat_aot_v2_context_apply_guest_slots(
             module, target.instance->guest_load_bias,
             ((CPUArchState *)cpu->env_ptr)->tb_jmp_cache_ptr)) {
+        if (stats) {
+            atomic_fetch_add(&stats->jit_fallbacks, 1);
+        }
         return NULL;
+    }
+    if (stats) {
+        atomic_fetch_add(&stats->aot_lookups, 1);
     }
     aot_v2_current_instance = target.instance;
     size_t index = (size_t)(descriptor_tb - module->tb_begin);
@@ -568,6 +686,9 @@ TranslationBlock *latc_aot_v2_find_tb(CPUState *cpu,
     } else if (tb->flags != flags || tb_cflags(tb) != cflags ||
                tb->tc.ptr != target.host_address) {
         return NULL;
+    }
+    if (getenv("LATX_AOT_V2_CACHE_DIR")) {
+        return tb;
     }
     uint32_t hash = tb_jmp_cache_hash_func(guest_pc);
 #ifdef CONFIG_LATX_FAST_JMPCACHE

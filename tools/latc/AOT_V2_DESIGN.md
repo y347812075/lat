@@ -483,6 +483,27 @@ LSX-only variant and runtime HWCAP-based variant selection are still required.
 Exit criterion: a dynamically linked x86 hello runs with ASLR enabled in cold
 and warm cache cases; warm cache reports every executed file-backed TB as AOT.
 
+As of 2026-08-25, the main PIE, guest `ld.so`, and guest `libc.so.6` can each be
+compiled into a separate AOT v2 ELF and loaded from a cache named
+`<source-sha256>.so`. The dynamic glibc hello passes with ASLR enabled and
+disabled. A cold cache uses JIT; a warm cache registers all three modules and
+reports `aot_lookups` and `jit_fallbacks` for each guest ELF range.
+
+This is still partial coverage. PIE modules may require more than the current
+256 guest-address context slots. The packager keeps a dependency-complete TB
+subset that fits: explicit TB targets and Host-code fall-through successors
+must all remain present, otherwise the owner TB is excluded. Missing TBs use
+JIT. The two-level guest-address table described above is still required for
+full coverage.
+
+The current `TranslationBlock` compatibility adapter cannot safely retain one
+shared jump-cache entry across different module slot contexts. Cache-directory
+mode therefore performs registry lookup and applies guest slots on every AOT
+indirect selection without publishing the proxy to LAT's jump caches. The
+direct `LatAotTargetV2` execution work below must remove this restriction.
+The counters measure registry selections and registry-to-JIT fallbacks; they
+are not instruction counts.
+
 ### M3: `dlopen()`, unloading, and cross-module behaviour
 
 - Test a program that calls a function from a startup DSO and another loaded
@@ -517,13 +538,14 @@ artifact without races.
 
 ## 11. Current implementation boundary
 
-M0 and static M1 are complete. M1 covers full static modules but retains the
-temporary `TranslationBlock` execution adapter and does not track executable
-mapping changes. M2 must accept `ET_DYN` source images, discover `PT_INTERP` and
-shared objects from the mmap path, register each guest load bias, and run a
-dynamically linked hello. Replacing the compatibility object with direct
-`LatAotTargetV2` execution remains part of that work. The compiler daemon stays
-deferred until the synchronous dynamic-module path works.
+M0, static M1, and the M2 dynamic hello path are complete. M1 covers full
+static modules. M2 accepts `ET_DYN`, discovers the main executable,
+`PT_INTERP`, and startup shared objects, registers each guest load bias, and
+runs a dynamically linked hello through separate main/loader/libc modules.
+It still retains the temporary `TranslationBlock` adapter, partial PIE module
+coverage, and pinned module mappings. Replacing the compatibility object with
+direct `LatAotTargetV2` execution and completing the M1/M2 regression remain
+the final M2 work. The compiler daemon stays deferred.
 
 ## 12. Rosetta comparison
 

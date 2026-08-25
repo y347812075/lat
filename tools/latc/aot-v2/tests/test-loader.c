@@ -1,5 +1,6 @@
 #include "module-loader.h"
 
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -40,6 +41,10 @@ int main(int argc, char **argv)
     }
     if (open_result) {
         fprintf(stderr, "cannot load fixture: %s\n", error);
+        return 1;
+    }
+    if (module.backing_fd < 0 || fcntl(module.backing_fd, F_GETFD) < 0) {
+        fprintf(stderr, "validated module backing fd was not retained\n");
         return 1;
     }
 
