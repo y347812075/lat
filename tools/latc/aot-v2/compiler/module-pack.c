@@ -359,6 +359,27 @@ static int patch_address(uint32_t *instructions, uint32_t slots,
     return 0;
 }
 
+static int patch_tb_target_pair(uint32_t *instructions,
+                                uint64_t patch, uint64_t target)
+{
+    if ((instructions[0] & 0xfe00001fu) == 0x1e00000cu &&
+        (instructions[1] & 0xfc0003e0u) == 0x4c000180u) {
+        int64_t difference = (int64_t)target - (int64_t)(patch + 4);
+        int64_t offset = difference >> 2;
+        if (!(difference & 3) && offset >= -(1 << 25) &&
+            offset < (1 << 25)) {
+            uint32_t destination = instructions[1] & 0x1fu;
+            instructions[0] = destination ?
+                0x18000040u | destination : 0x03400000u;
+            instructions[1] = 0x50000000u |
+                ((uint32_t)offset & 0xffffu) << 10 |
+                (((uint32_t)offset >> 16) & 0x3ffu);
+            return 0;
+        }
+    }
+    return patch_address(instructions, 2, patch, target);
+}
+
 static int patch_runtime_target(uint32_t *instructions, uint32_t slots,
                                 uint64_t patch, uint64_t target)
 {
@@ -474,10 +495,17 @@ static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
             int target = find_tb(pack, (uint64_t)relocation->addend,
                                  relocation->target);
             if (target >= 0 && pack->supported[target]) {
-                result = patch_runtime_target(
-                    instructions, relocation->slots,
-                    relocation->code_offset,
-                    pack->tbs[target].code_offset);
+                int direct_pair = relocation->slots == 2 &&
+                    (instructions[0] & 0xfe00001fu) == 0x1e00000cu &&
+                    (instructions[1] & 0xfc0003e0u) == 0x4c000180u;
+                result = direct_pair ?
+                    patch_tb_target_pair(
+                        instructions, relocation->code_offset,
+                        pack->tbs[target].code_offset) :
+                    patch_runtime_target(
+                        instructions, relocation->slots,
+                        relocation->code_offset,
+                        pack->tbs[target].code_offset);
             }
         }
         if (result) {
