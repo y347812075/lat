@@ -548,6 +548,13 @@ artifact without races.
 
 - Harden precise signal recovery and unwinding across helpers and faults.
 - Integrate SMC and executable mapping invalidation.
+- Treat cached AOT ELF files as untrusted input and fuzz notes, tables,
+  symbols, and relocations through a byte-buffer validator.
+- Measure startup time, RSS, shared text, AOT coverage, JIT fallback, and
+  steady-state translation efficiency on `3a6000-25g`.
+
+The detailed M5 requirements, implementation rules, and acceptance commands
+are maintained in `M5_PRD.md`, `M5_DESIGN.md`, and `M5_TEST_PLAN.md`.
 - Fuzz artifact parsing and relocation validation.
 - Measure startup, RSS, shared text pages, translation coverage, and steady
   performance on real dynamically linked applications.

@@ -1,5 +1,19 @@
 # AOT v2 M0 and M1 test slice
 
+## ELF validator fuzzing
+
+The normal AOT v2 test runs 100,000 deterministic mutations of a valid
+synthetic module. Clang builds two additional sanitizer targets:
+
+```sh
+make test-aot-v2-sanitize
+make test-aot-v2-libfuzzer
+```
+
+The libFuzzer target starts from the valid synthetic ELF, so mutations reach
+the note, dynamic table, dynamic symbols, strings, and relocations. Both
+commands are bounded and keep their generated corpus below `build/tests/`.
+
 This directory contains the first implementation slice of the AOT v2 design.
 
 - `include/lat-aot-v2.h` is the stable ELF note, module descriptor, TB, and PC

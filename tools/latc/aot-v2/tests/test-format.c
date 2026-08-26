@@ -195,9 +195,24 @@ static int expect_result(int fd, const LatAotExpectedV2 *expected,
     return 0;
 }
 
+static int expect_memory_result(const unsigned char file[FILE_SIZE],
+                                const LatAotExpectedV2 *expected,
+                                int success, const char *message)
+{
+    char error[256] = {0};
+    LatAotNoteV2 note;
+    int result = lat_aot_v2_elf_validate_memory(file, FILE_SIZE, expected,
+                                                &note, error, sizeof(error));
+    if ((success && result) || (!success && !result)) {
+        fprintf(stderr, "%s: result=%d error=%s\n", message, result, error);
+        return -1;
+    }
+    return 0;
+}
+
 int main(void)
 {
-    unsigned char file[FILE_SIZE];
+    _Alignas(Elf64_Ehdr) unsigned char file[FILE_SIZE];
     build_elf(file);
     char path[] = "/tmp/lat-aot-v2-format.XXXXXX";
     int fd = mkstemp(path);
@@ -211,6 +226,75 @@ int main(void)
     };
     memset(expected.source_sha256, 0x11, 32);
     memset(expected.codegen_id, 0x22, 32);
+    char memory_error[256] = {0};
+    LatAotNoteV2 memory_note;
+    if (lat_aot_v2_elf_validate_memory(file, sizeof(file), &expected,
+                                       &memory_note, memory_error,
+                                       sizeof(memory_error))) {
+        fprintf(stderr, "valid memory ELF: %s\n", memory_error);
+        return 1;
+    }
+    {
+        Elf64_Ehdr *test_header = (void *)file;
+        test_header->e_phoff++;
+        if (expect_memory_result(file, &expected, 0,
+                                 "unaligned program headers")) {
+            return 1;
+        }
+        test_header->e_phoff--;
+        test_header->e_shoff++;
+        if (expect_memory_result(file, &expected, 0,
+                                 "unaligned section headers")) {
+            return 1;
+        }
+        test_header->e_shoff--;
+    }
+    {
+        Elf64_Ehdr *test_header = (void *)file;
+        Elf64_Phdr *test_phdrs = (void *)(file + test_header->e_phoff);
+        test_phdrs[1].p_offset++;
+        if (expect_memory_result(file, &expected, 0, "unaligned note")) {
+            return 1;
+        }
+        test_phdrs[1].p_offset--;
+        test_phdrs[2].p_offset++;
+        if (expect_memory_result(file, &expected, 0, "unaligned dynamic")) {
+            return 1;
+        }
+        test_phdrs[2].p_offset--;
+        uint64_t saved_offset = test_phdrs[0].p_offset;
+        test_phdrs[0].p_offset = UINT64_MAX;
+        if (expect_memory_result(file, &expected, 0,
+                                 "overflowing load offset")) {
+            return 1;
+        }
+        test_phdrs[0].p_offset = saved_offset;
+    }
+    {
+        TestNote *test_note = (void *)(file + NOTE_OFFSET);
+        uint32_t saved_namesz = test_note->header.n_namesz;
+        test_note->header.n_namesz = UINT32_MAX;
+        if (expect_memory_result(file, &expected, 0,
+                                 "overflowing note name")) {
+            return 1;
+        }
+        test_note->header.n_namesz = saved_namesz;
+    }
+    {
+        Elf64_Shdr *test_sections = (void *)(file + SECTION_OFFSET);
+        test_sections[2].sh_offset++;
+        if (expect_memory_result(file, &expected, 0,
+                                 "unaligned symbol table")) {
+            return 1;
+        }
+        test_sections[2].sh_offset--;
+        test_sections[4].sh_offset++;
+        if (expect_memory_result(file, &expected, 0,
+                                 "unaligned relocation table")) {
+            return 1;
+        }
+        test_sections[4].sh_offset--;
+    }
     if (rewrite(fd, file) || expect_result(fd, &expected, 1, "valid ELF")) {
         return 1;
     }
