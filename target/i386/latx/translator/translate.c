@@ -3294,6 +3294,12 @@ void latx_tb_set_jmp_target(TranslationBlock *tb, int n,
                                    TranslationBlock *next_tb)
 {
     assert(!use_tu_jmp(tb));
+    tb_set_jmp_target(tb, n, (uintptr_t)next_tb->tc.ptr);
+#ifdef CONFIG_LATX_LAZYLINK
+    if (tb->lazylink[n] != 2) {
+        return;
+    }
+#endif
 #ifdef CONFIG_LATX_INSTS_PATTERN
     if (n) {
         if (next_tb->eflag_use) {
@@ -3302,9 +3308,6 @@ void latx_tb_set_jmp_target(TranslationBlock *tb, int n,
             tb->bool_flags |= TARGET1_ELIMINATE;
         }
     }
-#endif
-    tb_set_jmp_target(tb, n, (uintptr_t)next_tb->tc.ptr);
-#ifdef CONFIG_LATX_INSTS_PATTERN
     /* TODO: TU */
     /* Eflags elimination */
     if (!next_tb->eflag_use &&

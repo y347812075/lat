@@ -632,11 +632,14 @@ void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr)
             if (tb->lazylink[n] == 2) {
                 /* TB unlink */
                 tb->lazylink[n] = 1;
-                *(uint64_t*)jmp_rw = tb->lazylinkinst[n];
-                flush_idcache_range(jmp_rx, jmp_rw, 8);
+                tb_target_set_jmp_pair(jmp_rx, jmp_rw,
+                                       tb->lazylinkinst[n]);
             }
         } else {
             /* TB link */
+            if (!tb_target_jmp_in_range(jmp_rx, addr)) {
+                return;
+            }
             assert(tb->lazylink[n] == 1);
             tb->lazylink[n] = 2;
             tb->lazylinkinst[n] = *(uint64_t*)jmp_rx; /* save inst */
