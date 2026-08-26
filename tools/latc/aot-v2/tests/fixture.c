@@ -16,6 +16,10 @@
 #define LAT_AOT_FIXTURE_DESCRIPTOR_SOURCE_BYTE 0x11
 #endif
 
+#ifndef LAT_AOT_FIXTURE_BAD_PC_MAP
+#define LAT_AOT_FIXTURE_BAD_PC_MAP 0
+#endif
+
 extern uint64_t lat_aot_fixture_entry(void);
 extern const uint8_t lat_aot_fixture_text_end[];
 
@@ -53,7 +57,7 @@ static const LatAotPcMapV2 fixture_pc_maps[] = {
     {
         .guest_rva = 0x1000,
         .host_offset_begin = 0,
-        .host_offset_end = 28,
+        .host_offset_end = LAT_AOT_FIXTURE_BAD_PC_MAP ? 0 : 28,
         .flags = LAT_AOT_PC_MAP_DYNAMIC_STATE,
     },
 };

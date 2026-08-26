@@ -106,6 +106,20 @@ static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
         return fail(error, error_size,
                     "AOT descriptor points outside permitted segments");
     }
+    uint64_t text_size = text_end - text_begin;
+    size_t pc_count = (pc_end - pc_begin) / sizeof(LatAotPcMapV2);
+    for (size_t i = 0; i < pc_count; i++) {
+        const LatAotPcMapV2 *map = &descriptor->pc_map_begin[i];
+        if (!map->guest_rva ||
+            map->host_offset_begin >= map->host_offset_end ||
+            map->host_offset_end > text_size || map->state_record_offset ||
+            map->flags != LAT_AOT_PC_MAP_DYNAMIC_STATE ||
+            (i && descriptor->pc_map_begin[i - 1].host_offset_end >
+                  map->host_offset_begin)) {
+            return fail(error, error_size,
+                        "AOT PC map entry %zu is invalid", i);
+        }
+    }
     size_t slot_count = (slot_end - slot_begin) / sizeof(LatAotGuestSlotV2);
     if (slot_count > LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT) {
         return fail(error, error_size, "AOT guest slot table is too large");

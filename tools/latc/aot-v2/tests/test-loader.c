@@ -13,8 +13,12 @@ static void fill(unsigned char value, unsigned char output[32])
 int main(int argc, char **argv)
 {
     int expect_reject = argc == 3 && !strcmp(argv[1], "--expect-reject");
-    if (argc != 2 && !expect_reject) {
-        fprintf(stderr, "usage: %s [--expect-reject] AOT_MODULE\n", argv[0]);
+    int expect_pc_reject =
+        argc == 3 && !strcmp(argv[1], "--expect-pc-map-reject");
+    if (argc != 2 && !expect_reject && !expect_pc_reject) {
+        fprintf(stderr,
+                "usage: %s [--expect-reject|--expect-pc-map-reject] "
+                "AOT_MODULE\n", argv[0]);
         return 2;
     }
     if (lat_aot_runtime_abi_version() != LAT_AOT_V2_ABI_VERSION) {
@@ -28,7 +32,7 @@ int main(int argc, char **argv)
     fill(0x22, expected.codegen_id);
     LatAotLoadedModuleV2 module;
     char error[256] = {0};
-    const char *module_path = argv[expect_reject ? 2 : 1];
+    const char *module_path = argv[expect_reject || expect_pc_reject ? 2 : 1];
     int open_result = lat_aot_v2_module_open(module_path, &expected, &module,
                                              error, sizeof(error));
     if (expect_reject) {
@@ -37,6 +41,14 @@ int main(int argc, char **argv)
             return 1;
         }
         puts("test-aot-v2-loader-reject: PASS");
+        return 0;
+    }
+    if (expect_pc_reject) {
+        if (!open_result || !strstr(error, "PC map")) {
+            fprintf(stderr, "bad PC map was not rejected: %s\n", error);
+            return 1;
+        }
+        puts("test-aot-v2-loader-pc-map-reject: PASS");
         return 0;
     }
     if (open_result) {
