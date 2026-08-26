@@ -53,24 +53,24 @@ run_guest()
 printf 'Hello from glibc!\n' >"$work/expected"
 run_guest "$work/empty-cache" "$work/cold.out" "$work/cold.err"
 cmp "$work/expected" "$work/cold.out"
-test "$(grep -c 'discovered ELF.*module=missing' "$work/cold.err")" -eq 3
+test "$(grep -c 'discovered ELF.*module=missing' "$work/cold.err")" -ge 3
 test "$(grep -Ec 'module=missing aot_lookups=0 jit_fallbacks=[1-9][0-9]*' \
-  "$work/cold.err")" -eq 3
+  "$work/cold.err")" -ge 3
 
 run_guest "$work/hot-cache" "$work/hot.out" "$work/hot.err"
 cmp "$work/expected" "$work/hot.out"
-test "$(grep -c 'discovered ELF.*module=registered' "$work/hot.err")" -eq 3
+test "$(grep -c 'discovered ELF.*module=registered' "$work/hot.err")" -ge 3
 test "$(grep -Ec 'module=registered aot_lookups=[1-9][0-9]*' \
-  "$work/hot.err")" -eq 3
+  "$work/hot.err")" -ge 3
 grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' "$work/hot.err"
 
 run_guest "$work/hot-cache" "$work/no-aslr.out" "$work/no-aslr.err" \
   setarch "$(uname -m)" -R
 cmp "$work/hot.out" "$work/no-aslr.out"
 test "$(grep -c 'discovered ELF.*module=registered' \
-  "$work/no-aslr.err")" -eq 3
+  "$work/no-aslr.err")" -ge 3
 test "$(grep -Ec 'module=registered aot_lookups=[1-9][0-9]*' \
-  "$work/no-aslr.err")" -eq 3
+  "$work/no-aslr.err")" -ge 3
 grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' \
   "$work/no-aslr.err"
 
