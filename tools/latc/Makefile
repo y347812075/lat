@@ -27,7 +27,9 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-specint-aot-v2 \
 		test-aot-v2-translated test-aot-v2-pie test-aot-v2-runner \
 		test-aot-v2-glibc-runner test-aot-v2-signal-runner \
-		test-aot-v2-dynamic-runner test-aot-v2-dlopen-runner check-import
+		test-aot-v2-dynamic-runner test-aot-v2-dlopen-runner \
+		test-aot-v2-dynamic-semantics check-import
+
 
 all: $(BUILD)/latc $(BUILD)/liblatc_cfg.a
 
@@ -202,6 +204,30 @@ $(BUILD)/tests/x86-dlopen-main: tests/x86-dlopen-main.c
 	@mkdir -p $(dir $@)
 	$(X86_CC) -O2 -fPIE -pie -Wl,--build-id=none -o $@ $< -ldl
 
+$(BUILD)/tests/x86-semantics-startup.so: tests/x86-semantics-startup.c
+	@mkdir -p $(dir $@)
+	$(X86_CC) -O2 -fPIC -shared -Wl,-e,semantic_startup_entry \
+	  -Wl,-soname,liblatc-semantics-startup.so -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-semantics-plugin.so: tests/x86-semantics-plugin.c \
+		tests/x86-semantics-plugin.map
+	@mkdir -p $(dir $@)
+	$(X86_CC) -O2 -fPIC -shared -Wl,-e,semantic_plugin_entry \
+	  -Wl,--version-script=tests/x86-semantics-plugin.map \
+	  -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-semantics-preload.so: tests/x86-semantics-preload.c
+	@mkdir -p $(dir $@)
+	$(X86_CC) -O2 -fPIC -shared -Wl,-e,semantic_preload_entry \
+	  -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-semantics-main: tests/x86-semantics-main.c \
+		$(BUILD)/tests/x86-semantics-startup.so
+	@mkdir -p $(dir $@)
+	$(X86_CC) -O2 -fPIE -pie -rdynamic -Wl,--build-id=none \
+	  -L$(BUILD)/tests -Wl,-rpath,/tmp \
+	  -o $@ $< $(BUILD)/tests/x86-semantics-startup.so -ldl
+
 $(BUILD)/tests/test-cfg: tests/test-cfg.c $(BUILD)/liblatc_cfg.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
@@ -253,7 +279,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  scripts/compile-aot-v2-module.sh scripts/build-aot-v2-runner.sh \
 	  tests/test-aot-v2-runner.sh tests/test-aot-v2-glibc-runner.sh \
 	  tests/test-aot-v2-signal-runner.sh tests/test-aot-v2-pie.sh \
-	  tests/test-aot-v2-dynamic-runner.sh tests/test-aot-v2-dlopen-runner.sh
+	  tests/test-aot-v2-dynamic-runner.sh tests/test-aot-v2-dlopen-runner.sh \
+	  tests/test-aot-v2-dynamic-semantics.sh
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
@@ -525,6 +552,17 @@ test-aot-v2-dlopen-runner: all
 	sh tests/test-aot-v2-dlopen-runner.sh $(BUILD)/latc \
 	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) \
 	  $(X86_GUEST) $(X86_DSO) $(BUILD)/aot-v2-dlopen-runner-test 30s
+
+test-aot-v2-dynamic-semantics: all
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_ROOTFS)" -a -n "$(X86_GUEST)" \
+	  -a -n "$(X86_STARTUP_DSO)" -a -n "$(X86_DSO)" \
+	  -a -n "$(X86_PRELOAD_DSO)" || \
+	  { echo "usage: make test-aot-v2-dynamic-semantics AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_ROOTFS=... X86_GUEST=... X86_STARTUP_DSO=... X86_DSO=... X86_PRELOAD_DSO=..."; exit 2; }
+	sh tests/test-aot-v2-dynamic-semantics.sh $(BUILD)/latc \
+	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) \
+	  $(X86_GUEST) $(X86_STARTUP_DSO) $(X86_DSO) \
+	  $(X86_PRELOAD_DSO) $(BUILD)/aot-v2-dynamic-semantics-test 30s
 
 $(BUILD)/tests/liblat-good.so: tests/fake-liblat.c
 	@mkdir -p $(dir $@)

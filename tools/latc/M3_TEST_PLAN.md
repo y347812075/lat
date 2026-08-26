@@ -44,3 +44,15 @@
 - Warm cache with ASLR and no-ASLR: all four modules registered and executed
   AOT targets; the plugin had nonzero AOT lookups and
   `compat_tb_allocations=0`.
+
+## WI-2263 result
+
+- Native and AOT output matched exactly:
+  `startup=11 tls=7,9 ifunc=23 versions=31,32 hook=10 preload=77`.
+- The startup DSO called a main callback; the plugin preserved thread-local
+  state, selected its IFUNC implementation, and resolved both `LATC_1.0` and
+  default `LATC_2.0` symbol versions.
+- `hook=10` proves main-executable interposition won over the preload DSO's
+  competing value of 100. `preload=77` proves the guest preload was active.
+- Warm cache registered main, startup DSO, preload DSO, interpreter, libc, and
+  plugin. All six reported nonzero AOT lookups and no compatibility TBs.

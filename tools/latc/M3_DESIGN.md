@@ -75,3 +75,10 @@ four distinct ELF mappings. The cold-cache run completes with module-local JIT
 fallback. Warm-cache runs with ASLR enabled and disabled report AOT lookups for
 all four modules, including the post-startup plugin, and allocate no
 compatibility `TranslationBlock`. Instance deactivation remains `WI-2264`.
+
+`WI-2263` adds a combined guest-linker fixture. A startup DSO calls a main
+callback. A later plugin uses TLS, an IFUNC, default and explicitly versioned
+symbols, and an undefined hook that the main executable interposes. A preload
+DSO provides a separate marker and a competing hook; the result proves the
+main executable retains the guest ELF precedence. All function pointers come
+from guest PLT/GOT, `dlsym()`, or `dlvsym()` results.
