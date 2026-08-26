@@ -564,7 +564,10 @@ M4 adds the external per-user compiler service described in
 complete, including FD transfer, stable source snapshots, validation, atomic
 publication, queueing, deduplication, resource limits, and negative caching.
 Nonblocking runner submission is also complete for static, startup dynamic,
-and later DSO mappings. The full M1-M3 and SPECint train regression remains.
+and later DSO mappings. M4 final regression passed M1-M3, signal recovery,
+dynamic symbol semantics, compiler-service concurrency and failure handling,
+and a fresh SPECint train 12/12 generation and run. M5 production hardening
+remains.
 
 ## 12. Rosetta comparison
 

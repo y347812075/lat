@@ -29,7 +29,7 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-aot-v2-glibc-runner test-aot-v2-signal-runner \
 		test-aot-v2-dynamic-runner test-aot-v2-dlopen-runner \
 		test-aot-v2-dynamic-semantics test-latcd-once \
-		test-latcd-service test-latcd-runner check-import
+		test-latcd-service test-latcd-runner test-aot-v2-m4 check-import
 
 
 all: $(BUILD)/latc $(BUILD)/latcd/latcd $(BUILD)/liblatc_cfg.a
@@ -568,6 +568,60 @@ test-latcd-runner: all $(BUILD)/tests/x86-static-hello \
 	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) \
 	  $(BUILD)/tests/x86-static-hello $(BUILD)/tests/x86-dynamic-hello \
 	  $(BUILD)/latcd-runner-test
+
+test-aot-v2-m4: all $(BUILD)/tests/x86-static-hello \
+		$(BUILD)/tests/x86-glibc-hello $(BUILD)/tests/x86-signal-recover \
+		$(BUILD)/tests/x86-dynamic-hello $(BUILD)/tests/x86-dlopen-main \
+		$(BUILD)/tests/x86-dlopen-plugin.so \
+		$(BUILD)/tests/x86-semantics-main \
+		$(BUILD)/tests/x86-semantics-startup.so \
+		$(BUILD)/tests/x86-semantics-plugin.so \
+		$(BUILD)/tests/x86-semantics-preload.so
+	@test -n "$(RUNNER)" -a -n "$(AOT_V2_RUNNER)" \
+	  -a -n "$(AOT_V2_RUNTIME_DIR)" -a -n "$(X86_ROOTFS)" \
+	  -a -n "$(SPEC_ROOT)" || \
+	  { echo "usage: make test-aot-v2-m4 RUNNER=... AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_ROOTFS=... SPEC_ROOT=..."; exit 2; }
+	@mkdir -p $(BUILD)/aot-v2-m4
+	LD_LIBRARY_PATH=$(dir $(RUNNER)) \
+	  scripts/compile-native-image.sh $(BUILD)/latc $(RUNNER) \
+	  $(BUILD)/tests/x86-glibc-hello \
+	  $(BUILD)/aot-v2-m4/glibc.latnative
+	LD_LIBRARY_PATH=$(dir $(RUNNER)) \
+	  scripts/compile-native-image.sh $(BUILD)/latc $(RUNNER) \
+	  $(BUILD)/tests/x86-signal-recover \
+	  $(BUILD)/aot-v2-m4/signal.latnative
+	$(MAKE) test-latcd-once AOT_V2_RUNNER=$(AOT_V2_RUNNER) \
+	  AOT_V2_RUNTIME_DIR=$(AOT_V2_RUNTIME_DIR) \
+	  X86_GUEST=$(BUILD)/tests/x86-static-hello
+	$(MAKE) test-latcd-service AOT_V2_RUNNER=$(AOT_V2_RUNNER) \
+	  AOT_V2_RUNTIME_DIR=$(AOT_V2_RUNTIME_DIR) \
+	  X86_GUEST=$(BUILD)/tests/x86-static-hello
+	$(MAKE) test-latcd-runner AOT_V2_RUNNER=$(AOT_V2_RUNNER) \
+	  AOT_V2_RUNTIME_DIR=$(AOT_V2_RUNTIME_DIR) X86_ROOTFS=$(X86_ROOTFS)
+	$(MAKE) test-aot-v2-glibc-runner AOT_V2_RUNNER=$(AOT_V2_RUNNER) \
+	  AOT_V2_RUNTIME_DIR=$(AOT_V2_RUNTIME_DIR) \
+	  X86_GUEST=$(BUILD)/tests/x86-glibc-hello \
+	  NATIVE_IMAGE=$(BUILD)/aot-v2-m4/glibc.latnative
+	$(MAKE) test-aot-v2-signal-runner AOT_V2_RUNNER=$(AOT_V2_RUNNER) \
+	  AOT_V2_RUNTIME_DIR=$(AOT_V2_RUNTIME_DIR) \
+	  X86_GUEST=$(BUILD)/tests/x86-signal-recover \
+	  NATIVE_IMAGE=$(BUILD)/aot-v2-m4/signal.latnative
+	$(MAKE) test-aot-v2-dynamic-runner AOT_V2_RUNNER=$(AOT_V2_RUNNER) \
+	  AOT_V2_RUNTIME_DIR=$(AOT_V2_RUNTIME_DIR) X86_ROOTFS=$(X86_ROOTFS) \
+	  X86_GUEST=$(BUILD)/tests/x86-dynamic-hello
+	$(MAKE) test-aot-v2-dlopen-runner AOT_V2_RUNNER=$(AOT_V2_RUNNER) \
+	  AOT_V2_RUNTIME_DIR=$(AOT_V2_RUNTIME_DIR) X86_ROOTFS=$(X86_ROOTFS) \
+	  X86_GUEST=$(BUILD)/tests/x86-dlopen-main \
+	  X86_DSO=$(BUILD)/tests/x86-dlopen-plugin.so
+	$(MAKE) test-aot-v2-dynamic-semantics AOT_V2_RUNNER=$(AOT_V2_RUNNER) \
+	  AOT_V2_RUNTIME_DIR=$(AOT_V2_RUNTIME_DIR) X86_ROOTFS=$(X86_ROOTFS) \
+	  X86_GUEST=$(BUILD)/tests/x86-semantics-main \
+	  X86_STARTUP_DSO=$(BUILD)/tests/x86-semantics-startup.so \
+	  X86_DSO=$(BUILD)/tests/x86-semantics-plugin.so \
+	  X86_PRELOAD_DSO=$(BUILD)/tests/x86-semantics-preload.so
+	LD_LIBRARY_PATH=$(dir $(RUNNER)) $(MAKE) test-specint-aot-v2 \
+	  RUNNER=$(RUNNER) AOT_V2_RUNNER=$(AOT_V2_RUNNER) \
+	  AOT_V2_RUNTIME_DIR=$(AOT_V2_RUNTIME_DIR) SPEC_ROOT=$(SPEC_ROOT)
 
 test-aot-v2-glibc-runner: all
 	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
