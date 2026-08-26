@@ -82,11 +82,11 @@ test "$(grep -c 'discovered ELF.*module=missing' "$work/cold.err")" -eq 6
 run_guest "$work/hot-cache" "$work/hot.out" "$work/hot.err"
 cmp "$work/expected" "$work/hot.out"
 test "$(grep -c 'discovered ELF.*module=registered' "$work/hot.err")" -eq 6
-test "$(grep -Ec 'module=registered aot_lookups=[1-9][0-9]*' \
+test "$(grep -Ec 'module=(registered|inactive) aot_lookups=[1-9][0-9]*' \
   "$work/hot.err")" -eq 6
 for source in "$startup" "$plugin" "$preload"; do
     sha=$(sha256sum "$source" | awk '{print $1}')
-    grep -Eq "module stats source=$sha .*module=registered aot_lookups=[1-9]" \
+    grep -Eq "module stats source=$sha .*module=(registered|inactive) aot_lookups=[1-9]" \
       "$work/hot.err"
 done
 grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' "$work/hot.err"

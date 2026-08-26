@@ -22,6 +22,12 @@ void latc_aot_v2_drain_mmaps(void)
 {
 }
 
+void latc_aot_v2_note_munmap(uint64_t guest_start, uint64_t mapping_size)
+{
+    (void)guest_start;
+    (void)mapping_size;
+}
+
 void latc_aot_v2_report_stats(void)
 {
 }

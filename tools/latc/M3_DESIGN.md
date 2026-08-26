@@ -82,3 +82,9 @@ symbols, and an undefined hook that the main executable interposes. A preload
 DSO provides a separate marker and a competing hook; the result proves the
 main executable retains the guest ELF precedence. All function pointers come
 from guest PLT/GOT, `dlsym()`, or `dlvsym()` results.
+
+`WI-2264` notifies AOT v2 after a successful guest `munmap()`. Any overlapping
+instance is removed from the registry, its generation is incremented, and the
+tracker forgets that source/load-bias pair. The immutable Host module remains
+mapped and may back a later instance. Dispatcher cache entries retain the old
+generation and therefore cannot pass validation after close.
