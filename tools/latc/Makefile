@@ -27,7 +27,7 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-specint-aot-v2 \
 		test-aot-v2-translated test-aot-v2-pie test-aot-v2-runner \
 		test-aot-v2-glibc-runner test-aot-v2-signal-runner \
-		test-aot-v2-dynamic-runner check-import
+		test-aot-v2-dynamic-runner test-aot-v2-dlopen-runner check-import
 
 all: $(BUILD)/latc $(BUILD)/liblatc_cfg.a
 
@@ -193,6 +193,15 @@ $(BUILD)/tests/x86-dynamic-hello: tests/x86-glibc-hello.c
 	@mkdir -p $(dir $@)
 	$(X86_CC) -O2 -pie -Wl,--build-id=none -o $@ $<
 
+$(BUILD)/tests/x86-dlopen-plugin.so: tests/x86-dlopen-plugin.c
+	@mkdir -p $(dir $@)
+	$(X86_CC) -O2 -fPIC -shared -Wl,-e,latc_plugin_entry \
+	  -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-dlopen-main: tests/x86-dlopen-main.c
+	@mkdir -p $(dir $@)
+	$(X86_CC) -O2 -fPIE -pie -Wl,--build-id=none -o $@ $< -ldl
+
 $(BUILD)/tests/test-cfg: tests/test-cfg.c $(BUILD)/liblatc_cfg.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
@@ -244,7 +253,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  scripts/compile-aot-v2-module.sh scripts/build-aot-v2-runner.sh \
 	  tests/test-aot-v2-runner.sh tests/test-aot-v2-glibc-runner.sh \
 	  tests/test-aot-v2-signal-runner.sh tests/test-aot-v2-pie.sh \
-	  tests/test-aot-v2-dynamic-runner.sh
+	  tests/test-aot-v2-dynamic-runner.sh tests/test-aot-v2-dlopen-runner.sh
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
@@ -507,6 +516,15 @@ test-aot-v2-dynamic-runner: all
 	sh tests/test-aot-v2-dynamic-runner.sh $(BUILD)/latc \
 	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) \
 	  $(X86_GUEST) $(BUILD)/aot-v2-dynamic-runner-test 30s
+
+test-aot-v2-dlopen-runner: all
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_ROOTFS)" -a -n "$(X86_GUEST)" \
+	  -a -n "$(X86_DSO)" || \
+	  { echo "usage: make test-aot-v2-dlopen-runner AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_ROOTFS=... X86_GUEST=... X86_DSO=..."; exit 2; }
+	sh tests/test-aot-v2-dlopen-runner.sh $(BUILD)/latc \
+	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) \
+	  $(X86_GUEST) $(X86_DSO) $(BUILD)/aot-v2-dlopen-runner-test 30s
 
 $(BUILD)/tests/liblat-good.so: tests/fake-liblat.c
 	@mkdir -p $(dir $@)
