@@ -34,7 +34,7 @@
     },
     {
       "path": "lat/linux-user/latc-aot-v2-runner.c",
-      "reason": "load one test AOT v2 module and route translated syscalls through LAT linux-user"
+      "reason": "load per-ELF AOT v2 modules, track mappings, and submit missing source FDs to latcd"
     },
     {
       "path": "lat/linux-user/latc-aot-v2-runner-stub.c",

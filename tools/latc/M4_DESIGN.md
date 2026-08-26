@@ -108,6 +108,17 @@ Socket creation and sending are nonblocking. `ENOENT`, `ECONNREFUSED`, queue
 full, and short-lived resource errors increment diagnostics and return to JIT.
 No compile callback can replace a module in the current registry instance.
 
+`LATX_AOT_V2_LATCD_SOCKET` enables submission. The runner creates a nonblocking
+`SOCK_SEQPACKET`, connects, transfers the existing tracker FD with
+`SCM_RIGHTS | MSG_DONTWAIT`, and closes the socket without reading a response.
+The first two discovered ELF identities use startup priority 200; later DSOs
+use library priority 100. A SHA-256 set prevents a reload at another load bias
+from submitting the same bytes again.
+
+Dynamic compilation requires the daemon's trusted `--x86-rootfs` setting. It
+becomes `LAT_LD_PREFIX` only in the compiler child's minimal environment; the
+request cannot choose or override it.
+
 ## Security boundary
 
 `latcd` is per-user and creates its socket and cache below a user-owned `0700`
@@ -130,5 +141,6 @@ suppression, bounded exponential failure delays, compiler resource limits, a
 minimal child environment, atomic JSON counters, atomic `current` indexes, and
 SIGTERM cleanup for queued and active jobs.
 
-The nonblocking runner client is not implemented by these two work items; it
-belongs to `WI-2275`.
+`WI-2275` adds the nonblocking runner client, staging integration, per-process
+SHA-256 suppression, startup/library priorities, and submission diagnostics.
+It does not load a module produced during the same process.

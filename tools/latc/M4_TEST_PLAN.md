@@ -81,3 +81,23 @@ new work, and SIGTERM terminates an active compiler process group in less than
 five seconds while removing queued and temporary snapshots. A connected client
 that sends no request is rejected after one second instead of blocking the
 service. Published modules have matching atomic `.current` indexes.
+
+## WI-2275 result
+
+On 2026-08-26, the M4 runner was rebuilt from a fresh staging tree on
+`3a6000-25g`. The architecture-independent nonblocking client test and the
+complete local `make test` passed.
+
+With no daemon, static hello completed through JIT and reported one local
+submission failure. With a daemon deliberately delaying compilation by one
+second, static hello exited in 12 ms with its module still missing; the daemon
+published the module later. Dynamic hello exited in 43 ms and submitted exactly
+three identities: main and interpreter at priority 200, libc at priority 100.
+The daemon then reported `requests=3`, `queued=3`, `compiled=3`, and `failed=0`,
+with three modules, three current indexes, and no temporary files.
+
+The next dynamic run registered all three modules, reported AOT lookups and
+`direct_targets=101`, and made no compiler submission. Loader and libc remain
+partial modules and can still report JIT fallbacks, matching the established M2
+acceptance. Existing M2 dynamic and M3 100-cycle dlopen/reload tests also passed
+with the new runner.

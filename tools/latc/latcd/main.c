@@ -39,6 +39,7 @@ typedef struct LatcdConfig {
     const char *compiler;
     const char *runner;
     const char *runtime_dir;
+    const char *x86_rootfs;
     const char *stats_path;
     uint64_t max_input;
     uint64_t address_space_limit;
@@ -274,8 +275,11 @@ static int run_compiler(const LatcdConfig *config, const char *source,
     };
     char *library_path = g_strdup_printf("LD_LIBRARY_PATH=%s",
                                          config->runtime_dir);
-    char *const environment[] = {
-        "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", library_path, NULL,
+    char *guest_prefix = config->x86_rootfs ?
+        g_strdup_printf("LAT_LD_PREFIX=%s", config->x86_rootfs) : NULL;
+    char *environment[] = {
+        "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", library_path,
+        guest_prefix, NULL,
     };
     pid_t child = fork();
     if (child == 0) {
@@ -301,6 +305,7 @@ static int run_compiler(const LatcdConfig *config, const char *source,
     }
     if (child < 0) {
         g_free(library_path);
+        g_free(guest_prefix);
         return fail(error, error_size, "cannot start compiler: %s",
                     strerror(errno));
     }
@@ -316,6 +321,7 @@ static int run_compiler(const LatcdConfig *config, const char *source,
     } while (waited < 0 && errno == EINTR);
     compiler_process_group = 0;
     g_free(library_path);
+    g_free(guest_prefix);
     if (waited < 0) {
         return fail(error, error_size, "cannot wait for compiler: %s",
                     strerror(errno));
@@ -1044,6 +1050,7 @@ static void usage(const char *name)
             " --runner PATH --runtime-dir DIR [--max-input BYTES]\n"
             "  %s --serve --socket PATH --cache-dir DIR --latc PATH"
             " --runner PATH --runtime-dir DIR [--stats PATH]"
+            " [--x86-rootfs DIR]"
             " [--max-jobs N] [--negative-ms N] [--max-negative N]"
             " [--max-queue-bytes BYTES]"
             " [--cpu-seconds N] [--address-space BYTES]"
@@ -1082,6 +1089,8 @@ int main(int argc, char **argv)
             config.runner = argv[++i];
         else if (!strcmp(argv[i], "--runtime-dir") && i + 1 < argc)
             config.runtime_dir = argv[++i];
+        else if (!strcmp(argv[i], "--x86-rootfs") && i + 1 < argc)
+            config.x86_rootfs = argv[++i];
         else if (!strcmp(argv[i], "--stats") && i + 1 < argc)
             config.stats_path = argv[++i];
         else if (!strcmp(argv[i], "--max-input") && i + 1 < argc)
