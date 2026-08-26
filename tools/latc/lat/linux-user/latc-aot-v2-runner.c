@@ -46,12 +46,16 @@ typedef struct LatAotV2RuntimeInstance {
     struct LatAotV2RuntimeInstance *next;
 } LatAotV2RuntimeInstance;
 
-typedef struct LatAotV2ProxySet {
-    const LatAotLoadedModuleV2 *module;
-    TranslationBlock **proxies;
-    size_t count;
-    struct LatAotV2ProxySet *next;
-} LatAotV2ProxySet;
+#define LAT_AOT_V2_TARGET_CACHE_BITS 16
+#define LAT_AOT_V2_TARGET_CACHE_SIZE (1u << LAT_AOT_V2_TARGET_CACHE_BITS)
+
+typedef struct LatAotV2TargetCacheEntry {
+    target_ulong guest_pc;
+    uint32_t cflags;
+    uint64_t generation;
+    const void *host_address;
+    LatAotModuleInstanceV2 *instance;
+} LatAotV2TargetCacheEntry;
 
 static LatAotRegistryV2 registry;
 static LatAotV2RuntimeModule *runtime_modules;
@@ -72,8 +76,9 @@ typedef struct LatAotV2PendingMapping {
 } LatAotV2PendingMapping;
 static LatAotV2PendingMapping *pending_mapping_head;
 static LatAotV2PendingMapping **pending_mapping_tail = &pending_mapping_head;
-static __thread LatAotV2ProxySet *aot_v2_proxy_sets;
 static __thread LatAotModuleInstanceV2 *aot_v2_current_instance;
+static __thread LatAotV2TargetCacheEntry *aot_v2_target_cache;
+static _Atomic uint64_t direct_targets;
 
 static int register_discovered_module(const LatGuestElfInfoV2 *info,
                                       LatAotV2RuntimeInstance **instance,
@@ -96,6 +101,10 @@ void latc_aot_v2_report_stats(void)
         !getenv("LATX_AOT_V2_REPORT")) {
         return;
     }
+    fprintf(stderr,
+            "latx: AOT v2 runtime stats direct_targets=%llu "
+            "compat_tb_allocations=0\n",
+            (unsigned long long)atomic_load(&direct_targets));
     for (LatAotV2ModuleStats *stats = module_stats; stats;
          stats = stats->next) {
         char source[65];
@@ -562,140 +571,114 @@ int latc_aot_v2_prepare(CPUArchState *env)
     return 0;
 }
 
-static const LatAotTbV2 *find_descriptor_tb(const LatAotModuleV2 *module,
-                                            uint64_t guest_rva,
-                                            uint32_t cflags)
+bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
+                             uint32_t cflags, LatcAotV2Target *result)
 {
-    size_t left = 0;
-    size_t right = (size_t)(module->tb_end - module->tb_begin);
-    while (left < right) {
-        size_t middle = left + (right - left) / 2;
-        if (module->tb_begin[middle].guest_rva < guest_rva) {
-            left = middle + 1;
-        } else {
-            right = middle;
-        }
-    }
-    while (left != (size_t)(module->tb_end - module->tb_begin) &&
-           module->tb_begin[left].guest_rva == guest_rva &&
-           module->tb_begin[left].flags < cflags) {
-        left++;
-    }
-    if (left == (size_t)(module->tb_end - module->tb_begin) ||
-        module->tb_begin[left].guest_rva != guest_rva ||
-        module->tb_begin[left].flags != cflags) {
-        return NULL;
-    }
-    return &module->tb_begin[left];
-}
-
-static LatAotV2ProxySet *proxy_set_for(const LatAotLoadedModuleV2 *module)
-{
-    for (LatAotV2ProxySet *set = aot_v2_proxy_sets; set; set = set->next) {
-        if (set->module == module) {
-            return set;
-        }
-    }
-    size_t count = (size_t)(module->descriptor->tb_end -
-                            module->descriptor->tb_begin);
-    LatAotV2ProxySet *set = g_new0(LatAotV2ProxySet, 1);
-    if (!set) {
-        return NULL;
-    }
-    set->proxies = g_new0(TranslationBlock *, count);
-    if (!set->proxies) {
-        g_free(set);
-        return NULL;
-    }
-    set->module = module;
-    set->count = count;
-    set->next = aot_v2_proxy_sets;
-    aot_v2_proxy_sets = set;
-    return set;
-}
-
-TranslationBlock *latc_aot_v2_find_tb(CPUState *cpu,
-                                      target_ulong guest_pc,
-                                      uint32_t flags, uint32_t cflags)
-{
-    if (!registry_initialized) {
-        return NULL;
+    if (!registry_initialized || !result) {
+        return false;
     }
     LatAotV2ModuleStats *stats = module_stats_for_pc(guest_pc);
     if (!active) {
         if (stats) {
             atomic_fetch_add(&stats->jit_fallbacks, 1);
         }
-        return NULL;
+        return false;
     }
-    LatAotTargetV2 target;
-    if (lat_aot_v2_registry_lookup(&registry, guest_pc, cflags, &target)) {
-        if (stats) {
-            atomic_fetch_add(&stats->jit_fallbacks, 1);
+    if (!aot_v2_target_cache) {
+        aot_v2_target_cache = g_new0(LatAotV2TargetCacheEntry,
+                                     LAT_AOT_V2_TARGET_CACHE_SIZE);
+        if (!aot_v2_target_cache) {
+            return false;
         }
-        return NULL;
     }
-    LatAotV2RuntimeInstance *runtime_instance = (void *)target.instance;
+    uint32_t hash = (uint32_t)((guest_pc ^
+        (guest_pc >> LAT_AOT_V2_TARGET_CACHE_BITS) ^ cflags) &
+        (LAT_AOT_V2_TARGET_CACHE_SIZE - 1));
+    LatAotV2TargetCacheEntry *entry = &aot_v2_target_cache[hash];
+    LatAotModuleInstanceV2 *instance = entry->instance;
+    if (entry->guest_pc != guest_pc || entry->cflags != cflags || !instance ||
+        !atomic_load_explicit(&instance->active, memory_order_acquire) ||
+        entry->generation != atomic_load_explicit(
+            &instance->generation, memory_order_acquire)) {
+        LatAotTargetV2 target;
+        if (lat_aot_v2_registry_lookup(&registry, guest_pc, cflags, &target)) {
+            if (stats) {
+                atomic_fetch_add(&stats->jit_fallbacks, 1);
+            }
+            return false;
+        }
+        entry->guest_pc = guest_pc;
+        entry->cflags = cflags;
+        entry->generation = target.generation;
+        entry->host_address = (const void *)target.host_address;
+        entry->instance = target.instance;
+        instance = target.instance;
+    }
+    LatAotV2RuntimeInstance *runtime_instance = (void *)instance;
     if (runtime_instance->stats) {
         stats = runtime_instance->stats;
     }
-    const LatAotModuleV2 *module = target.instance->module->descriptor;
-    uint64_t guest_rva = guest_pc - target.instance->guest_load_bias;
-    const LatAotTbV2 *descriptor_tb = find_descriptor_tb(module, guest_rva,
-                                                          cflags);
-    LatAotV2ProxySet *proxy_set = proxy_set_for(target.instance->module);
-    if (!descriptor_tb || !proxy_set ||
-        lat_aot_v2_context_apply_guest_slots(
-            module, target.instance->guest_load_bias,
-            ((CPUArchState *)cpu->env_ptr)->tb_jmp_cache_ptr)) {
+    result->host_address = entry->host_address;
+    result->context = instance;
+    result->generation_address = &instance->generation;
+    result->guest_pc = guest_pc;
+    result->generation = entry->generation;
+    result->cflags = cflags;
+    if (!latc_aot_v2_activate_target(cpu, result)) {
         if (stats) {
             atomic_fetch_add(&stats->jit_fallbacks, 1);
         }
-        return NULL;
+        return false;
     }
     if (stats) {
         atomic_fetch_add(&stats->aot_lookups, 1);
     }
-    aot_v2_current_instance = target.instance;
-    size_t index = (size_t)(descriptor_tb - module->tb_begin);
-    TranslationBlock *tb = proxy_set->proxies[index];
-    if (!tb) {
-        tb = g_new0(TranslationBlock, 1);
-        tb->s_data = g_new0(struct separated_data, 1);
-        tb->s_data->_top_out = -1;
-        tb->s_data->_top_in = -1;
-        tb->s_data->rel_start = -1;
-        tb->s_data->rel_end = -1;
-        qemu_spin_init(&tb->jmp_lock);
-        tb->tc.ptr = (void *)target.host_address;
-        tb->tc.size = descriptor_tb->host_size;
-        tb->pc = guest_pc;
-        tb->flags = flags;
-        tb->cflags = cflags;
-        tb->size = 1;
-        tb->icount = 1;
-        tb->bool_flags = IS_AOT_TB;
-        tb->jmp_target_arg[0] = TB_JMP_RESET_OFFSET_INVALID;
-        tb->jmp_target_arg[1] = TB_JMP_RESET_OFFSET_INVALID;
-        tb->jmp_reset_offset[0] = TB_JMP_RESET_OFFSET_INVALID;
-        tb->jmp_reset_offset[1] = TB_JMP_RESET_OFFSET_INVALID;
-        tb->jmp_stub_reset_offset[0] = TB_JMP_RESET_OFFSET_INVALID;
-        tb->jmp_stub_reset_offset[1] = TB_JMP_RESET_OFFSET_INVALID;
-        tb->first_jmp_align = TB_JMP_RESET_OFFSET_INVALID;
-        proxy_set->proxies[index] = tb;
-    } else if (tb->flags != flags || tb_cflags(tb) != cflags ||
-               tb->tc.ptr != target.host_address) {
-        return NULL;
-    }
-    if (getenv("LATX_AOT_V2_CACHE_DIR")) {
-        return tb;
-    }
-    uint32_t hash = tb_jmp_cache_hash_func(guest_pc);
 #ifdef CONFIG_LATX_FAST_JMPCACHE
-    latx_fast_jmp_cache_add(cpu, hash, tb);
+    if (!getenv("LATX_AOT_V2_CACHE_DIR")) {
+        uint32_t jump_hash = tb_jmp_cache_hash_func(guest_pc);
+        FastTB *jump_cache = ((CPUArchState *)cpu->env_ptr)->tb_jmp_cache_ptr;
+        qatomic_set(&jump_cache[jump_hash].ptr, result->host_address);
+        qatomic_set(&jump_cache[jump_hash].pc, guest_pc);
+    }
 #endif
-    qatomic_set(&cpu->tb_jmp_cache[hash], tb);
-    return tb;
+    atomic_fetch_add(&direct_targets, 1);
+    return true;
+}
+
+bool latc_aot_v2_activate_target(CPUState *cpu,
+                                 const LatcAotV2Target *target)
+{
+    LatAotModuleInstanceV2 *instance = (void *)target->context;
+    if (!cpu || !instance ||
+        !atomic_load_explicit(&instance->active, memory_order_acquire) ||
+        target->generation != atomic_load_explicit(
+            &instance->generation, memory_order_acquire)) {
+        return false;
+    }
+    if (aot_v2_current_instance != instance &&
+        lat_aot_v2_context_apply_guest_slots(
+            instance->module->descriptor, instance->guest_load_bias,
+            ((CPUArchState *)cpu->env_ptr)->tb_jmp_cache_ptr)) {
+        return false;
+    }
+    aot_v2_current_instance = instance;
+    return true;
+}
+
+bool latc_aot_v2_contains_host_pc(uintptr_t host_pc)
+{
+    if (!active) {
+        return false;
+    }
+    for (LatAotV2RuntimeModule *candidate = runtime_modules; candidate;
+         candidate = candidate->next) {
+        const LatAotModuleV2 *module = candidate->loaded.descriptor;
+        if (host_pc >= (uintptr_t)module->text_begin &&
+            host_pc < (uintptr_t)module->text_end) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool latc_aot_v2_restore_state(CPUState *cpu, uintptr_t host_pc)

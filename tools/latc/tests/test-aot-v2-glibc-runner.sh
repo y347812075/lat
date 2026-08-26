@@ -38,6 +38,7 @@ LATC_TEST_ENV=works \
 printf 'Hello from glibc!\n' >"$work/expected"
 cmp "$work/expected" "$work/stdout"
 grep -Eq 'AOT v2 registered module with [1-9][0-9]* TBs' "$work/stderr"
+grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' "$work/stderr"
 grep -q '"runtime_tb_gen_attempts":0' "$work/stats.json"
 grep -q '"runtime_tb_gen_calls":0' "$work/stats.json"
 grep -q '"pretranslation_disabled":true' "$work/stats.json"
@@ -73,6 +74,8 @@ LATC_TEST_ENV=works \
   2>"$work/cache-hit-stderr"
 cmp "$work/expected" "$work/cache-hit-stdout"
 grep -q 'module=registered' "$work/cache-hit-stderr"
+grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' \
+  "$work/cache-hit-stderr"
 grep -q '"runtime_tb_gen_attempts":0' "$work/cache-hit-stats.json"
 grep -q '"runtime_tb_gen_calls":0' "$work/cache-hit-stats.json"
 echo "test-aot-v2-glibc-runner: PASS"
