@@ -1343,6 +1343,10 @@ int target_munmap(abi_ulong start, abi_ulong len, int rlimit_as_account)
     }
     mmap_unlock();
 
+    if (ret == 0) {
+        latc_aot_v2_note_munmap(start, len);
+    }
+
     if (ret == 0 && option_prlimit && rlimit_as_account &&
         vir_rlimit_as != RLIM_INFINITY) {
         if (vir_rlimit_as_acc > len) {

@@ -46,5 +46,8 @@ int lat_guest_elf_tracker_note_v2(LatGuestElfTrackerV2 *tracker, int fd,
 size_t lat_guest_elf_tracker_count_v2(const LatGuestElfTrackerV2 *tracker);
 const LatGuestElfInfoV2 *lat_guest_elf_tracker_get_v2(
     const LatGuestElfTrackerV2 *tracker, size_t index);
+size_t lat_guest_elf_tracker_remove_range_v2(LatGuestElfTrackerV2 *tracker,
+                                              uint64_t guest_start,
+                                              uint64_t mapping_size);
 
 #endif

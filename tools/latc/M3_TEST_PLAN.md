@@ -56,3 +56,13 @@
   competing value of 100. `preload=77` proves the guest preload was active.
 - Warm cache registered main, startup DSO, preload DSO, interpreter, libc, and
   plugin. All six reported nonzero AOT lookups and no compatibility TBs.
+
+## WI-2264 result
+
+- The fixture performed 100 load/call/close cycles. After each close it
+  reserved the old five-page guest range, forcing the next load to a different
+  bias. Native and AOT output both reported `loads=100 result=40 moved=1`.
+- Warm-cache and no-ASLR runs registered and executed 100 plugin instances,
+  then reported 100 deactivations and 100 inactive module-stat records.
+- The tracker unit test removes one overlapping ELF range, preserves the other
+  two, and reports no second removal for the same range.

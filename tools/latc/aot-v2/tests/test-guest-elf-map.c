@@ -87,7 +87,20 @@ int main(int argc, char **argv)
         lat_guest_elf_tracker_free_v2(tracker);
         return 1;
     }
+    const LatGuestElfInfoV2 *removed =
+        lat_guest_elf_tracker_get_v2(tracker, 1);
+    uint64_t removed_begin = removed->guest_begin;
+    uint64_t removed_size = removed->guest_end - removed->guest_begin;
+    if (lat_guest_elf_tracker_remove_range_v2(
+            tracker, removed_begin, removed_size) != 1 ||
+        lat_guest_elf_tracker_count_v2(tracker) != 2 ||
+        lat_guest_elf_tracker_remove_range_v2(
+            tracker, removed_begin, removed_size) != 0) {
+        fprintf(stderr, "tracked ELF range removal failed\n");
+        lat_guest_elf_tracker_free_v2(tracker);
+        return 1;
+    }
     lat_guest_elf_tracker_free_v2(tracker);
-    puts("test-aot-v2-guest-elf-map: PASS modules=3 duplicates=0");
+    puts("test-aot-v2-guest-elf-map: PASS modules=3 duplicates=0 removed=1");
     return 0;
 }

@@ -278,3 +278,23 @@ const LatGuestElfInfoV2 *lat_guest_elf_tracker_get_v2(
     return tracker && index < tracker->entries->len ?
         g_ptr_array_index(tracker->entries, index) : NULL;
 }
+
+size_t lat_guest_elf_tracker_remove_range_v2(LatGuestElfTrackerV2 *tracker,
+                                              uint64_t guest_start,
+                                              uint64_t mapping_size)
+{
+    if (!tracker || !mapping_size ||
+        guest_start > UINT64_MAX - mapping_size) {
+        return 0;
+    }
+    uint64_t guest_end = guest_start + mapping_size;
+    size_t removed = 0;
+    for (guint i = tracker->entries->len; i > 0; i--) {
+        LatGuestElfInfoV2 *entry = g_ptr_array_index(tracker->entries, i - 1);
+        if (guest_start < entry->guest_end && guest_end > entry->guest_begin) {
+            g_ptr_array_remove_index(tracker->entries, i - 1);
+            removed++;
+        }
+    }
+    return removed;
+}

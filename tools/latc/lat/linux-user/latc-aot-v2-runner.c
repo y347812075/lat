@@ -27,6 +27,7 @@ typedef enum LatAotV2ModuleState {
     LAT_AOT_V2_MODULE_MISSING,
     LAT_AOT_V2_MODULE_REJECTED,
     LAT_AOT_V2_MODULE_REGISTERED,
+    LAT_AOT_V2_MODULE_INACTIVE,
 } LatAotV2ModuleState;
 
 typedef struct LatAotV2ModuleStats {
@@ -89,6 +90,7 @@ static const char *module_state_name(LatAotV2ModuleState state)
 {
     switch (state) {
     case LAT_AOT_V2_MODULE_REGISTERED: return "registered";
+    case LAT_AOT_V2_MODULE_INACTIVE: return "inactive";
     case LAT_AOT_V2_MODULE_REJECTED: return "rejected";
     default: return "missing";
     }
@@ -252,6 +254,47 @@ void latc_aot_v2_note_mmap(int fd, uint64_t guest_start,
     pending_mapping_tail = &pending->next;
     pthread_mutex_unlock(&elf_tracker_lock);
     drain_mappings();
+}
+
+void latc_aot_v2_note_munmap(uint64_t guest_start, uint64_t mapping_size)
+{
+    if (!registry_initialized || !mapping_size ||
+        guest_start > UINT64_MAX - mapping_size) {
+        return;
+    }
+    uint64_t guest_end = guest_start + mapping_size;
+    pthread_mutex_lock(&elf_tracker_lock);
+    if (elf_tracker) {
+        lat_guest_elf_tracker_remove_range_v2(elf_tracker, guest_start,
+                                              mapping_size);
+    }
+    for (LatAotV2RuntimeInstance *runtime = runtime_instances; runtime;
+         runtime = runtime->next) {
+        LatAotModuleInstanceV2 *instance = &runtime->instance;
+        if (guest_start >= instance->guest_end ||
+            guest_end <= instance->guest_begin ||
+            !atomic_load_explicit(&instance->active, memory_order_acquire)) {
+            continue;
+        }
+        if (!lat_aot_v2_registry_deactivate(&registry, instance)) {
+            if (runtime->stats) {
+                runtime->stats->state = LAT_AOT_V2_MODULE_INACTIVE;
+            }
+            if (aot_v2_current_instance == instance) {
+                aot_v2_current_instance = NULL;
+            }
+            if (getenv("LATX_AOT_V2_REPORT")) {
+                fprintf(stderr,
+                        "latx: AOT v2 deactivated range=0x%llx-0x%llx "
+                        "generation=%llu\n",
+                        (unsigned long long)instance->guest_begin,
+                        (unsigned long long)instance->guest_end,
+                        (unsigned long long)atomic_load_explicit(
+                            &instance->generation, memory_order_acquire));
+            }
+        }
+    }
+    pthread_mutex_unlock(&elf_tracker_lock);
 }
 
 static int bind_runtime_targets(void)

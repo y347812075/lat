@@ -63,26 +63,31 @@ run_guest()
       "$guest" >"$output" 2>"$error"
 }
 
-printf 'dlopen callback result=40\n' >"$work/expected"
+printf 'dlopen loads=100 result=40 moved=1\n' >"$work/expected"
 run_guest "$work/empty-cache" "$work/cold.out" "$work/cold.err"
 cmp "$work/expected" "$work/cold.out"
-test "$(grep -c 'discovered ELF.*module=missing' "$work/cold.err")" -eq 4
+test "$(grep -c 'discovered ELF.*module=missing' "$work/cold.err")" -eq 103
 
 run_guest "$work/hot-cache" "$work/hot.out" "$work/hot.err"
 cmp "$work/expected" "$work/hot.out"
-test "$(grep -c 'discovered ELF.*module=registered' "$work/hot.err")" -eq 4
-test "$(grep -Ec 'module=registered aot_lookups=[1-9][0-9]*' \
-  "$work/hot.err")" -eq 4
+test "$(grep -c 'discovered ELF.*module=registered' "$work/hot.err")" -eq 103
+test "$(grep -Ec 'module=(registered|inactive) aot_lookups=[1-9][0-9]*' \
+  "$work/hot.err")" -eq 103
 plugin_sha=$(sha256sum "$plugin" | awk '{print $1}')
-grep -Eq "module stats source=$plugin_sha .*module=registered aot_lookups=[1-9]" \
+grep -Eq "module stats source=$plugin_sha .*module=inactive aot_lookups=[1-9]" \
   "$work/hot.err"
+test "$(grep -Ec "module stats source=$plugin_sha .*module=inactive" \
+  "$work/hot.err")" -eq 100
+test "$(grep -c 'AOT v2 deactivated range=' "$work/hot.err")" -eq 100
 grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' "$work/hot.err"
 
 run_guest "$work/hot-cache" "$work/no-aslr.out" "$work/no-aslr.err" \
   setarch "$(uname -m)" -R
 cmp "$work/hot.out" "$work/no-aslr.out"
-grep -Eq "module stats source=$plugin_sha .*module=registered aot_lookups=[1-9]" \
+grep -Eq "module stats source=$plugin_sha .*module=inactive aot_lookups=[1-9]" \
   "$work/no-aslr.err"
+test "$(grep -Ec "module stats source=$plugin_sha .*module=inactive" \
+  "$work/no-aslr.err")" -eq 100
 grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' \
   "$work/no-aslr.err"
 
