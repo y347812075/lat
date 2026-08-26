@@ -2465,6 +2465,12 @@ static void generate_indirect_goto(void *code_buf)
     IR2_OPND base = ra_alloc_data();
     la_data_li(base, (ADDR)code_buf);
     IR2_OPND label_miss = ra_alloc_label();
+#if defined(CONFIG_LATX_FAST_JMPCACHE) && !defined(CONFIG_LATX_GLUE_MASK)
+    IR2_OPND label_aot_v2_lookup = ra_alloc_label();
+    IR2_OPND label_aot_v2_context_ready = ra_alloc_label();
+    IR2_OPND label_aot_v2_slots_done = ra_alloc_label();
+    IR2_OPND label_aot_v2_slot_loop = ra_alloc_label();
+#endif
 
     /* indirect jmp */
     IR2_OPND jmp_entry = ra_alloc_itemp();
@@ -2499,10 +2505,69 @@ static void generate_indirect_goto(void *code_buf)
 #else
     la_alsl_d(next_tb, next_tb, jmp_cache_addr, 3);
     la_ld_d(jmp_entry, next_tb, 0);
-    la_bne(jmp_entry, next_x86_addr, label_miss);
+    la_bne(jmp_entry, next_x86_addr, label_aot_v2_lookup);
     la_ld_d(next_tb, next_tb, 8);
-#endif
     la_jirl(zero_ir2_opnd, next_tb, 0);
+
+    la_label(label_aot_v2_lookup);
+    IR2_OPND aot_v2_cache_addr = ra_alloc_itemp();
+    IR2_OPND aot_v2_entry = ra_alloc_itemp();
+    la_ld_d(aot_v2_cache_addr, env_ir2_opnd,
+            lsenv_offset_of_aot_v2_jmp_cache_ptr(lsenv));
+    la_beq(aot_v2_cache_addr, zero_ir2_opnd, label_miss);
+
+    la_srli_d(aot_v2_entry, next_x86_addr, TB_JMP_CACHE_BITS);
+    la_xor(aot_v2_entry, next_x86_addr, aot_v2_entry);
+    la_bstrpick_d(aot_v2_entry, aot_v2_entry,
+                  TB_JMP_CACHE_BITS - 1, 0);
+    la_slli_d(aot_v2_entry, aot_v2_entry, 6);
+    la_add_d(aot_v2_entry, aot_v2_entry, aot_v2_cache_addr);
+
+    la_ld_d(jmp_entry, aot_v2_entry,
+            offsetof(LatxAotV2FastTB, pc));
+    la_bne(jmp_entry, next_x86_addr, label_miss);
+    la_ld_d(jmp_entry, aot_v2_entry,
+            offsetof(LatxAotV2FastTB, generation_address));
+    la_beq(jmp_entry, zero_ir2_opnd, label_miss);
+    la_ld_d(next_tb, jmp_entry, 0);
+    la_ld_d(jmp_entry, aot_v2_entry,
+            offsetof(LatxAotV2FastTB, generation));
+    la_bne(jmp_entry, next_tb, label_miss);
+
+    la_ld_d(jmp_entry, aot_v2_entry,
+            offsetof(LatxAotV2FastTB, context));
+    la_ld_d(next_tb, env_ir2_opnd,
+            lsenv_offset_of_aot_v2_current_context(lsenv));
+    la_beq(jmp_entry, next_tb, label_aot_v2_context_ready);
+
+    IR2_OPND aot_v2_slot_dest = ra_alloc_itemp();
+    IR2_OPND aot_v2_slot_value = ra_alloc_itemp();
+    la_ld_d(aot_v2_cache_addr, aot_v2_entry,
+            offsetof(LatxAotV2FastTB, guest_slots_end));
+    la_ld_d(next_tb, aot_v2_entry,
+            offsetof(LatxAotV2FastTB, guest_slot_count));
+    la_beq(next_tb, zero_ir2_opnd, label_aot_v2_slots_done);
+    la_or(aot_v2_slot_dest, jmp_cache_addr, zero_ir2_opnd);
+    la_label(label_aot_v2_slot_loop);
+    la_addi_d(aot_v2_cache_addr, aot_v2_cache_addr, -8);
+    la_addi_d(aot_v2_slot_dest, aot_v2_slot_dest, -8);
+    la_ld_d(aot_v2_slot_value, aot_v2_cache_addr, 0);
+    la_st_d(aot_v2_slot_value, aot_v2_slot_dest, 0);
+    la_addi_d(next_tb, next_tb, -1);
+    la_bne(next_tb, zero_ir2_opnd, label_aot_v2_slot_loop);
+    la_label(label_aot_v2_slots_done);
+    la_st_d(jmp_entry, env_ir2_opnd,
+            lsenv_offset_of_aot_v2_current_context(lsenv));
+    ra_free_temp(aot_v2_slot_value);
+    ra_free_temp(aot_v2_slot_dest);
+
+    la_label(label_aot_v2_context_ready);
+    la_ld_d(next_tb, aot_v2_entry,
+            offsetof(LatxAotV2FastTB, ptr));
+    la_jirl(zero_ir2_opnd, next_tb, 0);
+    ra_free_temp(aot_v2_entry);
+    ra_free_temp(aot_v2_cache_addr);
+#endif
 #else
     la_slli_d(next_tb, next_tb, 3);
     la_ldx_d(next_tb, next_tb, jmp_cache_addr);

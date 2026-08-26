@@ -66,3 +66,24 @@
   then reported 100 deactivations and 100 inactive module-stat records.
 - The tracker unit test removes one overlapping ELF range, preserves the other
   two, and reports no second removal for the same range.
+
+## WI-2265 result
+
+- The focused fixture performs 100,000 calls from a `dlopen()` DSO back into
+  the main executable, causing 200,000 cross-module transfers.
+- Before the fast path, six 1,000,000-loop runs on `3a6000-25g` took
+  326, 327, 323, 323, 323, and 323 ms. The first context-check-only version
+  regressed to 424-436 ms and was rejected.
+- The final inline context switch took 97, 92, 94, 89, 88, and 92 ms for the
+  same workload, about 71% below the stable 323 ms baseline.
+- The 100,000-loop regression run reported `direct_targets=169` and
+  `compat_tb_allocations=0`. The test requires fewer than 10,000 dispatcher
+  targets, which distinguishes the inline path from the old per-transfer
+  dispatcher behavior without depending on wall-clock noise.
+- The `x64-v3` runner passed SPECint2000 train 12/12 on `3a6000-25g`:
+  `164.gzip` 9.967 s, `175.vpr` 5.971 s, `176.gcc` 1.112 s,
+  `181.mcf` 3.631 s, `186.crafty` 6.268 s, `197.parser` 2.164 s,
+  `252.eon` 2.099 s, `253.perlbmk` 19.693 s, `254.gap` 1.830 s,
+  `255.vortex` 3.127 s, `256.bzip2` 9.210 s, and `300.twolf` 3.778 s.
+  Every benchmark completed within 60 seconds and reported zero runtime TB
+  generation. SPEC ref was not run.

@@ -34,6 +34,7 @@ def main() -> None:
     for relative in (
         "include/latc-bundle-format.h",
         "include/latc-aot-v2-runner.h",
+        "include/exec/fasttb.h",
         "accel/tcg/cpu-exec.c",
         "accel/tcg/translate-all.c",
         "linux-user/latc-bundle-loader.c",
@@ -48,6 +49,9 @@ def main() -> None:
         "target/i386/latx/sbt/latc_native_export.c",
         "target/i386/latx/sbt/latc_native_export.h",
         "target/i386/latx/latx-config.c",
+        "target/i386/cpu.h",
+        "target/i386/latx/include/lsenv.h",
+        "target/i386/latx/translator/translate.c",
     ):
         destination = source / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -80,7 +84,7 @@ def main() -> None:
                      source / "linux-user" / name)
     manifest = json.loads((Path(__file__).resolve().parents[1] /
                            "lat-import.json").read_text())
-    build_id = f"lat-{manifest['source_commit']}-x64-v1"
+    build_id = f"lat-{manifest['source_commit']}-x64-v3"
     (source / "include/latc-build-id.h").write_text(
         "#ifndef LATC_BUILD_ID_H\n#define LATC_BUILD_ID_H\n"
         f"#define LATC_BUILD_ID \"{build_id}\"\n#endif\n"
