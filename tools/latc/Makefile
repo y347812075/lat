@@ -28,7 +28,8 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-aot-v2-translated test-aot-v2-pie test-aot-v2-runner \
 		test-aot-v2-glibc-runner test-aot-v2-signal-runner \
 		test-aot-v2-dynamic-runner test-aot-v2-dlopen-runner \
-		test-aot-v2-dynamic-semantics test-latcd-once check-import
+		test-aot-v2-dynamic-semantics test-latcd-once \
+		test-latcd-service check-import
 
 
 all: $(BUILD)/latc $(BUILD)/latcd/latcd $(BUILD)/liblatc_cfg.a
@@ -46,7 +47,7 @@ $(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/profile.o \
 $(BUILD)/latcd/latcd: $(BUILD)/latcd/main.o $(BUILD)/latcd/protocol.o \
 		$(BUILD)/aot-v2/compiler/module-inspect.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -287,7 +288,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  tests/test-aot-v2-signal-runner.sh tests/test-aot-v2-pie.sh \
 	  tests/test-aot-v2-dynamic-runner.sh tests/test-aot-v2-dlopen-runner.sh \
 	  tests/test-aot-v2-dynamic-semantics.sh tests/test-latcd-once.sh \
-	  tests/fake-latc-invalid-module.sh
+	  tests/fake-latc-invalid-module.sh tests/test-latcd-service.sh \
+	  tests/fake-latc-slow.sh tests/fake-latc-cpu.sh
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
@@ -540,6 +542,14 @@ test-latcd-once: all
 	sh tests/test-latcd-once.sh $(BUILD)/latcd/latcd $(BUILD)/latc \
 	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) \
 	  $(BUILD)/latcd-once-test
+
+test-latcd-service: all
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_GUEST)" || \
+	  { echo "usage: make test-latcd-service AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_GUEST=..."; exit 2; }
+	sh tests/test-latcd-service.sh $(BUILD)/latcd/latcd $(BUILD)/latc \
+	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) \
+	  $(BUILD)/latcd-service-test
 
 test-aot-v2-glibc-runner: all
 	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \

@@ -560,10 +560,11 @@ module-generation-aware fast dispatch have focused coverage. The AOT v2 runner
 still treats a cache miss as JIT-only for the lifetime of the process.
 
 M4 adds the external per-user compiler service described in
-`M4_DESIGN.md`. Its first step is a one-request service with FD transfer,
-stable source snapshots, validation, and atomic publication. Queueing,
-deduplication, negative caching, and nonblocking runner submission follow on
-top of that publication core.
+`M4_DESIGN.md`. The one-request publication core and resident service are
+complete, including FD transfer, stable source snapshots, validation, atomic
+publication, queueing, deduplication, resource limits, and negative caching.
+Nonblocking runner submission and the full cold-to-warm dynamic-program test
+remain.
 
 ## 12. Rosetta comparison
 

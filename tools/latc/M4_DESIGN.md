@@ -83,6 +83,13 @@ higher priority than libraries discovered later. The queue has fixed limits on
 job count and total input bytes. Duplicate job keys attach to the existing job
 instead of starting another compiler.
 
+The initial defaults are 64 waiting jobs, 4 GiB of waiting snapshots, and one
+worker. Compiler children are limited to 60 CPU seconds, 1 TiB of virtual
+address space, 2 GiB output files, and 256 open descriptors. The address-space
+limit must remain large because the LAT compiler runner reserves guest virtual
+address ranges; an 8 GiB trial forced its PIE into the guest `0x400000` range
+and was rejected by the loader.
+
 A failed job records the job key, reason class, compiler identity, attempt
 count, and retry time. The delay grows with repeated failures and is capped.
 Changing source bytes or the compiler/codegen identity creates a different key
@@ -117,7 +124,11 @@ compiler invocation, output inspection, source-digest comparison, read-only
 artifact mode, `fsync`, atomic rename, and temporary-file cleanup. The
 `--submit` mode is a synchronous diagnostic client for this one-request step.
 
-The resident service, peer credential check, compiler `rlimit` values, minimal
-child environment, priority queue, duplicate suppression, negative cache, and
-nonblocking runner client are not implemented by `WI-2273`; they belong to the
-remaining M4 work items.
+`WI-2274` adds `--serve`, same-UID peer checks, a one-second incomplete-request
+timeout, one worker, priority and byte-bounded queues, SHA-256 duplicate
+suppression, bounded exponential failure delays, compiler resource limits, a
+minimal child environment, atomic JSON counters, atomic `current` indexes, and
+SIGTERM cleanup for queued and active jobs.
+
+The nonblocking runner client is not implemented by these two work items; it
+belongs to `WI-2275`.

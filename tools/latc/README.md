@@ -41,16 +41,29 @@ stable snapshot, validates the module source digest, and publishes it with an
 atomic rename:
 
 ```sh
-build/latcd/latcd --once --socket /tmp/latcd.sock \
+build/latcd/latcd --once --socket "$XDG_RUNTIME_DIR/latcd.sock" \
   --cache-dir /path/to/cache --latc build/latc \
   --runner /path/to/latx-x86_64 --runtime-dir /path/to/aot-v2-runtime
-build/latcd/latcd --submit --socket /tmp/latcd.sock /path/to/x86-program
+build/latcd/latcd --submit --socket "$XDG_RUNTIME_DIR/latcd.sock" \
+  /path/to/x86-program
 ```
 
 On a LoongArch host, `make test-latcd-once` validates compiler failure cleanup,
 bad sources, writable descriptors, malformed compiler output, replacement of a
 bad cache entry, strict AOT execution, and an existing-module cache hit. The
-resident queue and automatic runner submission are later M4 work.
+The resident service uses the same trusted configuration and adds one compiler
+worker, SHA-256 deduplication, a priority queue, resource limits, bounded
+failure delays, and atomic status counters:
+
+```sh
+build/latcd/latcd --serve --socket "$XDG_RUNTIME_DIR/latcd.sock" \
+  --cache-dir "$HOME/.cache/latx/aot-v2" --latc build/latc \
+  --runner /path/to/latx-x86_64 --runtime-dir /path/to/aot-v2-runtime \
+  --stats "$XDG_RUNTIME_DIR/latcd-stats.json"
+```
+
+The socket parent must be owned by the current user and have no group or other
+permissions. Automatic runner submission is the next M4 work item.
 
 The module contains instruction-level Host-PC to guest-PC records in
 `.rodata.lat.map`. The runner publishes every supported native-image TB,

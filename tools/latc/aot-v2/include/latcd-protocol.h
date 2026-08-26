@@ -22,6 +22,8 @@ enum LatcdStatus {
     LATCD_STATUS_COMPILE_FAILED = 3,
     LATCD_STATUS_INVALID_MODULE = 4,
     LATCD_STATUS_IO_ERROR = 5,
+    LATCD_STATUS_QUEUE_FULL = 6,
+    LATCD_STATUS_NEGATIVE_CACHE = 7,
 };
 
 typedef struct LatcdRequestV1 {
