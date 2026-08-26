@@ -29,7 +29,7 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-aot-v2-glibc-runner test-aot-v2-signal-runner \
 		test-aot-v2-dynamic-runner test-aot-v2-dlopen-runner \
 		test-aot-v2-dynamic-semantics test-latcd-once \
-		test-latcd-service check-import
+		test-latcd-service test-latcd-runner check-import
 
 
 all: $(BUILD)/latc $(BUILD)/latcd/latcd $(BUILD)/liblatc_cfg.a
@@ -243,6 +243,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-native-relocate $(BUILD)/tests/test-native-dispatch \
 	$(BUILD)/tests/test-aot-v2-module-pack \
 	$(BUILD)/tests/test-latcd-protocol \
+	$(BUILD)/tests/test-latcd-client \
 	$(BUILD)/tests/test-aot-v2-guest-elf-map \
 	$(BUILD)/tests/test-x86-linux-user \
 	$(BUILD)/tests/x86-exit42 $(BUILD)/tests/x86-pie-exit42 \
@@ -289,7 +290,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  tests/test-aot-v2-dynamic-runner.sh tests/test-aot-v2-dlopen-runner.sh \
 	  tests/test-aot-v2-dynamic-semantics.sh tests/test-latcd-once.sh \
 	  tests/fake-latc-invalid-module.sh tests/test-latcd-service.sh \
-	  tests/fake-latc-slow.sh tests/fake-latc-cpu.sh
+	  tests/fake-latc-slow.sh tests/fake-latc-cpu.sh \
+	  tests/test-latcd-runner.sh
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
@@ -298,6 +300,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-native-dispatch
 	$(BUILD)/tests/test-aot-v2-module-pack
 	$(BUILD)/tests/test-latcd-protocol
+	$(BUILD)/tests/test-latcd-client
 	$(BUILD)/tests/test-aot-v2-guest-elf-map \
 	  $(BUILD)/tests/x86-pie-exit42 $(BUILD)/tests/x86-pie-exit42 \
 	  $(BUILD)/tests/x86-exit42
@@ -381,6 +384,11 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 
 $(BUILD)/tests/test-latcd-protocol: \
 		aot-v2/tests/test-latcd-protocol.c $(BUILD)/latcd/protocol.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+
+$(BUILD)/tests/test-latcd-client: aot-v2/tests/test-latcd-client.c \
+		aot-v2/runtime/latcd-client.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 
@@ -550,6 +558,16 @@ test-latcd-service: all
 	sh tests/test-latcd-service.sh $(BUILD)/latcd/latcd $(BUILD)/latc \
 	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) \
 	  $(BUILD)/latcd-service-test
+
+test-latcd-runner: all $(BUILD)/tests/x86-static-hello \
+		$(BUILD)/tests/x86-dynamic-hello
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_ROOTFS)" || \
+	  { echo "usage: make test-latcd-runner AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_ROOTFS=..."; exit 2; }
+	sh tests/test-latcd-runner.sh $(BUILD)/latcd/latcd $(BUILD)/latc \
+	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) \
+	  $(BUILD)/tests/x86-static-hello $(BUILD)/tests/x86-dynamic-hello \
+	  $(BUILD)/latcd-runner-test
 
 test-aot-v2-glibc-runner: all
 	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \

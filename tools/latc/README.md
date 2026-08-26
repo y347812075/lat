@@ -59,11 +59,23 @@ failure delays, and atomic status counters:
 build/latcd/latcd --serve --socket "$XDG_RUNTIME_DIR/latcd.sock" \
   --cache-dir "$HOME/.cache/latx/aot-v2" --latc build/latc \
   --runner /path/to/latx-x86_64 --runtime-dir /path/to/aot-v2-runtime \
+  --x86-rootfs /path/to/x86-rootfs \
   --stats "$XDG_RUNTIME_DIR/latcd-stats.json"
 ```
 
 The socket parent must be owned by the current user and have no group or other
-permissions. Automatic runner submission is the next M4 work item.
+permissions. Set the same socket on the runner to request missing modules:
+
+```sh
+LATX_AOT_V2_CACHE_DIR="$HOME/.cache/latx/aot-v2" \
+LATX_AOT_V2_LATCD_SOCKET="$XDG_RUNTIME_DIR/latcd.sock" \
+  /path/to/latx-x86_64 -L /path/to/x86-rootfs /path/to/x86-program
+```
+
+The runner sends the already-open ELF FD with a nonblocking `sendmsg` and does
+not wait for an acknowledgement or compilation. `compiler_submissions` means
+the packet reached the Unix socket; daemon counters and cache files report the
+final result.
 
 The module contains instruction-level Host-PC to guest-PC records in
 `.rodata.lat.map`. The runner publishes every supported native-image TB,

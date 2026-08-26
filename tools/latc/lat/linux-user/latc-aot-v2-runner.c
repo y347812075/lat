@@ -9,6 +9,8 @@
 #include "latc-aot-v2-runner.h"
 #include "latc-bundle-loader.h"
 #include "latc-build-id.h"
+#include "latcd-client.h"
+#include "latcd-protocol.h"
 #include "guest-elf-map.h"
 #include "module-loader.h"
 #include "qemu-def.h"
@@ -82,6 +84,12 @@ static LatAotV2PendingMapping **pending_mapping_tail = &pending_mapping_head;
 static __thread LatAotModuleInstanceV2 *aot_v2_current_instance;
 static __thread LatAotV2TargetCacheEntry *aot_v2_target_cache;
 static _Atomic uint64_t direct_targets;
+static _Atomic uint64_t compiler_submissions;
+static _Atomic uint64_t compiler_submission_failures;
+static _Atomic uint64_t compiler_submission_duplicates;
+static _Atomic uint64_t compiler_request_sequence;
+static uint64_t discovered_elfs;
+static GHashTable *submitted_sources;
 
 static int register_discovered_module(const LatGuestElfInfoV2 *info,
                                       LatAotV2RuntimeInstance **instance,
@@ -107,8 +115,13 @@ void latc_aot_v2_report_stats(void)
     }
     fprintf(stderr,
             "latx: AOT v2 runtime stats direct_targets=%llu "
-            "compat_tb_allocations=0\n",
-            (unsigned long long)atomic_load(&direct_targets));
+            "compat_tb_allocations=0 compiler_submissions=%llu "
+            "compiler_submission_failures=%llu "
+            "compiler_submission_duplicates=%llu\n",
+            (unsigned long long)atomic_load(&direct_targets),
+            (unsigned long long)atomic_load(&compiler_submissions),
+            (unsigned long long)atomic_load(&compiler_submission_failures),
+            (unsigned long long)atomic_load(&compiler_submission_duplicates));
     for (LatAotV2ModuleStats *stats = module_stats; stats;
          stats = stats->next) {
         char source[65];
@@ -157,7 +170,51 @@ bool latc_aot_v2_mapping_enabled(void)
 {
     const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
     const char *module = getenv("LATX_AOT_V2_MODULE");
-    return (cache && *cache) || (module && *module);
+    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
+    return (cache && *cache) || (module && *module) || (socket && *socket);
+}
+
+static void submit_missing_module(int fd, const LatGuestElfInfoV2 *info,
+                                  uint32_t priority)
+{
+    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
+    if (!socket || !*socket) {
+        return;
+    }
+    if (!submitted_sources) {
+        submitted_sources = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                   g_free, NULL);
+        if (!submitted_sources) {
+            atomic_fetch_add(&compiler_submission_failures, 1);
+            return;
+        }
+    }
+    char source[65];
+    digest_hex(info->source_sha256, source);
+    if (g_hash_table_contains(submitted_sources, source)) {
+        atomic_fetch_add(&compiler_submission_duplicates, 1);
+        return;
+    }
+    g_hash_table_add(submitted_sources, g_strdup(source));
+    uint64_t sequence = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
+    uint64_t request_id = ((uint64_t)getpid() << 32) ^ sequence;
+    char error[256] = {0};
+    if (latcd_client_submit_fd(socket, fd, priority, request_id,
+                               error, sizeof(error))) {
+        atomic_fetch_add(&compiler_submission_failures, 1);
+        if (getenv("LATX_AOT_V2_REPORT")) {
+            fprintf(stderr,
+                    "latx: AOT v2 compiler submission failed source=%s: %s\n",
+                    source, error[0] ? error : strerror(errno));
+        }
+        return;
+    }
+    atomic_fetch_add(&compiler_submissions, 1);
+    if (getenv("LATX_AOT_V2_REPORT")) {
+        fprintf(stderr,
+                "latx: AOT v2 compiler submitted source=%s priority=%u\n",
+                source, priority);
+    }
 }
 
 static void drain_mappings(void)
@@ -187,9 +244,16 @@ static void drain_mappings(void)
             pending->mapping_size, pending->file_offset, TARGET_PAGE_SIZE,
             &info, &added, error, sizeof(error));
         if (!result && added) {
+            discovered_elfs++;
             LatAotV2RuntimeInstance *instance = NULL;
             int registered = register_discovered_module(
                 info, &instance, error, sizeof(error));
+            if (registered <= 0) {
+                submit_missing_module(
+                    pending->fd, info,
+                    discovered_elfs <= 2 ? LATCD_PRIORITY_STARTUP :
+                                           LATCD_PRIORITY_LIBRARY);
+            }
             LatAotV2ModuleStats *stats = add_module_stats(
                 info, registered > 0 ? LAT_AOT_V2_MODULE_REGISTERED :
                 registered == 0 ? LAT_AOT_V2_MODULE_MISSING :

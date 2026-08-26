@@ -73,12 +73,16 @@ def main() -> None:
                  "aot-v2/include/lat-aot-v2.h",
                  source / "include/lat-aot-v2.h")
     shutil.copy2(Path(__file__).resolve().parents[1] /
+                 "aot-v2/include/latcd-protocol.h",
+                 source / "include/latcd-protocol.h")
+    shutil.copy2(Path(__file__).resolve().parents[1] /
                  "aot-v2/runtime/registry.h",
                  source / "include/registry.h")
     shutil.copy2(Path(__file__).resolve().parents[1] /
                  "aot-v2/runtime/module-loader.h",
                  source / "include/module-loader.h")
-    for name in ("guest-elf-map.c", "guest-elf-map.h"):
+    for name in ("guest-elf-map.c", "guest-elf-map.h",
+                 "latcd-client.c", "latcd-client.h"):
         shutil.copy2(Path(__file__).resolve().parents[1] /
                      "aot-v2/runtime" / name,
                      source / "linux-user" / name)
@@ -97,6 +101,7 @@ def main() -> None:
                  "  'latc-bundle-loader.c',\n",
                  "  'latc-bundle-loader.c',\n"
                  "  'guest-elf-map.c',\n"
+                 "  'latcd-client.c',\n"
                  "  'latc-aot-v2-runner.c',\n")
     replace_once(source / "target/i386/latx/sbt/meson.build",
                  "  'aot.c',\n", "  'aot.c',\n  'latc_native_export.c',\n")

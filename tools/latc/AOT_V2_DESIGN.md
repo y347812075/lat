@@ -563,8 +563,8 @@ M4 adds the external per-user compiler service described in
 `M4_DESIGN.md`. The one-request publication core and resident service are
 complete, including FD transfer, stable source snapshots, validation, atomic
 publication, queueing, deduplication, resource limits, and negative caching.
-Nonblocking runner submission and the full cold-to-warm dynamic-program test
-remain.
+Nonblocking runner submission is also complete for static, startup dynamic,
+and later DSO mappings. The full M1-M3 and SPECint train regression remains.
 
 ## 12. Rosetta comparison
 
