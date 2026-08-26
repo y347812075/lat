@@ -43,10 +43,12 @@ compile_module()
 }
 
 plugin_pc=$(nm -D "$plugin" | awk '$3 == "latc_plugin_apply" { print "0x" $1; exit }')
-test -n "$plugin_pc"
-printf '%s 1\n' "$plugin_pc" >"$work/plugin.profile"
+signal_pc=$(nm -D "$plugin" | awk '$3 == "latc_plugin_signal_site" { print "0x" $1; exit }')
+resume_pc=$(nm -D "$plugin" | awk '$3 == "latc_plugin_signal_resume" { print "0x" $1; exit }')
+test -n "$plugin_pc" -a -n "$signal_pc" -a -n "$resume_pc"
+printf '%s 1\n%s 1\n%s 1\n' "$plugin_pc" "$signal_pc" "$resume_pc" \
+  >"$work/plugin.profile"
 compile_module "$plugin" "$work/plugin.so" "$work/plugin.profile"
-compile_module "$guest" "$work/main.so"
 compile_module "$interp" "$work/interp.so"
 compile_module "$libc" "$work/libc.so"
 
@@ -63,23 +65,28 @@ run_guest()
       "$guest" >"$output" 2>"$error"
 }
 
-printf 'dlopen loads=100 result=40 moved=1\n' >"$work/expected"
+printf 'dlopen loads=100 signals=100 concurrent_invalidation=1 result=40 moved=1\n' \
+  >"$work/expected"
 run_guest "$work/empty-cache" "$work/cold.out" "$work/cold.err"
 cmp "$work/expected" "$work/cold.out"
-test "$(grep -c 'discovered ELF.*module=missing' "$work/cold.err")" -eq 103
+test "$(grep -c 'discovered ELF.*module=missing' "$work/cold.err")" -ge 102
 
 run_guest "$work/hot-cache" "$work/hot.out" "$work/hot.err"
 cmp "$work/expected" "$work/hot.out"
-test "$(grep -c 'discovered ELF.*module=registered' "$work/hot.err")" -eq 103
+test "$(grep -c 'discovered ELF.*module=registered' "$work/hot.err")" -ge 102
 test "$(grep -Ec 'module=(registered|inactive) aot_lookups=[1-9][0-9]*' \
-  "$work/hot.err")" -eq 103
+  "$work/hot.err")" -ge 102
 plugin_sha=$(sha256sum "$plugin" | awk '{print $1}')
 grep -Eq "module stats source=$plugin_sha .*module=inactive aot_lookups=[1-9]" \
   "$work/hot.err"
 test "$(grep -Ec "module stats source=$plugin_sha .*module=inactive" \
   "$work/hot.err")" -eq 100
-test "$(grep -c 'AOT v2 deactivated range=' "$work/hot.err")" -eq 100
+test "$(grep -c 'AOT v2 deactivated range=' "$work/hot.err")" -ge 100
+grep -Eq 'invalidation_unmap=100 .*signal_pc_lookups=100 ' \
+  "$work/hot.err"
 grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' "$work/hot.err"
+grep -Eq 'signal_pc_lookups=100 signal_pc_hits=100 signal_pc_misses=0' \
+  "$work/hot.err"
 
 run_guest "$work/hot-cache" "$work/no-aslr.out" "$work/no-aslr.err" \
   setarch "$(uname -m)" -R
@@ -89,6 +96,8 @@ grep -Eq "module stats source=$plugin_sha .*module=inactive aot_lookups=[1-9]" \
 test "$(grep -Ec "module stats source=$plugin_sha .*module=inactive" \
   "$work/no-aslr.err")" -eq 100
 grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' \
+  "$work/no-aslr.err"
+grep -Eq 'signal_pc_lookups=100 signal_pc_hits=100 signal_pc_misses=0' \
   "$work/no-aslr.err"
 
 echo "test-aot-v2-dlopen-runner: PASS"

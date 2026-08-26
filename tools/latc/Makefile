@@ -205,22 +205,28 @@ $(BUILD)/tests/x86-glibc-hello: tests/x86-glibc-hello.c
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -static -no-pie -Wl,--build-id=none -o $@ $<
 
-$(BUILD)/tests/x86-signal-recover: tests/x86-signal-recover.c
+$(BUILD)/tests/x86-signal-recover: tests/x86-signal-recover.c \
+		tests/x86-signal-sites.S
 	@mkdir -p $(dir $@)
-	$(X86_CC) -O2 -static -no-pie -Wl,--build-id=none -o $@ $<
+	$(X86_CC) -O2 -static -no-pie -Wl,--build-id=none -o $@ $^
+
+$(BUILD)/tests/x86-signal-recover.profile: \
+		$(BUILD)/tests/x86-signal-recover
+	nm -n $< | awk '$$3 ~ /^signal_.*_resume$$/ { print "0x" $$1, 1 }' >$@
 
 $(BUILD)/tests/x86-dynamic-hello: tests/x86-glibc-hello.c
 	@mkdir -p $(dir $@)
 	$(X86_CC) -O2 -pie -Wl,--build-id=none -o $@ $<
 
-$(BUILD)/tests/x86-dlopen-plugin.so: tests/x86-dlopen-plugin.c
+$(BUILD)/tests/x86-dlopen-plugin.so: tests/x86-dlopen-plugin.c \
+		tests/x86-dlopen-signal.S
 	@mkdir -p $(dir $@)
 	$(X86_CC) -O2 -fPIC -shared -Wl,-e,latc_plugin_entry \
-	  -Wl,--build-id=none -o $@ $<
+	  -Wl,--build-id=none -o $@ $^
 
 $(BUILD)/tests/x86-dlopen-main: tests/x86-dlopen-main.c
 	@mkdir -p $(dir $@)
-	$(X86_CC) -O2 -fPIE -pie -Wl,--build-id=none -o $@ $< -ldl
+	$(X86_CC) -O2 -fPIE -pie -Wl,--build-id=none -o $@ $< -ldl -pthread
 
 $(BUILD)/tests/x86-semantics-startup.so: tests/x86-semantics-startup.c
 	@mkdir -p $(dir $@)
@@ -490,6 +496,22 @@ $(BUILD)/aot-v2/fixture-bad-descriptor.so: aot-v2/tests/fixture.c \
 	  -l:liblat-aot-runtime.so.2 -o $@ \
 	  aot-v2/tests/fixture.c aot-v2/tests/fixture-entry.S
 
+$(BUILD)/aot-v2/fixture-bad-pc-map.so: aot-v2/tests/fixture.c \
+		aot-v2/tests/fixture-entry.S aot-v2/tests/module.map \
+		$(BUILD)/aot-v2/liblat-aot-runtime.so.2
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -O2 -fPIC -shared -nostdlib \
+	  -DLAT_AOT_FIXTURE_BAD_PC_MAP=1 \
+	  -Wl,-z,defs -Wl,-z,now -Wl,-z,relro \
+	  -Wl,--unique=.text.lat.tu -Wl,--unique=.rodata.lat.tb \
+	  -Wl,--unique=.rodata.lat.map \
+	  -Wl,--unique=.data.rel.ro.lat.module \
+	  -Wl,--version-script=aot-v2/tests/module.map \
+	  -Wl,--build-id=sha1 \
+	  -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
+	  -l:liblat-aot-runtime.so.2 -o $@ \
+	  aot-v2/tests/fixture.c aot-v2/tests/fixture-entry.S
+
 $(BUILD)/tests/test-aot-v2-loader: aot-v2/tests/test-loader.c \
 		$(BUILD)/aot-v2/runtime/module-loader.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o \
@@ -528,6 +550,7 @@ $(BUILD)/tests/test-aot-v2-translated-module: \
 AOT_V2_NATIVE_TESTS := $(BUILD)/aot-v2/liblat-aot-runtime.so.2 \
 	$(BUILD)/aot-v2/fixture.so \
 	$(BUILD)/aot-v2/fixture-bad-descriptor.so \
+	$(BUILD)/aot-v2/fixture-bad-pc-map.so \
 	$(BUILD)/tests/test-aot-v2-loader
 endif
 
@@ -557,6 +580,9 @@ ifeq ($(HOST_ARCH),loongarch64)
 	LD_LIBRARY_PATH=$(abspath $(BUILD)/aot-v2) \
 	  $(BUILD)/tests/test-aot-v2-loader --expect-reject \
 	  $(abspath $(BUILD)/aot-v2/fixture-bad-descriptor.so)
+	LD_LIBRARY_PATH=$(abspath $(BUILD)/aot-v2) \
+	  $(BUILD)/tests/test-aot-v2-loader --expect-pc-map-reject \
+	  $(abspath $(BUILD)/aot-v2/fixture-bad-pc-map.so)
 endif
 
 test-aot-v2-translated: all $(BUILD)/aot-v2/liblat-aot-runtime.so.2 \
@@ -619,6 +645,7 @@ test-latcd-runner: all $(BUILD)/tests/x86-static-hello \
 
 test-aot-v2-m4: all $(BUILD)/tests/x86-static-hello \
 		$(BUILD)/tests/x86-glibc-hello $(BUILD)/tests/x86-signal-recover \
+		$(BUILD)/tests/x86-signal-recover.profile \
 		$(BUILD)/tests/x86-dynamic-hello $(BUILD)/tests/x86-dlopen-main \
 		$(BUILD)/tests/x86-dlopen-plugin.so \
 		$(BUILD)/tests/x86-semantics-main \
@@ -637,7 +664,8 @@ test-aot-v2-m4: all $(BUILD)/tests/x86-static-hello \
 	LD_LIBRARY_PATH=$(dir $(RUNNER)) \
 	  scripts/compile-native-image.sh $(BUILD)/latc $(RUNNER) \
 	  $(BUILD)/tests/x86-signal-recover \
-	  $(BUILD)/aot-v2-m4/signal.latnative
+	  $(BUILD)/aot-v2-m4/signal.latnative \
+	  $(BUILD)/tests/x86-signal-recover.profile
 	$(MAKE) test-latcd-once AOT_V2_RUNNER=$(AOT_V2_RUNNER) \
 	  AOT_V2_RUNTIME_DIR=$(AOT_V2_RUNTIME_DIR) \
 	  X86_GUEST=$(BUILD)/tests/x86-static-hello

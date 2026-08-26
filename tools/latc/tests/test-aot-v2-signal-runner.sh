@@ -30,7 +30,7 @@ LATC_STRICT_AOT=1 \
 LATC_STATS_OUT="$work/stats.json" \
   "$work/runner" >"$work/stdout" 2>"$work/stderr"
 
-printf 'AOT v2 signal recovery works\n' >"$work/expected"
+printf '%s\n' 'AOT v2 signal recovery boundary=1 internal=1 helper=1 registers=1 nested=1 altstack=1 sigreturn=1' >"$work/expected"
 cmp "$work/expected" "$work/stdout"
 grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' "$work/stderr"
 grep -q '"runtime_tb_gen_attempts":0' "$work/stats.json"
