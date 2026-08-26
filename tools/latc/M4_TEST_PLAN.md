@@ -101,3 +101,27 @@ The next dynamic run registered all three modules, reported AOT lookups and
 partial modules and can still report JIT fallbacks, matching the established M2
 acceptance. Existing M2 dynamic and M3 100-cycle dlopen/reload tests also passed
 with the new runner.
+
+## M4 final regression
+
+The final 3A6000-25g regression passed static glibc, precise signal recovery,
+M2 dynamic, M3 100-cycle dlopen/reload, dynamic TLS/IFUNC/version/interposition
+semantics, the latcd five-phase service test, and the runner cold/warm test.
+
+All twelve SPECint2000 train modules were regenerated with the M4 runner and
+passed. Every manifest entry was `valid=true`, `module_tbs` equalled
+`native_tbs`, and both runtime TB-generation counters were zero. Times were:
+
+```text
+164.gzip       9.965333 s    175.vpr       6.044121 s
+176.gcc        1.122332 s    181.mcf       3.640545 s
+186.crafty     6.223693 s    197.parser    2.166699 s
+252.eon        2.091868 s    253.perlbmk  19.550169 s
+254.gap        1.826500 s    255.vortex    3.049790 s
+256.bzip2      9.183712 s    300.twolf     3.721174 s
+```
+
+No test exceeded 60 seconds. SPEC ref was not run. The tested runner SHA-256 is
+`99e33ae789a4b93559aaf86d89fe3839337dd4cebf95fcda883c79a957e2d4ec`;
+its runtime library SHA-256 is
+`255b2ff160d32a96ed2d5d4e77bb7efa55bb19019e69fba902d4f1278f34dbca`.

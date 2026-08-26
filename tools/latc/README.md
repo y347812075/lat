@@ -98,6 +98,20 @@ The test rejects partial modules, any runtime TB generation, invalid SPEC
 output, and a benchmark that exceeds 60 seconds. M1 passed all twelve train
 workloads on `3a6000-25g` on 2026-08-25. Ref inputs were not run.
 
+After building an AOT v2 runner, rerun the complete M4 test set with:
+
+```sh
+make -C tools/latc test-aot-v2-m4 \
+  RUNNER=/path/to/exporter/latx-x86_64 \
+  AOT_V2_RUNNER=/path/to/aot-v2/latx-x86_64 \
+  AOT_V2_RUNTIME_DIR=/path/to/aot-v2 \
+  X86_ROOTFS=/path/to/x86-rootfs SPEC_ROOT=/path/to/spec2000
+```
+
+This includes cold/warm compiler service tests, static glibc, signal recovery,
+dynamic loading and symbol semantics, and a fresh SPECint train 12/12 build and
+run. It does not run SPEC ref.
+
 `latc inspect` reports this existing format as
 `execution_model=lat-aot-bundle`. It is deliberately not called a standalone
 native ELF: the file still contains the LAT runner and can enter LAT's JIT.
