@@ -28,10 +28,10 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-aot-v2-translated test-aot-v2-pie test-aot-v2-runner \
 		test-aot-v2-glibc-runner test-aot-v2-signal-runner \
 		test-aot-v2-dynamic-runner test-aot-v2-dlopen-runner \
-		test-aot-v2-dynamic-semantics check-import
+		test-aot-v2-dynamic-semantics test-latcd-once check-import
 
 
-all: $(BUILD)/latc $(BUILD)/liblatc_cfg.a
+all: $(BUILD)/latc $(BUILD)/latcd/latcd $(BUILD)/liblatc_cfg.a
 
 $(BUILD)/liblatc_cfg.a: $(CFG_OBJ)
 	$(AR) rcs $@ $^
@@ -41,6 +41,11 @@ $(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/profile.o \
 		$(BUILD)/aot-v2/compiler/module-inspect.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o \
 		$(FORMAT_OBJ) $(BUILD)/native/format/native-image.o $(BUILD)/liblatc_cfg.a
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/latcd/latcd: $(BUILD)/latcd/main.o $(BUILD)/latcd/protocol.o \
+		$(BUILD)/aot-v2/compiler/module-inspect.o \
+		$(BUILD)/aot-v2/runtime/elf-validate.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD)/%.o: %.c
@@ -236,6 +241,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-fallback-loader $(BUILD)/tests/test-native-format \
 	$(BUILD)/tests/test-native-relocate $(BUILD)/tests/test-native-dispatch \
 	$(BUILD)/tests/test-aot-v2-module-pack \
+	$(BUILD)/tests/test-latcd-protocol \
 	$(BUILD)/tests/test-aot-v2-guest-elf-map \
 	$(BUILD)/tests/test-x86-linux-user \
 	$(BUILD)/tests/x86-exit42 $(BUILD)/tests/x86-pie-exit42 \
@@ -280,7 +286,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  tests/test-aot-v2-runner.sh tests/test-aot-v2-glibc-runner.sh \
 	  tests/test-aot-v2-signal-runner.sh tests/test-aot-v2-pie.sh \
 	  tests/test-aot-v2-dynamic-runner.sh tests/test-aot-v2-dlopen-runner.sh \
-	  tests/test-aot-v2-dynamic-semantics.sh
+	  tests/test-aot-v2-dynamic-semantics.sh tests/test-latcd-once.sh \
+	  tests/fake-latc-invalid-module.sh
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
@@ -288,6 +295,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-native-relocate
 	$(BUILD)/tests/test-native-dispatch
 	$(BUILD)/tests/test-aot-v2-module-pack
+	$(BUILD)/tests/test-latcd-protocol
 	$(BUILD)/tests/test-aot-v2-guest-elf-map \
 	  $(BUILD)/tests/x86-pie-exit42 $(BUILD)/tests/x86-pie-exit42 \
 	  $(BUILD)/tests/x86-exit42
@@ -368,6 +376,11 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin)[0]; assert d["tb_count"] == 1; assert d["relocation_count"] == 1; assert d["pc_map_count"] == 0'
 	$(MAKE) test-aot-v2
 	$(MAKE) check-import
+
+$(BUILD)/tests/test-latcd-protocol: \
+		aot-v2/tests/test-latcd-protocol.c $(BUILD)/latcd/protocol.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 
 $(BUILD)/tests/test-aot-v2-format: aot-v2/tests/test-format.c \
 		$(BUILD)/aot-v2/runtime/elf-validate.o
@@ -519,6 +532,14 @@ test-aot-v2-runner: all
 	sh tests/test-aot-v2-runner.sh $(BUILD)/latc $(AOT_V2_RUNNER) \
 	  $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) $(NATIVE_IMAGE) \
 	  $(BUILD)/aot-v2-runner-test
+
+test-latcd-once: all
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_GUEST)" || \
+	  { echo "usage: make test-latcd-once AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_GUEST=..."; exit 2; }
+	sh tests/test-latcd-once.sh $(BUILD)/latcd/latcd $(BUILD)/latc \
+	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) \
+	  $(BUILD)/latcd-once-test
 
 test-aot-v2-glibc-runner: all
 	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \

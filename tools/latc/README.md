@@ -35,6 +35,23 @@ build/latc compile-module /path/to/x86-program -o program.so \
 build/latc inspect-module --json program.so
 ```
 
+M4 adds a separate per-user compiler process. The first implemented step
+accepts one read-only x86 ELF file descriptor over a Unix socket, compiles a
+stable snapshot, validates the module source digest, and publishes it with an
+atomic rename:
+
+```sh
+build/latcd/latcd --once --socket /tmp/latcd.sock \
+  --cache-dir /path/to/cache --latc build/latc \
+  --runner /path/to/latx-x86_64 --runtime-dir /path/to/aot-v2-runtime
+build/latcd/latcd --submit --socket /tmp/latcd.sock /path/to/x86-program
+```
+
+On a LoongArch host, `make test-latcd-once` validates compiler failure cleanup,
+bad sources, writable descriptors, malformed compiler output, replacement of a
+bad cache entry, strict AOT execution, and an existing-module cache hit. The
+resident queue and automatic runner submission are later M4 work.
+
 The module contains instruction-level Host-PC to guest-PC records in
 `.rodata.lat.map`. The runner publishes every supported native-image TB,
 restores x86 state from those records on a Host signal, and puts direct Host
