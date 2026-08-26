@@ -554,14 +554,16 @@ artifact without races.
 
 ## 11. Current implementation boundary
 
-M0, static M1, and the M2 dynamic hello path are complete. M1 covers full
-static modules. M2 accepts `ET_DYN`, discovers the main executable,
-`PT_INTERP`, and startup shared objects, registers each guest load bias, and
-runs a dynamically linked hello through separate main/loader/libc modules.
-It still retains the temporary `TranslationBlock` adapter, partial PIE module
-coverage, and pinned module mappings. Replacing the compatibility object with
-direct `LatAotTargetV2` execution and completing the M1/M2 regression remain
-the final M2 work. The compiler daemon stays deferred.
+M0 through M3 are complete. Static executables, dynamically linked startup
+images, `dlopen()` modules, cross-module calls, callbacks, unload/reload, and
+module-generation-aware fast dispatch have focused coverage. The AOT v2 runner
+still treats a cache miss as JIT-only for the lifetime of the process.
+
+M4 adds the external per-user compiler service described in
+`M4_DESIGN.md`. Its first step is a one-request service with FD transfer,
+stable source snapshots, validation, and atomic publication. Queueing,
+deduplication, negative caching, and nonblocking runner submission follow on
+top of that publication core.
 
 ## 12. Rosetta comparison
 
