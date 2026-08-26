@@ -75,9 +75,13 @@ static int range_valid(size_t file_size, uint64_t offset, uint64_t size)
     return offset <= file_size && size <= file_size - offset;
 }
 
-static uint64_t align4(uint64_t value)
+static int align4(uint64_t value, uint64_t *aligned)
 {
-    return (value + 3) & ~(uint64_t)3;
+    if (value > UINT64_MAX - 3) {
+        return -1;
+    }
+    *aligned = (value + 3) & ~(uint64_t)3;
+    return 0;
 }
 
 static const void *vaddr_to_file(const unsigned char *file, size_t file_size,
@@ -91,6 +95,7 @@ static const void *vaddr_to_file(const unsigned char *file, size_t file_size,
         }
         uint64_t delta = address - phdr->p_vaddr;
         if (delta <= phdr->p_filesz && size <= phdr->p_filesz - delta &&
+            phdr->p_offset <= file_size && delta <= file_size - phdr->p_offset &&
             range_valid(file_size, phdr->p_offset + delta, size)) {
             return file + phdr->p_offset + delta;
         }
@@ -112,7 +117,8 @@ static int validate_note(const unsigned char *file, size_t file_size,
         if (phdr->p_type != PT_NOTE) {
             continue;
         }
-        if (!range_valid(file_size, phdr->p_offset, phdr->p_filesz)) {
+        if (phdr->p_offset % _Alignof(Elf64_Nhdr) ||
+            !range_valid(file_size, phdr->p_offset, phdr->p_filesz)) {
             return reject(error, error_size, "AOT note segment is truncated");
         }
         uint64_t cursor = phdr->p_offset;
@@ -123,9 +129,12 @@ static int validate_note(const unsigned char *file, size_t file_size,
             }
             const Elf64_Nhdr *header = (const void *)(file + cursor);
             cursor += sizeof(*header);
-            uint64_t name_size = align4(header->n_namesz);
-            uint64_t desc_size = align4(header->n_descsz);
-            if (name_size > end - cursor || desc_size > end - cursor - name_size) {
+            uint64_t name_size;
+            uint64_t desc_size;
+            if (align4(header->n_namesz, &name_size) ||
+                align4(header->n_descsz, &desc_size) ||
+                name_size > end - cursor ||
+                desc_size > end - cursor - name_size) {
                 return reject(error, error_size, "AOT note payload is truncated");
             }
             const char *name = (const void *)(file + cursor);
@@ -203,6 +212,7 @@ static int validate_dynamic(const unsigned char *file, size_t file_size,
         }
     }
     if (!dynamic_phdr ||
+        dynamic_phdr->p_offset % _Alignof(Elf64_Dyn) ||
         !range_valid(file_size, dynamic_phdr->p_offset,
                      dynamic_phdr->p_filesz) ||
         dynamic_phdr->p_filesz % sizeof(Elf64_Dyn)) {
@@ -283,6 +293,7 @@ static int validate_dynamic_symbols(const unsigned char *file,
 {
     if (!header->e_shoff || header->e_shentsize != sizeof(Elf64_Shdr) ||
         !header->e_shnum ||
+        header->e_shoff % _Alignof(Elf64_Shdr) ||
         !range_valid(file_size, header->e_shoff,
                      (uint64_t)header->e_shnum * sizeof(Elf64_Shdr))) {
         return reject(error, error_size, "AOT section table is missing or invalid");
@@ -301,6 +312,7 @@ static int validate_dynamic_symbols(const unsigned char *file,
     if (!symbols || symbols->sh_link >= header->e_shnum ||
         symbols->sh_entsize != sizeof(Elf64_Sym) ||
         symbols->sh_size % sizeof(Elf64_Sym) ||
+        symbols->sh_offset % _Alignof(Elf64_Sym) ||
         !range_valid(file_size, symbols->sh_offset, symbols->sh_size)) {
         return reject(error, error_size, "AOT dynamic symbol table is invalid");
     }
@@ -371,6 +383,7 @@ static int address_is_in_load(const Elf64_Phdr *phdrs, size_t phnum,
 {
     for (size_t i = 0; i < phnum; i++) {
         const Elf64_Phdr *phdr = &phdrs[i];
+        /* A relative relocation may encode a valid one-past module pointer. */
         if (phdr->p_type == PT_LOAD && address >= phdr->p_vaddr &&
             address - phdr->p_vaddr <= phdr->p_memsz) {
             return 1;
@@ -396,6 +409,7 @@ static int validate_relocations(const unsigned char *file, size_t file_size,
         }
         if (section->sh_entsize != sizeof(Elf64_Rela) ||
             section->sh_size % sizeof(Elf64_Rela) ||
+            section->sh_offset % _Alignof(Elf64_Rela) ||
             !range_valid(file_size, section->sh_offset, section->sh_size) ||
             section->sh_link >= header->e_shnum) {
             return reject(error, error_size,
@@ -404,6 +418,8 @@ static int validate_relocations(const unsigned char *file, size_t file_size,
         const Elf64_Shdr *symbol_section = &sections[section->sh_link];
         if (symbol_section->sh_type != SHT_DYNSYM ||
             symbol_section->sh_entsize != sizeof(Elf64_Sym) ||
+            symbol_section->sh_size % sizeof(Elf64_Sym) ||
+            symbol_section->sh_offset % _Alignof(Elf64_Sym) ||
             !range_valid(file_size, symbol_section->sh_offset,
                          symbol_section->sh_size) ||
             symbol_section->sh_link >= header->e_shnum) {
@@ -460,15 +476,75 @@ static int validate_relocations(const unsigned char *file, size_t file_size,
     return 0;
 }
 
+int lat_aot_v2_elf_validate_memory(const void *data, size_t file_size,
+                                   const LatAotExpectedV2 *expected,
+                                   LatAotNoteV2 *note, char *error,
+                                   size_t error_size)
+{
+    const unsigned char *file = data;
+    int result = -1;
+
+    if (!file || file_size < sizeof(Elf64_Ehdr) ||
+        (uintptr_t)file % _Alignof(Elf64_Ehdr)) {
+        return reject(error, error_size, "AOT ELF memory is missing or unaligned");
+    }
+    const Elf64_Ehdr *header = (const void *)file;
+    if (memcmp(header->e_ident, ELFMAG, SELFMAG) ||
+        header->e_ident[EI_CLASS] != ELFCLASS64 ||
+        header->e_ident[EI_DATA] != ELFDATA2LSB ||
+        header->e_ident[EI_VERSION] != EV_CURRENT ||
+        header->e_type != ET_DYN || header->e_machine != EM_LOONGARCH ||
+        header->e_version != EV_CURRENT ||
+        header->e_ehsize != sizeof(*header) ||
+        header->e_phentsize != sizeof(Elf64_Phdr) || !header->e_phnum ||
+        header->e_phoff % _Alignof(Elf64_Phdr) ||
+        !range_valid(file_size, header->e_phoff,
+                     (uint64_t)header->e_phnum * sizeof(Elf64_Phdr))) {
+        return reject(error, error_size,
+                      "file is not a supported LoongArch AOT ELF");
+    }
+    const Elf64_Phdr *phdrs = (const void *)(file + header->e_phoff);
+    for (size_t i = 0; i < header->e_phnum; i++) {
+        const Elf64_Phdr *phdr = &phdrs[i];
+        if (phdr->p_type == PT_INTERP) {
+            return reject(error, error_size,
+                          "AOT module must not have PT_INTERP");
+        }
+        if (phdr->p_type == PT_LOAD) {
+            if ((phdr->p_flags & (PF_W | PF_X)) == (PF_W | PF_X)) {
+                return reject(error, error_size,
+                              "AOT module contains a W+X segment");
+            }
+            if (phdr->p_filesz > phdr->p_memsz ||
+                !range_valid(file_size, phdr->p_offset, phdr->p_filesz)) {
+                return reject(error, error_size,
+                              "AOT load segment is invalid");
+            }
+        }
+    }
+    if (validate_note(file, file_size, phdrs, header->e_phnum, expected,
+                      note, error, error_size) ||
+        validate_dynamic(file, file_size, phdrs, header->e_phnum,
+                         error, error_size) ||
+        validate_dynamic_symbols(file, file_size, header,
+                                 error, error_size) ||
+        validate_relocations(file, file_size, header, phdrs,
+                             header->e_phnum, error, error_size)) {
+        return -1;
+    }
+    result = 0;
+    return result;
+}
+
 int lat_aot_v2_elf_validate_fd(int fd, const LatAotExpectedV2 *expected,
                                LatAotNoteV2 *note, char *error,
                                size_t error_size)
 {
     struct stat status;
-    unsigned char *file = MAP_FAILED;
-    int result = -1;
+    unsigned char *file;
 
-    if (fd < 0 || fstat(fd, &status) || status.st_size < (off_t)sizeof(Elf64_Ehdr)) {
+    if (fd < 0 || fstat(fd, &status) ||
+        status.st_size < (off_t)sizeof(Elf64_Ehdr)) {
         return reject(error, error_size, "cannot stat AOT ELF");
     }
     if (!S_ISREG(status.st_mode) || (status.st_mode & (S_IWGRP | S_IWOTH))) {
@@ -482,51 +558,8 @@ int lat_aot_v2_elf_validate_fd(int fd, const LatAotExpectedV2 *expected,
     if (file == MAP_FAILED) {
         return reject(error, error_size, "cannot map AOT ELF");
     }
-    const Elf64_Ehdr *header = (const void *)file;
-    if (memcmp(header->e_ident, ELFMAG, SELFMAG) ||
-        header->e_ident[EI_CLASS] != ELFCLASS64 ||
-        header->e_ident[EI_DATA] != ELFDATA2LSB ||
-        header->e_ident[EI_VERSION] != EV_CURRENT ||
-        header->e_type != ET_DYN || header->e_machine != EM_LOONGARCH ||
-        header->e_version != EV_CURRENT ||
-        header->e_ehsize != sizeof(*header) ||
-        header->e_phentsize != sizeof(Elf64_Phdr) || !header->e_phnum ||
-        !range_valid(file_size, header->e_phoff,
-                     (uint64_t)header->e_phnum * sizeof(Elf64_Phdr))) {
-        reject(error, error_size, "file is not a supported LoongArch AOT ELF");
-        goto out;
-    }
-    const Elf64_Phdr *phdrs = (const void *)(file + header->e_phoff);
-    for (size_t i = 0; i < header->e_phnum; i++) {
-        const Elf64_Phdr *phdr = &phdrs[i];
-        if (phdr->p_type == PT_INTERP) {
-            reject(error, error_size, "AOT module must not have PT_INTERP");
-            goto out;
-        }
-        if (phdr->p_type == PT_LOAD) {
-            if ((phdr->p_flags & (PF_W | PF_X)) == (PF_W | PF_X)) {
-                reject(error, error_size, "AOT module contains a W+X segment");
-                goto out;
-            }
-            if (phdr->p_filesz > phdr->p_memsz ||
-                !range_valid(file_size, phdr->p_offset, phdr->p_filesz)) {
-                reject(error, error_size, "AOT load segment is invalid");
-                goto out;
-            }
-        }
-    }
-    if (validate_note(file, file_size, phdrs, header->e_phnum, expected,
-                      note, error, error_size) ||
-        validate_dynamic(file, file_size, phdrs, header->e_phnum,
-                         error, error_size) ||
-        validate_dynamic_symbols(file, file_size, header,
-                                 error, error_size) ||
-        validate_relocations(file, file_size, header, phdrs,
-                             header->e_phnum, error, error_size)) {
-        goto out;
-    }
-    result = 0;
-out:
+    int result = lat_aot_v2_elf_validate_memory(file, file_size, expected,
+                                                note, error, error_size);
     munmap(file, file_size);
     return result;
 }

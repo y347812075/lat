@@ -5,6 +5,11 @@
 
 #include <stddef.h>
 
+int lat_aot_v2_elf_validate_memory(const void *data, size_t size,
+                                   const LatAotExpectedV2 *expected,
+                                   LatAotNoteV2 *note, char *error,
+                                   size_t error_size);
+
 int lat_aot_v2_elf_validate_fd(int fd, const LatAotExpectedV2 *expected,
                                LatAotNoteV2 *note, char *error,
                                size_t error_size);

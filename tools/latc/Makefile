@@ -3,6 +3,7 @@ X86_CC ?= $(CC)
 AR ?= ar
 HOST_ARCH := $(shell uname -m)
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=c11
+FUZZ_CC ?= clang
 CPPFLAGS += -Icfg/include
 CPPFLAGS += -Iformat -Ilat/include -Inative/include -Inative/format \
 	-Inative/runtime -Iaot-v2/include -Iaot-v2/runtime \
@@ -29,7 +30,8 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-aot-v2-glibc-runner test-aot-v2-signal-runner \
 		test-aot-v2-dynamic-runner test-aot-v2-dlopen-runner \
 		test-aot-v2-dynamic-semantics test-latcd-once \
-		test-latcd-service test-latcd-runner test-aot-v2-m4 check-import
+		test-latcd-service test-latcd-runner test-aot-v2-m4 \
+		test-aot-v2-sanitize test-aot-v2-libfuzzer check-import
 
 
 all: $(BUILD)/latc $(BUILD)/latcd/latcd $(BUILD)/liblatc_cfg.a
@@ -397,6 +399,39 @@ $(BUILD)/tests/test-aot-v2-format: aot-v2/tests/test-format.c \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 
+$(BUILD)/tests/test-aot-v2-elf-mutate: \
+		aot-v2/tests/test-elf-mutate.c aot-v2/tests/elf-fixture.c \
+		$(BUILD)/aot-v2/runtime/elf-validate.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+
+$(BUILD)/tests/test-aot-v2-elf-mutate-sanitize: \
+		aot-v2/tests/test-elf-mutate.c aot-v2/tests/elf-fixture.c \
+		aot-v2/runtime/elf-validate.c
+	@mkdir -p $(dir $@)
+	$(FUZZ_CC) $(CPPFLAGS) $(CFLAGS) -O1 -fno-omit-frame-pointer \
+	  -fsanitize=address,undefined -o $@ $^
+
+$(BUILD)/tests/fuzz-aot-v2-elf: aot-v2/fuzz/fuzz-elf-validate.c \
+		aot-v2/runtime/elf-validate.c
+	@mkdir -p $(dir $@)
+	$(FUZZ_CC) $(CPPFLAGS) $(CFLAGS) -O1 -fno-omit-frame-pointer \
+	  -fsanitize=fuzzer,address,undefined -o $@ $^
+
+test-aot-v2-sanitize: $(BUILD)/tests/test-aot-v2-elf-mutate-sanitize
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+	  UBSAN_OPTIONS=halt_on_error=1 $<
+
+test-aot-v2-libfuzzer: $(BUILD)/tests/fuzz-aot-v2-elf \
+		$(BUILD)/tests/test-aot-v2-elf-mutate
+	rm -rf $(BUILD)/tests/aot-v2-elf-corpus
+	mkdir -p $(BUILD)/tests/aot-v2-elf-corpus
+	$(BUILD)/tests/test-aot-v2-elf-mutate --write-seed \
+	  $(BUILD)/tests/aot-v2-elf-corpus/valid-elf
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+	  UBSAN_OPTIONS=halt_on_error=1 $(BUILD)/tests/fuzz-aot-v2-elf \
+	  -runs=100000 -max_len=4096 $(BUILD)/tests/aot-v2-elf-corpus
+
 $(BUILD)/tests/test-aot-v2-registry: aot-v2/tests/test-registry.c \
 		$(BUILD)/aot-v2/runtime/registry.o
 	@mkdir -p $(dir $@)
@@ -486,8 +521,10 @@ AOT_V2_NATIVE_TESTS := $(BUILD)/aot-v2/liblat-aot-runtime.so.2 \
 endif
 
 test-aot-v2: $(BUILD)/tests/test-aot-v2-format \
+		$(BUILD)/tests/test-aot-v2-elf-mutate \
 		$(BUILD)/tests/test-aot-v2-registry $(AOT_V2_NATIVE_TESTS)
 	$(BUILD)/tests/test-aot-v2-format
+	$(BUILD)/tests/test-aot-v2-elf-mutate
 	$(BUILD)/tests/test-aot-v2-registry
 ifeq ($(HOST_ARCH),loongarch64)
 	LC_ALL=C readelf -h $(BUILD)/aot-v2/fixture.so | grep -q 'DYN (Shared object file)'
