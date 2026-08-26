@@ -1,0 +1,46 @@
+# AOT v2 M3 test plan
+
+## Post-startup loading
+
+- Build a PIE main executable and a separate x86-64 DSO.
+- Generate cache modules for main, interpreter, libc, libdl where applicable,
+  and the test DSO.
+- Run cold and warm cache cases with ASLR enabled and disabled.
+- Require the DSO to be discovered only after `dlopen()` and registered once
+  its executable mappings are complete.
+- Compare stdout and exit status with native x86 execution.
+
+## Cross-module semantics
+
+- Call a function from a startup DSO and from a `dlopen()` DSO.
+- Pass a main-program callback into the DSO and call it from DSO code.
+- Exercise one TLS variable, one IFUNC resolver, one versioned symbol, symbol
+  interposition, and `LD_PRELOAD` in focused fixtures.
+- Require guest addresses and guest PLT/GOT resolution; reject Host symbol
+  resolution as a substitute.
+
+## Close and reload
+
+- Loop load, call, close, and reload at least 100 times.
+- Force or observe a different guest load bias and verify the new instance.
+- After close, assert that registry and dispatcher-cache lookup cannot return
+  the inactive instance.
+- Deliver a signal inside the reloaded DSO and verify PC-map recovery selects
+  the active load bias.
+
+## Regression and performance
+
+- Run static glibc hello, dynamic three-module hello, and AOT signal recovery.
+- Run SPECint2000 train 12/12 with a 60-second per-benchmark limit and no ref.
+- Require zero runtime TB generation for strict static modules.
+- Compare focused cross-module call and callback costs before and after the
+  module-aware fast path; reject a clear dispatcher regression.
+
+## WI-2262 result
+
+- Native x86 fixture output: `dlopen callback result=40`.
+- `3a6000-25g` cold cache: main, interpreter, libc, and plugin were discovered;
+  output matched native execution and each missing module used local JIT.
+- Warm cache with ASLR and no-ASLR: all four modules registered and executed
+  AOT targets; the plugin had nonzero AOT lookups and
+  `compat_tb_allocations=0`.
