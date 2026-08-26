@@ -62,6 +62,7 @@ cmp "$work/expected" "$work/hot.out"
 test "$(grep -c 'discovered ELF.*module=registered' "$work/hot.err")" -eq 3
 test "$(grep -Ec 'module=registered aot_lookups=[1-9][0-9]*' \
   "$work/hot.err")" -eq 3
+grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' "$work/hot.err"
 
 run_guest "$work/hot-cache" "$work/no-aslr.out" "$work/no-aslr.err" \
   setarch "$(uname -m)" -R
@@ -70,5 +71,7 @@ test "$(grep -c 'discovered ELF.*module=registered' \
   "$work/no-aslr.err")" -eq 3
 test "$(grep -Ec 'module=registered aot_lookups=[1-9][0-9]*' \
   "$work/no-aslr.err")" -eq 3
+grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' \
+  "$work/no-aslr.err"
 
 echo "test-aot-v2-dynamic-runner: PASS"

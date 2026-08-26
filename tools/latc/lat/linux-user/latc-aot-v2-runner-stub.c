@@ -32,15 +32,28 @@ int latc_aot_v2_prepare(CPUArchState *env)
     return 0;
 }
 
-TranslationBlock *latc_aot_v2_find_tb(CPUState *cpu,
-                                      target_ulong guest_pc,
-                                      uint32_t flags, uint32_t cflags)
+bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
+                             uint32_t cflags, LatcAotV2Target *target)
 {
     (void)cpu;
     (void)guest_pc;
-    (void)flags;
     (void)cflags;
-    return NULL;
+    (void)target;
+    return false;
+}
+
+bool latc_aot_v2_activate_target(CPUState *cpu,
+                                 const LatcAotV2Target *target)
+{
+    (void)cpu;
+    (void)target;
+    return false;
+}
+
+bool latc_aot_v2_contains_host_pc(uintptr_t host_pc)
+{
+    (void)host_pc;
+    return false;
 }
 
 bool latc_aot_v2_restore_state(CPUState *cpu, uintptr_t host_pc)

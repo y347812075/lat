@@ -36,9 +36,11 @@ build/latc inspect-module --json program.so
 ```
 
 The module contains instruction-level Host-PC to guest-PC records in
-`.rodata.lat.map`. M1 publishes every supported native-image TB, restores x86
-state from those records on a host signal, and populates LAT's fast indirect
-jump cache after the first lookup. Dynamic ELF discovery remains an M2 task.
+`.rodata.lat.map`. The runner publishes every supported native-image TB,
+restores x86 state from those records on a Host signal, and puts direct Host
+addresses in LAT's fast indirect jump cache after the first lookup. It does not
+create compatibility `TranslationBlock` objects. M2 also discovers dynamic
+main, loader, and libc mappings by source SHA-256 and actual load bias.
 
 Run all twelve official SPECint2000 train workloads on LoongArch with:
 

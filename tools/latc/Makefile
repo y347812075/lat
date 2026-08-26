@@ -26,7 +26,8 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-spec-gzip-native test-specint-native test-aot-v2 \
 		test-specint-aot-v2 \
 		test-aot-v2-translated test-aot-v2-pie test-aot-v2-runner \
-		test-aot-v2-glibc-runner test-aot-v2-dynamic-runner check-import
+		test-aot-v2-glibc-runner test-aot-v2-signal-runner \
+		test-aot-v2-dynamic-runner check-import
 
 all: $(BUILD)/latc $(BUILD)/liblatc_cfg.a
 
@@ -184,6 +185,10 @@ $(BUILD)/tests/x86-glibc-hello: tests/x86-glibc-hello.c
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -static -no-pie -Wl,--build-id=none -o $@ $<
 
+$(BUILD)/tests/x86-signal-recover: tests/x86-signal-recover.c
+	@mkdir -p $(dir $@)
+	$(X86_CC) -O2 -static -no-pie -Wl,--build-id=none -o $@ $<
+
 $(BUILD)/tests/x86-dynamic-hello: tests/x86-glibc-hello.c
 	@mkdir -p $(dir $@)
 	$(X86_CC) -O2 -pie -Wl,--build-id=none -o $@ $<
@@ -238,7 +243,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  scripts/link-native-shell.sh scripts/link-aot-v2-module.sh \
 	  scripts/compile-aot-v2-module.sh scripts/build-aot-v2-runner.sh \
 	  tests/test-aot-v2-runner.sh tests/test-aot-v2-glibc-runner.sh \
-	  tests/test-aot-v2-pie.sh tests/test-aot-v2-dynamic-runner.sh
+	  tests/test-aot-v2-signal-runner.sh tests/test-aot-v2-pie.sh \
+	  tests/test-aot-v2-dynamic-runner.sh
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
@@ -485,6 +491,14 @@ test-aot-v2-glibc-runner: all
 	sh tests/test-aot-v2-glibc-runner.sh $(BUILD)/latc $(AOT_V2_RUNNER) \
 	  $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) $(NATIVE_IMAGE) \
 	  $(BUILD)/aot-v2-glibc-runner-test
+
+test-aot-v2-signal-runner: all
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_GUEST)" -a -n "$(NATIVE_IMAGE)" || \
+	  { echo "usage: make test-aot-v2-signal-runner AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_GUEST=... NATIVE_IMAGE=..."; exit 2; }
+	sh tests/test-aot-v2-signal-runner.sh $(BUILD)/latc $(AOT_V2_RUNNER) \
+	  $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) $(NATIVE_IMAGE) \
+	  $(BUILD)/aot-v2-signal-runner-test
 
 test-aot-v2-dynamic-runner: all
 	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \

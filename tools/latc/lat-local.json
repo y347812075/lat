@@ -59,6 +59,10 @@
       "reason": "notify AOT v2 about successful file-backed mappings after releasing the mmap lock"
     },
     {
+      "path": "lat/linux-user/signal.c",
+      "reason": "recognize synchronous exceptions raised inside AOT v2 module text before restoring guest state from the generated PC map"
+    },
+    {
       "path": "lat/accel/tcg/translate-all.c",
       "reason": "count and reject runtime TB generation for strict AOT verification"
     },

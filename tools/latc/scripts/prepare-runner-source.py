@@ -41,6 +41,7 @@ def main() -> None:
         "linux-user/elfload.c",
         "linux-user/main.c",
         "linux-user/mmap.c",
+        "linux-user/signal.c",
         "linux-user/syscall.c",
         "target/i386/latx/sbt/aot_recover_tb.c",
         "target/i386/latx/sbt/aot.c",

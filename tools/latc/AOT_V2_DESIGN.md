@@ -461,7 +461,7 @@ glibc then uses syscall instructions from the main ELF, which continue through
 LAT's existing `linux-user/syscall.c`; runner-provided vDSO code never requires
 runtime translation.
 
-On `3a6000-25g` on 2026-08-25, all twelve official SPECint2000 train workloads
+On `3a6000-25g` on 2026-08-26, all twelve official SPECint2000 train workloads
 passed under a 60-second per-benchmark limit. Every run recorded zero
 `runtime_tb_gen_attempts` and zero `runtime_tb_gen_calls`. Ref inputs were not
 run.
@@ -483,11 +483,27 @@ LSX-only variant and runtime HWCAP-based variant selection are still required.
 Exit criterion: a dynamically linked x86 hello runs with ASLR enabled in cold
 and warm cache cases; warm cache reports every executed file-backed TB as AOT.
 
-As of 2026-08-25, the main PIE, guest `ld.so`, and guest `libc.so.6` can each be
+As of 2026-08-26, the main PIE, guest `ld.so`, and guest `libc.so.6` can each be
 compiled into a separate AOT v2 ELF and loaded from a cache named
 `<source-sha256>.so`. The dynamic glibc hello passes with ASLR enabled and
 disabled. A cold cache uses JIT; a warm cache registers all three modules and
 reports `aot_lookups` and `jit_fallbacks` for each guest ELF range.
+
+The CPU loop now receives a `LatcAotV2Target` containing the Host code address
+and executes it directly. AOT hits do not allocate, publish, or register a
+compatibility `TranslationBlock`. A separate per-thread address cache avoids
+repeating registry searches and validates the module generation before reuse.
+For the static single-module path, the runner publishes the Host address and
+guest PC directly to LAT's existing `FastTB` cache. This preserves indirect
+TB-to-TB execution without constructing a `TranslationBlock`; `164.gzip`
+measured 9.94 seconds versus 9.93 seconds for the removed proxy path on the
+same host and input.
+
+Synchronous Host exceptions now recognize AOT module text before entering
+LAT's normal signal exit path. `cpu_restore_state()` resolves the generated PC
+map and restores guest state without a runtime TB. A static x86 regression
+test raises `SIGFPE` inside AOT code, changes guest `RIP` in its handler, and
+exits with zero runtime translation.
 
 This is still partial coverage. PIE modules may require more than the current
 256 guest-address context slots. The packager keeps a dependency-complete TB
@@ -496,13 +512,13 @@ must all remain present, otherwise the owner TB is excluded. Missing TBs use
 JIT. The two-level guest-address table described above is still required for
 full coverage.
 
-The current `TranslationBlock` compatibility adapter cannot safely retain one
-shared jump-cache entry across different module slot contexts. Cache-directory
-mode therefore performs registry lookup and applies guest slots on every AOT
-indirect selection without publishing the proxy to LAT's jump caches. The
-direct `LatAotTargetV2` execution work below must remove this restriction.
-The counters measure registry selections and registry-to-JIT fallbacks; they
-are not instruction counts.
+Cache-directory mode does not publish module targets to the shared `FastTB`
+cache. A direct cross-module jump could otherwise enter code while the guest
+address slots still belong to the previous module. Dynamic execution instead
+uses the direct address cache in the dispatcher and applies guest slots when
+the selected module changes. A module-aware generated-code cache remains M3
+work. The counters measure address resolutions and registry-to-JIT fallbacks;
+they are not instruction counts.
 
 ### M3: `dlopen()`, unloading, and cross-module behaviour
 

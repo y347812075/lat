@@ -42,3 +42,14 @@ and falls back to JIT only for mappings without a usable module.
 - SMC hardening, fuzzing, signing, and production packaging are M5.
 - M2 does not require PGO or broad performance optimisation.
 
+## Result
+
+M2 completed on `3a6000-25g` on 2026-08-26. Dynamic glibc hello passed with a
+cold cache, a warm three-module cache, ASLR enabled, and ASLR disabled. The CPU
+loop executes AOT Host addresses without compatibility `TranslationBlock`
+objects. Static glibc hello, an AOT `SIGFPE` guest-state recovery test, and all
+twelve SPECint2000 train workloads passed with zero runtime TB generation.
+
+Dynamic modules still use a dependency-complete subset limited by 256 guest
+address slots. Cross-module generated-code caching and unload/reload are not
+part of M2.

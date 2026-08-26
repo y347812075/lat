@@ -36,3 +36,18 @@
   M1 mode with zero runtime TB generation.
 - Record focused startup and steady-state measurements; reject a clear
   regression, but do not make general performance tuning an M2 exit gate.
+
+## 2026-08-26 result
+
+- `test-aot-v2-glibc-runner`: passed; explicit module and warm-cache paths
+  reported zero runtime translation and `compat_tb_allocations=0`.
+- `test-aot-v2-dynamic-runner`: passed for cold cache, warm main/loader/libc
+  cache, ASLR, and no-ASLR execution.
+- `test-aot-v2-signal-runner`: passed; an AOT integer divide exception reached
+  the guest `SIGFPE` handler through the generated PC map with zero JIT.
+- SPECint2000 train: 12/12 valid. Final clean-runner times in seconds were gzip
+  9.94, vpr 6.08, gcc 1.14, mcf 3.99, crafty 7.07, parser 3.08, eon 4.29,
+  perlbmk 21.14, gap 1.79, vortex 2.89, bzip2 9.08, and twolf 3.67. Ref was
+  not run.
+- The removed proxy and direct FastTB path ran the same gzip input in 9.93 and
+  9.94 seconds respectively on the same host.
