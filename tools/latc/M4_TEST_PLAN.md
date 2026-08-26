@@ -62,5 +62,22 @@ FD, and malformed compiler output without publishing a new module or leaving
 temporary files. It also replaced a corrupt cache entry and then recognized
 the valid module as a cache hit while the configured compiler was `/bin/false`.
 
-Compiler interruption during an active child and source metadata mutation
-during a large copy remain explicit tests for the resident-service work.
+Source metadata mutation during a large copy remains a later hardening test.
+
+## WI-2274 result
+
+On 2026-08-26, `make test-latcd-service` passed on `3a6000-25g`. Twenty
+concurrent submissions of the same static hello produced `requests=20`,
+`queued=1`, `compiled=1`, and `failed=0`. The duplicate and post-publication
+cache-hit counts sum to 19, so only the first request entered the compiler;
+their individual counts depend on whether publication finishes while the
+remaining requests are being accepted. Alternating requests used two paths
+with identical bytes, proving that the key is content SHA-256 rather than path.
+
+The test also proved that a failed SHA is rejected during its negative-cache
+delay, the CPU limit terminates a busy compiler, priority 200 runs before a
+previously queued priority 1 job, task-count and total-byte queue limits reject
+new work, and SIGTERM terminates an active compiler process group in less than
+five seconds while removing queued and temporary snapshots. A connected client
+that sends no request is rejected after one second instead of blocking the
+service. Published modules have matching atomic `.current` indexes.
