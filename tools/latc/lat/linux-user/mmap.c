@@ -177,6 +177,12 @@ static int target_mprotect_internal(abi_ulong start, abi_ulong len,
         mmap_unlock();
         return -TARGET_ENOMEM;
     }
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+    if ((target_prot & PROT_WRITE) || !(target_prot & PROT_EXEC)) {
+        latc_aot_v2_invalidate_range(thread_cpu, start, len,
+                                     LATC_AOT_V2_INVALIDATE_PROTECTION);
+    }
+#endif
 
 #if defined(CONFIG_LATX_KZT) && defined(TARGET_X86_64)
     if (guest_request &&
@@ -975,6 +981,10 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
             errno = ENOMEM;
             goto fail;
         }
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+        latc_aot_v2_invalidate_range(thread_cpu, start, len,
+                                     LATC_AOT_V2_INVALIDATE_MAP_FIXED);
+#endif
 
         /* worst case: we cannot map the file because the offset is not
            aligned, so we read it */
@@ -1204,8 +1214,12 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
     mmap_unlock();
 #if defined(CONFIG_LATX) && defined(TARGET_X86_64)
     if (aot_v2_fd >= 0) {
-        latc_aot_v2_note_mmap(aot_v2_fd, start, aot_v2_size,
-                              aot_v2_offset);
+        if (target_prot & PROT_WRITE) {
+            close(aot_v2_fd);
+        } else {
+            latc_aot_v2_note_mmap(aot_v2_fd, start, aot_v2_size,
+                                  aot_v2_offset);
+        }
     }
 #endif
     return start;
@@ -1325,6 +1339,7 @@ int target_munmap(abi_ulong start, abi_ulong len, int rlimit_as_account)
     }
 
     mmap_lock();
+    latc_aot_v2_note_munmap(thread_cpu, start, len);
     ret = mmap_unmap_host_range(start, len);
 
     if (ret == 0) {
@@ -1342,10 +1357,6 @@ int target_munmap(abi_ulong start, abi_ulong len, int rlimit_as_account)
 #endif
     }
     mmap_unlock();
-
-    if (ret == 0) {
-        latc_aot_v2_note_munmap(thread_cpu, start, len);
-    }
 
     if (ret == 0 && option_prlimit && rlimit_as_account &&
         vir_rlimit_as != RLIM_INFINITY) {
@@ -1455,6 +1466,14 @@ abi_long target_mremap(abi_ulong old_addr, abi_ulong old_size,
      */
     start_exclusive();
     mmap_lock();
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+    latc_aot_v2_invalidate_range(thread_cpu, old_addr, source_size,
+                                 LATC_AOT_V2_INVALIDATE_UNMAP);
+    if (flags & MREMAP_FIXED) {
+        latc_aot_v2_invalidate_range(thread_cpu, new_addr, new_size,
+                                     LATC_AOT_V2_INVALIDATE_MAP_FIXED);
+    }
+#endif
 
     prot = page_get_flags(old_addr);
 #if defined(CONFIG_LATX) && defined(TARGET_I386)

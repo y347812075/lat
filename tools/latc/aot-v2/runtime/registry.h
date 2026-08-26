@@ -15,14 +15,29 @@ typedef struct LatAotLoadedModuleV2 {
     LatAotNoteV2 note;
 } LatAotLoadedModuleV2;
 
+#define LAT_AOT_V2_MAX_EXEC_RANGES 16
+
+typedef struct LatAotGuestRangeV2 {
+    uint64_t begin;
+    uint64_t end;
+} LatAotGuestRangeV2;
+
 typedef struct LatAotModuleInstanceV2 {
     const LatAotLoadedModuleV2 *module;
     uint64_t guest_load_bias;
     uint64_t guest_begin;
     uint64_t guest_end;
+    uint32_t exec_range_count;
+    LatAotGuestRangeV2 exec_ranges[LAT_AOT_V2_MAX_EXEC_RANGES];
     _Atomic uint64_t generation;
     _Atomic int active;
 } LatAotModuleInstanceV2;
+
+/*
+ * Registered instances and their immutable range fields must remain alive
+ * until registry destruction. Readers may still hold an older snapshot after
+ * a writer has published a replacement.
+ */
 
 typedef struct LatAotRegistrySnapshotV2 LatAotRegistrySnapshotV2;
 
@@ -44,6 +59,10 @@ int lat_aot_v2_registry_register(LatAotRegistryV2 *registry,
                                  LatAotModuleInstanceV2 *instance);
 int lat_aot_v2_registry_deactivate(LatAotRegistryV2 *registry,
                                    LatAotModuleInstanceV2 *instance);
+int lat_aot_v2_registry_deactivate_range(LatAotRegistryV2 *registry,
+                                         uint64_t guest_begin,
+                                         uint64_t guest_end,
+                                         size_t *deactivated);
 int lat_aot_v2_registry_lookup(const LatAotRegistryV2 *registry,
                                uint64_t guest_pc, uint32_t flags,
                                LatAotTargetV2 *target);

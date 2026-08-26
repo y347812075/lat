@@ -291,7 +291,12 @@ size_t lat_guest_elf_tracker_remove_range_v2(LatGuestElfTrackerV2 *tracker,
     size_t removed = 0;
     for (guint i = tracker->entries->len; i > 0; i--) {
         LatGuestElfInfoV2 *entry = g_ptr_array_index(tracker->entries, i - 1);
-        if (guest_start < entry->guest_end && guest_end > entry->guest_begin) {
+        int overlaps_exec = 0;
+        for (uint16_t range = 0; range < entry->exec_range_count; range++) {
+            overlaps_exec |= guest_start < entry->exec_ranges[range].end &&
+                             guest_end > entry->exec_ranges[range].begin;
+        }
+        if (overlaps_exec) {
             g_ptr_array_remove_index(tracker->entries, i - 1);
             removed++;
         }

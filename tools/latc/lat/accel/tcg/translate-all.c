@@ -4418,6 +4418,7 @@ int page_unprotect(target_ulong address, uintptr_t pc, int *emu)
     int inv_one_tb = 0;
     int size = 1;
     int force_inv_host_page= 0;
+    bool current_aot_invalidated = false;
 
     /* Technically this isn't safe inside a signal handler.  However we
        know this only ever happens in a synchronous SEGV handler, so in
@@ -4470,6 +4471,11 @@ int page_unprotect(target_ulong address, uintptr_t pc, int *emu)
             return 0;
         }
     }
+
+    current_aot_invalidated = latc_aot_v2_invalidate_range(
+        current_cpu, address & TARGET_PAGE_MASK,
+        is_cross ? 2 * TARGET_PAGE_SIZE : TARGET_PAGE_SIZE,
+        LATC_AOT_V2_INVALIDATE_CODE_WRITE);
 
     current_tb_invalidated = false;
     if (!force_inv_host_page &&
@@ -4684,7 +4690,7 @@ no_pageflags_cache:
     mmap_unlock();
 
     /* If current TB was invalidated return to main loop */
-    return current_tb_invalidated ? 2 : 1;
+    return current_tb_invalidated || current_aot_invalidated ? 2 : 1;
 }
 
 #ifdef CONFIG_LATX_AOT

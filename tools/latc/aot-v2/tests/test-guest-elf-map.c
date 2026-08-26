@@ -91,6 +91,19 @@ int main(int argc, char **argv)
         lat_guest_elf_tracker_get_v2(tracker, 1);
     uint64_t removed_begin = removed->guest_begin;
     uint64_t removed_size = removed->guest_end - removed->guest_begin;
+    uint64_t nonexec = removed->guest_begin;
+    for (uint16_t i = 0; i < removed->exec_range_count; i++) {
+        if (nonexec >= removed->exec_ranges[i].begin &&
+            nonexec < removed->exec_ranges[i].end) {
+            nonexec = removed->exec_ranges[i].end;
+        }
+    }
+    if (nonexec < removed->guest_end &&
+        lat_guest_elf_tracker_remove_range_v2(tracker, nonexec, 1) != 0) {
+        fprintf(stderr, "non-executable range removed tracked ELF\n");
+        lat_guest_elf_tracker_free_v2(tracker);
+        return 1;
+    }
     if (lat_guest_elf_tracker_remove_range_v2(
             tracker, removed_begin, removed_size) != 1 ||
         lat_guest_elf_tracker_count_v2(tracker) != 2 ||

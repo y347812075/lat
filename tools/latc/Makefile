@@ -29,7 +29,7 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-aot-v2-translated test-aot-v2-pie test-aot-v2-runner \
 		test-aot-v2-glibc-runner test-aot-v2-signal-runner \
 		test-aot-v2-dynamic-runner test-aot-v2-dlopen-runner \
-		test-aot-v2-dynamic-semantics test-latcd-once \
+		test-aot-v2-dynamic-semantics test-aot-v2-invalidation test-latcd-once \
 		test-latcd-service test-latcd-runner test-aot-v2-m4 \
 		test-aot-v2-sanitize test-aot-v2-libfuzzer check-import
 
@@ -112,6 +112,16 @@ $(BUILD)/tests/x86-c-exit42: tests/x86-c-start.S tests/x86-c-exit42.c
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -fno-stack-protector -nostdlib -static -no-pie \
 	  -Wl,--build-id=none -o $@ $^
+
+$(BUILD)/tests/x86-aot-v2-invalidation: tests/x86-aot-v2-invalidation.c
+	@mkdir -p $(dir $@)
+	$(X86_CC) -O2 -g -Wall -Wextra -Werror -o $@ $< -ldl -pthread
+
+$(BUILD)/tests/x86-aot-v2-invalidation-plugin.so: \
+		tests/x86-aot-v2-invalidation-plugin.S
+	@mkdir -p $(dir $@)
+	$(X86_CC) -shared -fPIC -Wl,-z,now -Wl,-z,relro \
+	  -Wl,--build-id=sha1 -o $@ $<
 
 $(BUILD)/tests/x86-indirect-call42: tests/x86-indirect-call42.S
 	@mkdir -p $(dir $@)
@@ -290,7 +300,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  tests/test-aot-v2-runner.sh tests/test-aot-v2-glibc-runner.sh \
 	  tests/test-aot-v2-signal-runner.sh tests/test-aot-v2-pie.sh \
 	  tests/test-aot-v2-dynamic-runner.sh tests/test-aot-v2-dlopen-runner.sh \
-	  tests/test-aot-v2-dynamic-semantics.sh tests/test-latcd-once.sh \
+	  tests/test-aot-v2-dynamic-semantics.sh \
+	  tests/test-aot-v2-invalidation.sh tests/test-latcd-once.sh \
 	  tests/fake-latc-invalid-module.sh tests/test-latcd-service.sh \
 	  tests/fake-latc-slow.sh tests/fake-latc-cpu.sh \
 	  tests/test-latcd-runner.sh
@@ -703,6 +714,18 @@ test-aot-v2-dynamic-semantics: all
 	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) \
 	  $(X86_GUEST) $(X86_STARTUP_DSO) $(X86_DSO) \
 	  $(X86_PRELOAD_DSO) $(BUILD)/aot-v2-dynamic-semantics-test 30s
+
+test-aot-v2-invalidation: all \
+		$(BUILD)/tests/x86-aot-v2-invalidation \
+		$(BUILD)/tests/x86-aot-v2-invalidation-plugin.so
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_ROOTFS)" || \
+	  { echo "usage: make test-aot-v2-invalidation AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_ROOTFS=..."; exit 2; }
+	sh tests/test-aot-v2-invalidation.sh $(BUILD)/latc \
+	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) \
+	  $(BUILD)/tests/x86-aot-v2-invalidation \
+	  $(BUILD)/tests/x86-aot-v2-invalidation-plugin.so \
+	  $(BUILD)/aot-v2-invalidation-test 30s
 
 $(BUILD)/tests/liblat-good.so: tests/fake-liblat.c
 	@mkdir -p $(dir $@)
