@@ -66,9 +66,11 @@ run_guest()
     cache=$1
     output=$2
     error=$3
+    loops=${4:-0}
     env LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
       LD_PRELOAD=/tmp/latc-m3-semantics-preload.so \
       LATX_AOT=0 LATX_AOT_V2_CACHE_DIR="$cache" LATX_AOT_V2_REPORT=1 \
+      LATC_M3_CROSS_MODULE_LOOPS="$loops" \
       timeout -k 2s "$run_timeout" "$runner" -L "$rootfs" \
       "$guest" >"$output" 2>"$error"
 }
@@ -90,5 +92,14 @@ for source in "$startup" "$plugin" "$preload"; do
       "$work/hot.err"
 done
 grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' "$work/hot.err"
+
+run_guest "$work/hot-cache" "$work/fast.out" "$work/fast.err" 100000
+cmp "$work/expected" "$work/fast.out"
+direct_targets=$(sed -n \
+  's/.*runtime stats direct_targets=\([0-9][0-9]*\).*/\1/p' \
+  "$work/fast.err")
+test -n "$direct_targets"
+test "$direct_targets" -lt 10000
+grep -q 'compat_tb_allocations=0' "$work/fast.err"
 
 echo "test-aot-v2-dynamic-semantics: PASS"

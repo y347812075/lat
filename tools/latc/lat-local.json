@@ -56,7 +56,7 @@
     },
     {
       "path": "lat/linux-user/mmap.c",
-      "reason": "notify AOT v2 about successful file-backed mappings after releasing the mmap lock"
+      "reason": "notify AOT v2 about successful mappings and unmaps after releasing the mmap lock"
     },
     {
       "path": "lat/linux-user/signal.c",
@@ -80,7 +80,23 @@
     },
     {
       "path": "lat/target/i386/latx/latx-config.c",
-      "reason": "reserve per-thread guest address slots immediately before the existing jump cache"
+      "reason": "allocate per-thread guest address slots and a module-aware AOT v2 indirect jump cache"
+    },
+    {
+      "path": "lat/include/exec/fasttb.h",
+      "reason": "define generation-checked AOT v2 fast jump entries alongside the original LAT cache"
+    },
+    {
+      "path": "lat/target/i386/cpu.h",
+      "reason": "hold the per-thread AOT v2 fast cache and active module context"
+    },
+    {
+      "path": "lat/target/i386/latx/include/lsenv.h",
+      "reason": "expose AOT v2 cache fields to generated indirect jump code"
+    },
+    {
+      "path": "lat/target/i386/latx/translator/translate.c",
+      "reason": "check module context and generation before an AOT v2 indirect fast jump"
     }
   ]
 }

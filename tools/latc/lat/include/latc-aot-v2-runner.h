@@ -14,13 +14,16 @@ typedef struct LatcAotV2Target {
     target_ulong guest_pc;
     uint64_t generation;
     uint32_t cflags;
+    const uint64_t *guest_slots_end;
+    uint64_t guest_slot_count;
 } LatcAotV2Target;
 
 bool latc_aot_v2_mapping_enabled(void);
 /* Takes ownership of fd. ELF inspection is deferred while mmap is locked. */
 void latc_aot_v2_note_mmap(int fd, uint64_t guest_start,
                            uint64_t mapping_size, uint64_t file_offset);
-void latc_aot_v2_note_munmap(uint64_t guest_start, uint64_t mapping_size);
+void latc_aot_v2_note_munmap(CPUState *cpu, uint64_t guest_start,
+                             uint64_t mapping_size);
 void latc_aot_v2_drain_mmaps(void);
 void latc_aot_v2_report_stats(void);
 int latc_aot_v2_prepare(CPUArchState *env);

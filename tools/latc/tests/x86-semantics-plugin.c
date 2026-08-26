@@ -41,6 +41,17 @@ int semantic_interposed(void)
     return semantic_hook();
 }
 
+__attribute__((visibility("default"), noinline))
+int semantic_pingpong(int loops)
+{
+    int sum = 0;
+
+    for (int i = 0; i < loops; i++) {
+        sum += semantic_hook();
+    }
+    return sum;
+}
+
 __attribute__((naked, visibility("default"), noreturn))
 void semantic_plugin_entry(void)
 {

@@ -88,3 +88,18 @@ instance is removed from the registry, its generation is incremented, and the
 tracker forgets that source/load-bias pair. The immutable Host module remains
 mapped and may back a later instance. Dispatcher cache entries retain the old
 generation and therefore cannot pass validation after close.
+
+`WI-2265` keeps LAT's original `FastTB` table unchanged and adds a separate
+64-byte AOT v2 table consulted only after a normal indirect lookup misses.
+Each entry records the guest PC, Host target, module context, generation
+address and value, and a precomputed set of guest-address slots. Generated
+code rejects stale generations. If the target module differs, it copies the
+precomputed slots, updates the CPU's current context, and jumps directly
+without returning to the C dispatcher. Signal recovery reads the same CPU
+context, so generated-code module switches remain visible to recovery.
+
+The two new CPU context fields move translated register offsets by 16 bytes.
+The code-generation identity is therefore `x64-v3`; runners reject older
+`v1` and intermediate `v2` modules instead of executing them with stale
+offsets. The runner preparation script copies every affected LAT file from
+the extracted source tree so a clean rebuild preserves the local adapter.

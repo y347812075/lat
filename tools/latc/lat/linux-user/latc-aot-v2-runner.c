@@ -44,6 +44,8 @@ typedef struct LatAotV2RuntimeInstance {
     LatAotModuleInstanceV2 instance;
     LatAotV2RuntimeModule *runtime_module;
     LatAotV2ModuleStats *stats;
+    uint64_t guest_slots[LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT];
+    uint64_t guest_slot_count;
     struct LatAotV2RuntimeInstance *next;
 } LatAotV2RuntimeInstance;
 
@@ -256,7 +258,8 @@ void latc_aot_v2_note_mmap(int fd, uint64_t guest_start,
     drain_mappings();
 }
 
-void latc_aot_v2_note_munmap(uint64_t guest_start, uint64_t mapping_size)
+void latc_aot_v2_note_munmap(CPUState *cpu, uint64_t guest_start,
+                             uint64_t mapping_size)
 {
     if (!registry_initialized || !mapping_size ||
         guest_start > UINT64_MAX - mapping_size) {
@@ -280,8 +283,20 @@ void latc_aot_v2_note_munmap(uint64_t guest_start, uint64_t mapping_size)
             if (runtime->stats) {
                 runtime->stats->state = LAT_AOT_V2_MODULE_INACTIVE;
             }
-            if (aot_v2_current_instance == instance) {
+            bool was_current = aot_v2_current_instance == instance;
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+            if (cpu) {
+                was_current = ((CPUArchState *)cpu->env_ptr)
+                    ->aot_v2_current_context == instance;
+            }
+#endif
+            if (was_current) {
                 aot_v2_current_instance = NULL;
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+                if (cpu) {
+                    latx_aot_v2_fast_jmp_cache_set_context(cpu, NULL);
+                }
+#endif
             }
             if (getenv("LATX_AOT_V2_REPORT")) {
                 fprintf(stderr,
@@ -408,6 +423,16 @@ static int register_module_instance(LatAotV2RuntimeModule *module,
         .guest_begin = guest_begin,
         .guest_end = guest_end,
     };
+    const LatAotModuleV2 *descriptor = module->loaded.descriptor;
+    runtime_instance->guest_slot_count =
+        descriptor->guest_slot_end - descriptor->guest_slot_begin;
+    if (lat_aot_v2_context_apply_guest_slots(
+            descriptor, load_bias,
+            runtime_instance->guest_slots +
+                LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT)) {
+        g_free(runtime_instance);
+        return -1;
+    }
     if (lat_aot_v2_registry_register(&registry,
                                      &runtime_instance->instance)) {
         g_free(runtime_instance);
@@ -667,6 +692,9 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
     result->guest_pc = guest_pc;
     result->generation = entry->generation;
     result->cflags = cflags;
+    result->guest_slots_end = runtime_instance->guest_slots +
+        LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT;
+    result->guest_slot_count = runtime_instance->guest_slot_count;
     if (!latc_aot_v2_activate_target(cpu, result)) {
         if (stats) {
             atomic_fetch_add(&stats->jit_fallbacks, 1);
@@ -698,13 +726,29 @@ bool latc_aot_v2_activate_target(CPUState *cpu,
             &instance->generation, memory_order_acquire)) {
         return false;
     }
-    if (aot_v2_current_instance != instance &&
-        lat_aot_v2_context_apply_guest_slots(
-            instance->module->descriptor, instance->guest_load_bias,
-            ((CPUArchState *)cpu->env_ptr)->tb_jmp_cache_ptr)) {
-        return false;
+    CPUArchState *env = (CPUArchState *)cpu->env_ptr;
+    const void *current_context = aot_v2_current_instance;
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+    current_context = env->aot_v2_current_context;
+#endif
+    if (current_context != instance) {
+        uint64_t count = target->guest_slot_count;
+        memcpy((uint64_t *)env->tb_jmp_cache_ptr - count,
+               target->guest_slots_end - count,
+               count * sizeof(uint64_t));
     }
     aot_v2_current_instance = instance;
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+    latx_aot_v2_fast_jmp_cache_set_context(cpu, instance);
+    if (getenv("LATX_AOT_V2_CACHE_DIR")) {
+        uint32_t hash = tb_jmp_cache_hash_func(target->guest_pc);
+        latx_aot_v2_fast_jmp_cache_add(
+            cpu, hash, target->guest_pc, target->host_address,
+            target->context, (const uint64_t *)target->generation_address,
+            target->generation, target->guest_slots_end,
+            target->guest_slot_count);
+    }
+#endif
     return true;
 }
 
@@ -767,6 +811,10 @@ bool latc_aot_v2_restore_state(CPUState *cpu, uintptr_t host_pc)
         return false;
     }
     LatAotModuleInstanceV2 *instance = aot_v2_current_instance;
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+    instance = (LatAotModuleInstanceV2 *)
+        ((CPUArchState *)cpu->env_ptr)->aot_v2_current_context;
+#endif
     if (!instance || instance->module != &runtime_module->loaded) {
         instance = NULL;
         for (LatAotV2RuntimeInstance *candidate = runtime_instances; candidate;
