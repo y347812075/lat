@@ -30,6 +30,17 @@ void latc_aot_v2_note_munmap(CPUState *cpu, uint64_t guest_start,
     (void)mapping_size;
 }
 
+bool latc_aot_v2_invalidate_range(CPUState *cpu, uint64_t guest_start,
+                                  uint64_t mapping_size,
+                                  LatcAotV2InvalidationReason reason)
+{
+    (void)cpu;
+    (void)guest_start;
+    (void)mapping_size;
+    (void)reason;
+    return false;
+}
+
 void latc_aot_v2_report_stats(void)
 {
 }

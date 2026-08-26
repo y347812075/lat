@@ -104,6 +104,19 @@ int lat_aot_v2_registry_register(LatAotRegistryV2 *registry,
         errno = EINVAL;
         return -1;
     }
+    if (instance->exec_range_count > LAT_AOT_V2_MAX_EXEC_RANGES) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (uint32_t i = 0; i < instance->exec_range_count; i++) {
+        const LatAotGuestRangeV2 *range = &instance->exec_ranges[i];
+        if (range->begin < instance->guest_begin ||
+            range->end > instance->guest_end || range->begin >= range->end ||
+            (i && instance->exec_ranges[i - 1].end > range->begin)) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
     pthread_mutex_lock(&registry->write_lock);
     LatAotRegistrySnapshotV2 *old = atomic_load_explicit(
         &registry->current, memory_order_acquire);
@@ -167,6 +180,70 @@ int lat_aot_v2_registry_deactivate(LatAotRegistryV2 *registry,
         }
     }
     publish_snapshot(registry, replacement);
+    pthread_mutex_unlock(&registry->write_lock);
+    return 0;
+}
+
+static int instance_exec_range_overlaps(const LatAotModuleInstanceV2 *instance,
+                                        uint64_t guest_begin,
+                                        uint64_t guest_end)
+{
+    if (!instance->exec_range_count) {
+        return guest_begin < instance->guest_end &&
+               guest_end > instance->guest_begin;
+    }
+    for (uint32_t i = 0; i < instance->exec_range_count; i++) {
+        if (guest_begin < instance->exec_ranges[i].end &&
+            guest_end > instance->exec_ranges[i].begin) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int lat_aot_v2_registry_deactivate_range(LatAotRegistryV2 *registry,
+                                         uint64_t guest_begin,
+                                         uint64_t guest_end,
+                                         size_t *deactivated)
+{
+    if (!registry || guest_begin >= guest_end) {
+        errno = EINVAL;
+        return -1;
+    }
+    pthread_mutex_lock(&registry->write_lock);
+    LatAotRegistrySnapshotV2 *old = atomic_load_explicit(
+        &registry->current, memory_order_acquire);
+    size_t removed = 0;
+    for (size_t i = 0; i < old->count; i++) {
+        removed += instance_exec_range_overlaps(old->instances[i],
+                                                guest_begin, guest_end);
+    }
+    if (!removed) {
+        if (deactivated) {
+            *deactivated = 0;
+        }
+        pthread_mutex_unlock(&registry->write_lock);
+        return 0;
+    }
+    LatAotRegistrySnapshotV2 *replacement = snapshot_new(old->count - removed);
+    if (!replacement) {
+        pthread_mutex_unlock(&registry->write_lock);
+        return -1;
+    }
+    for (size_t i = 0, output = 0; i < old->count; i++) {
+        LatAotModuleInstanceV2 *instance = old->instances[i];
+        if (instance_exec_range_overlaps(instance, guest_begin, guest_end)) {
+            atomic_store_explicit(&instance->active, 0, memory_order_release);
+            atomic_fetch_add_explicit(&instance->generation, 1,
+                                      memory_order_acq_rel);
+        } else {
+            replacement->instances[output++] = instance;
+        }
+    }
+    publish_snapshot(registry, replacement);
+    if (deactivated) {
+        *deactivated = removed;
+    }
     pthread_mutex_unlock(&registry->write_lock);
     return 0;
 }

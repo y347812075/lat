@@ -48,6 +48,7 @@ typedef struct LatAotV2RuntimeInstance {
     LatAotV2ModuleStats *stats;
     uint64_t guest_slots[LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT];
     uint64_t guest_slot_count;
+    uint64_t handled_invalidation_generation;
     struct LatAotV2RuntimeInstance *next;
 } LatAotV2RuntimeInstance;
 
@@ -88,6 +89,9 @@ static _Atomic uint64_t compiler_submissions;
 static _Atomic uint64_t compiler_submission_failures;
 static _Atomic uint64_t compiler_submission_duplicates;
 static _Atomic uint64_t compiler_request_sequence;
+static _Atomic uint64_t invalidated_instances;
+static _Atomic uint64_t invalidated_exec_ranges;
+static _Atomic uint64_t invalidation_reasons[4];
 static uint64_t discovered_elfs;
 static GHashTable *submitted_sources;
 
@@ -106,6 +110,17 @@ static const char *module_state_name(LatAotV2ModuleState state)
     }
 }
 
+static const char *invalidation_reason_name(LatcAotV2InvalidationReason reason)
+{
+    switch (reason) {
+    case LATC_AOT_V2_INVALIDATE_UNMAP: return "unmap";
+    case LATC_AOT_V2_INVALIDATE_MAP_FIXED: return "map-fixed";
+    case LATC_AOT_V2_INVALIDATE_PROTECTION: return "protection";
+    case LATC_AOT_V2_INVALIDATE_CODE_WRITE: return "code-write";
+    default: return "unknown";
+    }
+}
+
 void latc_aot_v2_report_stats(void)
 {
     static _Atomic bool reported;
@@ -117,11 +132,25 @@ void latc_aot_v2_report_stats(void)
             "latx: AOT v2 runtime stats direct_targets=%llu "
             "compat_tb_allocations=0 compiler_submissions=%llu "
             "compiler_submission_failures=%llu "
-            "compiler_submission_duplicates=%llu\n",
+            "compiler_submission_duplicates=%llu "
+            "invalidated_instances=%llu invalidated_exec_ranges=%llu "
+            "invalidation_unmap=%llu "
+            "invalidation_map_fixed=%llu invalidation_protection=%llu "
+            "invalidation_code_write=%llu\n",
             (unsigned long long)atomic_load(&direct_targets),
             (unsigned long long)atomic_load(&compiler_submissions),
             (unsigned long long)atomic_load(&compiler_submission_failures),
-            (unsigned long long)atomic_load(&compiler_submission_duplicates));
+            (unsigned long long)atomic_load(&compiler_submission_duplicates),
+            (unsigned long long)atomic_load(&invalidated_instances),
+            (unsigned long long)atomic_load(&invalidated_exec_ranges),
+            (unsigned long long)atomic_load(
+                &invalidation_reasons[LATC_AOT_V2_INVALIDATE_UNMAP]),
+            (unsigned long long)atomic_load(
+                &invalidation_reasons[LATC_AOT_V2_INVALIDATE_MAP_FIXED]),
+            (unsigned long long)atomic_load(
+                &invalidation_reasons[LATC_AOT_V2_INVALIDATE_PROTECTION]),
+            (unsigned long long)atomic_load(
+                &invalidation_reasons[LATC_AOT_V2_INVALIDATE_CODE_WRITE]));
     for (LatAotV2ModuleStats *stats = module_stats; stats;
          stats = stats->next) {
         char source[65];
@@ -322,58 +351,105 @@ void latc_aot_v2_note_mmap(int fd, uint64_t guest_start,
     drain_mappings();
 }
 
-void latc_aot_v2_note_munmap(CPUState *cpu, uint64_t guest_start,
-                             uint64_t mapping_size)
+static uint32_t instance_exec_range_overlap_count(
+    const LatAotModuleInstanceV2 *instance, uint64_t guest_start,
+    uint64_t guest_end)
 {
-    if (!registry_initialized || !mapping_size ||
-        guest_start > UINT64_MAX - mapping_size) {
-        return;
+    if (!instance->exec_range_count) {
+        return guest_start < instance->guest_end &&
+               guest_end > instance->guest_begin;
+    }
+    uint32_t overlaps = 0;
+    for (uint32_t i = 0; i < instance->exec_range_count; i++) {
+        if (guest_start < instance->exec_ranges[i].end &&
+            guest_end > instance->exec_ranges[i].begin) {
+            overlaps++;
+        }
+    }
+    return overlaps;
+}
+
+bool latc_aot_v2_invalidate_range(CPUState *cpu, uint64_t guest_start,
+                                  uint64_t mapping_size,
+                                  LatcAotV2InvalidationReason reason)
+{
+    if (!mapping_size || guest_start > UINT64_MAX - mapping_size ||
+        reason > LATC_AOT_V2_INVALIDATE_CODE_WRITE) {
+        return false;
     }
     uint64_t guest_end = guest_start + mapping_size;
+    bool current_invalidated = false;
     pthread_mutex_lock(&elf_tracker_lock);
-    if (elf_tracker) {
+    if (elf_tracker && reason != LATC_AOT_V2_INVALIDATE_CODE_WRITE) {
         lat_guest_elf_tracker_remove_range_v2(elf_tracker, guest_start,
                                               mapping_size);
+    }
+    size_t deactivated = 0;
+    size_t deactivated_exec_ranges = 0;
+    if (registry_initialized &&
+        lat_aot_v2_registry_deactivate_range(&registry, guest_start, guest_end,
+                                             &deactivated)) {
+        pthread_mutex_unlock(&elf_tracker_lock);
+        return false;
     }
     for (LatAotV2RuntimeInstance *runtime = runtime_instances; runtime;
          runtime = runtime->next) {
         LatAotModuleInstanceV2 *instance = &runtime->instance;
-        if (guest_start >= instance->guest_end ||
-            guest_end <= instance->guest_begin ||
-            !atomic_load_explicit(&instance->active, memory_order_acquire)) {
+        uint32_t overlaps = instance_exec_range_overlap_count(
+            instance, guest_start, guest_end);
+        uint64_t generation = atomic_load_explicit(
+            &instance->generation, memory_order_acquire);
+        if (!overlaps ||
+            atomic_load_explicit(&instance->active, memory_order_acquire) ||
+            runtime->handled_invalidation_generation == generation) {
             continue;
         }
-        if (!lat_aot_v2_registry_deactivate(&registry, instance)) {
-            if (runtime->stats) {
-                runtime->stats->state = LAT_AOT_V2_MODULE_INACTIVE;
-            }
-            bool was_current = aot_v2_current_instance == instance;
+        runtime->handled_invalidation_generation = generation;
+        deactivated_exec_ranges += overlaps;
+        bool was_current = aot_v2_current_instance == instance;
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+        if (cpu) {
+            was_current |= ((CPUArchState *)cpu->env_ptr)
+                ->aot_v2_current_context == instance;
+        }
+#endif
+        current_invalidated |= was_current;
+        if (runtime->stats &&
+            runtime->stats->state == LAT_AOT_V2_MODULE_REGISTERED) {
+            runtime->stats->state = LAT_AOT_V2_MODULE_INACTIVE;
+        }
+        if (was_current) {
+            aot_v2_current_instance = NULL;
 #ifdef CONFIG_LATX_FAST_JMPCACHE
             if (cpu) {
-                was_current = ((CPUArchState *)cpu->env_ptr)
-                    ->aot_v2_current_context == instance;
+                latx_aot_v2_fast_jmp_cache_set_context(cpu, NULL);
             }
 #endif
-            if (was_current) {
-                aot_v2_current_instance = NULL;
-#ifdef CONFIG_LATX_FAST_JMPCACHE
-                if (cpu) {
-                    latx_aot_v2_fast_jmp_cache_set_context(cpu, NULL);
-                }
-#endif
-            }
-            if (getenv("LATX_AOT_V2_REPORT")) {
-                fprintf(stderr,
-                        "latx: AOT v2 deactivated range=0x%llx-0x%llx "
-                        "generation=%llu\n",
-                        (unsigned long long)instance->guest_begin,
-                        (unsigned long long)instance->guest_end,
-                        (unsigned long long)atomic_load_explicit(
-                            &instance->generation, memory_order_acquire));
-            }
+        }
+        if (getenv("LATX_AOT_V2_REPORT")) {
+            fprintf(stderr,
+                    "latx: AOT v2 deactivated range=0x%llx-0x%llx "
+                    "generation=%llu reason=%s\n",
+                    (unsigned long long)instance->guest_begin,
+                    (unsigned long long)instance->guest_end,
+                    (unsigned long long)generation,
+                    invalidation_reason_name(reason));
         }
     }
+    if (deactivated) {
+        atomic_fetch_add(&invalidated_instances, deactivated);
+        atomic_fetch_add(&invalidated_exec_ranges, deactivated_exec_ranges);
+        atomic_fetch_add(&invalidation_reasons[reason], 1);
+    }
     pthread_mutex_unlock(&elf_tracker_lock);
+    return current_invalidated;
+}
+
+void latc_aot_v2_note_munmap(CPUState *cpu, uint64_t guest_start,
+                             uint64_t mapping_size)
+{
+    latc_aot_v2_invalidate_range(cpu, guest_start, mapping_size,
+                                 LATC_AOT_V2_INVALIDATE_UNMAP);
 }
 
 static int bind_runtime_targets(void)
@@ -472,6 +548,8 @@ static int register_module_instance(LatAotV2RuntimeModule *module,
                                     uint64_t load_bias,
                                     uint64_t guest_begin,
                                     uint64_t guest_end,
+                                    const LatGuestElfRangeV2 *exec_ranges,
+                                    uint32_t exec_range_count,
                                     LatAotV2RuntimeInstance **result)
 {
     LatAotV2RuntimeInstance *runtime_instance = g_new0(
@@ -487,6 +565,27 @@ static int register_module_instance(LatAotV2RuntimeModule *module,
         .guest_begin = guest_begin,
         .guest_end = guest_end,
     };
+    if (exec_range_count > LAT_AOT_V2_MAX_EXEC_RANGES) {
+        g_free(runtime_instance);
+        errno = E2BIG;
+        return -1;
+    }
+    if (exec_range_count) {
+        runtime_instance->instance.exec_range_count = exec_range_count;
+        for (uint32_t i = 0; i < exec_range_count; i++) {
+            runtime_instance->instance.exec_ranges[i] =
+                (LatAotGuestRangeV2) {
+                    .begin = exec_ranges[i].begin,
+                    .end = exec_ranges[i].end,
+                };
+        }
+    } else {
+        runtime_instance->instance.exec_range_count = 1;
+        runtime_instance->instance.exec_ranges[0] = (LatAotGuestRangeV2) {
+            .begin = guest_begin,
+            .end = guest_end,
+        };
+    }
     const LatAotModuleV2 *descriptor = module->loaded.descriptor;
     runtime_instance->guest_slot_count =
         descriptor->guest_slot_end - descriptor->guest_slot_begin;
@@ -576,6 +675,7 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
     if (register_module_instance(module,
                                  info->load_bias + info->preferred_base,
                                  info->guest_begin, info->guest_end,
+                                 info->exec_ranges, info->exec_range_count,
                                  instance)) {
         snprintf(error, error_size, "cannot register AOT v2 instance: %s",
                  strerror(errno));
@@ -686,6 +786,7 @@ int latc_aot_v2_prepare(CPUArchState *env)
     module->next = runtime_modules;
     runtime_modules = module;
     if (register_module_instance(module, guest_base, guest_base, guest_end,
+                                 NULL, 0,
                                  NULL) ||
         lat_aot_v2_context_apply_guest_slots(
             module->loaded.descriptor, guest_base, env->tb_jmp_cache_ptr)) {
