@@ -310,6 +310,7 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
             .start = start,
             .end = last->addr + last->len,
             .terminator_pc = last->addr,
+            .semantic_flags = CFG_TB_CODE64,
             .terminator = term_from_insn(last->kind),
             .first_edge = out->edge_count,
         };

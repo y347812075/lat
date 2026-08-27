@@ -1,4 +1,5 @@
 #include "lat-native-image.h"
+#include "lat-aot-v2.h"
 #include "module-pack.h"
 
 #include <glib.h>
@@ -104,6 +105,72 @@ static int write_fixture(const char *path, int overlap)
     return 0;
 }
 
+static int write_large_guest_table_fixture(const char *path)
+{
+    const size_t address_count = LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT + 1;
+    const size_t code_size = address_count * 3 * sizeof(uint32_t);
+    const size_t tb_offset = sizeof(LatNativeImageHeaderV2) + 8 + code_size;
+    const size_t relocation_offset = tb_offset + sizeof(LatNativeTbV1);
+    const size_t pc_map_offset = relocation_offset +
+        address_count * sizeof(LatNativeRelocationV1);
+    const size_t image_size = pc_map_offset + sizeof(LatNativePcMapV2);
+    unsigned char *image = g_malloc0(image_size);
+    if (!image) {
+        return -1;
+    }
+    LatNativeImageHeaderV2 *header = (void *)image;
+    memcpy(header->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
+    header->version = LAT_NATIVE_IMAGE_VERSION;
+    header->header_size = sizeof(*header);
+    header->flags = LAT_NATIVE_IMAGE_PIE;
+    header->guest_entry = 0x401000;
+    header->preferred_guest_base = 0x400000;
+    header->guest_image_offset = sizeof(*header);
+    header->guest_image_size = 1;
+    header->code_offset = sizeof(*header) + 8;
+    header->code_size = code_size;
+    header->tb_table_offset = tb_offset;
+    header->tb_count = 1;
+    header->relocation_offset = relocation_offset;
+    header->relocation_count = address_count;
+    header->pc_map_offset = pc_map_offset;
+    header->pc_map_count = 1;
+    strcpy(header->lat_build_id, "aot-v2-two-level-guest-table-test-v1");
+
+    uint32_t *code = (void *)(image + header->code_offset);
+    LatNativeRelocationV1 *relocations =
+        (void *)(image + relocation_offset);
+    for (size_t i = 0; i < address_count; i++) {
+        code[i * 3] = 12; /* destination register */
+        code[i * 3 + 1] = 0x03400000u;
+        code[i * 3 + 2] = 0x03400000u;
+        relocations[i] = (LatNativeRelocationV1) {
+            .code_offset = i * 3 * sizeof(uint32_t),
+            .addend = 0x401000 + i * 8,
+            .kind = LAT_NATIVE_RELOC_GUEST_ADDRESS,
+            .slots = 3,
+        };
+    }
+    LatNativeTbV1 *tb = (void *)(image + tb_offset);
+    *tb = (LatNativeTbV1) {
+        .guest_pc = 0x401000, .code_offset = 0, .code_size = code_size,
+    };
+    LatNativePcMapV2 *map = (void *)(image + pc_map_offset);
+    *map = (LatNativePcMapV2) {
+        .guest_pc = 0x401000,
+        .host_offset_begin = 0,
+        .host_offset_end = code_size,
+        .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+    };
+    FILE *file = fopen(path, "wb");
+    int result = file && fwrite(image, image_size, 1, file) == 1 ? 0 : -1;
+    if (file && fclose(file)) {
+        result = -1;
+    }
+    g_free(image);
+    return result;
+}
+
 int main(void)
 {
     char directory[] = "/tmp/latc-aot-v2-module-pack-XXXXXX";
@@ -120,6 +187,7 @@ int main(void)
         g_free(image_path);
         return 1;
     }
+    char *metadata_path = g_build_filename(directory, "module.c", NULL);
     char *text_path = g_build_filename(directory, "text.bin", NULL);
     gchar *text = NULL;
     gsize text_size = 0;
@@ -130,6 +198,30 @@ int main(void)
         g_free(image_path);
         return 1;
     }
+    if (write_large_guest_table_fixture(image_path) ||
+        lat_aot_v2_emit_module_sources(image_path, directory,
+                                       error, sizeof(error))) {
+        fprintf(stderr, "cannot emit two-level guest table: %s\n", error);
+        g_free(text);
+        g_free(text_path);
+        g_free(metadata_path);
+        g_free(image_path);
+        return 1;
+    }
+    gchar *metadata = NULL;
+    if (!g_file_get_contents(metadata_path, &metadata, NULL, NULL) ||
+        !strstr(metadata, "LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS") ||
+        !strstr(metadata, "guest_slots,guest_slots+257") ||
+        !strstr(metadata, "{0x1800,-16,0}")) {
+        fprintf(stderr, "257-entry two-level guest table was not emitted\n");
+        g_free(metadata);
+        g_free(text);
+        g_free(text_path);
+        g_free(metadata_path);
+        g_free(image_path);
+        return 1;
+    }
+    g_free(metadata);
     const uint32_t *code = (const void *)text;
     if (code[0] != 0x18000044u ||
         (code[1] & 0xfc000000u) != 0x50000000u ||
@@ -155,7 +247,6 @@ int main(void)
     }
     g_free(text);
     g_remove(text_path);
-    char *metadata_path = g_build_filename(directory, "module.c", NULL);
     char *assembly_path = g_build_filename(directory, "module.S", NULL);
     g_remove(metadata_path);
     g_remove(assembly_path);

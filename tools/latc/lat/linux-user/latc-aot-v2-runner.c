@@ -60,6 +60,8 @@ typedef struct LatAotV2RuntimeInstance {
     LatAotV2RuntimeModule *runtime_module;
     LatAotV2ModuleStats *stats;
     uint64_t guest_slots[LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT];
+    uint64_t *guest_pages;
+    size_t guest_page_storage_count;
     uint64_t guest_slot_count;
     uint64_t handled_invalidation_generation;
     struct LatAotV2RuntimeInstance *next;
@@ -124,10 +126,18 @@ static __thread LatAotModuleInstanceV2 *aot_v2_current_instance;
 static __thread uint64_t aot_v2_current_generation;
 static __thread LatAotV2TargetCacheEntry *aot_v2_target_cache;
 static _Atomic uint64_t direct_targets;
+static _Atomic uint64_t file_dispatch_misses;
+static _Atomic uint64_t nonfile_dispatch_misses;
 static _Atomic uint64_t compiler_submissions;
 static _Atomic uint64_t compiler_submission_failures;
 static _Atomic uint64_t compiler_submission_duplicates;
 static _Atomic uint64_t compiler_request_sequence;
+
+static uint32_t aot_v2_semantic_flags(uint32_t cflags)
+{
+    return LAT_AOT_TB_CODE64 |
+        ((cflags & CF_PARALLEL) ? LAT_AOT_TB_PARALLEL : 0);
+}
 static _Atomic uint64_t invalidated_instances;
 static _Atomic uint64_t invalidated_exec_ranges;
 static _Atomic uint64_t revalidated_instances;
@@ -344,6 +354,7 @@ void latc_aot_v2_report_stats(void)
     }
     fprintf(stderr,
             "latx: AOT v2 runtime stats direct_targets=%llu "
+            "file_dispatch_misses=%llu nonfile_dispatch_misses=%llu "
             "compat_tb_allocations=0 compiler_submissions=%llu "
             "compiler_submission_failures=%llu "
             "compiler_submission_duplicates=%llu "
@@ -358,6 +369,8 @@ void latc_aot_v2_report_stats(void)
             "instance_allocated=%zu registry_retired=%zu "
             "host_index_retired=%zu module_stats=%zu host_features=0x%llx\n",
             (unsigned long long)atomic_load(&direct_targets),
+            (unsigned long long)atomic_load(&file_dispatch_misses),
+            (unsigned long long)atomic_load(&nonfile_dispatch_misses),
             (unsigned long long)atomic_load(&compiler_submissions),
             (unsigned long long)atomic_load(&compiler_submission_failures),
             (unsigned long long)atomic_load(&compiler_submission_duplicates),
@@ -477,6 +490,21 @@ static LatAotV2ModuleStats *module_stats_for_pc(uint64_t guest_pc)
         }
     }
     return NULL;
+}
+
+bool latc_aot_v2_is_file_pc(target_ulong guest_pc)
+{
+    return module_stats_for_pc(guest_pc) != NULL;
+}
+
+static void note_dispatch_miss(LatAotV2ModuleStats *stats)
+{
+    if (stats) {
+        atomic_fetch_add(&stats->jit_fallbacks, 1);
+        atomic_fetch_add(&file_dispatch_misses, 1);
+    } else {
+        atomic_fetch_add(&nonfile_dispatch_misses, 1);
+    }
 }
 
 bool latc_aot_v2_mapping_enabled(void)
@@ -994,6 +1022,9 @@ static LatAotV2RuntimeInstance *allocate_runtime_instance_locked(void)
                sizeof(runtime->instance.exec_ranges));
         runtime->runtime_module = NULL;
         runtime->stats = NULL;
+        g_free(runtime->guest_pages);
+        runtime->guest_pages = NULL;
+        runtime->guest_page_storage_count = 0;
         memset(runtime->guest_slots, 0, sizeof(runtime->guest_slots));
         runtime->guest_slot_count = 0;
         runtime->handled_invalidation_generation = 0;
@@ -1058,15 +1089,35 @@ static int register_module_instance(LatAotV2RuntimeModule *module,
         };
     }
     const LatAotModuleV2 *descriptor = module->loaded.descriptor;
-    runtime_instance->guest_slot_count =
-        descriptor->guest_slot_end - descriptor->guest_slot_begin;
-    if (lat_aot_v2_context_apply_guest_slots(
+    size_t address_count = descriptor->guest_slot_end -
+                           descriptor->guest_slot_begin;
+    if (descriptor->module_flags & LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS) {
+        size_t page_count =
+            (address_count + LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT - 1) /
+            LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+        runtime_instance->guest_page_storage_count =
+            page_count * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+        runtime_instance->guest_pages = g_new0(
+            uint64_t, runtime_instance->guest_page_storage_count);
+        if (runtime_instance->guest_page_storage_count &&
+            !runtime_instance->guest_pages) {
+            release_unused_runtime_instance_locked(runtime_instance);
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+    size_t context_slot_count = 0;
+    if (lat_aot_v2_context_apply_guest_table(
             descriptor, load_bias,
             runtime_instance->guest_slots +
-                LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT)) {
+                LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT,
+            runtime_instance->guest_pages,
+            runtime_instance->guest_page_storage_count,
+            &context_slot_count)) {
         release_unused_runtime_instance_locked(runtime_instance);
         return -1;
     }
+    runtime_instance->guest_slot_count = context_slot_count;
     if (lat_aot_v2_registry_register(&registry,
                                      &runtime_instance->instance)) {
         release_unused_runtime_instance_locked(runtime_instance);
@@ -1556,8 +1607,11 @@ int latc_aot_v2_prepare(CPUArchState *env)
                                  exec_ranges, exec_range_count,
                                  NULL) ||
         run_lifecycle_stress(module) ||
-        lat_aot_v2_context_apply_guest_slots(
-            module->loaded.descriptor, guest_base, env->tb_jmp_cache_ptr)) {
+        (!(module->loaded.descriptor->module_flags &
+           LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS) &&
+         lat_aot_v2_context_apply_guest_slots(
+             module->loaded.descriptor, guest_base,
+             env->tb_jmp_cache_ptr))) {
         fprintf(stderr, "latx: cannot register AOT v2 module: %s\n",
                 strerror(errno));
         return strict ? -1 : 0;
@@ -1580,15 +1634,14 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
     }
     LatAotV2ModuleStats *stats = module_stats_for_pc(guest_pc);
     if (!atomic_load_explicit(&active, memory_order_acquire)) {
-        if (stats) {
-            atomic_fetch_add(&stats->jit_fallbacks, 1);
-        }
+        note_dispatch_miss(stats);
         return false;
     }
     if (!aot_v2_target_cache) {
         aot_v2_target_cache = g_new0(LatAotV2TargetCacheEntry,
                                      LAT_AOT_V2_TARGET_CACHE_SIZE);
         if (!aot_v2_target_cache) {
+            note_dispatch_miss(stats);
             return false;
         }
     }
@@ -1612,10 +1665,10 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
     }
     LatAotTargetV2 target = {0};
     if (!target_held) {
-        if (lat_aot_v2_registry_lookup(&registry, guest_pc, cflags, &target)) {
-            if (stats) {
-                atomic_fetch_add(&stats->jit_fallbacks, 1);
-            }
+        if (lat_aot_v2_registry_lookup(&registry, guest_pc,
+                                       aot_v2_semantic_flags(cflags),
+                                       &target)) {
+            note_dispatch_miss(stats);
             return false;
         }
         entry->guest_pc = guest_pc;
@@ -1644,9 +1697,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
             atomic_fetch_sub_explicit(&instance->readers, 1,
                                       memory_order_seq_cst);
         }
-        if (stats) {
-            atomic_fetch_add(&stats->jit_fallbacks, 1);
-        }
+        note_dispatch_miss(stats);
         return false;
     }
     if (target_held) {

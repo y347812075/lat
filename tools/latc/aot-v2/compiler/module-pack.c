@@ -292,37 +292,6 @@ static void select_supported_tbs(ModulePack *pack)
             pack->supported[owner] = 0;
         }
     }
-    if (pack->header->flags & LAT_NATIVE_IMAGE_PIE) {
-        GHashTable *guest_addresses = g_hash_table_new(g_direct_hash,
-                                                        g_direct_equal);
-        for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
-            const LatNativeRelocationV1 *relocation = &pack->relocations[i];
-            if (relocation->kind != LAT_NATIVE_RELOC_GUEST_ADDRESS) {
-                continue;
-            }
-            int owner = find_code_tb(pack, relocation->code_offset);
-            if (owner < 0 || !pack->supported[owner]) {
-                continue;
-            }
-            if ((uint64_t)relocation->addend <
-                pack->header->preferred_guest_base) {
-                pack->supported[owner] = 0;
-                continue;
-            }
-            uint64_t rva = (uint64_t)relocation->addend -
-                           pack->header->preferred_guest_base;
-            gpointer key = (gpointer)(uintptr_t)(rva + 1);
-            if (!g_hash_table_contains(guest_addresses, key)) {
-                if (g_hash_table_size(guest_addresses) ==
-                    LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT) {
-                    pack->supported[owner] = 0;
-                    continue;
-                }
-                g_hash_table_add(guest_addresses, key);
-            }
-        }
-        g_hash_table_destroy(guest_addresses);
-    }
     int changed;
     do {
         changed = 0;
@@ -498,7 +467,7 @@ static int guest_slot(ModulePack *pack, uint64_t guest_rva)
             return (int)i;
         }
     }
-    if (pack->guest_rvas->len >= LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT) {
+    if (pack->guest_rvas->len >= LAT_AOT_V2_GUEST_ADDRESS_LIMIT) {
         return -1;
     }
     g_array_append_val(pack->guest_rvas, guest_rva);
@@ -544,14 +513,18 @@ static int patch_guest_address(ModulePack *pack,
     }
     uint64_t guest_rva = target - pack->header->preferred_guest_base;
     int slot = guest_slot(pack, guest_rva);
-    if (slot < 0 || relocation->slots < 1 || relocation->slots > 3) {
+    if (slot < 0 || relocation->slots < 2 || relocation->slots > 3) {
         return -1;
     }
     uint32_t destination = instructions[0] & 0x1f;
-    int32_t offset = -(slot + 1) * 8;
+    uint32_t page = (uint32_t)slot / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+    uint32_t entry = (uint32_t)slot % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+    int32_t offset = -(int32_t)((page + 1) * 8);
     instructions[0] = 0x28c00000u | ((uint32_t)offset & 0xfff) << 10 |
                       22u << 5 | destination;
-    for (uint32_t i = 1; i < relocation->slots; i++) {
+    instructions[1] = 0x28c00000u | (entry * 8) << 10 |
+                      destination << 5 | destination;
+    for (uint32_t i = 2; i < relocation->slots; i++) {
         instructions[i] = 0x03400000u;
     }
     return 0;
@@ -643,7 +616,7 @@ static int emit_metadata(const char *path, const ModulePack *pack,
         "static const Note note = { {4,sizeof(LatAotNoteV2),0x4c415432},"
         "\"LAT\", { MAGIC,2,sizeof(LatAotNoteV2),"
         "LAT_AOT_MODULE_PARTIAL|LAT_AOT_MODULE_READONLY_TEXT|"
-        "LAT_AOT_MODULE_PRECISE_PC_MAP,"
+        "LAT_AOT_MODULE_PRECISE_PC_MAP|LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS,"
         "LAT_AOT_V2_REQUIRED_BASE_FEATURES|LAT_AOT_FEATURE_LASX,{ ");
     print_bytes(file, pack->header->guest_sha256);
     fprintf(file, " },{ ");
@@ -689,10 +662,11 @@ static int emit_metadata(const char *path, const ModulePack *pack,
         "__attribute__((section(\".rodata.lat.guest\"),used))\n"
         "static const LatAotGuestSlotV2 guest_slots[] = {\n");
     for (guint i = 0; i < pack->guest_rvas->len; i++) {
-        fprintf(file, "{0x%llx,-%u,0},\n",
+        fprintf(file, "{0x%llx,-%u,%u},\n",
                 (unsigned long long)g_array_index(pack->guest_rvas,
                                                   uint64_t, i),
-                (i + 1) * 8);
+                (i / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT + 1) * 8,
+                (i % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT) * 8);
     }
     if (!pack->guest_rvas->len) {
         fprintf(file, "{0,0,0},\n");
@@ -704,7 +678,7 @@ static int emit_metadata(const char *path, const ModulePack *pack,
         "const LatAotModuleV2 lat_aot_module_v2 = {"
         "MAGIC,2,sizeof(LatAotModuleV2),"
         "LAT_AOT_MODULE_PARTIAL|LAT_AOT_MODULE_READONLY_TEXT|"
-        "LAT_AOT_MODULE_PRECISE_PC_MAP,"
+        "LAT_AOT_MODULE_PRECISE_PC_MAP|LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS,"
         "LAT_AOT_V2_REQUIRED_BASE_FEATURES|LAT_AOT_FEATURE_LASX,{ ");
     print_bytes(file, pack->header->guest_sha256);
     fprintf(file, " },{ ");

@@ -6,7 +6,7 @@
 #define LATC_BUNDLE_MAGIC "LATCBND1"
 #define LATC_CFG_MAGIC "LATCCFG1"
 #define LATC_BUNDLE_VERSION 3u
-#define LATC_CFG_VERSION 3u
+#define LATC_CFG_VERSION 4u
 
 typedef struct __attribute__((packed)) LatcDiskCfgHeader {
     char magic[8];
@@ -27,7 +27,7 @@ typedef struct __attribute__((packed)) LatcDiskFunction {
 typedef struct __attribute__((packed)) LatcDiskTb {
     uint64_t start, end, terminator_pc, first_edge, edge_count;
     uint64_t profile_count;
-    uint32_t terminator, reserved;
+    uint32_t terminator, semantic_flags;
 } LatcDiskTb;
 
 typedef struct __attribute__((packed)) LatcDiskExecRange {

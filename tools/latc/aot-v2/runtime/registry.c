@@ -406,6 +406,10 @@ int lat_aot_v2_context_apply_guest_slots(const LatAotModuleV2 *module,
         return -1;
     }
     size_t count = (end - begin) / sizeof(LatAotGuestSlotV2);
+    if (module->module_flags & LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS) {
+        errno = ENOTSUP;
+        return -1;
+    }
     if (count > LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT) {
         errno = E2BIG;
         return -1;
@@ -420,5 +424,65 @@ int lat_aot_v2_context_apply_guest_slots(const LatAotModuleV2 *module,
         *(uint64_t *)((unsigned char *)jump_cache + slot->fp_offset) =
             guest_load_bias + slot->guest_rva;
     }
+    return 0;
+}
+
+int lat_aot_v2_context_apply_guest_table(const LatAotModuleV2 *module,
+                                         uint64_t guest_load_bias,
+                                         void *jump_cache,
+                                         uint64_t *page_storage,
+                                         size_t page_storage_count,
+                                         size_t *context_slot_count)
+{
+    if (!module || !jump_cache || !context_slot_count) {
+        errno = EINVAL;
+        return -1;
+    }
+    uintptr_t begin = (uintptr_t)module->guest_slot_begin;
+    uintptr_t end = (uintptr_t)module->guest_slot_end;
+    if ((!begin != !end) || end < begin ||
+        (end - begin) % sizeof(LatAotGuestSlotV2)) {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t count = (end - begin) / sizeof(LatAotGuestSlotV2);
+    if (!(module->module_flags & LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS)) {
+        *context_slot_count = count;
+        return lat_aot_v2_context_apply_guest_slots(module, guest_load_bias,
+                                                    jump_cache);
+    }
+    if (count > LAT_AOT_V2_GUEST_ADDRESS_LIMIT) {
+        errno = E2BIG;
+        return -1;
+    }
+    size_t page_count = (count + LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT - 1) /
+                        LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+    size_t required = page_count * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+    if (required && (!page_storage || page_storage_count < required)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    if (required) {
+        memset(page_storage, 0, required * sizeof(*page_storage));
+    }
+    uint64_t *context = jump_cache;
+    for (size_t page = 0; page < page_count; page++) {
+        context[-(ptrdiff_t)(page + 1)] =
+            (uintptr_t)&page_storage[page * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT];
+    }
+    for (size_t i = 0; i < count; i++) {
+        const LatAotGuestSlotV2 *slot = &module->guest_slot_begin[i];
+        size_t page = i / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+        size_t entry = i % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+        if (slot->fp_offset != -(int32_t)((page + 1) * 8) ||
+            slot->reserved != entry * 8 ||
+            guest_load_bias > UINT64_MAX - slot->guest_rva) {
+            errno = ENOEXEC;
+            return -1;
+        }
+        page_storage[page * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT + entry] =
+            guest_load_bias + slot->guest_rva;
+    }
+    *context_slot_count = page_count;
     return 0;
 }

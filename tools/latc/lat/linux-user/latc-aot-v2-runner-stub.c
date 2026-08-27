@@ -66,6 +66,12 @@ void latc_aot_v2_report_stats(void)
 {
 }
 
+bool latc_aot_v2_is_file_pc(target_ulong guest_pc)
+{
+    (void)guest_pc;
+    return false;
+}
+
 int latc_aot_v2_prepare(CPUArchState *env)
 {
     (void)env;

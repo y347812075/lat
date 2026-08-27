@@ -180,7 +180,8 @@ static int compile_bundle(const char *input, const char *output,
     }
     if (profile) {
         size_t matched = 0, unmatched = 0, ignored = 0;
-        if (latc_profile_apply(profile, &program, profile_ignore_outside_exec,
+        if (latc_profile_apply(profile, input, &program,
+                               profile_ignore_outside_exec,
                                &matched, &unmatched, &ignored,
                                error, sizeof(error)) != 0) {
             fprintf(stderr, "latc: %s\n", error);
