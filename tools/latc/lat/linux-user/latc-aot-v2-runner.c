@@ -354,8 +354,8 @@ void latc_aot_v2_report_stats(void)
     }
     fprintf(stderr,
             "latx: AOT v2 runtime stats direct_targets=%llu "
-            "file_dispatch_misses=%llu nonfile_dispatch_misses=%llu "
-            "compat_tb_allocations=0 compiler_submissions=%llu "
+            "compat_tb_allocations=0 file_dispatch_misses=%llu "
+            "nonfile_dispatch_misses=%llu compiler_submissions=%llu "
             "compiler_submission_failures=%llu "
             "compiler_submission_duplicates=%llu "
             "invalidated_instances=%llu invalidated_exec_ranges=%llu "
