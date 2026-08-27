@@ -357,6 +357,7 @@ void latc_aot_v2_report_stats(void)
     if (atomic_exchange(&reported, true)) {
         return;
     }
+    latc_bundle_flush_stats();
     submit_runtime_profiles();
     if (!getenv("LATX_AOT_V2_REPORT")) return;
     LatAotRegistryCountsV2 registry_counts = {0};

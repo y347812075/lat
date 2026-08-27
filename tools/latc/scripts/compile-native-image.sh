@@ -44,9 +44,20 @@ while [ "$round" -le 20 ]; do
         echo "latc: native compilation failed without static missing targets" >&2
         exit 1
     fi
-    cat "$supplements" "$missing" | \
-        awk '{ count[$1] += $2 } END { for (pc in count) print pc, count[pc] }' | \
-        sort -k1,1 >"$work/supplements-next.profile"
+    if head -n 1 "$supplements" | grep -q '^LATC_PROFILE_V2 '; then
+        head -n 1 "$supplements" >"$work/supplements-next.profile"
+        {
+            tail -n +2 "$supplements"
+            awk '{ print $1, "0x1", $2 }' "$missing"
+        } | awk '{ key=$1 " " $2; count[key]+=$3 }
+                  END { for (key in count) print key, count[key] }' | \
+            sort -k1,1 -k2,2 >>"$work/supplements-next.profile"
+    else
+        cat "$supplements" "$missing" | \
+            awk '{ count[$1] += $2 }
+                  END { for (pc in count) print pc, count[pc] }' | \
+            sort -k1,1 >"$work/supplements-next.profile"
+    fi
     mv "$work/supplements-next.profile" "$supplements"
     echo "latc: static supplement round $round added $(wc -l <"$missing") targets" >&2
     round=$((round + 1))
