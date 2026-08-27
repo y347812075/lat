@@ -47,6 +47,7 @@ typedef struct LatAotV2ModuleStats {
     uint8_t source_sha256[32];
     _Atomic uint64_t guest_begin;
     _Atomic uint64_t guest_end;
+    _Atomic uint64_t load_bias;
     _Atomic LatAotV2ModuleState state;
     _Atomic uint64_t aot_lookups;
     _Atomic uint64_t jit_fallbacks;
@@ -128,6 +129,7 @@ static __thread LatAotV2TargetCacheEntry *aot_v2_target_cache;
 static _Atomic uint64_t direct_targets;
 static _Atomic uint64_t file_dispatch_misses;
 static _Atomic uint64_t nonfile_dispatch_misses;
+static _Atomic uint64_t traced_dispatch_misses;
 static _Atomic uint64_t compiler_submissions;
 static _Atomic uint64_t compiler_submission_failures;
 static _Atomic uint64_t compiler_submission_duplicates;
@@ -453,6 +455,8 @@ static LatAotV2ModuleStats *add_module_stats(
                                   memory_order_release);
             atomic_store_explicit(&stats->guest_end, info->guest_end,
                                   memory_order_release);
+            atomic_store_explicit(&stats->load_bias, info->load_bias,
+                                  memory_order_release);
             atomic_store_explicit(&stats->state, state,
                                   memory_order_release);
             return stats;
@@ -467,6 +471,8 @@ static LatAotV2ModuleStats *add_module_stats(
     atomic_store_explicit(&stats->guest_begin, info->guest_begin,
                           memory_order_relaxed);
     atomic_store_explicit(&stats->guest_end, info->guest_end,
+                          memory_order_relaxed);
+    atomic_store_explicit(&stats->load_bias, info->load_bias,
                           memory_order_relaxed);
     atomic_store_explicit(&stats->state, state, memory_order_relaxed);
     stats->next = atomic_load_explicit(&module_stats, memory_order_relaxed);
@@ -497,11 +503,25 @@ bool latc_aot_v2_is_file_pc(target_ulong guest_pc)
     return module_stats_for_pc(guest_pc) != NULL;
 }
 
-static void note_dispatch_miss(LatAotV2ModuleStats *stats)
+static void note_dispatch_miss(LatAotV2ModuleStats *stats,
+                               uint64_t guest_pc, uint32_t cflags)
 {
     if (stats) {
         atomic_fetch_add(&stats->jit_fallbacks, 1);
         atomic_fetch_add(&file_dispatch_misses, 1);
+        uint64_t trace_index = atomic_fetch_add(&traced_dispatch_misses, 1);
+        if (trace_index < 1024 && getenv("LATX_AOT_V2_TRACE_MISSES")) {
+            char source[65];
+            digest_hex(stats->source_sha256, source);
+            uint64_t load_bias = atomic_load_explicit(
+                &stats->load_bias, memory_order_acquire);
+            fprintf(stderr,
+                    "latx: AOT v2 file miss source=%s rva=0x%llx "
+                    "flags=0x%x guest_pc=0x%llx\n",
+                    source, (unsigned long long)(guest_pc - load_bias),
+                    aot_v2_semantic_flags(cflags),
+                    (unsigned long long)guest_pc);
+        }
     } else {
         atomic_fetch_add(&nonfile_dispatch_misses, 1);
     }
@@ -1634,14 +1654,14 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
     }
     LatAotV2ModuleStats *stats = module_stats_for_pc(guest_pc);
     if (!atomic_load_explicit(&active, memory_order_acquire)) {
-        note_dispatch_miss(stats);
+        note_dispatch_miss(stats, guest_pc, cflags);
         return false;
     }
     if (!aot_v2_target_cache) {
         aot_v2_target_cache = g_new0(LatAotV2TargetCacheEntry,
                                      LAT_AOT_V2_TARGET_CACHE_SIZE);
         if (!aot_v2_target_cache) {
-            note_dispatch_miss(stats);
+            note_dispatch_miss(stats, guest_pc, cflags);
             return false;
         }
     }
@@ -1668,7 +1688,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
         if (lat_aot_v2_registry_lookup(&registry, guest_pc,
                                        aot_v2_semantic_flags(cflags),
                                        &target)) {
-            note_dispatch_miss(stats);
+            note_dispatch_miss(stats, guest_pc, cflags);
             return false;
         }
         entry->guest_pc = guest_pc;
@@ -1697,7 +1717,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
             atomic_fetch_sub_explicit(&instance->readers, 1,
                                       memory_order_seq_cst);
         }
-        note_dispatch_miss(stats);
+        note_dispatch_miss(stats, guest_pc, cflags);
         return false;
     }
     if (target_held) {
