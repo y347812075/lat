@@ -53,8 +53,17 @@ typedef struct LatAotV2ModuleStats {
     _Atomic uint64_t jit_fallbacks;
     _Atomic uint64_t registration_ns;
     _Atomic size_t live_instances;
+    int source_fd;
+    GArray *profile_entries;
     struct LatAotV2ModuleStats *next;
 } LatAotV2ModuleStats;
+
+typedef struct LatAotV2ProfileEntry {
+    uint64_t rva;
+    uint32_t flags;
+    uint32_t reserved;
+    uint64_t count;
+} LatAotV2ProfileEntry;
 
 typedef struct LatAotV2RuntimeInstance {
     LatAotModuleInstanceV2 instance;
@@ -106,6 +115,7 @@ static bool registry_initialized;
 static bool runtime_bound;
 static LatGuestElfTrackerV2 *elf_tracker;
 static pthread_mutex_t elf_tracker_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t profile_lock = PTHREAD_MUTEX_INITIALIZER;
 typedef struct LatAotV2PendingMapping {
     int fd;
     uint64_t guest_start;
@@ -144,6 +154,8 @@ static _Atomic uint64_t invalidated_instances;
 static _Atomic uint64_t invalidated_exec_ranges;
 static _Atomic uint64_t revalidated_instances;
 static _Atomic uint64_t revalidation_failures;
+
+static void submit_runtime_profiles(void);
 static _Atomic uint64_t invalidation_reasons[4];
 static _Atomic uint64_t signal_pc_lookups;
 static _Atomic uint64_t signal_pc_hits;
@@ -342,10 +354,11 @@ static const char *invalidation_reason_name(LatcAotV2InvalidationReason reason)
 void latc_aot_v2_report_stats(void)
 {
     static _Atomic bool reported;
-    if (atomic_exchange(&reported, true) ||
-        !getenv("LATX_AOT_V2_REPORT")) {
+    if (atomic_exchange(&reported, true)) {
         return;
     }
+    submit_runtime_profiles();
+    if (!getenv("LATX_AOT_V2_REPORT")) return;
     LatAotRegistryCountsV2 registry_counts = {0};
     if (registry_initialized) {
         pthread_mutex_lock(&elf_tracker_lock);
@@ -444,7 +457,7 @@ void latc_aot_v2_report_stats(void)
 }
 
 static LatAotV2ModuleStats *add_module_stats(
-    const LatGuestElfInfoV2 *info, LatAotV2ModuleState state)
+    const LatGuestElfInfoV2 *info, LatAotV2ModuleState state, int source_fd)
 {
     for (LatAotV2ModuleStats *stats = atomic_load_explicit(
              &module_stats, memory_order_acquire); stats;
@@ -459,6 +472,9 @@ static LatAotV2ModuleStats *add_module_stats(
                                   memory_order_release);
             atomic_store_explicit(&stats->state, state,
                                   memory_order_release);
+            if (stats->source_fd < 0 && source_fd >= 0) {
+                stats->source_fd = fcntl(source_fd, F_DUPFD_CLOEXEC, 3);
+            }
             return stats;
         }
     }
@@ -466,6 +482,10 @@ static LatAotV2ModuleStats *add_module_stats(
     if (!stats) {
         return NULL;
     }
+    stats->source_fd = source_fd >= 0 ?
+        fcntl(source_fd, F_DUPFD_CLOEXEC, 3) : -1;
+    stats->profile_entries = g_array_new(FALSE, FALSE,
+                                         sizeof(LatAotV2ProfileEntry));
     memcpy(stats->source_sha256, info->source_sha256,
            sizeof(stats->source_sha256));
     atomic_store_explicit(&stats->guest_begin, info->guest_begin,
@@ -509,17 +529,40 @@ static void note_dispatch_miss(LatAotV2ModuleStats *stats,
     if (stats) {
         atomic_fetch_add(&stats->jit_fallbacks, 1);
         atomic_fetch_add(&file_dispatch_misses, 1);
+        uint64_t load_bias = atomic_load_explicit(
+            &stats->load_bias, memory_order_acquire);
+        uint64_t rva = guest_pc - load_bias;
+        uint32_t semantic_flags = aot_v2_semantic_flags(cflags);
+        pthread_mutex_lock(&profile_lock);
+        bool found = false;
+        if (stats->profile_entries) {
+            for (guint i = 0; i < stats->profile_entries->len; i++) {
+                LatAotV2ProfileEntry *entry = &g_array_index(
+                    stats->profile_entries, LatAotV2ProfileEntry, i);
+                if (entry->rva == rva && entry->flags == semantic_flags) {
+                    if (entry->count != UINT64_MAX) entry->count++;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && stats->profile_entries->len <
+                          LAT_AOT_V2_GUEST_ADDRESS_LIMIT) {
+                LatAotV2ProfileEntry entry = {
+                    .rva = rva, .flags = semantic_flags, .count = 1,
+                };
+                g_array_append_val(stats->profile_entries, entry);
+            }
+        }
+        pthread_mutex_unlock(&profile_lock);
         uint64_t trace_index = atomic_fetch_add(&traced_dispatch_misses, 1);
         if (trace_index < 1024 && getenv("LATX_AOT_V2_TRACE_MISSES")) {
             char source[65];
             digest_hex(stats->source_sha256, source);
-            uint64_t load_bias = atomic_load_explicit(
-                &stats->load_bias, memory_order_acquire);
             fprintf(stderr,
                     "latx: AOT v2 file miss source=%s rva=0x%llx "
                     "flags=0x%x guest_pc=0x%llx\n",
                     source, (unsigned long long)(guest_pc - load_bias),
-                    aot_v2_semantic_flags(cflags),
+                    semantic_flags,
                     (unsigned long long)guest_pc);
         }
     } else {
@@ -578,6 +621,90 @@ static void submit_missing_module(int fd, const LatGuestElfInfoV2 *info,
     }
 }
 
+static int profile_entry_compare(gconstpointer left, gconstpointer right)
+{
+    const LatAotV2ProfileEntry *a = left;
+    const LatAotV2ProfileEntry *b = right;
+    if (a->rva != b->rva) return a->rva < b->rva ? -1 : 1;
+    if (a->flags != b->flags) return a->flags < b->flags ? -1 : 1;
+    return 0;
+}
+
+static void submit_runtime_profiles(void)
+{
+    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
+    if (!socket || !*socket) return;
+    for (LatAotV2ModuleStats *stats = atomic_load_explicit(
+             &module_stats, memory_order_acquire); stats;
+         stats = stats->next) {
+        pthread_mutex_lock(&profile_lock);
+        guint count = stats->profile_entries ?
+                      stats->profile_entries->len : 0;
+        GArray *entries = count ? g_array_sized_new(
+            FALSE, FALSE, sizeof(LatAotV2ProfileEntry), count) : NULL;
+        if (entries) {
+            g_array_append_vals(entries, stats->profile_entries->data, count);
+        }
+        pthread_mutex_unlock(&profile_lock);
+        if (!entries || stats->source_fd < 0) {
+            if (entries) g_array_free(entries, TRUE);
+            continue;
+        }
+        g_array_sort(entries, profile_entry_compare);
+        gchar *path = NULL;
+        GError *gerror = NULL;
+        int output_fd = g_file_open_tmp("latc-profile-XXXXXX", &path, &gerror);
+        FILE *output = output_fd >= 0 ? fdopen(output_fd, "w") : NULL;
+        char source[65];
+        digest_hex(stats->source_sha256, source);
+        int failed = !output;
+        if (output) {
+            fprintf(output, "LATC_PROFILE_V2 %s\n", source);
+            for (guint i = 0; i < entries->len; i++) {
+                const LatAotV2ProfileEntry *entry = &g_array_index(
+                    entries, LatAotV2ProfileEntry, i);
+                fprintf(output, "0x%llx 0x%x %llu\n",
+                        (unsigned long long)entry->rva, entry->flags,
+                        (unsigned long long)entry->count);
+            }
+            failed = fflush(output) || fsync(fileno(output));
+            if (fclose(output)) failed = 1;
+        } else if (output_fd >= 0) {
+            close(output_fd);
+        }
+        int profile_fd = !failed ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+        if (profile_fd >= 0) unlink(path);
+        uint64_t sequence = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
+        uint64_t request_id = ((uint64_t)getpid() << 32) ^ sequence;
+        char error[256] = {0};
+        if (profile_fd < 0 || latcd_client_submit_profile_fd(
+                socket, stats->source_fd, profile_fd,
+                LATCD_PRIORITY_LIBRARY, request_id,
+                error, sizeof(error))) {
+            atomic_fetch_add(&compiler_submission_failures, 1);
+            if (getenv("LATX_AOT_V2_REPORT")) {
+                fprintf(stderr,
+                        "latx: AOT v2 profile submission failed source=%s: %s\n",
+                        source, error[0] ? error : strerror(errno));
+            }
+        } else {
+            atomic_fetch_add(&compiler_submissions, 1);
+            if (getenv("LATX_AOT_V2_REPORT")) {
+                fprintf(stderr,
+                        "latx: AOT v2 profile submitted source=%s keys=%u\n",
+                        source, count);
+            }
+        }
+        if (profile_fd >= 0) close(profile_fd);
+        if (path) {
+            unlink(path);
+            g_free(path);
+        }
+        g_clear_error(&gerror);
+        g_array_free(entries, TRUE);
+    }
+}
+
 static void drain_mappings(void)
 {
     if (have_mmap_lock()) {
@@ -621,7 +748,8 @@ static void drain_mappings(void)
             LatAotV2ModuleStats *stats = add_module_stats(
                 info, registered > 0 ? LAT_AOT_V2_MODULE_REGISTERED :
                 registered == 0 ? LAT_AOT_V2_MODULE_MISSING :
-                                  LAT_AOT_V2_MODULE_REJECTED);
+                                  LAT_AOT_V2_MODULE_REJECTED,
+                pending->fd);
             if (stats) {
                 atomic_store_explicit(&stats->registration_ns,
                                       registration_ns,
@@ -1241,7 +1369,36 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
     if (!module) {
         char source_hex[65];
         digest_hex(info->source_sha256, source_hex);
-        char *basename = g_strdup_printf("%s.so", source_hex);
+        char *basename = NULL;
+        char *index_name = g_strdup_printf("%s.current", source_hex);
+        char *index_path = g_build_filename(cache, index_name, NULL);
+        g_free(index_name);
+        int index_fd = open(index_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        struct stat index_status;
+        if (index_fd >= 0 && !fstat(index_fd, &index_status) &&
+            S_ISREG(index_status.st_mode) &&
+            index_status.st_uid == geteuid() &&
+            index_status.st_size > 0 && index_status.st_size < 1024) {
+            char contents[1024] = {0};
+            ssize_t count = read(index_fd, contents, index_status.st_size);
+            if (count == index_status.st_size) {
+                char *start = strstr(contents, "\"module\":\"");
+                if (start) {
+                    start += strlen("\"module\":\"");
+                    char *end = strchr(start, '\"');
+                    if (end && end > start && end - start < 192 &&
+                        !memchr(start, '/', end - start) &&
+                        end - start > 3 && !memcmp(end - 3, ".so", 3)) {
+                        basename = g_strndup(start, end - start);
+                    }
+                }
+            }
+        }
+        if (index_fd >= 0) close(index_fd);
+        g_free(index_path);
+        if (!basename) {
+            basename = g_strdup_printf("%s.so", source_hex);
+        }
         char *path = g_build_filename(cache, basename, NULL);
         g_free(basename);
         if (!path) {
@@ -1389,7 +1546,7 @@ bool latc_aot_v2_revalidate_range(uint64_t guest_start,
             (g_get_monotonic_time() - registration_start) * 1000;
         if (result > 0 && instance) {
             LatAotV2ModuleStats *stats = add_module_stats(
-                &info, LAT_AOT_V2_MODULE_REGISTERED);
+                &info, LAT_AOT_V2_MODULE_REGISTERED, source->fd);
             instance->stats = stats;
             if (stats) {
                 atomic_store_explicit(&stats->registration_ns,
