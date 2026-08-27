@@ -215,6 +215,8 @@ static const char *runtime_entry(uint32_t symbol)
         return "lat_aot_runtime_pcmpistri_xmm";
     case LAT_NATIVE_SYMBOL_PCMPISTRM_XMM:
         return "lat_aot_runtime_pcmpistrm_xmm";
+    case LAT_NATIVE_SYMBOL_EFLAGTF:
+        return "lat_aot_runtime_eflagtf";
     default:
         return NULL;
     }

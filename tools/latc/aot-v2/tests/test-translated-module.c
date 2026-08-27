@@ -50,8 +50,10 @@ static int execute_instance(LatAotRegistryV2 *registry,
         lat_native_enter_x86_static_exec((void *)target.host_address,
                                          environment, stack_top, jump_cache);
         fprintf(stderr, "translated TB returned without raising a syscall\n");
+        lat_aot_v2_registry_target_release(&target);
         return -1;
     }
+    lat_aot_v2_registry_target_release(&target);
     return 0;
 }
 

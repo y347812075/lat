@@ -58,17 +58,19 @@ performance reports must lead with the three efficiency percentages.
 
 ## Reproduction
 
-Use `compare-native-train.py` with three rounds, warm AOT cache checks, a
-pinned CPU, and ASLR disabled:
+The comparison tool now measures M4, AOT v2, old AOT, and native LoongArch.
+Use at least five rounds, warm old-AOT cache checks, a pinned CPU, and ASLR
+disabled when the host permits it:
 
 ```sh
 python3 spec2000/compare-native-train.py \
   --runner /path/to/latx-x86_64 \
   --latc-dir /path/to/latc/specbin-native \
+  --aot-v2-dir /path/to/latc/specbin-aot-v2 \
   --native-dir /path/to/specbin/la_gcc12_2_0 \
   --spec-root /path/to/spec2000-x64 \
   --workdir /path/to/results \
-  --rounds 3 --cpu 2 --timeout 90 --lat-cache warm --disable-aslr
+  --rounds 5 --cpu 2 --timeout 90 --lat-cache warm --disable-aslr
 ```
 
 The generated `baseline.md` is the comparison table. `report.json` retains

@@ -61,6 +61,7 @@ static int runtime_import_allowed(const char *name)
         "lat_aot_runtime_raise_gpf",
         "lat_aot_runtime_pcmpistri_xmm",
         "lat_aot_runtime_pcmpistrm_xmm",
+        "lat_aot_runtime_eflagtf",
     };
     for (size_t i = 0; i < sizeof(imports) / sizeof(imports[0]); i++) {
         if (!strcmp(name, imports[i])) {

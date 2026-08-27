@@ -8,7 +8,7 @@
 #include <stdlib.h>
 
 typedef struct LookupThread {
-    const LatAotRegistryV2 *registry;
+    LatAotRegistryV2 *registry;
     _Atomic int *stop;
     _Atomic int *failed;
 } LookupThread;
@@ -24,6 +24,7 @@ static void *lookup_unchanged_instance(void *opaque)
             atomic_store_explicit(thread->failed, 1, memory_order_release);
             break;
         }
+        lat_aot_v2_registry_target_release(&target);
     }
     return NULL;
 }
@@ -83,14 +84,19 @@ int main(void)
     LatAotTargetV2 target;
     if (lat_aot_v2_registry_lookup(&registry, 0x401000,
                                    LAT_AOT_TB_CODE64, &target) ||
-        target.host_address != text + 4 || target.instance != &first ||
-        lat_aot_v2_registry_lookup(&registry, 0x701000,
-                                   LAT_AOT_TB_CODE64 |
-                                   LAT_AOT_TB_PARALLEL, &target) ||
-        target.host_address != text + 8 || target.instance != &second) {
+        target.host_address != text + 4 || target.instance != &first) {
         fprintf(stderr, "registry lookup failed\n");
         return 1;
     }
+    lat_aot_v2_registry_target_release(&target);
+    if (lat_aot_v2_registry_lookup(&registry, 0x701000,
+                                   LAT_AOT_TB_CODE64 |
+                                   LAT_AOT_TB_PARALLEL, &target) ||
+        target.host_address != text + 8 || target.instance != &second) {
+        fprintf(stderr, "registry parallel lookup failed\n");
+        return 1;
+    }
+    lat_aot_v2_registry_target_release(&target);
     uint64_t context_words[4] = {0};
     void *jump_cache = &context_words[2];
     if (lat_aot_v2_context_apply_guest_slots(&descriptor, 0x400000,
@@ -110,8 +116,12 @@ int main(void)
     if (lat_aot_v2_registry_deactivate_range(&registry, 0x480000, 0x481000,
                                              &deactivated) || deactivated ||
         lat_aot_v2_registry_lookup(&registry, 0x401000,
-                                   LAT_AOT_TB_CODE64, &target) ||
-        lat_aot_v2_registry_deactivate_range(&registry, 0x401800, 0x401900,
+                                   LAT_AOT_TB_CODE64, &target)) {
+        fprintf(stderr, "registry no-op range deactivation failed\n");
+        return 1;
+    }
+    lat_aot_v2_registry_target_release(&target);
+    if (lat_aot_v2_registry_deactivate_range(&registry, 0x401800, 0x401900,
                                              &deactivated) ||
         deactivated != 1 ||
         atomic_load(&first.generation) != generation + 1 ||
@@ -122,6 +132,7 @@ int main(void)
         fprintf(stderr, "registry range deactivation failed\n");
         return 1;
     }
+    lat_aot_v2_registry_target_release(&target);
 
     enum { LOOKUP_THREADS = 4, INVALIDATION_ROUNDS = 2000 };
     pthread_t lookup_threads[LOOKUP_THREADS];
@@ -185,6 +196,21 @@ int main(void)
         pthread_join(lookup_threads[i], NULL);
     }
     if (atomic_load_explicit(&failed, memory_order_acquire)) {
+        free(transients);
+        return 1;
+    }
+    lat_aot_v2_registry_drain(&registry);
+    LatAotRegistryCountsV2 counts;
+    lat_aot_v2_registry_counts(&registry, &counts);
+    if (counts.current_snapshots != 1 || counts.retired_snapshots ||
+        counts.readers || atomic_load_explicit(&second.readers,
+                                                memory_order_acquire)) {
+        fprintf(stderr,
+                "registry reclamation failed current=%zu retired=%zu "
+                "readers=%zu instance_readers=%u\n",
+                counts.current_snapshots, counts.retired_snapshots,
+                counts.readers, atomic_load_explicit(&second.readers,
+                                                     memory_order_acquire));
         free(transients);
         return 1;
     }

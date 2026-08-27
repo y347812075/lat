@@ -30,8 +30,9 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-aot-v2-glibc-runner test-aot-v2-signal-runner \
 		test-aot-v2-dynamic-runner test-aot-v2-dlopen-runner \
 		test-aot-v2-dynamic-semantics test-aot-v2-invalidation test-latcd-once \
-		test-latcd-service test-latcd-runner test-aot-v2-m4 \
-		test-aot-v2-sanitize test-aot-v2-libfuzzer check-import
+		test-latcd-service test-latcd-runner test-aot-v2-real-app test-aot-v2-m4 \
+		test-aot-v2-sanitize test-aot-v2-tsan test-aot-v2-libfuzzer \
+		check-import
 
 
 all: $(BUILD)/latc $(BUILD)/latcd/latcd $(BUILD)/liblatc_cfg.a
@@ -212,7 +213,7 @@ $(BUILD)/tests/x86-signal-recover: tests/x86-signal-recover.c \
 
 $(BUILD)/tests/x86-signal-recover.profile: \
 		$(BUILD)/tests/x86-signal-recover
-	nm -n $< | awk '$$3 ~ /^signal_.*_resume$$/ { print "0x" $$1, 1 }' >$@
+	nm -n $< | awk '$$3 ~ /^signal_.*_(site|fault|resume)$$/ { print "0x" $$1, 1 }' >$@
 
 $(BUILD)/tests/x86-dynamic-hello: tests/x86-glibc-hello.c
 	@mkdir -p $(dir $@)
@@ -310,7 +311,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  tests/test-aot-v2-invalidation.sh tests/test-latcd-once.sh \
 	  tests/fake-latc-invalid-module.sh tests/test-latcd-service.sh \
 	  tests/fake-latc-slow.sh tests/fake-latc-cpu.sh \
-	  tests/test-latcd-runner.sh
+	  tests/test-latcd-runner.sh tests/test-aot-v2-real-app.sh
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
@@ -453,6 +454,15 @@ $(BUILD)/tests/test-aot-v2-registry: aot-v2/tests/test-registry.c \
 		$(BUILD)/aot-v2/runtime/registry.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ -pthread
+
+$(BUILD)/tests/test-aot-v2-registry-tsan: aot-v2/tests/test-registry.c \
+		aot-v2/runtime/registry.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -O1 -fno-omit-frame-pointer \
+	  -fsanitize=thread -o $@ $^ -pthread
+
+test-aot-v2-tsan: $(BUILD)/tests/test-aot-v2-registry-tsan
+	TSAN_OPTIONS=halt_on_error=1 $<
 
 ifeq ($(HOST_ARCH),loongarch64)
 $(BUILD)/aot-v2/liblat-aot-runtime.so.2: aot-v2/runtime/runtime-abi.c \
@@ -642,6 +652,14 @@ test-latcd-runner: all $(BUILD)/tests/x86-static-hello \
 	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) \
 	  $(BUILD)/tests/x86-static-hello $(BUILD)/tests/x86-dynamic-hello \
 	  $(BUILD)/latcd-runner-test
+
+test-aot-v2-real-app: all
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_ROOTFS)" -a -n "$(X86_APP)" || \
+	  { echo "usage: make test-aot-v2-real-app AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_ROOTFS=... X86_APP=..."; exit 2; }
+	sh tests/test-aot-v2-real-app.sh $(BUILD)/latcd/latcd $(BUILD)/latc \
+	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) $(X86_APP) \
+	  $(BUILD)/aot-v2-real-app-test
 
 test-aot-v2-m4: all $(BUILD)/tests/x86-static-hello \
 		$(BUILD)/tests/x86-glibc-hello $(BUILD)/tests/x86-signal-recover \

@@ -2,6 +2,7 @@
 
 #include <dlfcn.h>
 #include <elf.h>
+#include <errno.h>
 #include <link.h>
 #include <pthread.h>
 #include <sched.h>
@@ -123,6 +124,20 @@ static int run_map_fixed(Module *module)
            0 : -1;
 }
 
+static int run_map_fixed_failed(Module *module)
+{
+    uintptr_t page = (uintptr_t)module->value & ~(uintptr_t)0x3fff;
+    size_t size = 0x4000;
+    if (module->value() != 17 ||
+        mmap((void *)page, size, PROT_READ | PROT_EXEC,
+             MAP_PRIVATE | MAP_FIXED, -1, 0) != MAP_FAILED ||
+        errno != EBADF) {
+        fprintf(stderr, "MAP_FIXED with invalid fd did not fail with EBADF\n");
+        return -1;
+    }
+    return module->value() == 17 ? 0 : -1;
+}
+
 static int run_munmap(Module *module, int complete)
 {
     if (module->value() != 17) {
@@ -160,6 +175,45 @@ static int run_mprotect(Module *module)
         return -1;
     }
     return module->value() == 42 ? 0 : -1;
+}
+
+static int run_mprotect_unchanged(Module *module)
+{
+    uintptr_t page = page_floor((uintptr_t)module->value);
+    if (module->value() != 17 ||
+        mprotect((void *)page, page_size, PROT_READ | PROT_WRITE)) {
+        perror("mprotect unchanged writable");
+        return -1;
+    }
+    if (mprotect((void *)page, page_size, PROT_READ | PROT_EXEC)) {
+        perror("mprotect unchanged executable");
+        return -1;
+    }
+    return module->value() == 17 ? 0 : -1;
+}
+
+static int run_mprotect_failed(Module *module)
+{
+    uintptr_t page = page_floor((uintptr_t)module->value);
+    if (module->value() != 17 ||
+        mprotect((void *)(page + 1), page_size,
+                 PROT_READ | PROT_WRITE) != -1 || errno != EINVAL) {
+        fprintf(stderr, "misaligned mprotect did not fail with EINVAL\n");
+        return -1;
+    }
+    return module->value() == 17 ? 0 : -1;
+}
+
+static int run_mremap_failed(Module *module)
+{
+    uintptr_t page = page_floor((uintptr_t)module->value);
+    if (module->value() != 17 ||
+        mremap((void *)(page + 1), page_size, page_size,
+               MREMAP_MAYMOVE) != MAP_FAILED || errno != EINVAL) {
+        fprintf(stderr, "misaligned mremap did not fail with EINVAL\n");
+        return -1;
+    }
+    return module->value() == 17 ? 0 : -1;
 }
 
 static int run_cross_page(Module *module)
@@ -320,12 +374,20 @@ int main(int argc, char **argv)
     int result;
     if (!strcmp(argv[1], "map-fixed")) {
         result = run_map_fixed(&module);
+    } else if (!strcmp(argv[1], "map-fixed-failed")) {
+        result = run_map_fixed_failed(&module);
     } else if (!strcmp(argv[1], "munmap-partial")) {
         result = run_munmap(&module, 0);
     } else if (!strcmp(argv[1], "munmap-complete")) {
         result = run_munmap(&module, 1);
     } else if (!strcmp(argv[1], "mprotect")) {
         result = run_mprotect(&module);
+    } else if (!strcmp(argv[1], "mprotect-unchanged")) {
+        result = run_mprotect_unchanged(&module);
+    } else if (!strcmp(argv[1], "mprotect-failed")) {
+        result = run_mprotect_failed(&module);
+    } else if (!strcmp(argv[1], "mremap-failed")) {
+        result = run_mremap_failed(&module);
     } else if (!strcmp(argv[1], "smc-cross")) {
         result = run_cross_page(&module);
     } else if (!strcmp(argv[1], "smc-thread")) {

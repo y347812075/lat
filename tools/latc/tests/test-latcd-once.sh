@@ -21,8 +21,10 @@ start_once()
     socket=$1
     cache=$2
     compiler=$3
+    shift 3
     "$latcd" --once --socket "$socket" --cache-dir "$cache" \
       --latc "$compiler" --runner "$runner" --runtime-dir "$runtime_dir" \
+      "$@" \
       >"$socket.stdout" 2>"$socket.stderr" &
     server_pid=$!
     n=0
@@ -148,5 +150,37 @@ start_once "$work/hit.sock" "$cache" /bin/false
 wait "$server_pid"
 grep -q 'cache hit:' "$work/hit.client"
 test -z "$(find "$cache/.tmp" -mindepth 1 -maxdepth 1 -print -quit)"
+
+chmod 0644 "$module"
+start_once "$work/writable-module.sock" "$cache" /bin/false
+if "$latcd" --submit --socket "$work/writable-module.sock" "$guest" \
+     >"$work/writable-module.client" 2>&1; then
+    echo "latcd accepted externally writable cached module" >&2
+    exit 1
+fi
+if wait "$server_pid"; then
+    echo "latcd treated externally writable cached module as a hit" >&2
+    exit 1
+fi
+grep -q '^status=3$' "$work/writable-module.client"
+chmod 0444 "$module"
+
+eviction_cache=$work/eviction-cache
+mkdir -m 700 "$eviction_cache"
+cp "$module" "$eviction_cache/$source_sha.so"
+chmod 0444 "$eviction_cache/$source_sha.so"
+touch -t 200001010000 "$eviction_cache/$source_sha.so"
+cp "$guest" "$work/eviction-input.elf"
+printf x >>"$work/eviction-input.elf"
+eviction_sha=$(sha256sum "$work/eviction-input.elf" | cut -d ' ' -f 1)
+cache_limit=$(( $(stat -c %s "$module") + 4096 ))
+start_once "$work/eviction.sock" "$eviction_cache" "$latc" \
+  --max-cache-bytes "$cache_limit"
+timeout 60 "$latcd" --submit --socket "$work/eviction.sock" \
+  "$work/eviction-input.elf" >"$work/eviction.client"
+wait "$server_pid"
+test -f "$eviction_cache/$eviction_sha.so"
+test ! -e "$eviction_cache/$source_sha.so"
+test ! -e "$eviction_cache/$source_sha.current"
 
 echo "test-latcd-once: PASS source=$source_sha"

@@ -61,17 +61,37 @@ run_mode map-fixed
 grep -Eq 'invalidated_instances=1 invalidated_exec_ranges=1 .*invalidation_map_fixed=1 ' \
   "$work/map-fixed.err"
 
+run_mode map-fixed-failed
+grep -Eq 'invalidated_instances=0 invalidated_exec_ranges=0 .*invalidation_map_fixed=0 ' \
+  "$work/map-fixed-failed.err"
+
 run_mode munmap-partial
-grep -Eq 'invalidated_instances=1 invalidated_exec_ranges=1 invalidation_unmap=1 ' \
+grep -Eq 'invalidated_instances=1 invalidated_exec_ranges=1 .*invalidation_unmap=1 ' \
   "$work/munmap-partial.err"
 
 run_mode munmap-complete
-grep -Eq 'invalidated_instances=1 invalidated_exec_ranges=1 invalidation_unmap=1 ' \
+grep -Eq 'invalidated_instances=1 invalidated_exec_ranges=1 .*invalidation_unmap=1 ' \
   "$work/munmap-complete.err"
 
 run_mode mprotect
 grep -Eq 'invalidated_instances=1 invalidated_exec_ranges=1 .*invalidation_protection=1 ' \
   "$work/mprotect.err"
+grep -Eq 'revalidated_instances=0 revalidation_failures=[1-9][0-9]* ' \
+  "$work/mprotect.err"
+
+run_mode mprotect-unchanged
+grep -Eq 'invalidated_instances=1 invalidated_exec_ranges=1 .*invalidation_protection=1 ' \
+  "$work/mprotect-unchanged.err"
+grep -Eq 'revalidated_instances=1 revalidation_failures=0 ' \
+  "$work/mprotect-unchanged.err"
+
+run_mode mprotect-failed
+grep -Eq 'invalidated_instances=0 invalidated_exec_ranges=0 .*invalidation_protection=0 ' \
+  "$work/mprotect-failed.err"
+
+run_mode mremap-failed
+grep -Eq 'invalidated_instances=0 invalidated_exec_ranges=0 .*invalidation_unmap=0 ' \
+  "$work/mremap-failed.err"
 
 run_mode smc-cross
 grep -Eq 'invalidated_instances=1 invalidated_exec_ranges=1 .*invalidation_protection=1 ' \
@@ -88,15 +108,17 @@ grep -Eq 'invalidated_instances=1 invalidated_exec_ranges=1 .*invalidation_prote
 run_mode unaffected
 test "$(grep -c 'discovered ELF.*module=registered' \
   "$work/unaffected.err")" -ge 2
-test "$(grep -c 'module stats source=.*module=registered' \
-  "$work/unaffected.err")" -ge 1
-test "$(grep -c 'module stats source=.*module=inactive' \
-  "$work/unaffected.err")" -ge 1
+test "$(grep -c "module stats source=$plugin_sha .*module=registered" \
+  "$work/unaffected.err")" -eq 1
+test "$(grep -c "module stats source=$plugin_sha " \
+  "$work/unaffected.err")" -eq 1
+grep -Eq 'instance_live=1 instance_retired=0 instance_free=1 ' \
+  "$work/unaffected.err"
 
 run_mode reload
 test "$(grep -c 'discovered ELF.*module=registered' \
   "$work/reload.err")" -ge 2
-grep -Eq 'invalidated_instances=1 invalidated_exec_ranges=1 invalidation_unmap=1 ' \
+grep -Eq 'invalidated_instances=1 invalidated_exec_ranges=1 .*invalidation_unmap=1 ' \
   "$work/reload.err"
 
 echo "test-aot-v2-invalidation: PASS"

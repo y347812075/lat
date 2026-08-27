@@ -94,10 +94,15 @@ int main(int argc, char **argv)
         fprintf(stderr, "fixture TB returned the wrong result\n");
         return 1;
     }
+    lat_aot_v2_registry_target_release(&target);
     if (lat_aot_v2_registry_lookup(&registry, 0x701000,
                                    LAT_AOT_TB_CODE64, &target) ||
-        target.instance != &second ||
-        lat_aot_v2_registry_deactivate(&registry, &first) ||
+        target.instance != &second) {
+        fprintf(stderr, "second module instance lookup failed\n");
+        return 1;
+    }
+    lat_aot_v2_registry_target_release(&target);
+    if (lat_aot_v2_registry_deactivate(&registry, &first) ||
         lat_aot_v2_registry_lookup(&registry, 0x401000,
                                    LAT_AOT_TB_CODE64, &target) == 0) {
         fprintf(stderr, "multiple instance or deactivation test failed\n");
