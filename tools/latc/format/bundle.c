@@ -64,8 +64,11 @@ static int write_cfg(FILE *out, const CfgProgram *p, uint64_t *size_out)
     }
     for (size_t i = 0; i < p->tb_count; i++) {
         const CfgTb *tb = &p->tbs[i];
+        uint32_t semantic_flags = tb->semantic_flags ?
+            tb->semantic_flags : CFG_TB_CODE64;
         LatcDiskTb d = {tb->start, tb->end, tb->terminator_pc, tb->first_edge,
-                    tb->edge_count, tb->profile_count, tb->terminator, 0};
+                    tb->edge_count, tb->profile_count, tb->terminator,
+                    semantic_flags};
         if (fwrite(&d, sizeof(d), 1, out) != 1) return -1;
     }
     for (size_t i = 0; i < p->edge_count; i++) {

@@ -2,6 +2,8 @@
 
 #include "latc-bundle-loader.h"
 #include "latc-bundle-format.h"
+#include "latc-aot-v2-runner.h"
+#include "lat-aot-v2.h"
 
 #include "accel/tcg/internal.h"
 #include "exec/exec-all.h"
@@ -30,6 +32,10 @@ static uint64_t stat_runtime_program_tb_gen_calls;
 static uint64_t stat_runtime_system_tb_gen_calls;
 static uint64_t stat_runtime_program_tb_gen_attempts;
 static uint64_t stat_runtime_system_tb_gen_attempts;
+static uint64_t stat_runtime_file_tb_gen_calls;
+static uint64_t stat_runtime_nonfile_tb_gen_calls;
+static uint64_t stat_runtime_file_tb_gen_attempts;
+static uint64_t stat_runtime_nonfile_tb_gen_attempts;
 static uint32_t stat_runtime_first_cflags;
 static bool stat_pretranslation_disabled;
 static bool stat_aot_cache_hit;
@@ -75,6 +81,10 @@ static void write_stats(void)
             "\"runtime_system_tb_gen_calls\":%llu,"
             "\"runtime_program_tb_gen_attempts\":%llu,"
             "\"runtime_system_tb_gen_attempts\":%llu,"
+            "\"runtime_file_tb_gen_calls\":%llu,"
+            "\"runtime_nonfile_tb_gen_calls\":%llu,"
+            "\"runtime_file_tb_gen_attempts\":%llu,"
+            "\"runtime_nonfile_tb_gen_attempts\":%llu,"
             "\"runtime_first_pc\":%llu,\"runtime_first_cflags\":%u,"
             "\"pretranslation_disabled\":%s,\"aot_cache_hit\":%s,"
             "\"bundle_verify_ns\":%llu,\"guest_extract_ns\":%llu,"
@@ -94,6 +104,10 @@ static void write_stats(void)
             (unsigned long long)stat_runtime_system_tb_gen_calls,
             (unsigned long long)stat_runtime_program_tb_gen_attempts,
             (unsigned long long)stat_runtime_system_tb_gen_attempts,
+            (unsigned long long)stat_runtime_file_tb_gen_calls,
+            (unsigned long long)stat_runtime_nonfile_tb_gen_calls,
+            (unsigned long long)stat_runtime_file_tb_gen_attempts,
+            (unsigned long long)stat_runtime_nonfile_tb_gen_attempts,
             (unsigned long long)stat_runtime_first_pc,
             stat_runtime_first_cflags,
             stat_pretranslation_disabled ? "true" : "false",
@@ -122,6 +136,13 @@ static bool runtime_stats_enabled(void)
            (bundle_self_fd < 0 && path && *path);
 }
 
+static uint32_t profile_cflags(uint32_t base, uint32_t semantic_flags)
+{
+    uint32_t result = base & ~CF_PARALLEL;
+    if (semantic_flags & LAT_AOT_TB_PARALLEL) result |= CF_PARALLEL;
+    return result;
+}
+
 void latc_bundle_note_tb_attempt(uint64_t guest_pc, uint32_t cflags)
 {
     if (!runtime_stats_enabled()) return;
@@ -133,6 +154,8 @@ void latc_bundle_note_tb_attempt(uint64_t guest_pc, uint32_t cflags)
     stat_runtime_tb_gen_attempts++;
     if (program_pc) stat_runtime_program_tb_gen_attempts++;
     else stat_runtime_system_tb_gen_attempts++;
+    if (latc_aot_v2_is_file_pc(guest_pc)) stat_runtime_file_tb_gen_attempts++;
+    else stat_runtime_nonfile_tb_gen_attempts++;
     const char *profile_path = getenv("LATC_PROFILE_OUT");
     if (profile_path && *profile_path) {
         FILE *profile = fopen(profile_path, "a");
@@ -158,6 +181,8 @@ void latc_bundle_note_tb_generated(uint64_t guest_pc, uint32_t cflags)
     stat_runtime_tb_gen_calls++;
     if (program_address(guest_pc)) stat_runtime_program_tb_gen_calls++;
     else stat_runtime_system_tb_gen_calls++;
+    if (latc_aot_v2_is_file_pc(guest_pc)) stat_runtime_file_tb_gen_calls++;
+    else stat_runtime_nonfile_tb_gen_calls++;
     write_stats();
 }
 
@@ -564,13 +589,16 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
             uint64_t translated_start = disk_tb.start + load_bias;
             uint64_t translated_end = disk_tb.end + load_bias;
             target_ulong pc = translated_start;
+            uint32_t tb_cflags = profile_cflags(cflags,
+                                                disk_tb.semantic_flags);
             bool first = true;
             while (pc < translated_end) {
                 mmap_lock();
                 TranslationBlock *tb = tb_gen_code(cpu, pc, cs_base,
-                                                   flags, cflags);
+                                                   flags, tb_cflags);
                 if (tb) {
-                    jrra_pre_translate((void **)&tb, 1, cpu, flags, cflags);
+                    jrra_pre_translate((void **)&tb, 1, cpu, flags,
+                                       tb_cflags);
                 }
                 mmap_unlock();
                 if (!tb) {

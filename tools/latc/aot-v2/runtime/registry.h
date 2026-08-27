@@ -82,5 +82,11 @@ void lat_aot_v2_registry_counts(const LatAotRegistryV2 *registry,
 int lat_aot_v2_context_apply_guest_slots(const LatAotModuleV2 *module,
                                          uint64_t guest_load_bias,
                                          void *jump_cache);
+int lat_aot_v2_context_apply_guest_table(const LatAotModuleV2 *module,
+                                         uint64_t guest_load_bias,
+                                         void *jump_cache,
+                                         uint64_t *page_storage,
+                                         size_t page_storage_count,
+                                         size_t *context_slot_count);
 
 #endif

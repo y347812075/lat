@@ -1,6 +1,7 @@
 #include "qemu/osdep.h"
 
 #include "latc_native_export.h"
+#include "lat-aot-v2.h"
 #include "lat-native-image.h"
 #include "latc-build-id.h"
 
@@ -10,6 +11,12 @@
 static uint64_t align_up(uint64_t value, uint64_t alignment)
 {
     return (value + alignment - 1) & ~(alignment - 1);
+}
+
+static uint32_t native_semantic_flags(uint32_t cflags)
+{
+    return LAT_AOT_TB_CODE64 |
+        ((cflags & CF_PARALLEL) ? LAT_AOT_TB_PARALLEL : 0);
 }
 
 static gint compare_native_tb(gconstpointer left, gconstpointer right)
@@ -311,7 +318,7 @@ static int append_relocation(GArray *output, const aot_rel *source,
     } else if (direct_tb_target(tb, segment, source->kind, &guest_pc)) {
         relocation.kind = LAT_NATIVE_RELOC_TB_TARGET;
         relocation.addend = guest_pc;
-        relocation.target = tb->cflags;
+        relocation.target = native_semantic_flags(tb->cflags);
         relocation.reserved = runtime_symbol(source->kind);
     } else {
         int symbol = runtime_symbol(source->kind);
@@ -359,7 +366,7 @@ static void append_tu_relocations(GArray *output, const aot_tb *tb,
             .code_offset = code_offset,
             .addend = guest_pc + tb->lazypc[edge],
             .kind = LAT_NATIVE_RELOC_TB_TARGET,
-            .target = tb->cflags,
+            .target = native_semantic_flags(tb->cflags),
             .slots = 1,
         };
         g_array_append_val(output, relocation);
@@ -389,7 +396,7 @@ static void append_jrra_relocation(GArray *output, const aot_tb *tb,
         .code_offset = tb_code_offset + tb->return_target_ptr_offset,
         .addend = target_pc - load_bias,
         .kind = LAT_NATIVE_RELOC_JRRA_TARGET,
-        .target = tb->cflags,
+        .target = native_semantic_flags(tb->cflags),
         .slots = 4,
     };
     g_array_append_val(output, relocation);
@@ -675,7 +682,7 @@ int latc_native_export(const char *path, const char *guest_path,
             .guest_pc = pc - guest_load_bias,
             .code_offset = code_offset,
             .code_size = tbs[i].tb_cache_size,
-            .flags = tbs[i].cflags,
+            .flags = native_semantic_flags(tbs[i].cflags),
         };
         g_array_append_val(native_tbs, native_tb);
 

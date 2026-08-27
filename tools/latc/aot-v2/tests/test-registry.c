@@ -105,6 +105,38 @@ int main(void)
         fprintf(stderr, "guest context slots were not populated\n");
         return 1;
     }
+    LatAotGuestSlotV2 *large_slots = calloc(257, sizeof(*large_slots));
+    uint64_t *pages = calloc(512, sizeof(*pages));
+    uint64_t large_context[LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT] = {0};
+    if (!large_slots || !pages) {
+        perror("allocate two-level guest table test");
+        return 1;
+    }
+    for (size_t i = 0; i < 257; i++) {
+        large_slots[i] = (LatAotGuestSlotV2) {
+            .guest_rva = 0x1000 + i * 8,
+            .fp_offset = -(int32_t)((i / 256 + 1) * 8),
+            .reserved = (i % 256) * 8,
+        };
+    }
+    LatAotModuleV2 large_descriptor = {
+        .module_flags = LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS,
+        .guest_slot_begin = large_slots,
+        .guest_slot_end = large_slots + 257,
+    };
+    size_t context_slot_count = 0;
+    if (lat_aot_v2_context_apply_guest_table(
+            &large_descriptor, 0x400000,
+            large_context + LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT,
+            pages, 512, &context_slot_count) || context_slot_count != 2 ||
+        large_context[255] != (uintptr_t)pages ||
+        large_context[254] != (uintptr_t)(pages + 256) ||
+        pages[0] != 0x401000 || pages[256] != 0x401800) {
+        fprintf(stderr, "two-level guest context table was not populated\n");
+        return 1;
+    }
+    free(pages);
+    free(large_slots);
     errno = 0;
     if (lat_aot_v2_registry_register(&registry, &overlap) == 0 ||
         errno != EEXIST) {

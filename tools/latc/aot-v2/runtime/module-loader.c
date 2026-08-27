@@ -121,12 +121,22 @@ static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
         }
     }
     size_t slot_count = (slot_end - slot_begin) / sizeof(LatAotGuestSlotV2);
-    if (slot_count > LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT) {
+    int two_level = !!(descriptor->module_flags &
+                       LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS);
+    size_t slot_limit = two_level ? LAT_AOT_V2_GUEST_ADDRESS_LIMIT :
+                                   LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT;
+    if (slot_count > slot_limit) {
         return fail(error, error_size, "AOT guest slot table is too large");
     }
     for (size_t i = 0; i < slot_count; i++) {
         const LatAotGuestSlotV2 *slot = &descriptor->guest_slot_begin[i];
-        if (slot->reserved || slot->fp_offset != -(int32_t)((i + 1) * 8)) {
+        int32_t expected_fp_offset = two_level ?
+            -(int32_t)((i / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT + 1) * 8) :
+            -(int32_t)((i + 1) * 8);
+        uint32_t expected_page_offset = two_level ?
+            (i % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT) * 8 : 0;
+        if (slot->reserved != expected_page_offset ||
+            slot->fp_offset != expected_fp_offset) {
             return fail(error, error_size, "AOT guest slot table is invalid");
         }
     }

@@ -39,6 +39,11 @@ typedef enum {
     CFG_FUNCTION_ERROR,
 } CfgFunctionStatus;
 
+enum CfgTbSemanticFlag {
+    CFG_TB_CODE64 = 1u << 0,
+    CFG_TB_PARALLEL = 1u << 1,
+};
+
 typedef struct {
     uint64_t from;
     uint64_t to;
@@ -51,6 +56,7 @@ typedef struct {
     uint64_t end;
     uint64_t terminator_pc;
     uint64_t profile_count;
+    uint32_t semantic_flags;
     CfgTbTerm terminator;
     size_t first_edge;
     size_t edge_count;
