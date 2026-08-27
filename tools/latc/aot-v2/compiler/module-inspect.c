@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glib.h>
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -116,4 +117,82 @@ int lat_aot_v2_module_inspect_file(const char *path,
     info->guest_slot_records = slots->sh_size / sizeof(LatAotGuestSlotV2);
     g_free(contents);
     return 0;
+}
+
+int lat_aot_v2_module_validate_profile_file(const char *path,
+                                            const char *profile_path,
+                                            char *error,
+                                            size_t error_size)
+{
+    LatAotModuleInfoV2 info;
+    if (lat_aot_v2_module_inspect_file(path, &info, error, error_size)) {
+        return -1;
+    }
+    gchar *contents = NULL;
+    gsize size = 0;
+    if (!g_file_get_contents(path, &contents, &size, NULL)) {
+        return fail(error, error_size, "cannot read AOT module");
+    }
+    const unsigned char *file = (const void *)contents;
+    const Elf64_Ehdr *header = (const void *)file;
+    const Elf64_Shdr *sections = (const void *)(file + header->e_shoff);
+    const Elf64_Shdr *names_section = &sections[header->e_shstrndx];
+    const char *names = (const void *)(file + names_section->sh_offset);
+    const Elf64_Shdr *section = find_section(file, header, names,
+        names_section->sh_size, ".rodata.lat.tb");
+    if (!section || section->sh_offset > size ||
+        section->sh_size > size - section->sh_offset ||
+        section->sh_size % sizeof(LatAotTbV2)) {
+        g_free(contents);
+        return fail(error, error_size, "AOT TB section is invalid");
+    }
+    const LatAotTbV2 *tbs = (const void *)(file + section->sh_offset);
+    size_t tb_count = section->sh_size / sizeof(*tbs);
+    GHashTable *keys = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                              g_free, NULL);
+    for (size_t i = 0; i < tb_count; i++) {
+        char *key = g_strdup_printf("%016" PRIx64 ":%08x",
+                                    tbs[i].guest_rva, tbs[i].flags);
+        g_hash_table_add(keys, key);
+    }
+    FILE *profile = fopen(profile_path, "r");
+    if (!profile) {
+        g_hash_table_destroy(keys);
+        g_free(contents);
+        return fail(error, error_size, "cannot read compiled profile: %s",
+                    strerror(errno));
+    }
+    char *line = NULL;
+    size_t capacity = 0;
+    int result = 0;
+    if (getline(&line, &capacity, profile) < 0) {
+        result = fail(error, error_size, "compiled profile is empty");
+    }
+    size_t record = 0;
+    while (!result && getline(&line, &capacity, profile) >= 0) {
+        uint64_t rva, flags, count;
+        record++;
+        if (sscanf(line, "%" SCNx64 " %" SCNx64 " %" SCNu64,
+                   &rva, &flags, &count) != 3) {
+            result = fail(error, error_size,
+                          "compiled profile record %zu is invalid", record);
+            break;
+        }
+        char key[48];
+        snprintf(key, sizeof(key), "%016" PRIx64 ":%08" PRIx64,
+                 rva, flags);
+        if (!g_hash_table_contains(keys, key)) {
+            result = fail(error, error_size,
+                          "profile TB missing from module: rva=0x%" PRIx64
+                          " flags=0x%" PRIx64, rva, flags);
+        }
+    }
+    if (!result && ferror(profile)) {
+        result = fail(error, error_size, "cannot read compiled profile");
+    }
+    free(line);
+    fclose(profile);
+    g_hash_table_destroy(keys);
+    g_free(contents);
+    return result;
 }
