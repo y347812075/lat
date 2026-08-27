@@ -120,6 +120,11 @@ static void write_stats(void)
     g_free(stats_path);
 }
 
+void latc_bundle_flush_stats(void)
+{
+    write_stats();
+}
+
 static bool program_address(uint64_t guest_pc)
 {
     for (uint64_t i = 0; i < bundle_exec_range_count; i++) {
