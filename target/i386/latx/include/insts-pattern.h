@@ -98,6 +98,7 @@ typedef enum InstPtnRejectReason {
 typedef struct InstPtnStats {
     uint64_t matches;
     uint64_t rejects[INSTPTN_REJECT_COUNT];
+    uint64_t eflags_eliminations;
     uint64_t eflags_fallbacks;
     uint64_t ir2_emitted;
     uint64_t host_emitted;
@@ -118,6 +119,7 @@ void instptn_stats_dump(void);
 void instptn_stats_record_match_opcode(InstPtnOpcode opcode);
 void instptn_stats_record_reject(InstPtnOption option,
                                  InstPtnRejectReason reason);
+void instptn_stats_record_eflags_eliminated(InstPtnOption option);
 void instptn_stats_record_eflags_fallback(InstPtnOption option);
 void instptn_stats_record_eflags_fallback_opcode(InstPtnOpcode opcode);
 void instptn_stats_record_codegen_opcode(InstPtnOpcode opcode,
@@ -206,6 +208,7 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
 
 #define instptn_check_shr_jcc_0() INSTPTN_CHECK_XX_0(SHR_JCC)
 #define instptn_check_and_jcc_0() INSTPTN_CHECK_XX_0(AND_JCC)
+#define instptn_check_add_jcc_0() INSTPTN_CHECK_XX_0(ADD_JCC)
 #else
 #define instptn_check_void(option)
 #define instptn_check_false(option)
@@ -240,6 +243,7 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
 
 #define instptn_check_shr_jcc_0()
 #define instptn_check_and_jcc_0()
+#define instptn_check_add_jcc_0()
 #endif
 
 bool try_translate_instptn(IR1_INST *pir1);

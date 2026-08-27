@@ -139,6 +139,7 @@ typedef enum InstPtnOpcode {
     INSTPTN_OPC_AND_JCC        = 0x20000000,
 
     INSTPTN_OPC_EXTENSION_BASE = 0x20000001,
+    INSTPTN_OPC_ADD_JCC        = INSTPTN_OPC_EXTENSION_BASE,
 } InstPtnOpcode;
 #endif
 

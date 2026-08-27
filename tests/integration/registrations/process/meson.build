@@ -1,5 +1,13 @@
 if 'x86_64-linux-user' in target_dirs
   latx_integration_tests += [{
+    'name': 'test-add-jcc',
+    'runner': find_program('../../test-add-jcc.sh'),
+    'args': [
+      emulators['latx-x86_64'],
+      files('../../add-jcc.S'),
+    ],
+  }]
+  latx_integration_tests += [{
     'name': 'test-instptn-options',
     'runner': find_program('../../test-instptn-options.sh'),
     'args': [

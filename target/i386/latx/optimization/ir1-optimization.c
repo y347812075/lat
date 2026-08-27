@@ -29,6 +29,47 @@
  */
 
 #ifdef CONFIG_LATX_TU
+#if defined(CONFIG_LATX_FLAG_REDUCTION) && \
+    defined(CONFIG_LATX_INSTS_PATTERN)
+static void reduce_add_jcc_local_eflags(IR1_INST *ir1,
+                                        uint8 *pending_use,
+                                        uint8 eflag_out)
+{
+    if (!option_flag_reduction ||
+        ir1->instptn.opc != INSTPTN_OPC_ADD_JCC) {
+        return;
+    }
+
+    IR1_INST *jcc = ir1->instptn.next;
+    uint8 local_use;
+
+    switch (ir1_opcode(jcc)) {
+    case dt_X86_INS_JE:
+    case dt_X86_INS_JNE:
+        local_use = __ZF;
+        break;
+    case dt_X86_INS_JS:
+    case dt_X86_INS_JNS:
+        local_use = __SF;
+        break;
+    default:
+        return;
+    }
+
+    uint8 dead_local_use = local_use & ~eflag_out;
+    uint8 eliminated = dead_local_use & ir1_get_eflag_def(ir1);
+
+    if (!eliminated) {
+        return;
+    }
+
+    *pending_use &= ~eliminated;
+    ir1_set_eflag_def(ir1,
+                      ir1_get_eflag_def(ir1) & ~eliminated);
+    instptn_stats_record_eflags_eliminated(INSTPTN_OPT_ADD_JCC);
+}
+#endif
+
 /* static int opt, noopt; */
 static void ir1_optimization_over_tb(TranslationBlock *tb)
 {
@@ -51,6 +92,11 @@ static void ir1_optimization_over_tb(TranslationBlock *tb)
         OPT_FLAG_RDTN(rdtn, ir1);
         /* TODO: TU */
         OPT_INSTS_PTN(tb, ir1, i, ptn);
+#if defined(CONFIG_LATX_FLAG_REDUCTION) && \
+    defined(CONFIG_LATX_INSTS_PATTERN)
+        reduce_add_jcc_local_eflags(ir1, &rdtn_pending_use,
+                                    tb->s_data->eflag_out);
+#endif
     }
     SAVE_FLAG_TO_TB(rdtn, tb);
 }
