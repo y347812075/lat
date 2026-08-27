@@ -183,4 +183,23 @@ test -f "$eviction_cache/$eviction_sha.so"
 test ! -e "$eviction_cache/$source_sha.so"
 test ! -e "$eviction_cache/$source_sha.current"
 
+versioned_cache=$work/versioned-eviction-cache
+mkdir -m 700 "$versioned_cache"
+old_profile=$(printf old-profile | sha256sum | cut -d ' ' -f 1)
+old_name=$source_sha-$old_profile.so
+cp "$module" "$versioned_cache/$old_name"
+chmod 0444 "$versioned_cache/$old_name"
+printf '{"module":"%s","source_sha256":"%s"}\n' \
+  "$old_name" "$source_sha" >"$versioned_cache/$source_sha.current"
+chmod 0444 "$versioned_cache/$source_sha.current"
+touch -t 200001010000 "$versioned_cache/$old_name"
+start_once "$work/versioned-eviction.sock" "$versioned_cache" "$latc" \
+  --max-cache-bytes "$cache_limit"
+timeout 60 "$latcd" --submit --socket "$work/versioned-eviction.sock" \
+  "$work/eviction-input.elf" >"$work/versioned-eviction.client"
+wait "$server_pid"
+test -f "$versioned_cache/$eviction_sha.so"
+test ! -e "$versioned_cache/$old_name"
+test ! -e "$versioned_cache/$source_sha.current"
+
 echo "test-latcd-once: PASS source=$source_sha"

@@ -648,6 +648,7 @@ static int cached_module_inspect(const char *path, const uint8_t digest[32],
 typedef struct LatcdCacheEntry {
     char *module_path;
     char *index_path;
+    char *module_name;
     uint64_t size;
     struct timespec modified;
 } LatcdCacheEntry;
@@ -657,6 +658,7 @@ static void cache_entry_free(gpointer opaque)
     LatcdCacheEntry *entry = opaque;
     g_free(entry->module_path);
     g_free(entry->index_path);
+    g_free(entry->module_name);
     g_free(entry);
 }
 
@@ -673,8 +675,46 @@ static int cache_entry_compare(gconstpointer left, gconstpointer right)
     return strcmp(a->module_path, b->module_path);
 }
 
+static bool cache_module_name(const char *name, char digest_text[65])
+{
+    size_t length = strlen(name);
+    if (length != 67 && length != 132) {
+        return false;
+    }
+    if (strcmp(name + length - 3, ".so") ||
+        (length == 132 && name[64] != '-')) {
+        return false;
+    }
+    size_t hex_length = length == 67 ? 64 : 129;
+    for (size_t i = 0; i < hex_length; i++) {
+        if (i == 64) {
+            continue;
+        }
+        if (!g_ascii_isxdigit(name[i])) {
+            return false;
+        }
+    }
+    memcpy(digest_text, name, 64);
+    digest_text[64] = '\0';
+    return true;
+}
+
+static bool cache_index_points_to(const char *path, const char *module_name)
+{
+    gchar *contents = NULL;
+    gsize size = 0;
+    if (!g_file_get_contents(path, &contents, &size, NULL)) {
+        return false;
+    }
+    char *expected = g_strdup_printf("\"module\":\"%s\"", module_name);
+    bool matches = strstr(contents, expected) != NULL;
+    g_free(expected);
+    g_free(contents);
+    return matches;
+}
+
 static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
-                           const char *incoming_hex, char *error,
+                           const char *incoming_name, char *error,
                            size_t error_size)
 {
     if (incoming > config->max_cache_bytes) {
@@ -694,26 +734,15 @@ static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
     GPtrArray *entries = g_ptr_array_new_with_free_func(cache_entry_free);
     const char *name;
     while ((name = g_dir_read_name(directory))) {
-        size_t length = strlen(name);
-        if (length != 67 || strcmp(name + 64, ".so")) {
+        char digest_text[65];
+        if (!cache_module_name(name, digest_text)) {
             continue;
         }
-        char digest_text[65];
-        memcpy(digest_text, name, 64);
-        digest_text[64] = '\0';
         uint8_t digest[32];
-        bool valid_name = true;
         for (size_t i = 0; i < 32; i++) {
             int high = g_ascii_xdigit_value(digest_text[i * 2]);
             int low = g_ascii_xdigit_value(digest_text[i * 2 + 1]);
-            if (high < 0 || low < 0) {
-                valid_name = false;
-                break;
-            }
             digest[i] = (high << 4) | low;
-        }
-        if (!valid_name) {
-            continue;
         }
         char *module_path = g_build_filename(config->cache_dir, name, NULL);
         struct stat status;
@@ -722,7 +751,7 @@ static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
             g_free(module_path);
             continue;
         }
-        if (!strcmp(digest_text, incoming_hex)) {
+        if (!strcmp(name, incoming_name)) {
             g_free(module_path);
             continue;
         }
@@ -738,6 +767,7 @@ static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
             entry->index_path = g_strdup_printf("%s/%s.current",
                                                 config->cache_dir,
                                                 digest_text);
+            entry->module_name = g_strdup(name);
             entry->size = status.st_size;
             entry->modified = status.st_mtim;
             g_ptr_array_add(entries, entry);
@@ -754,7 +784,10 @@ static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
          i++) {
         LatcdCacheEntry *entry = g_ptr_array_index(entries, i);
         if (!unlink(entry->module_path)) {
-            unlink(entry->index_path);
+            if (cache_index_points_to(entry->index_path,
+                                      entry->module_name)) {
+                unlink(entry->index_path);
+            }
             total = total > entry->size ? total - entry->size : 0;
         }
     }
@@ -873,7 +906,9 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         goto out;
     }
     if (lat_aot_v2_module_inspect_file(module, &info, error, sizeof(error)) ||
-        memcmp(info.note.source_sha256, digest, 32)) {
+        memcmp(info.note.source_sha256, digest, 32) ||
+        (profile && lat_aot_v2_module_validate_profile_file(
+            module, profile, error, sizeof(error)))) {
         if (!error[0]) {
             snprintf(error, sizeof(error), "compiled module source digest mismatch");
         }
@@ -908,7 +943,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         status = LATCD_STATUS_OK;
         goto out;
     }
-    if (cache_make_room(config, module_status.st_size, hex,
+    if (cache_make_room(config, module_status.st_size, module_name,
                         error, sizeof(error)) || rename(module, final)) {
         if (!error[0]) {
             fail(error, sizeof(error), "cannot publish module: %s",
