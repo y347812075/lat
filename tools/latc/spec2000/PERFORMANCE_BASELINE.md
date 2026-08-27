@@ -67,6 +67,8 @@ python3 spec2000/compare-native-train.py \
   --runner /path/to/latx-x86_64 \
   --latc-dir /path/to/latc/specbin-native \
   --aot-v2-dir /path/to/latc/specbin-aot-v2 \
+  --aot-v2-module-dir /path/to/latc/modules \
+  --aot-v2-runtime-dir /path/to/latc/runtime \
   --native-dir /path/to/specbin/la_gcc12_2_0 \
   --spec-root /path/to/spec2000-x64 \
   --workdir /path/to/results \

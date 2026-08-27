@@ -65,7 +65,16 @@ run_foreground()
     test "$(cat "$work/$name.stdout")" = "$(expected "$rounds")"
 }
 
-run_foreground 250000 cold
+startup_rounds=${LATC_REAL_APP_ROUNDS:-250000}
+startup_samples=${LATC_REAL_APP_STARTUP_SAMPLES:-5}
+case "$startup_samples" in
+    ''|*[!0-9]*) echo "invalid LATC_REAL_APP_STARTUP_SAMPLES" >&2; exit 2 ;;
+esac
+[ "$startup_samples" -ge 1 ] && [ "$startup_samples" -le 20 ] || {
+    echo "LATC_REAL_APP_STARTUP_SAMPLES must be between 1 and 20" >&2
+    exit 2
+}
+run_foreground "$startup_rounds" cold
 n=0
 while :; do
     if [ -f "$stats" ] && python3 - "$stats" 2>/dev/null <<'PY'
@@ -81,9 +90,50 @@ PY
     sleep 0.05
 done
 
-run_foreground 250000 warm
+run_foreground "$startup_rounds" warm
+sample_index=2
+while [ "$sample_index" -le "$startup_samples" ]; do
+    run_foreground "$startup_rounds" "warm.$sample_index"
+    sample_index=$((sample_index + 1))
+done
 grep -Eq 'module=registered aot_lookups=[1-9][0-9]*' "$work/warm.stderr"
 grep -Eq 'registration_ns=[1-9][0-9]*' "$work/warm.stderr"
+
+if [ "${LATC_REAL_APP_STARTUP_ONLY:-0}" = 1 ]; then
+    kill -TERM "$daemon_pid"
+    wait "$daemon_pid"
+    daemon_pid=
+    python3 - "$work" >"$work/startup-report.json" <<'PY'
+import json, pathlib, re, statistics, sys
+work = pathlib.Path(sys.argv[1])
+pattern = re.compile(r"module stats source=([0-9a-f]{64}).*module=(\w+) "
+                     r"aot_lookups=(\d+) jit_fallbacks=(\d+) "
+                     r"registration_ns=(\d+)")
+modules = []
+for match in pattern.finditer((work / "warm.stderr").read_text()):
+    modules.append({"source": match.group(1), "state": match.group(2),
+                    "aot_lookups": int(match.group(3)),
+                    "jit_fallbacks": int(match.group(4)),
+                    "registration_ns": int(match.group(5))})
+runtime = json.load(open(work / "warm.stats.json"))
+warm_paths = [work / "warm.ms"] + sorted(work.glob("warm.*.ms"))
+warm_samples = [int(path.read_text()) for path in warm_paths]
+report = {
+    "cold_ms": int((work / "cold.ms").read_text()),
+    "warm_ms": int(statistics.median(warm_samples)),
+    "warm_samples_ms": warm_samples,
+    "modules": modules,
+    "runtime_tb_gen_attempts": runtime.get("runtime_tb_gen_attempts"),
+    "runtime_tb_gen_calls": runtime.get("runtime_tb_gen_calls"),
+}
+assert any(m["state"] == "registered" and m["aot_lookups"] > 0
+           for m in modules), modules
+json.dump(report, sys.stdout, indent=2)
+print()
+PY
+    echo "test-aot-v2-real-app-startup: PASS report=$work/startup-report.json"
+    exit 0
+fi
 
 long_rounds=500000
 env LD_LIBRARY_PATH="$runtime_dir" LATX_AOT=0 \
@@ -97,18 +147,25 @@ long_pid=$!
 sample=0
 while kill -0 "$long_pid" 2>/dev/null; do
     if [ -r "/proc/$long_pid/smaps_rollup" ]; then
-        python3 - "$long_pid" "$sample" >>"$work/resources.tsv" <<'PY'
+        if python3 - "$long_pid" "$sample" >>"$work/resources.tsv" <<'PY'
 import pathlib, sys, time
 pid, sample = sys.argv[1:]
 values = {}
-for line in pathlib.Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines():
+try:
+    lines = pathlib.Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines()
+except FileNotFoundError:
+    # The process can exit after the shell's readability check.
+    sys.exit(1)
+for line in lines:
     fields = line.split()
     if len(fields) >= 2 and fields[0].rstrip(":") in ("Rss", "Pss"):
         values[fields[0].rstrip(":")] = int(fields[1])
 print(sample, time.monotonic_ns(), values.get("Rss", 0),
       values.get("Pss", 0), sep="\t")
 PY
-        sample=$((sample + 1))
+        then
+            sample=$((sample + 1))
+        fi
     fi
     sleep 0.1
 done
@@ -205,13 +262,16 @@ for line in (work / "resources.tsv").read_text().splitlines():
                     "rss_kb": rss, "pss_kb": pss})
 runtime = json.load(open(work / "warm.stats.json"))
 shared = json.load(open(work / "shared.json"))
+warm_paths = [work / "warm.ms"] + sorted(work.glob("warm.*.ms"))
+warm_samples = [int(path.read_text()) for path in warm_paths]
 registered = [m for m in modules if m["state"] == "registered"]
 assert len(registered) >= 3, modules
 assert all(m["aot_lookups"] > 0 for m in registered), modules
 report = {
     "application": "/bin/bash",
     "cold_ms": int((work / "cold.ms").read_text()),
-    "warm_ms": int((work / "warm.ms").read_text()),
+    "warm_ms": int(statistics.median(warm_samples)),
+    "warm_samples_ms": warm_samples,
     "modules": modules,
     "runtime_tb_gen_attempts": runtime.get("runtime_tb_gen_attempts"),
     "runtime_tb_gen_calls": runtime.get("runtime_tb_gen_calls"),
