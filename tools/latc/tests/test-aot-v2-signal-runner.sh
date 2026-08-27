@@ -30,9 +30,13 @@ LATC_STRICT_AOT=1 \
 LATC_STATS_OUT="$work/stats.json" \
   "$work/runner" >"$work/stdout" 2>"$work/stderr"
 
-printf '%s\n' 'AOT v2 signal recovery boundary=1 internal=1 helper=1 registers=1 nested=1 altstack=1 sigreturn=1' >"$work/expected"
+printf '%s\n' 'AOT v2 signal recovery boundary=1 internal=1 end=1 helper=1 gprs=1 rflags=1 vector=1 mask=1 nested=1 altstack=1 sigreturn=1' >"$work/expected"
 cmp "$work/expected" "$work/stdout"
 grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' "$work/stderr"
+# The UD2 case raises through the LAT helper with guest state already set;
+# boundary, internal, and end faults require host-PC map recovery.
+grep -Eq 'signal_pc_lookups=3 signal_pc_hits=3 signal_pc_misses=0' \
+  "$work/stderr"
 grep -q '"runtime_tb_gen_attempts":0' "$work/stats.json"
 grep -q '"runtime_tb_gen_calls":0' "$work/stats.json"
 echo "test-aot-v2-signal-runner: PASS"

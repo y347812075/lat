@@ -30,5 +30,6 @@ LAT_AOT_RUNTIME_ENTRY lat_aot_runtime_raise_illop, 12
 LAT_AOT_RUNTIME_ENTRY lat_aot_runtime_raise_gpf, 13
 LAT_AOT_RUNTIME_ENTRY lat_aot_runtime_pcmpistri_xmm, 14
 LAT_AOT_RUNTIME_ENTRY lat_aot_runtime_pcmpistrm_xmm, 15
+LAT_AOT_RUNTIME_ENTRY lat_aot_runtime_eflagtf, 16
 
 .section .note.GNU-stack,"",@progbits

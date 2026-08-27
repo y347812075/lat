@@ -141,6 +141,7 @@ static int runtime_symbol(aot_rel_kind kind)
         return LAT_NATIVE_SYMBOL_PCMPISTRI_XMM;
     case LOAD_HELPER_PCMPISTRM_XMM:
         return LAT_NATIVE_SYMBOL_PCMPISTRM_XMM;
+    case LOAD_HELPER_EFLAGTF: return LAT_NATIVE_SYMBOL_EFLAGTF;
     default: return LAT_NATIVE_SYMBOL_INVALID;
     }
 }

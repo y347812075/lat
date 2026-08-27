@@ -12,6 +12,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,9 @@
 #define LATCD_DEFAULT_MAX_INPUT (UINT64_C(1) << 30)
 #define LATCD_DEFAULT_MAX_JOBS 64u
 #define LATCD_DEFAULT_MAX_QUEUE_BYTES (UINT64_C(4) << 30)
+#define LATCD_DEFAULT_MAX_CACHE_BYTES (UINT64_C(16) << 30)
+#define LATCD_DEFAULT_WORKERS 1u
+#define LATCD_MAX_WORKERS 32u
 #define LATCD_DEFAULT_MAX_NEGATIVE 128u
 #define LATCD_DEFAULT_NEGATIVE_MS 30000u
 #define LATCD_DEFAULT_CPU_SECONDS 60u
@@ -45,7 +49,9 @@ typedef struct LatcdConfig {
     uint64_t address_space_limit;
     uint64_t file_size_limit;
     uint64_t max_queue_bytes;
+    uint64_t max_cache_bytes;
     uint32_t max_jobs;
+    uint32_t workers;
     uint32_t max_negative;
     uint32_t negative_ms;
     uint32_t cpu_seconds;
@@ -74,7 +80,7 @@ typedef struct LatcdService {
     GPtrArray *queue;
     GHashTable *active;
     GHashTable *negative;
-    pthread_t worker;
+    pthread_t *workers;
     int stopping;
     uint64_t next_sequence;
     uint64_t requests;
@@ -88,8 +94,14 @@ typedef struct LatcdService {
     uint64_t queued_bytes;
 } LatcdService;
 
+typedef struct LatcdWorker {
+    LatcdService *service;
+    uint32_t index;
+} LatcdWorker;
+
 static volatile sig_atomic_t stop_requested;
-static volatile sig_atomic_t compiler_process_group;
+static volatile sig_atomic_t compiler_process_groups[LATCD_MAX_WORKERS];
+static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int fail(char *error, size_t error_size, const char *format, ...)
 {
@@ -265,8 +277,9 @@ out:
     return result;
 }
 
-static int run_compiler(const LatcdConfig *config, const char *source,
-                        const char *output, char *error, size_t error_size)
+static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
+                        const char *source, const char *output,
+                        char *error, size_t error_size)
 {
     char *const arguments[] = {
         (char *)config->compiler, "compile-module", (char *)source,
@@ -310,7 +323,7 @@ static int run_compiler(const LatcdConfig *config, const char *source,
                     strerror(errno));
     }
     setpgid(child, child);
-    compiler_process_group = child;
+    compiler_process_groups[worker_index] = child;
     if (stop_requested) {
         kill(-child, SIGTERM);
     }
@@ -319,7 +332,7 @@ static int run_compiler(const LatcdConfig *config, const char *source,
     do {
         waited = waitpid(child, &status, 0);
     } while (waited < 0 && errno == EINTR);
-    compiler_process_group = 0;
+    compiler_process_groups[worker_index] = 0;
     g_free(library_path);
     g_free(guest_prefix);
     if (waited < 0) {
@@ -366,6 +379,139 @@ static int sync_directory(const char *path, char *error, size_t error_size)
     return 0;
 }
 
+static int cached_module_inspect(const char *path, const uint8_t digest[32],
+                                 LatAotModuleInfoV2 *info)
+{
+    struct stat status;
+    return !lstat(path, &status) && S_ISREG(status.st_mode) &&
+           status.st_uid == geteuid() && status.st_nlink == 1 &&
+           !(status.st_mode & 0222) &&
+           !lat_aot_v2_module_inspect_file(path, info, NULL, 0) &&
+           !memcmp(info->note.source_sha256, digest, 32);
+}
+
+typedef struct LatcdCacheEntry {
+    char *module_path;
+    char *index_path;
+    uint64_t size;
+    struct timespec modified;
+} LatcdCacheEntry;
+
+static void cache_entry_free(gpointer opaque)
+{
+    LatcdCacheEntry *entry = opaque;
+    g_free(entry->module_path);
+    g_free(entry->index_path);
+    g_free(entry);
+}
+
+static int cache_entry_compare(gconstpointer left, gconstpointer right)
+{
+    const LatcdCacheEntry *a = *(LatcdCacheEntry *const *)left;
+    const LatcdCacheEntry *b = *(LatcdCacheEntry *const *)right;
+    if (a->modified.tv_sec != b->modified.tv_sec) {
+        return a->modified.tv_sec < b->modified.tv_sec ? -1 : 1;
+    }
+    if (a->modified.tv_nsec != b->modified.tv_nsec) {
+        return a->modified.tv_nsec < b->modified.tv_nsec ? -1 : 1;
+    }
+    return strcmp(a->module_path, b->module_path);
+}
+
+static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
+                           const char *incoming_hex, char *error,
+                           size_t error_size)
+{
+    if (incoming > config->max_cache_bytes) {
+        return fail(error, error_size,
+                    "compiled module exceeds cache capacity");
+    }
+    GError *directory_error = NULL;
+    GDir *directory = g_dir_open(config->cache_dir, 0, &directory_error);
+    if (!directory) {
+        int result = fail(error, error_size, "cannot scan cache: %s",
+                          directory_error ? directory_error->message :
+                          "unknown error");
+        g_clear_error(&directory_error);
+        return result;
+    }
+    uint64_t total = 0;
+    GPtrArray *entries = g_ptr_array_new_with_free_func(cache_entry_free);
+    const char *name;
+    while ((name = g_dir_read_name(directory))) {
+        size_t length = strlen(name);
+        if (length != 67 || strcmp(name + 64, ".so")) {
+            continue;
+        }
+        char digest_text[65];
+        memcpy(digest_text, name, 64);
+        digest_text[64] = '\0';
+        uint8_t digest[32];
+        bool valid_name = true;
+        for (size_t i = 0; i < 32; i++) {
+            int high = g_ascii_xdigit_value(digest_text[i * 2]);
+            int low = g_ascii_xdigit_value(digest_text[i * 2 + 1]);
+            if (high < 0 || low < 0) {
+                valid_name = false;
+                break;
+            }
+            digest[i] = (high << 4) | low;
+        }
+        if (!valid_name) {
+            continue;
+        }
+        char *module_path = g_build_filename(config->cache_dir, name, NULL);
+        struct stat status;
+        if (lstat(module_path, &status) || !S_ISREG(status.st_mode) ||
+            status.st_size < 0) {
+            g_free(module_path);
+            continue;
+        }
+        if (!strcmp(digest_text, incoming_hex)) {
+            g_free(module_path);
+            continue;
+        }
+        if ((uint64_t)status.st_size > UINT64_MAX - total) {
+            total = UINT64_MAX;
+        } else {
+            total += status.st_size;
+        }
+        LatAotModuleInfoV2 info;
+        if (cached_module_inspect(module_path, digest, &info)) {
+            LatcdCacheEntry *entry = g_new0(LatcdCacheEntry, 1);
+            entry->module_path = module_path;
+            entry->index_path = g_strdup_printf("%s/%s.current",
+                                                config->cache_dir,
+                                                digest_text);
+            entry->size = status.st_size;
+            entry->modified = status.st_mtim;
+            g_ptr_array_add(entries, entry);
+        } else {
+            g_free(module_path);
+        }
+    }
+    g_dir_close(directory);
+    g_ptr_array_sort(entries, cache_entry_compare);
+    for (guint i = 0;
+         incoming > config->max_cache_bytes - MIN(total,
+                                                   config->max_cache_bytes) &&
+         i < entries->len;
+         i++) {
+        LatcdCacheEntry *entry = g_ptr_array_index(entries, i);
+        if (!unlink(entry->module_path)) {
+            unlink(entry->index_path);
+            total = total > entry->size ? total - entry->size : 0;
+        }
+    }
+    int result = 0;
+    if (total > config->max_cache_bytes - incoming) {
+        result = fail(error, error_size,
+                      "cache capacity is occupied by non-evictable files");
+    }
+    g_ptr_array_free(entries, TRUE);
+    return result;
+}
+
 static int publish_current_index(const LatcdConfig *config, const char *hex,
                                  const LatAotModuleInfoV2 *info, char *error,
                                  size_t error_size)
@@ -406,8 +552,8 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     return result;
 }
 
-static int publish_snapshot(const LatcdConfig *config, const char *snapshot,
-                            const uint8_t digest[32],
+static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
+                            const char *snapshot, const uint8_t digest[32],
                             LatcdResponseV1 *response)
 {
     char error[sizeof(response->message)] = {0};
@@ -421,15 +567,19 @@ static int publish_snapshot(const LatcdConfig *config, const char *snapshot,
     final = g_strdup_printf("%s/%s.so", config->cache_dir, hex);
 
     LatAotModuleInfoV2 info;
-    if (!lat_aot_v2_module_inspect_file(final, &info, NULL, 0) &&
-        !memcmp(info.note.source_sha256, digest, 32)) {
+    pthread_mutex_lock(&cache_lock);
+    if (cached_module_inspect(final, digest, &info)) {
         if (publish_current_index(config, hex, &info, error, sizeof(error))) {
+            pthread_mutex_unlock(&cache_lock);
             goto out;
         }
+        utimensat(AT_FDCWD, final, NULL, AT_SYMLINK_NOFOLLOW);
+        pthread_mutex_unlock(&cache_lock);
         snprintf(error, sizeof(error), "cache hit: %s", final);
         status = LATCD_STATUS_OK;
         goto out;
     }
+    pthread_mutex_unlock(&cache_lock);
 
     module = g_build_filename(temporary_dir, "module-XXXXXX", NULL);
     int placeholder = g_mkstemp_full(module, O_RDWR | O_CLOEXEC, 0600);
@@ -440,7 +590,8 @@ static int publish_snapshot(const LatcdConfig *config, const char *snapshot,
     }
     close(placeholder);
     unlink(module);
-    if (run_compiler(config, snapshot, module, error, sizeof(error))) {
+    if (run_compiler(config, worker_index, snapshot, module,
+                     error, sizeof(error))) {
         status = LATCD_STATUS_COMPILE_FAILED;
         goto out;
     }
@@ -457,22 +608,50 @@ static int publish_snapshot(const LatcdConfig *config, const char *snapshot,
              strerror(errno));
         goto out;
     }
-    if (sync_file(module, error, sizeof(error)) || rename(module, final)) {
+    if (sync_file(module, error, sizeof(error))) {
+        goto out;
+    }
+    struct stat module_status;
+    if (lstat(module, &module_status) || !S_ISREG(module_status.st_mode) ||
+        module_status.st_size < 0) {
+        fail(error, sizeof(error), "cannot inspect compiled module: %s",
+             strerror(errno));
+        goto out;
+    }
+    pthread_mutex_lock(&cache_lock);
+    if (cached_module_inspect(final, digest, &info)) {
+        if (publish_current_index(config, hex, &info, error, sizeof(error))) {
+            pthread_mutex_unlock(&cache_lock);
+            goto out;
+        }
+        utimensat(AT_FDCWD, final, NULL, AT_SYMLINK_NOFOLLOW);
+        pthread_mutex_unlock(&cache_lock);
+        snprintf(error, sizeof(error), "cache hit: %s", final);
+        status = LATCD_STATUS_OK;
+        goto out;
+    }
+    if (cache_make_room(config, module_status.st_size, hex,
+                        error, sizeof(error)) || rename(module, final)) {
         if (!error[0]) {
             fail(error, sizeof(error), "cannot publish module: %s",
                  strerror(errno));
         }
+        pthread_mutex_unlock(&cache_lock);
         goto out;
     }
     if (sync_directory(config->cache_dir, error, sizeof(error))) {
+        pthread_mutex_unlock(&cache_lock);
         goto out;
     }
     if (publish_current_index(config, hex, &info, error, sizeof(error))) {
+        pthread_mutex_unlock(&cache_lock);
         goto out;
     }
     if (sync_directory(config->cache_dir, error, sizeof(error))) {
+        pthread_mutex_unlock(&cache_lock);
         goto out;
     }
+    pthread_mutex_unlock(&cache_lock);
     snprintf(error, sizeof(error), "published: %s", final);
     status = LATCD_STATUS_OK;
 out:
@@ -505,7 +684,7 @@ static int process_request(const LatcdConfig *config, int source_fd,
         response->status = LATCD_STATUS_BAD_SOURCE;
         goto out;
     }
-    result = publish_snapshot(config, snapshot, response->source_sha256,
+    result = publish_snapshot(config, 0, snapshot, response->source_sha256,
                               response);
 out:
     if (result && !response->message[0]) {
@@ -538,13 +717,17 @@ static int cache_contains(const LatcdConfig *config, const uint8_t digest[32])
     digest_hex(digest, hex);
     char *path = g_strdup_printf("%s/%s.so", config->cache_dir, hex);
     LatAotModuleInfoV2 info;
-    int valid = !lat_aot_v2_module_inspect_file(path, &info, NULL, 0) &&
-                !memcmp(info.note.source_sha256, digest, 32);
+    pthread_mutex_lock(&cache_lock);
+    int valid = cached_module_inspect(path, digest, &info);
     if (valid) {
         char error[128];
         valid = !publish_current_index(config, hex, &info, error,
                                        sizeof(error));
+        if (valid) {
+            utimensat(AT_FDCWD, path, NULL, AT_SYMLINK_NOFOLLOW);
+        }
     }
+    pthread_mutex_unlock(&cache_lock);
     g_free(path);
     return valid;
 }
@@ -563,12 +746,14 @@ static void write_stats_locked(const LatcdService *service)
         ",\"compiled\":%" PRIu64 ",\"failed\":%" PRIu64
         ",\"negative_hits\":%" PRIu64 ",\"queue_full\":%" PRIu64
         ",\"queue_depth\":%u,\"queue_bytes\":%" PRIu64
-        ",\"active_jobs\":%u}\n",
+        ",\"active_jobs\":%u,\"workers\":%u"
+        ",\"max_cache_bytes\":%" PRIu64 "}\n",
         service->requests, service->queued, service->deduplicated,
         service->cache_hits, service->compiled, service->failed,
         service->negative_hits, service->queue_full, service->queue->len,
         service->queued_bytes,
-        g_hash_table_size(service->active));
+        g_hash_table_size(service->active), service->config->workers,
+        service->config->max_cache_bytes);
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
         ssize_t written = write(fd, contents, length);
@@ -633,7 +818,8 @@ static void negative_record_locked(LatcdService *service, const char *key,
 
 static void *compiler_worker(void *opaque)
 {
-    LatcdService *service = opaque;
+    LatcdWorker *worker = opaque;
+    LatcdService *service = worker->service;
     for (;;) {
         pthread_mutex_lock(&service->lock);
         while (!service->stopping && !service->queue->len) {
@@ -652,8 +838,8 @@ static void *compiler_worker(void *opaque)
             .version = LATCD_PROTOCOL_VERSION,
             .size = sizeof(response),
         };
-        int result = publish_snapshot(service->config, job->snapshot,
-                                      job->digest, &response);
+        int result = publish_snapshot(service->config, worker->index,
+                                      job->snapshot, job->digest, &response);
 
         pthread_mutex_lock(&service->lock);
         g_hash_table_remove(service->active, job->key);
@@ -909,11 +1095,44 @@ static int run_service(const LatcdConfig *config)
         .active = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL),
         .negative = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                           g_free),
+        .workers = g_new0(pthread_t, config->workers),
+        .stopping = 0,
+        .next_sequence = 0,
+        .requests = 0,
+        .queued = 0,
+        .deduplicated = 0,
+        .cache_hits = 0,
+        .compiled = 0,
+        .failed = 0,
+        .negative_hits = 0,
+        .queue_full = 0,
+        .queued_bytes = 0,
     };
-    if (pthread_create(&service.worker, NULL, compiler_worker, &service)) {
+    LatcdWorker *worker_args = g_new0(LatcdWorker, config->workers);
+    uint32_t started_workers = 0;
+    for (; started_workers < config->workers; started_workers++) {
+        worker_args[started_workers] = (LatcdWorker) {
+            .service = &service,
+            .index = started_workers,
+        };
+        if (pthread_create(&service.workers[started_workers], NULL,
+                           compiler_worker, &worker_args[started_workers])) {
+            break;
+        }
+    }
+    if (started_workers != config->workers) {
         fprintf(stderr, "latcd: cannot start compiler worker\n");
+        pthread_mutex_lock(&service.lock);
+        service.stopping = 1;
+        pthread_cond_broadcast(&service.ready);
+        pthread_mutex_unlock(&service.lock);
+        for (uint32_t i = 0; i < started_workers; i++) {
+            pthread_join(service.workers[i], NULL);
+        }
         close(server);
         unlink(config->socket_path);
+        g_free(worker_args);
+        g_free(service.workers);
         g_ptr_array_free(service.queue, TRUE);
         g_hash_table_destroy(service.active);
         g_hash_table_destroy(service.negative);
@@ -969,12 +1188,16 @@ static int run_service(const LatcdConfig *config)
     }
     g_ptr_array_set_size(service.queue, 0);
     service.queued_bytes = 0;
-    pthread_cond_signal(&service.ready);
+    pthread_cond_broadcast(&service.ready);
     pthread_mutex_unlock(&service.lock);
-    if (compiler_process_group > 0) {
-        kill(-compiler_process_group, SIGTERM);
+    for (uint32_t i = 0; i < config->workers; i++) {
+        if (compiler_process_groups[i] > 0) {
+            kill(-compiler_process_groups[i], SIGTERM);
+        }
     }
-    pthread_join(service.worker, NULL);
+    for (uint32_t i = 0; i < config->workers; i++) {
+        pthread_join(service.workers[i], NULL);
+    }
     pthread_mutex_lock(&service.lock);
     write_stats_locked(&service);
     pthread_mutex_unlock(&service.lock);
@@ -984,6 +1207,8 @@ static int run_service(const LatcdConfig *config)
     g_ptr_array_free(service.queue, TRUE);
     g_hash_table_destroy(service.active);
     g_hash_table_destroy(service.negative);
+    g_free(worker_args);
+    g_free(service.workers);
     pthread_cond_destroy(&service.ready);
     pthread_mutex_destroy(&service.lock);
     return 0;
@@ -1052,7 +1277,8 @@ static void usage(const char *name)
             " --runner PATH --runtime-dir DIR [--stats PATH]"
             " [--x86-rootfs DIR]"
             " [--max-jobs N] [--negative-ms N] [--max-negative N]"
-            " [--max-queue-bytes BYTES]"
+            " [--max-queue-bytes BYTES] [--max-cache-bytes BYTES]"
+            " [--workers N]"
             " [--cpu-seconds N] [--address-space BYTES]"
             " [--file-size BYTES] [--open-files N]\n"
             "  %s --submit --socket PATH [--priority N] X86_ELF\n",
@@ -1069,7 +1295,9 @@ int main(int argc, char **argv)
         .address_space_limit = LATCD_DEFAULT_ADDRESS_SPACE,
         .file_size_limit = LATCD_DEFAULT_FILE_SIZE,
         .max_queue_bytes = LATCD_DEFAULT_MAX_QUEUE_BYTES,
+        .max_cache_bytes = LATCD_DEFAULT_MAX_CACHE_BYTES,
         .max_jobs = LATCD_DEFAULT_MAX_JOBS,
+        .workers = LATCD_DEFAULT_WORKERS,
         .max_negative = LATCD_DEFAULT_MAX_NEGATIVE,
         .negative_ms = LATCD_DEFAULT_NEGATIVE_MS,
         .cpu_seconds = LATCD_DEFAULT_CPU_SECONDS,
@@ -1099,6 +1327,10 @@ int main(int argc, char **argv)
             config.max_jobs = g_ascii_strtoull(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--max-queue-bytes") && i + 1 < argc)
             config.max_queue_bytes = g_ascii_strtoull(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--max-cache-bytes") && i + 1 < argc)
+            config.max_cache_bytes = g_ascii_strtoull(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--workers") && i + 1 < argc)
+            config.workers = g_ascii_strtoull(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--max-negative") && i + 1 < argc)
             config.max_negative = g_ascii_strtoull(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--negative-ms") && i + 1 < argc)
@@ -1126,7 +1358,8 @@ int main(int argc, char **argv)
     }
     if (!config.cache_dir || !config.compiler || !config.runner ||
         !config.runtime_dir || !config.max_input || !config.max_jobs ||
-        !config.max_queue_bytes ||
+        !config.max_queue_bytes || !config.max_cache_bytes ||
+        !config.workers || config.workers > LATCD_MAX_WORKERS ||
         !config.max_negative || !config.negative_ms || !config.cpu_seconds ||
         !config.address_space_limit || !config.file_size_limit ||
         !config.open_files) {

@@ -13,7 +13,7 @@
 #define LAT_AOT_V2_RUNTIME_ABI_SYMBOL "lat_aot_runtime_abi_version"
 #define LAT_AOT_V2_RUNTIME_SYSCALL_SYMBOL "lat_aot_runtime_raise_syscall"
 #define LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT 256u
-#define LAT_AOT_RUNTIME_TARGET_COUNT 16u
+#define LAT_AOT_RUNTIME_TARGET_COUNT 17u
 
 enum LatAotFeatureV2 {
     LAT_AOT_FEATURE_LBT = 1u << 0,
@@ -116,6 +116,7 @@ enum LatAotRuntimeTargetV2 {
     LAT_AOT_TARGET_RAISE_GPF,
     LAT_AOT_TARGET_PCMPISTRI_XMM,
     LAT_AOT_TARGET_PCMPISTRM_XMM,
+    LAT_AOT_TARGET_EFLAGTF,
 };
 
 typedef struct LatAotRuntimeTargetsV2 {
@@ -154,7 +155,7 @@ _Static_assert(sizeof(LatAotGuestSlotV2) == 16,
                "AOT v2 guest slot ABI size changed");
 _Static_assert(sizeof(LatAotModuleV2) == 192,
                "AOT v2 module ABI size changed");
-_Static_assert(sizeof(LatAotRuntimeTargetsV2) == 136,
+_Static_assert(sizeof(LatAotRuntimeTargetsV2) == 144,
                "AOT v2 runtime target ABI size changed");
 
 #endif

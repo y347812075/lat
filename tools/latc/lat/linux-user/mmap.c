@@ -154,6 +154,10 @@ static int target_mprotect_internal(abi_ulong start, abi_ulong len,
     abi_ulong end, host_start, host_end, addr;
     int prot1, ret, page_flags, host_prot;
     int prot_tmp, shadow_mask;
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+    bool aot_invalidate = false;
+    bool aot_restore = false;
+#endif
 
     trace_target_mprotect(start, len, target_prot);
 
@@ -178,10 +182,17 @@ static int target_mprotect_internal(abi_ulong start, abi_ulong len,
         return -TARGET_ENOMEM;
     }
 #if defined(CONFIG_LATX) && defined(TARGET_X86_64)
-    if ((target_prot & PROT_WRITE) || !(target_prot & PROT_EXEC)) {
-        latc_aot_v2_invalidate_range(thread_cpu, start, len,
-                                     LATC_AOT_V2_INVALIDATE_PROTECTION);
+    bool was_executable = true;
+    for (addr = start; addr < end; addr += TARGET_PAGE_SIZE) {
+        if (!(page_get_flags(addr) & PAGE_EXEC)) {
+            was_executable = false;
+            break;
+        }
     }
+    aot_invalidate = (target_prot & PROT_WRITE) ||
+                     !(target_prot & PROT_EXEC);
+    aot_restore = (target_prot & PROT_EXEC) &&
+                  !(target_prot & PROT_WRITE) && !was_executable;
 #endif
 
 #if defined(CONFIG_LATX_KZT) && defined(TARGET_X86_64)
@@ -290,6 +301,13 @@ static int target_mprotect_internal(abi_ulong start, abi_ulong len,
 
     page_set_flags_tb_reload(start, start + len, page_flags, true);
 
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+    if (aot_invalidate) {
+        latc_aot_v2_invalidate_range(thread_cpu, start, len,
+                                     LATC_AOT_V2_INVALIDATE_PROTECTION);
+    }
+#endif
+
     if (target_prot == PROT_NONE) {
 #ifdef CONFIG_LATX_AOT
         if (option_aot && segment_tree_lookup2(start, start + len)) {
@@ -299,6 +317,11 @@ static int target_mprotect_internal(abi_ulong start, abi_ulong len,
     }
 
     mmap_unlock();
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+    if (aot_restore) {
+        latc_aot_v2_revalidate_range(start, len);
+    }
+#endif
     return 0;
 error:
     mmap_unlock();
@@ -981,11 +1004,6 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
             errno = ENOMEM;
             goto fail;
         }
-#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
-        latc_aot_v2_invalidate_range(thread_cpu, start, len,
-                                     LATC_AOT_V2_INVALIDATE_MAP_FIXED);
-#endif
-
         /* worst case: we cannot map the file because the offset is not
            aligned, so we read it */
 #ifdef TARGET_X86_64
@@ -1173,6 +1191,12 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
     }
 
  the_end:
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+    if (flags & MAP_FIXED) {
+        latc_aot_v2_invalidate_range(thread_cpu, start, len,
+                                     LATC_AOT_V2_INVALIDATE_MAP_FIXED);
+    }
+#endif
 #ifdef TARGET_I386
     guest_vma_name_reset(start, len);
 #endif
@@ -1466,15 +1490,6 @@ abi_long target_mremap(abi_ulong old_addr, abi_ulong old_size,
      */
     start_exclusive();
     mmap_lock();
-#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
-    latc_aot_v2_invalidate_range(thread_cpu, old_addr, source_size,
-                                 LATC_AOT_V2_INVALIDATE_UNMAP);
-    if (flags & MREMAP_FIXED) {
-        latc_aot_v2_invalidate_range(thread_cpu, new_addr, new_size,
-                                     LATC_AOT_V2_INVALIDATE_MAP_FIXED);
-    }
-#endif
-
     prot = page_get_flags(old_addr);
 #if defined(CONFIG_LATX) && defined(TARGET_I386)
     for (addr = old_addr; addr < old_addr + source_size;
@@ -1725,6 +1740,11 @@ mremap_done:
         }
         page_set_flags(new_addr, new_addr + new_size,
                        prot | PAGE_VALID | PAGE_RESET);
+
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+        latc_aot_v2_note_mremap(thread_cpu, old_addr, source_size,
+                                new_addr, new_size, keep_old);
+#endif
 
 #ifdef CONFIG_LATX_AOT
         if (option_aot) {

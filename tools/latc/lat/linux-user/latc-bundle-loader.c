@@ -115,9 +115,16 @@ static bool program_address(uint64_t guest_pc)
     return false;
 }
 
+static bool runtime_stats_enabled(void)
+{
+    const char *path = getenv("LATC_STATS_OUT");
+    return (bundle_self_fd >= 0 && pretranslation_complete) ||
+           (bundle_self_fd < 0 && path && *path);
+}
+
 void latc_bundle_note_tb_attempt(uint64_t guest_pc, uint32_t cflags)
 {
-    if (bundle_self_fd < 0 || !pretranslation_complete) return;
+    if (!runtime_stats_enabled()) return;
     bool program_pc = program_address(guest_pc);
     if (!stat_runtime_tb_gen_attempts) {
         stat_runtime_first_pc = guest_pc;
@@ -147,10 +154,11 @@ void latc_bundle_note_tb_attempt(uint64_t guest_pc, uint32_t cflags)
 void latc_bundle_note_tb_generated(uint64_t guest_pc, uint32_t cflags)
 {
     (void)cflags;
-    if (bundle_self_fd < 0 || !pretranslation_complete) return;
+    if (!runtime_stats_enabled()) return;
     stat_runtime_tb_gen_calls++;
     if (program_address(guest_pc)) stat_runtime_program_tb_gen_calls++;
     else stat_runtime_system_tb_gen_calls++;
+    write_stats();
 }
 
 static int copy_range(int src, uint64_t offset, uint64_t size, int dst)

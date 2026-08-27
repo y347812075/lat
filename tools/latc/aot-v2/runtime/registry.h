@@ -31,6 +31,7 @@ typedef struct LatAotModuleInstanceV2 {
     LatAotGuestRangeV2 exec_ranges[LAT_AOT_V2_MAX_EXEC_RANGES];
     _Atomic uint64_t generation;
     _Atomic int active;
+    _Atomic uint32_t readers;
 } LatAotModuleInstanceV2;
 
 /*
@@ -45,7 +46,15 @@ typedef struct LatAotRegistryV2 {
     pthread_mutex_t write_lock;
     _Atomic(LatAotRegistrySnapshotV2 *) current;
     LatAotRegistrySnapshotV2 *retired;
+    _Atomic size_t readers;
+    _Atomic size_t retired_count;
 } LatAotRegistryV2;
+
+typedef struct LatAotRegistryCountsV2 {
+    size_t current_snapshots;
+    size_t retired_snapshots;
+    size_t readers;
+} LatAotRegistryCountsV2;
 
 typedef struct LatAotTargetV2 {
     const void *host_address;
@@ -63,9 +72,13 @@ int lat_aot_v2_registry_deactivate_range(LatAotRegistryV2 *registry,
                                          uint64_t guest_begin,
                                          uint64_t guest_end,
                                          size_t *deactivated);
-int lat_aot_v2_registry_lookup(const LatAotRegistryV2 *registry,
+int lat_aot_v2_registry_lookup(LatAotRegistryV2 *registry,
                                uint64_t guest_pc, uint32_t flags,
                                LatAotTargetV2 *target);
+void lat_aot_v2_registry_target_release(LatAotTargetV2 *target);
+void lat_aot_v2_registry_drain(LatAotRegistryV2 *registry);
+void lat_aot_v2_registry_counts(const LatAotRegistryV2 *registry,
+                                LatAotRegistryCountsV2 *counts);
 int lat_aot_v2_context_apply_guest_slots(const LatAotModuleV2 *module,
                                          uint64_t guest_load_bias,
                                          void *jump_cache);

@@ -22,6 +22,27 @@ void latc_aot_v2_drain_mmaps(void)
 {
 }
 
+bool latc_aot_v2_revalidate_range(uint64_t guest_start,
+                                  uint64_t mapping_size)
+{
+    (void)guest_start;
+    (void)mapping_size;
+    return false;
+}
+
+bool latc_aot_v2_note_mremap(CPUState *cpu, uint64_t old_start,
+                             uint64_t old_size, uint64_t new_start,
+                             uint64_t new_size, bool keep_old)
+{
+    (void)cpu;
+    (void)old_start;
+    (void)old_size;
+    (void)new_start;
+    (void)new_size;
+    (void)keep_old;
+    return false;
+}
+
 void latc_aot_v2_note_munmap(CPUState *cpu, uint64_t guest_start,
                              uint64_t mapping_size)
 {
@@ -72,6 +93,15 @@ bool latc_aot_v2_activate_target(CPUState *cpu,
 bool latc_aot_v2_contains_host_pc(uintptr_t host_pc)
 {
     (void)host_pc;
+    return false;
+}
+
+bool latc_aot_v2_diagnose_host_pc(CPUState *cpu, uintptr_t host_pc,
+                                  LatcAotV2SignalDiagnostic *diagnostic)
+{
+    (void)cpu;
+    (void)host_pc;
+    (void)diagnostic;
     return false;
 }
 

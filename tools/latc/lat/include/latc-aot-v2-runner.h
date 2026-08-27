@@ -18,6 +18,14 @@ typedef struct LatcAotV2Target {
     uint64_t guest_slot_count;
 } LatcAotV2Target;
 
+typedef struct LatcAotV2SignalDiagnostic {
+    uint8_t source_sha256[32];
+    target_ulong guest_pc;
+    uint64_t generation;
+    target_ulong guest_begin;
+    target_ulong guest_end;
+} LatcAotV2SignalDiagnostic;
+
 typedef enum LatcAotV2InvalidationReason {
     LATC_AOT_V2_INVALIDATE_UNMAP,
     LATC_AOT_V2_INVALIDATE_MAP_FIXED,
@@ -35,6 +43,11 @@ bool latc_aot_v2_invalidate_range(CPUState *cpu, uint64_t guest_start,
                                   uint64_t mapping_size,
                                   LatcAotV2InvalidationReason reason);
 void latc_aot_v2_drain_mmaps(void);
+bool latc_aot_v2_revalidate_range(uint64_t guest_start,
+                                  uint64_t mapping_size);
+bool latc_aot_v2_note_mremap(CPUState *cpu, uint64_t old_start,
+                             uint64_t old_size, uint64_t new_start,
+                             uint64_t new_size, bool keep_old);
 void latc_aot_v2_report_stats(void);
 int latc_aot_v2_prepare(CPUArchState *env);
 bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
@@ -42,6 +55,8 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
 bool latc_aot_v2_activate_target(CPUState *cpu,
                                  const LatcAotV2Target *target);
 bool latc_aot_v2_contains_host_pc(uintptr_t host_pc);
+bool latc_aot_v2_diagnose_host_pc(CPUState *cpu, uintptr_t host_pc,
+                                  LatcAotV2SignalDiagnostic *diagnostic);
 bool latc_aot_v2_restore_state(CPUState *cpu, uintptr_t host_pc);
 
 #endif

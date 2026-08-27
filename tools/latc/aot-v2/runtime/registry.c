@@ -48,6 +48,23 @@ static void snapshot_free(LatAotRegistrySnapshotV2 *snapshot)
     free(snapshot);
 }
 
+static void reclaim_retired_locked(LatAotRegistryV2 *registry)
+{
+    if (atomic_load_explicit(&registry->readers,
+                             memory_order_seq_cst)) {
+        return;
+    }
+    LatAotRegistrySnapshotV2 *snapshot = registry->retired;
+    registry->retired = NULL;
+    atomic_store_explicit(&registry->retired_count, 0,
+                          memory_order_release);
+    while (snapshot) {
+        LatAotRegistrySnapshotV2 *next = snapshot->retired_next;
+        snapshot_free(snapshot);
+        snapshot = next;
+    }
+}
+
 int lat_aot_v2_registry_init(LatAotRegistryV2 *registry)
 {
     if (!registry) {
@@ -89,9 +106,12 @@ static int publish_snapshot(LatAotRegistryV2 *registry,
                             LatAotRegistrySnapshotV2 *replacement)
 {
     LatAotRegistrySnapshotV2 *old = atomic_exchange_explicit(
-        &registry->current, replacement, memory_order_acq_rel);
+        &registry->current, replacement, memory_order_seq_cst);
     old->retired_next = registry->retired;
     registry->retired = old;
+    atomic_fetch_add_explicit(&registry->retired_count, 1,
+                              memory_order_release);
+    reclaim_retired_locked(registry);
     return 0;
 }
 
@@ -156,8 +176,6 @@ int lat_aot_v2_registry_deactivate(LatAotRegistryV2 *registry,
         return -1;
     }
     pthread_mutex_lock(&registry->write_lock);
-    atomic_store_explicit(&instance->active, 0, memory_order_release);
-    atomic_fetch_add_explicit(&instance->generation, 1, memory_order_acq_rel);
     LatAotRegistrySnapshotV2 *old = atomic_load_explicit(
         &registry->current, memory_order_acquire);
     size_t retained = 0;
@@ -179,6 +197,8 @@ int lat_aot_v2_registry_deactivate(LatAotRegistryV2 *registry,
             replacement->instances[output++] = old->instances[i];
         }
     }
+    atomic_store_explicit(&instance->active, 0, memory_order_release);
+    atomic_fetch_add_explicit(&instance->generation, 1, memory_order_acq_rel);
     publish_snapshot(registry, replacement);
     pthread_mutex_unlock(&registry->write_lock);
     return 0;
@@ -271,7 +291,7 @@ static const LatAotTbV2 *find_tb(const LatAotModuleV2 *module,
     return NULL;
 }
 
-int lat_aot_v2_registry_lookup(const LatAotRegistryV2 *registry,
+int lat_aot_v2_registry_lookup(LatAotRegistryV2 *registry,
                                uint64_t guest_pc, uint32_t flags,
                                LatAotTargetV2 *target)
 {
@@ -279,8 +299,16 @@ int lat_aot_v2_registry_lookup(const LatAotRegistryV2 *registry,
         errno = EINVAL;
         return -1;
     }
+    memset(target, 0, sizeof(*target));
+    /*
+     * These operations are sequentially consistent on purpose.  A writer
+     * exchanges current before observing readers.  Therefore it either sees
+     * this reader, or this reader observes the replacement snapshot.
+     */
+    atomic_fetch_add_explicit(&registry->readers, 1,
+                              memory_order_seq_cst);
     LatAotRegistrySnapshotV2 *snapshot = atomic_load_explicit(
-        &registry->current, memory_order_acquire);
+        &registry->current, memory_order_seq_cst);
     size_t left = 0;
     size_t right = snapshot->count;
     while (left < right) {
@@ -293,26 +321,73 @@ int lat_aot_v2_registry_lookup(const LatAotRegistryV2 *registry,
     }
     if (!left) {
         errno = ENOENT;
-        return -1;
+        goto fail;
     }
     LatAotModuleInstanceV2 *instance = snapshot->instances[left - 1];
+    atomic_fetch_add_explicit(&instance->readers, 1,
+                              memory_order_seq_cst);
     if (guest_pc >= instance->guest_end ||
         !atomic_load_explicit(&instance->active, memory_order_acquire)) {
+        atomic_fetch_sub_explicit(&instance->readers, 1,
+                                  memory_order_seq_cst);
         errno = ENOENT;
-        return -1;
+        goto fail;
     }
     const LatAotModuleV2 *module = instance->module->descriptor;
     const LatAotTbV2 *tb = find_tb(module,
         guest_pc - instance->guest_load_bias, flags);
     if (!tb) {
+        atomic_fetch_sub_explicit(&instance->readers, 1,
+                                  memory_order_seq_cst);
         errno = ENOENT;
-        return -1;
+        goto fail;
     }
     target->host_address = module->text_begin + tb->host_offset;
     target->instance = instance;
     target->generation = atomic_load_explicit(&instance->generation,
                                                memory_order_acquire);
+    atomic_fetch_sub_explicit(&registry->readers, 1,
+                              memory_order_seq_cst);
     return 0;
+
+fail:
+    atomic_fetch_sub_explicit(&registry->readers, 1,
+                              memory_order_seq_cst);
+    return -1;
+}
+
+void lat_aot_v2_registry_target_release(LatAotTargetV2 *target)
+{
+    if (!target || !target->instance) {
+        return;
+    }
+    atomic_fetch_sub_explicit(&target->instance->readers, 1,
+                              memory_order_seq_cst);
+    target->instance = NULL;
+}
+
+void lat_aot_v2_registry_drain(LatAotRegistryV2 *registry)
+{
+    if (!registry) {
+        return;
+    }
+    pthread_mutex_lock(&registry->write_lock);
+    reclaim_retired_locked(registry);
+    pthread_mutex_unlock(&registry->write_lock);
+}
+
+void lat_aot_v2_registry_counts(const LatAotRegistryV2 *registry,
+                                LatAotRegistryCountsV2 *counts)
+{
+    if (!registry || !counts) {
+        return;
+    }
+    counts->current_snapshots = atomic_load_explicit(
+        &registry->current, memory_order_acquire) != NULL;
+    counts->retired_snapshots = atomic_load_explicit(
+        &registry->retired_count, memory_order_acquire);
+    counts->readers = atomic_load_explicit(&registry->readers,
+                                            memory_order_acquire);
 }
 
 int lat_aot_v2_context_apply_guest_slots(const LatAotModuleV2 *module,

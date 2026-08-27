@@ -95,6 +95,23 @@ assert s["deduplicated"] + s["cache_hits"] == 19, s
 PY
 stop_service
 
+start_service workers "$script_dir/fake-latc-slow.sh" --workers 2
+cp "$guest" "$work/workers-a.elf"
+cp "$guest" "$work/workers-b.elf"
+printf a >>"$work/workers-a.elf"
+printf b >>"$work/workers-b.elf"
+"$latcd" --submit --socket "$socket" "$work/workers-a.elf" \
+  >"$phase/a.client" &
+worker_client_a=$!
+"$latcd" --submit --socket "$socket" "$work/workers-b.elf" \
+  >"$phase/b.client" &
+worker_client_b=$!
+wait "$worker_client_a"
+wait "$worker_client_b"
+wait_stats 's["active_jobs"] == 2 and s["queue_depth"] == 0 and s["workers"] == 2'
+wait_stats 's["compiled"] == 2 and s["active_jobs"] == 0'
+stop_service
+
 start_service negative /bin/false --negative-ms 500
 python3 - "$socket" <<'PY'
 import socket
