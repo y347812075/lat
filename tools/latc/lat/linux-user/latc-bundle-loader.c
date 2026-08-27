@@ -2,7 +2,6 @@
 
 #include "latc-bundle-loader.h"
 #include "latc-bundle-format.h"
-#include "latc-aot-v2-runner.h"
 #include "lat-aot-v2.h"
 
 #include "accel/tcg/internal.h"
@@ -37,6 +36,8 @@ static uint64_t stat_runtime_nonfile_tb_gen_calls;
 static uint64_t stat_runtime_file_tb_gen_attempts;
 static uint64_t stat_runtime_nonfile_tb_gen_attempts;
 static uint32_t stat_runtime_first_cflags;
+
+bool latc_aot_v2_is_file_pc(target_ulong guest_pc);
 static bool stat_pretranslation_disabled;
 static bool stat_aot_cache_hit;
 static uint64_t stat_bundle_verify_ns, stat_guest_extract_ns;
