@@ -22,7 +22,8 @@ import pathlib
 import sys
 
 from specint import (aggregate_stats, geometric_mean, merge_profile, run_spec,
-                     sample_summary, selected_programs)
+                     sample_summary, selected_programs,
+                     strict_aot_v2_env_lines)
 
 work = pathlib.Path(sys.argv[1])
 assert merge_profile(work / "input.profile", work / "merged.profile") == 2
@@ -45,6 +46,16 @@ summary = sample_summary([1.0, 2.0, 3.0])
 assert summary["median"] == 2.0, summary
 assert abs(geometric_mean([2.0, 8.0]) - 4.0) < 1e-12
 assert selected_programs(["164.gzip"])[0][1] == "gzip_base.Of.gcc830.dyn"
+env_lines = strict_aot_v2_env_lines(
+    "/runtime dir", "/module dir/input.so", "/guest dir/input")
+assert env_lines == [
+    "export LD_LIBRARY_PATH='/runtime dir'${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}",
+    "export LATX_AOT_V2_MODULE='/module dir/input.so'",
+    "export LATX_AOT_V2_SOURCE='/guest dir/input'",
+    "export LATX_AOT_V2_STRICT=1",
+    "export LATC_DISABLE_PRETRANSLATE=1",
+    "export LATC_STRICT_AOT=1",
+], env_lines
 spec = (work / "timeout-spec").resolve()
 (spec / "result").mkdir(parents=True)
 runner = spec / "myrun1.sh"
@@ -76,3 +87,5 @@ PY
 python3 "$(dirname "$0")/../spec2000/prepare-specint-train.py" --help >/dev/null
 python3 "$(dirname "$0")/../spec2000/bench-specint-train.py" --help >/dev/null
 python3 "$(dirname "$0")/../spec2000/run-specint-native.py" --help >/dev/null
+python3 "$(dirname "$0")/../spec2000/compare-native-train.py" --help >/dev/null
+python3 "$(dirname "$0")/../spec2000/compare-aot-v2-focused.py" --help >/dev/null

@@ -10,7 +10,8 @@ import shutil
 from pathlib import Path
 
 from specint import (geometric_mean, replace_run_link, run_spec,
-                     sample_summary, selected_programs, sha256)
+                     sample_summary, selected_programs, sha256,
+                     strict_aot_v2_env_lines)
 
 
 def quote(value):
@@ -96,6 +97,8 @@ def main():
     parser.add_argument("--runner", required=True, type=Path)
     parser.add_argument("--latc-dir", required=True, type=Path)
     parser.add_argument("--aot-v2-dir", required=True, type=Path)
+    parser.add_argument("--aot-v2-module-dir", required=True, type=Path)
+    parser.add_argument("--aot-v2-runtime-dir", required=True, type=Path)
     parser.add_argument("--native-dir", required=True, type=Path)
     parser.add_argument("--spec-root", required=True, type=Path)
     parser.add_argument("--workdir", required=True, type=Path)
@@ -112,9 +115,14 @@ def main():
     args.runner = args.runner.resolve()
     args.latc_dir = args.latc_dir.resolve()
     args.aot_v2_dir = args.aot_v2_dir.resolve()
+    args.aot_v2_module_dir = args.aot_v2_module_dir.resolve()
+    args.aot_v2_runtime_dir = args.aot_v2_runtime_dir.resolve()
     args.native_dir = args.native_dir.resolve()
     args.spec_root = args.spec_root.resolve()
     args.workdir = args.workdir.resolve()
+    if not args.aot_v2_runtime_dir.is_dir():
+        raise SystemExit("missing AOT v2 runtime directory: %s" %
+                         args.aot_v2_runtime_dir)
     guest_dir = (args.spec_root / args.guest_dir).resolve()
     programs = selected_programs(args.benchmark)
     modes = ("m4", "aot_v2", "old_aot", "native")
@@ -137,8 +145,9 @@ def main():
         guest = guest_dir / filename
         m4 = args.latc_dir / filename
         aot_v2 = args.aot_v2_dir / filename
+        aot_v2_module = args.aot_v2_module_dir / (filename + ".so")
         native = args.native_dir / filename
-        for path in (guest, m4, aot_v2, native):
+        for path in (guest, m4, aot_v2, aot_v2_module, native):
             if not path.is_file():
                 raise SystemExit("missing %s input: %s" % (benchmark, path))
         home = homes / benchmark
@@ -146,11 +155,15 @@ def main():
         wrapper(mode_dirs["m4"] / filename, [
             "exec %s %s \"$@\"" % (command_prefix, quote(m4)),
         ])
-        wrapper(mode_dirs["aot_v2"] / filename, [
+        wrapper(mode_dirs["aot_v2"] / filename,
+                strict_aot_v2_env_lines(
+                    args.aot_v2_runtime_dir, aot_v2_module, guest) + [
             "exec %s %s \"$@\"" % (command_prefix, quote(aot_v2)),
         ])
         wrapper(mode_dirs["old_aot"] / filename, [
             "export HOME=%s" % quote(home),
+            "export LD_LIBRARY_PATH=%s${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" %
+            quote(args.runner.parent),
             "export LATX_AOT=1",
             "export LATX_TU=1",
             "exec %s %s %s \"$@\"" %
@@ -170,12 +183,16 @@ def main():
         "runner": str(args.runner), "runner_sha256": sha256(args.runner),
         "m4_dir": str(args.latc_dir),
         "aot_v2_dir": str(args.aot_v2_dir),
+        "aot_v2_module_dir": str(args.aot_v2_module_dir),
+        "aot_v2_runtime_dir": str(args.aot_v2_runtime_dir),
         "native_dir": str(args.native_dir),
         "input_sha256": {
             benchmark: {
                 "guest": sha256(guest_dir / filename),
                 "m4": sha256(args.latc_dir / filename),
                 "aot_v2": sha256(args.aot_v2_dir / filename),
+                "aot_v2_module": sha256(
+                    args.aot_v2_module_dir / (filename + ".so")),
                 "native": sha256(args.native_dir / filename),
             }
             for benchmark, filename, _strict in programs

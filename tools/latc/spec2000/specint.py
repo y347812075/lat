@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shlex
 import signal
 import statistics
 import subprocess
@@ -35,6 +36,20 @@ def sha256(path):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def strict_aot_v2_env_lines(runtime_dir, module, guest):
+    """Return shell exports that require execution through an AOT v2 module."""
+    quote = shlex.quote
+    return [
+        "export LD_LIBRARY_PATH=%s${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" %
+        quote(str(runtime_dir)),
+        "export LATX_AOT_V2_MODULE=%s" % quote(str(module)),
+        "export LATX_AOT_V2_SOURCE=%s" % quote(str(guest)),
+        "export LATX_AOT_V2_STRICT=1",
+        "export LATC_DISABLE_PRETRANSLATE=1",
+        "export LATC_STRICT_AOT=1",
+    ]
 
 
 def selected_programs(names):
