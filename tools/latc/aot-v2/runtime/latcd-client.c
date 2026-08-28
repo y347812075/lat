@@ -7,6 +7,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -83,11 +84,53 @@ static int submit(const char *socket_path, int source_fd, int profile_fd,
     ssize_t sent = sendmsg(socket_fd, &message,
                            MSG_DONTWAIT | MSG_NOSIGNAL);
     int saved = errno;
-    close(socket_fd);
     if (sent != sizeof(request)) {
+        close(socket_fd);
         errno = sent < 0 ? saved : EIO;
         return fail(error, error_size, "cannot submit ELF to latcd: %s",
                     sent < 0 ? strerror(saved) : "short packet");
+    }
+    struct pollfd response_event = {
+        .fd = socket_fd,
+        .events = POLLIN,
+    };
+    int ready;
+    do {
+        ready = poll(&response_event, 1, 1000);
+    } while (ready < 0 && errno == EINTR);
+    if (ready <= 0 || !(response_event.revents & POLLIN)) {
+        saved = ready == 0 ? ETIMEDOUT :
+                (ready < 0 ? errno : ECONNRESET);
+        close(socket_fd);
+        errno = saved;
+        return fail(error, error_size, "latcd did not acknowledge request: %s",
+                    strerror(errno));
+    }
+    LatcdResponseV1 response;
+    ssize_t received;
+    do {
+        received = recv(socket_fd, &response, sizeof(response), 0);
+    } while (received < 0 && errno == EINTR);
+    if (received != sizeof(response) ||
+        response.magic != LATCD_RESPONSE_MAGIC ||
+        response.version != LATCD_PROTOCOL_VERSION ||
+        response.size != sizeof(response)) {
+        saved = received < 0 ? errno : EPROTO;
+        close(socket_fd);
+        errno = saved;
+        return fail(error, error_size, "invalid latcd response packet");
+    }
+    close(socket_fd);
+    response.message[sizeof(response.message) - 1] = '\0';
+    if (response.request_id != request_id) {
+        errno = EPROTO;
+        return fail(error, error_size,
+                    "latcd response request id does not match");
+    }
+    if (response.status != LATCD_STATUS_OK) {
+        errno = EIO;
+        return fail(error, error_size, "latcd rejected request: %s",
+                    response.message[0] ? response.message : "unknown error");
     }
     return 0;
 }

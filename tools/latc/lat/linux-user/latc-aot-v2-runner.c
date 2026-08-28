@@ -47,7 +47,7 @@ typedef struct LatAotV2ModuleStats {
     uint8_t source_sha256[32];
     _Atomic uint64_t guest_begin;
     _Atomic uint64_t guest_end;
-    _Atomic uint64_t load_bias;
+    _Atomic uint64_t source_base;
     _Atomic LatAotV2ModuleState state;
     _Atomic uint64_t aot_lookups;
     _Atomic uint64_t jit_fallbacks;
@@ -469,7 +469,8 @@ static LatAotV2ModuleStats *add_module_stats(
                                   memory_order_release);
             atomic_store_explicit(&stats->guest_end, info->guest_end,
                                   memory_order_release);
-            atomic_store_explicit(&stats->load_bias, info->load_bias,
+            atomic_store_explicit(&stats->source_base,
+                                  info->load_bias + info->preferred_base,
                                   memory_order_release);
             atomic_store_explicit(&stats->state, state,
                                   memory_order_release);
@@ -493,7 +494,8 @@ static LatAotV2ModuleStats *add_module_stats(
                           memory_order_relaxed);
     atomic_store_explicit(&stats->guest_end, info->guest_end,
                           memory_order_relaxed);
-    atomic_store_explicit(&stats->load_bias, info->load_bias,
+    atomic_store_explicit(&stats->source_base,
+                          info->load_bias + info->preferred_base,
                           memory_order_relaxed);
     atomic_store_explicit(&stats->state, state, memory_order_relaxed);
     stats->next = atomic_load_explicit(&module_stats, memory_order_relaxed);
@@ -530,9 +532,9 @@ static void note_dispatch_miss(LatAotV2ModuleStats *stats,
     if (stats) {
         atomic_fetch_add(&stats->jit_fallbacks, 1);
         atomic_fetch_add(&file_dispatch_misses, 1);
-        uint64_t load_bias = atomic_load_explicit(
-            &stats->load_bias, memory_order_acquire);
-        uint64_t rva = guest_pc - load_bias;
+        uint64_t source_base = atomic_load_explicit(
+            &stats->source_base, memory_order_acquire);
+        uint64_t rva = guest_pc - source_base;
         uint32_t semantic_flags = aot_v2_semantic_flags(cflags);
         pthread_mutex_lock(&profile_lock);
         bool found = false;
@@ -562,7 +564,7 @@ static void note_dispatch_miss(LatAotV2ModuleStats *stats,
             fprintf(stderr,
                     "latx: AOT v2 file miss source=%s rva=0x%llx "
                     "flags=0x%x guest_pc=0x%llx\n",
-                    source, (unsigned long long)(guest_pc - load_bias),
+                    source, (unsigned long long)rva,
                     semantic_flags,
                     (unsigned long long)guest_pc);
         }

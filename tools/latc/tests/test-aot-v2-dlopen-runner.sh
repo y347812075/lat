@@ -16,7 +16,8 @@ work=$7
 run_timeout=$8
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 rm -rf "$work"
-mkdir -p "$work/empty-cache" "$work/hot-cache" "$work/race-cache"
+mkdir -p "$work/empty-cache" "$work/hot-cache" "$work/mixed-cache" \
+  "$work/race-cache"
 
 interp=$(readlink -f "$rootfs/lib64/ld-linux-x86-64.so.2")
 libc=$(readlink -f "$rootfs/lib/x86_64-linux-gnu/libc.so.6")
@@ -52,7 +53,11 @@ compile_module "$plugin" "$work/plugin.so" "$work/plugin.profile"
 plugin_sha=$(sha256sum "$plugin" | awk '{print $1}')
 cp "$work/plugin.so" "$work/race-cache/$plugin_sha.so"
 compile_module "$interp" "$work/interp.so"
+interp_sha=$(sha256sum "$interp" | awk '{print $1}')
+cp "$work/interp.so" "$work/mixed-cache/$interp_sha.so"
 compile_module "$libc" "$work/libc.so"
+libc_sha=$(sha256sum "$libc" | awk '{print $1}')
+cp "$work/libc.so" "$work/mixed-cache/$libc_sha.so"
 
 run_guest()
 {
@@ -72,6 +77,15 @@ printf 'dlopen loads=100 signals=100 concurrent_invalidation=0 result=40 moved=1
 run_guest "$work/empty-cache" "$work/cold.out" "$work/cold.err"
 cmp "$work/expected" "$work/cold.out"
 test "$(grep -c 'discovered ELF.*module=missing' "$work/cold.err")" -ge 102
+
+run_guest "$work/mixed-cache" "$work/mixed.out" "$work/mixed.err"
+cmp "$work/expected" "$work/mixed.out"
+grep -Eq "module stats source=$interp_sha .*module=registered aot_lookups=[1-9]" \
+  "$work/mixed.err"
+grep -Eq "module stats source=$libc_sha .*module=registered aot_lookups=[1-9]" \
+  "$work/mixed.err"
+grep -Eq "module stats source=$plugin_sha .*module=missing aot_lookups=0" \
+  "$work/mixed.err"
 
 run_guest "$work/hot-cache" "$work/hot.out" "$work/hot.err"
 cmp "$work/expected" "$work/hot.out"

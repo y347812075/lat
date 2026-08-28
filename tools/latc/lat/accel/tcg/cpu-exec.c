@@ -810,7 +810,6 @@ inline void tb_add_jump(TranslationBlock *tb, int n,
 
 #ifdef CONFIG_LATX
 static __thread LatcAotV2Target *cpu_aot_v2_target_cache;
-static __thread const void *cpu_aot_v2_context;
 #endif
 
 static inline TranslationBlock *tb_find(CPUState *cpu,
@@ -837,11 +836,12 @@ static inline TranslationBlock *tb_find(CPUState *cpu,
             cached->generation == atomic_load_explicit(
                 cached->generation_address, memory_order_acquire)) {
             *aot_target = *cached;
-            aot_v2 = cpu_aot_v2_context == cached->context ||
-                latc_aot_v2_activate_target(cpu, cached);
-            if (aot_v2) {
-                cpu_aot_v2_context = cached->context;
-            }
+            /*
+             * Generated fast jumps update env->aot_v2_current_context
+             * without returning here.  Revalidate the real context instead
+             * of keeping a second C-side context value that can go stale.
+             */
+            aot_v2 = latc_aot_v2_activate_target(cpu, cached);
         }
         if (!aot_v2) {
             aot_v2 = latc_aot_v2_find_target(cpu, pc, cflags, aot_target);
@@ -853,7 +853,6 @@ static inline TranslationBlock *tb_find(CPUState *cpu,
                 if (cpu_aot_v2_target_cache) {
                     cpu_aot_v2_target_cache[hash] = *aot_target;
                 }
-                cpu_aot_v2_context = aot_target->context;
             }
         }
     }

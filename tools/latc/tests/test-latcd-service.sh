@@ -127,12 +127,24 @@ source_sha = hashlib.sha256(open(source_path, "rb").read()).hexdigest()
 with open(source_path, "rb") as source:
     source.seek(24)
     entry = struct.unpack("<Q", source.read(8))[0]
+    source.seek(32)
+    phoff = struct.unpack("<Q", source.read(8))[0]
+    source.seek(54)
+    phentsize, phnum = struct.unpack("<HH", source.read(4))
+    load_vaddrs = []
+    for index in range(phnum):
+        source.seek(phoff + index * phentsize)
+        phdr = source.read(phentsize)
+        if struct.unpack_from("<I", phdr)[0] == 1:  # PT_LOAD
+            load_vaddrs.append(struct.unpack_from("<Q", phdr, 16)[0])
+    assert load_vaddrs and entry >= min(load_vaddrs)
+    entry_rva = entry - min(load_vaddrs)
 
 for request_id, count in ((101, 1), (102, 2)):
     profile = tempfile.NamedTemporaryFile(mode="w", delete=False)
     try:
         profile.write("LATC_PROFILE_V2 %s\n" % source_sha)
-        profile.write("0x%x 0x1 %d\n" % (entry, count))
+        profile.write("0x%x 0x1 %d\n" % (entry_rva, count))
         profile.close()
         source_fd = os.open(source_path, os.O_RDONLY)
         profile_fd = os.open(profile.name, os.O_RDONLY)
@@ -158,6 +170,43 @@ for request_id, count in ((101, 1), (102, 2)):
 PY
 wait_stats 's["active_jobs"] == 2 and s["queue_depth"] == 1 and s["running_sources"] == 1'
 wait_stats 's["compiled"] == 2 and s["active_jobs"] == 0 and s["running_sources"] == 0'
+python3 - "$cache" "$guest" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import struct
+import sys
+
+cache = Path(sys.argv[1])
+source = Path(sys.argv[2])
+source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+with source.open("rb") as elf:
+    elf.seek(24)
+    entry = struct.unpack("<Q", elf.read(8))[0]
+    elf.seek(32)
+    phoff = struct.unpack("<Q", elf.read(8))[0]
+    elf.seek(54)
+    phentsize, phnum = struct.unpack("<HH", elf.read(4))
+    load_vaddrs = []
+    for index in range(phnum):
+        elf.seek(phoff + index * phentsize)
+        phdr = elf.read(phentsize)
+        if struct.unpack_from("<I", phdr)[0] == 1:
+            load_vaddrs.append(struct.unpack_from("<Q", phdr, 16)[0])
+entry_rva = entry - min(load_vaddrs)
+profile = cache / ".profiles" / f"{source_sha}.profile"
+contents = profile.read_text()
+assert contents.splitlines() == [
+    f"LATC_PROFILE_V2 {source_sha}",
+    f"0x{entry_rva:x} 0x1 3",
+], contents
+profile_sha = hashlib.sha256(contents.encode()).hexdigest()
+module_name = f"{source_sha}-{profile_sha}.so"
+assert (cache / module_name).is_file(), module_name
+current = json.loads((cache / f"{source_sha}.current").read_text())
+assert current["module"] == module_name, current
+assert len(list(cache.glob(f"{source_sha}-*.so"))) == 2
+PY
 stop_service
 
 start_service negative /bin/false --negative-ms 500
