@@ -44,6 +44,7 @@
 #include "aot_page.h"
 #include "latx-options.h"
 #endif
+#include <elf.h>
 #include <sys/resource.h>
 
 static pthread_mutex_t mmap_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -787,6 +788,16 @@ static int create_shadow_file(int fd, uint64 offset, abi_ulong start, abi_ulong 
 #ifdef TARGET_X86_64
 extern int latx_wine;
 void kzt_wine_bridge(abi_ulong start, int fd);
+
+static bool latc_aot_v2_x86_elf_fd(int fd)
+{
+    unsigned char ident[EI_NIDENT];
+
+    return pread(fd, ident, sizeof(ident), 0) == sizeof(ident) &&
+           !memcmp(ident, ELFMAG, SELFMAG) &&
+           ident[EI_CLASS] == ELFCLASS64 &&
+           ident[EI_DATA] == ELFDATA2LSB;
+}
 #endif
 abi_ulong option_mmap_fixed;
 abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
@@ -801,7 +812,8 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
     uint64_t aot_v2_offset = offset;
     uint64_t aot_v2_size = len;
     if (fd >= 0 && !(flags & MAP_ANONYMOUS) &&
-        latc_aot_v2_mapping_enabled()) {
+        !(target_prot & PROT_WRITE) && latc_aot_v2_mapping_enabled() &&
+        latc_aot_v2_x86_elf_fd(fd)) {
         aot_v2_fd = dup(fd);
     }
 #endif

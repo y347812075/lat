@@ -29,8 +29,10 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-aot-v2-translated test-aot-v2-pie test-aot-v2-runner \
 		test-aot-v2-glibc-runner test-aot-v2-signal-runner \
 		test-aot-v2-dynamic-runner test-aot-v2-dlopen-runner \
-		test-aot-v2-dynamic-semantics test-aot-v2-invalidation test-latcd-once \
+		test-aot-v2-dynamic-semantics test-aot-v2-invalidation \
+		test-aot-v2-fork test-latcd-once \
 		test-latcd-service test-latcd-runner test-aot-v2-real-app test-aot-v2-m4 \
+		test-aot-v2-complex-apps \
 		test-aot-v2-sanitize test-aot-v2-tsan test-aot-v2-libfuzzer \
 		check-import
 
@@ -118,10 +120,16 @@ $(BUILD)/tests/x86-aot-v2-invalidation: tests/x86-aot-v2-invalidation.c
 	@mkdir -p $(dir $@)
 	$(X86_CC) -O2 -g -Wall -Wextra -Werror -o $@ $< -ldl -pthread
 
+$(BUILD)/tests/x86-aot-v2-fork: tests/x86-aot-v2-fork.c
+	@mkdir -p $(dir $@)
+	$(X86_CC) -O2 -g -Wall -Wextra -Werror -fPIE -pie \
+	  -Wl,--build-id=none -o $@ $< -pthread
+
 $(BUILD)/tests/x86-aot-v2-invalidation-plugin.so: \
 		tests/x86-aot-v2-invalidation-plugin.S
 	@mkdir -p $(dir $@)
-	$(X86_CC) -shared -fPIC -Wl,-z,now -Wl,-z,relro \
+	$(X86_CC) -nostdlib -shared -fPIC -Wl,-z,now -Wl,-z,relro \
+	  -Wl,-e,latc_invalidation_entry \
 	  -Wl,--build-id=sha1 -o $@ $<
 
 $(BUILD)/tests/x86-indirect-call42: tests/x86-indirect-call42.S
@@ -309,9 +317,11 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  tests/test-aot-v2-dynamic-runner.sh tests/test-aot-v2-dlopen-runner.sh \
 	  tests/test-aot-v2-dynamic-semantics.sh \
 	  tests/test-aot-v2-invalidation.sh tests/test-latcd-once.sh \
+	  tests/test-aot-v2-fork.sh \
 	  tests/fake-latc-invalid-module.sh tests/test-latcd-service.sh \
 	  tests/fake-latc-slow.sh tests/fake-latc-cpu.sh \
-	  tests/test-latcd-runner.sh tests/test-aot-v2-real-app.sh
+	  tests/test-latcd-runner.sh tests/test-aot-v2-real-app.sh \
+	  tests/test-aot-v2-complex-apps.sh scripts/prepare-complex-rootfs.sh
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
@@ -661,6 +671,14 @@ test-aot-v2-real-app: all
 	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) $(X86_APP) \
 	  $(BUILD)/aot-v2-real-app-test
 
+test-aot-v2-complex-apps: all
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_ROOTFS)" || \
+	  { echo "usage: make test-aot-v2-complex-apps AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_ROOTFS=..."; exit 2; }
+	sh tests/test-aot-v2-complex-apps.sh $(BUILD)/latcd/latcd $(BUILD)/latc \
+	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) \
+	  $(BUILD)/aot-v2-complex-apps-test
+
 test-aot-v2-m4: all $(BUILD)/tests/x86-static-hello \
 		$(BUILD)/tests/x86-glibc-hello $(BUILD)/tests/x86-signal-recover \
 		$(BUILD)/tests/x86-signal-recover.profile \
@@ -772,6 +790,14 @@ test-aot-v2-invalidation: all \
 	  $(BUILD)/tests/x86-aot-v2-invalidation \
 	  $(BUILD)/tests/x86-aot-v2-invalidation-plugin.so \
 	  $(BUILD)/aot-v2-invalidation-test 30s
+
+test-aot-v2-fork: all $(BUILD)/tests/x86-aot-v2-fork
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_ROOTFS)" || \
+	  { echo "usage: make test-aot-v2-fork AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_ROOTFS=..."; exit 2; }
+	sh tests/test-aot-v2-fork.sh $(BUILD)/latc $(AOT_V2_RUNNER) \
+	  $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) \
+	  $(BUILD)/tests/x86-aot-v2-fork $(BUILD)/aot-v2-fork-test
 
 $(BUILD)/tests/liblat-good.so: tests/fake-liblat.c
 	@mkdir -p $(dir $@)

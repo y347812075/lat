@@ -111,6 +111,7 @@ static _Atomic(LatAotV2ModuleStats *) module_stats;
 static _Atomic size_t module_stats_count;
 static bool prepared;
 static _Atomic bool active;
+static _Atomic bool fork_child_jit_only;
 static bool registry_initialized;
 static bool runtime_bound;
 static LatGuestElfTrackerV2 *elf_tracker;
@@ -143,6 +144,7 @@ static _Atomic uint64_t traced_dispatch_misses;
 static _Atomic uint64_t compiler_submissions;
 static _Atomic uint64_t compiler_submission_failures;
 static _Atomic uint64_t compiler_submission_duplicates;
+static _Atomic uint64_t compiler_submission_throttled;
 static _Atomic uint64_t compiler_request_sequence;
 
 static uint32_t aot_v2_semantic_flags(uint32_t cflags)
@@ -156,6 +158,23 @@ static _Atomic uint64_t revalidated_instances;
 static _Atomic uint64_t revalidation_failures;
 
 static void submit_runtime_profiles(void);
+
+static bool next_compiler_request_id(uint64_t *request_id)
+{
+    uint64_t sequence = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
+    const char *text = getenv("LATX_AOT_V2_MAX_SUBMISSIONS");
+    if (text && *text) {
+        char *end = NULL;
+        errno = 0;
+        unsigned long long limit = strtoull(text, &end, 10);
+        if (!errno && end && !*end && sequence > limit) {
+            atomic_fetch_add(&compiler_submission_throttled, 1);
+            return false;
+        }
+    }
+    *request_id = ((uint64_t)getpid() << 32) ^ sequence;
+    return true;
+}
 static _Atomic uint64_t invalidation_reasons[4];
 static _Atomic uint64_t signal_pc_lookups;
 static _Atomic uint64_t signal_pc_hits;
@@ -172,6 +191,74 @@ static bool signal_invalidation_test;
 static bool signal_invalidation_test_worker_started;
 static uint64_t discovered_elfs;
 static GHashTable *submitted_sources;
+
+void latc_aot_v2_fork_start(void)
+{
+    pthread_mutex_lock(&elf_tracker_lock);
+    pthread_mutex_lock(&profile_lock);
+}
+
+void latc_aot_v2_fork_end(CPUState *cpu, bool child)
+{
+    if (!child) {
+        pthread_mutex_unlock(&profile_lock);
+        pthread_mutex_unlock(&elf_tracker_lock);
+        return;
+    }
+
+    /*
+     * A fork child inherits code mappings, registry pointers and descriptors,
+     * but it does not inherit the threads that owned or maintained them.
+     * Disable those inherited objects before returning to guest code.  execve
+     * will create a fresh runner; a child that keeps running falls back to JIT.
+     */
+    atomic_store_explicit(&fork_child_jit_only, true, memory_order_release);
+    atomic_store_explicit(&active, false, memory_order_release);
+    if (getenv("LATX_AOT_V2_REPORT")) {
+        static const char message[] =
+            "latx: AOT v2 fork child switched to JIT\n";
+        (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+    }
+    aot_v2_current_instance = NULL;
+    aot_v2_current_generation = 0;
+    aot_v2_target_cache = NULL;
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+    if (cpu) {
+        latx_aot_v2_fast_jmp_cache_set_context(cpu, NULL);
+        latx_fast_jmp_cache_clear_all(cpu);
+    }
+#else
+    (void)cpu;
+#endif
+
+    for (LatAotV2PendingMapping *mapping = pending_mapping_head; mapping;
+         mapping = mapping->next) {
+        if (mapping->fd >= 0) {
+            close(mapping->fd);
+            mapping->fd = -1;
+        }
+    }
+    pending_mapping_head = NULL;
+    pending_mapping_tail = &pending_mapping_head;
+    for (LatAotV2SourceMapping *mapping = source_mappings; mapping;
+         mapping = mapping->next) {
+        if (mapping->fd >= 0) {
+            close(mapping->fd);
+            mapping->fd = -1;
+        }
+    }
+    source_mappings = NULL;
+    for (LatAotV2ModuleStats *stats = atomic_load_explicit(
+             &module_stats, memory_order_acquire); stats; stats = stats->next) {
+        if (stats->source_fd >= 0) {
+            close(stats->source_fd);
+            stats->source_fd = -1;
+        }
+    }
+
+    pthread_mutex_unlock(&profile_lock);
+    pthread_mutex_unlock(&elf_tracker_lock);
+}
 
 enum {
     LAT_AOT_V2_SIGNAL_TEST_IDLE,
@@ -354,6 +441,9 @@ static const char *invalidation_reason_name(LatcAotV2InvalidationReason reason)
 void latc_aot_v2_report_stats(void)
 {
     static _Atomic bool reported;
+    if (atomic_load_explicit(&fork_child_jit_only, memory_order_acquire)) {
+        return;
+    }
     if (atomic_exchange(&reported, true)) {
         return;
     }
@@ -374,6 +464,7 @@ void latc_aot_v2_report_stats(void)
             "nonfile_dispatch_misses=%llu compiler_submissions=%llu "
             "compiler_submission_failures=%llu "
             "compiler_submission_duplicates=%llu "
+            "compiler_submission_throttled=%llu "
             "invalidated_instances=%llu invalidated_exec_ranges=%llu "
             "revalidated_instances=%llu revalidation_failures=%llu "
             "invalidation_unmap=%llu "
@@ -390,6 +481,7 @@ void latc_aot_v2_report_stats(void)
             (unsigned long long)atomic_load(&compiler_submissions),
             (unsigned long long)atomic_load(&compiler_submission_failures),
             (unsigned long long)atomic_load(&compiler_submission_duplicates),
+            (unsigned long long)atomic_load(&compiler_submission_throttled),
             (unsigned long long)atomic_load(&invalidated_instances),
             (unsigned long long)atomic_load(&invalidated_exec_ranges),
             (unsigned long long)atomic_load(&revalidated_instances),
@@ -575,6 +667,9 @@ static void note_dispatch_miss(LatAotV2ModuleStats *stats,
 
 bool latc_aot_v2_mapping_enabled(void)
 {
+    if (atomic_load_explicit(&fork_child_jit_only, memory_order_acquire)) {
+        return false;
+    }
     const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
     const char *module = getenv("LATX_AOT_V2_MODULE");
     const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
@@ -603,8 +698,10 @@ static void submit_missing_module(int fd, const LatGuestElfInfoV2 *info,
         return;
     }
     g_hash_table_add(submitted_sources, g_strdup(source));
-    uint64_t sequence = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
-    uint64_t request_id = ((uint64_t)getpid() << 32) ^ sequence;
+    uint64_t request_id;
+    if (!next_compiler_request_id(&request_id)) {
+        return;
+    }
     char error[256] = {0};
     if (latcd_client_submit_fd(socket, fd, priority, request_id,
                                error, sizeof(error))) {
@@ -677,8 +774,17 @@ static void submit_runtime_profiles(void)
         }
         int profile_fd = !failed ? open(path, O_RDONLY | O_CLOEXEC) : -1;
         if (profile_fd >= 0) unlink(path);
-        uint64_t sequence = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
-        uint64_t request_id = ((uint64_t)getpid() << 32) ^ sequence;
+        uint64_t request_id;
+        if (!next_compiler_request_id(&request_id)) {
+            if (profile_fd >= 0) close(profile_fd);
+            if (path) {
+                unlink(path);
+                g_free(path);
+            }
+            g_clear_error(&gerror);
+            g_array_free(entries, TRUE);
+            return;
+        }
         char error[256] = {0};
         if (profile_fd < 0 || latcd_client_submit_profile_fd(
                 socket, stats->source_fd, profile_fd,

@@ -1,4 +1,14 @@
 .section .text.latc_invalidation,"ax",@progbits
+.global latc_invalidation_entry
+.type latc_invalidation_entry,@function
+latc_invalidation_entry:
+    mov $60, %eax
+    xor %edi, %edi
+    syscall
+1:
+    jmp 1b
+.size latc_invalidation_entry, .-latc_invalidation_entry
+
 .p2align 12
 .global latc_invalidation_value
 .type latc_invalidation_value,@function

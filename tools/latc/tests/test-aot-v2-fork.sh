@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 6 ]; then
+    echo "usage: $0 LATC RUNNER RUNTIME_DIR ROOTFS GUEST WORKDIR" >&2
+    exit 2
+fi
+
+latc=$1
+runner=$2
+runtime_dir=$3
+rootfs=$4
+guest=$5
+work=$6
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+
+rm -rf "$work"
+mkdir -p "$work/cache"
+source_sha=$(sha256sum "$guest" | awk '{print $1}')
+hot_rva=$(nm -n "$guest" | awk '$3 == "fork_hot_value" { print "0x" $1; exit }')
+test -n "$hot_rva"
+{
+    printf 'LATC_PROFILE_V2 %s\n' "$source_sha"
+    printf '%s 0x3 100\n' "$hot_rva"
+} >"$work/fork.profile"
+
+LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+LAT_LD_PREFIX="$rootfs" \
+  "$script_dir/../scripts/compile-aot-v2-module.sh" \
+  "$latc" "$runner" "$guest" "$runtime_dir" "$work/fork.so" \
+  "$work/fork.profile" >"$work/compile.stdout"
+cp "$work/fork.so" "$work/cache/$source_sha.so"
+
+env HOME="$work/home" LD_LIBRARY_PATH="$runtime_dir" LATX_AOT=0 \
+  LATX_AOT_V2_CACHE_DIR="$work/cache" LATX_AOT_V2_REPORT=1 \
+  timeout -k 2s 30s "$runner" -L "$rootfs" "$guest" \
+  >"$work/run.stdout" 2>"$work/run.stderr"
+
+grep -q '^FORK_OK parent_aot_child_jit=1 ' "$work/run.stdout"
+grep -q '^latx: AOT v2 fork child switched to JIT$' "$work/run.stderr"
+grep -Eq "module stats source=$source_sha .*module=registered aot_lookups=[1-9]" \
+  "$work/run.stderr"
+grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' \
+  "$work/run.stderr"
+echo "test-aot-v2-fork: PASS"

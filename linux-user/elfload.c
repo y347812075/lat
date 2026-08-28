@@ -3450,7 +3450,8 @@ int load_elf_binary(struct linux_binprm *bprm, struct image_info *info)
 #ifndef TARGET_X86_64
     const VdsoImageInfo *vdso = NULL;
 #else
-    const VdsoImageInfo *vdso = vdso_image_info();
+    const VdsoImageInfo *vdso = getenv("LATX_AOT_V2_MODULE") ?
+                                NULL : vdso_image_info();
 #endif
     if (vdso) {
         load_elf_vdso(&vdso_info, vdso);

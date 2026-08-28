@@ -3,6 +3,16 @@
 #include "qemu.h"
 #include "latc-aot-v2-runner.h"
 
+void latc_aot_v2_fork_start(void)
+{
+}
+
+void latc_aot_v2_fork_end(CPUState *cpu, bool child)
+{
+    (void)cpu;
+    (void)child;
+}
+
 bool latc_aot_v2_mapping_enabled(void)
 {
     return false;
