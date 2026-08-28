@@ -63,6 +63,10 @@
 #include "hw/core/tcg-cpu-ops.h"
 #include "internal.h"
 #include "loongarch-extcontext.h"
+#ifdef CONFIG_LATX
+#include "latc-bundle-loader.h"
+#include "latc-aot-v2-runner.h"
+#endif
 
 #ifdef CONFIG_LATX_PERF
 #include "latx-perf.h"
@@ -514,6 +518,11 @@ bool cpu_restore_state(CPUState *cpu, uintptr_t host_pc, bool will_exit)
      *
      * Either way we need return early as we can't resolve it here.
      */
+#ifdef CONFIG_LATX
+    if (latc_aot_v2_restore_state(cpu, host_pc)) {
+        return true;
+    }
+#endif
     if (in_code_gen_buffer((const void *)(host_pc - tcg_splitwx_diff))) {
         TranslationBlock *tb = tcg_tb_lookup(host_pc);
         if (tb) {
@@ -1910,6 +1919,9 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 
     assert_memory_lock();
     qemu_thread_jit_write();
+#ifdef CONFIG_LATX
+    latc_bundle_note_tb_attempt(pc, cflags);
+#endif
 
     phys_pc = get_page_addr_code_hostp(env, pc, &host_pc);
 
@@ -2332,6 +2344,9 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
         tcg_tb_remove(tb);
         return existing_tb;
     }
+#ifdef CONFIG_LATX
+    latc_bundle_note_tb_generated(tb->pc, tb_cflags(tb));
+#endif
     return tb;
 }
 
@@ -4403,6 +4418,7 @@ int page_unprotect(target_ulong address, uintptr_t pc, int *emu)
     int inv_one_tb = 0;
     int size = 1;
     int force_inv_host_page= 0;
+    bool current_aot_invalidated = false;
 
     /* Technically this isn't safe inside a signal handler.  However we
        know this only ever happens in a synchronous SEGV handler, so in
@@ -4455,6 +4471,11 @@ int page_unprotect(target_ulong address, uintptr_t pc, int *emu)
             return 0;
         }
     }
+
+    current_aot_invalidated = latc_aot_v2_invalidate_range(
+        current_cpu, address & TARGET_PAGE_MASK,
+        is_cross ? 2 * TARGET_PAGE_SIZE : TARGET_PAGE_SIZE,
+        LATC_AOT_V2_INVALIDATE_CODE_WRITE);
 
     current_tb_invalidated = false;
     if (!force_inv_host_page &&
@@ -4669,7 +4690,7 @@ no_pageflags_cache:
     mmap_unlock();
 
     /* If current TB was invalidated return to main loop */
-    return current_tb_invalidated ? 2 : 1;
+    return current_tb_invalidated || current_aot_invalidated ? 2 : 1;
 }
 
 #ifdef CONFIG_LATX_AOT

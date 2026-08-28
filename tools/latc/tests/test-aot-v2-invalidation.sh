@@ -26,8 +26,11 @@ value_pc=$(nm -D "$plugin" | awk \
   '$3 == "latc_invalidation_value" { print "0x" $1; exit }')
 cross_pc=$(nm -D "$plugin" | awk \
   '$3 == "latc_invalidation_cross_page" { print "0x" $1; exit }')
-test -n "$value_pc" -a -n "$cross_pc"
-printf '%s 1\n%s 1\n' "$value_pc" "$cross_pc" >"$work/plugin.profile"
+entry_pc=$(nm -D "$plugin" | awk \
+  '$3 == "latc_invalidation_entry" { print "0x" $1; exit }')
+test -n "$value_pc" -a -n "$cross_pc" -a -n "$entry_pc"
+printf '%s 1\n%s 1\n%s 1\n' "$value_pc" "$cross_pc" "$entry_pc" \
+  >"$work/plugin.profile"
 
 LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 LAT_LD_PREFIX="$rootfs" \

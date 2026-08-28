@@ -602,6 +602,18 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     do {
         waited = waitpid(child, &status, 0);
     } while (waited < 0 && errno == EINTR);
+    /*
+     * Compiler shell scripts can exit after SIGTERM while a grandchild keeps
+     * translating in the compiler's process group.  Do not lose the PGID
+     * when the leader is reaped: terminate any remaining descendants before
+     * marking this worker idle.
+     */
+    if (!kill(-child, 0) || errno == EPERM) {
+        struct timespec grace = { .tv_nsec = 100 * 1000 * 1000 };
+        kill(-child, SIGTERM);
+        nanosleep(&grace, NULL);
+        kill(-child, SIGKILL);
+    }
     compiler_process_groups[worker_index] = 0;
     g_free(library_path);
     g_free(guest_prefix);

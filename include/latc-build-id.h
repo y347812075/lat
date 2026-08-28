@@ -1,0 +1,4 @@
+#ifndef LATC_BUILD_ID_H
+#define LATC_BUILD_ID_H
+#define LATC_BUILD_ID "lat-42c042301e107b34063773e118c825dd644d476c-x64-v3"
+#endif

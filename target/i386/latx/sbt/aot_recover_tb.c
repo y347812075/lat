@@ -358,6 +358,27 @@ inline int load_page(target_ulong pc, uint32_t cflags, seg_info *info)
         p_aot_tbs = (struct aot_tb *)(aot_buffer + pt[pt_id].page_tbs_offset);
     }
 
+    const char *debug_pc_text = getenv("LATC_DEBUG_PC");
+    if (debug_pc_text && *debug_pc_text) {
+        target_ulong debug_pc = strtoull(debug_pc_text, NULL, 0);
+        if ((debug_pc & TARGET_PAGE_MASK) == (pc & TARGET_PAGE_MASK)) {
+            int matches = 0;
+            for (int i = 0; i < tb_num_in_page; i++) {
+                target_ulong tb_pc = info->seg_begin +
+                    p_aot_tbs[i].offset_in_segment;
+                if (tb_pc == debug_pc) {
+                    fprintf(stderr, "latc-aot: page record pc=0x%lx cflags=0x%x size=%u first=%u\n",
+                            (unsigned long)debug_pc, p_aot_tbs[i].cflags,
+                            p_aot_tbs[i].size, p_aot_tbs[i].is_first_tb);
+                    matches++;
+                }
+            }
+            fprintf(stderr, "latc-aot: page pc=0x%lx state=%d records=%d matches=%d flags=0x%x\n",
+                    (unsigned long)debug_pc, page_state, tb_num_in_page,
+                    matches, cflags);
+        }
+    }
+
     if (tb_num_in_page == 0) {
         return 0;
     }
@@ -401,6 +422,13 @@ int load_aot(target_ulong pc, uint32_t cflags)
     }
 
     seg_info *info = segment_tree_lookup(pc);
+    const char *debug_pc_text = getenv("LATC_DEBUG_PC");
+    if (debug_pc_text && *debug_pc_text &&
+        pc == strtoull(debug_pc_text, NULL, 0)) {
+        fprintf(stderr, "latc-aot: load pc=0x%lx flags=0x%x info=%p buffer=%p state=%d mode=%d\n",
+                (unsigned long)pc, cflags, info, info ? info->buffer : NULL,
+                page_get_page_state(pc), option_aot);
+    }
     if (info == NULL || info->buffer == NULL) {
         if (smc_page_reload(pc & TARGET_PAGE_MASK, cflags)) {
             return 1;

@@ -17,6 +17,7 @@
 #include "trace.h"
 #include "translate.h"
 #include "latx-config.h"
+#include "lat-aot-v2.h"
 #include "syscall-tunnel.h"
 #if defined(CONFIG_LATX_KZT)
 #include "wrappertbbridge.h"
@@ -467,6 +468,8 @@ __thread ENV *lsenv;
 #ifdef CONFIG_LATX_FAST_JMPCACHE
 typedef struct LatxFastJmpCache {
     struct rcu_head rcu;
+    LatxAotV2FastTB aot_v2_entries[TB_JMP_CACHE_SIZE];
+    uint64_t aot_v2_guest_slots[LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT];
     FastTB entries[TB_JMP_CACHE_SIZE];
 } LatxFastJmpCache;
 
@@ -504,6 +507,8 @@ void latx_fast_jmp_cache_clear(CPUState *cs, int h)
     CPUX86State *env = &cpu->env;
     FastTB *fast_jmp_cache = (FastTB *)env->tb_jmp_cache_ptr;
     qatomic_set(&fast_jmp_cache[h].pc, FASTTB_INVALID_PC);
+    LatxAotV2FastTB *aot_v2_cache = env->aot_v2_jmp_cache_ptr;
+    qatomic_set(&aot_v2_cache[h].pc, FASTTB_INVALID_PC);
 }
 
 void latx_fast_jmp_cache_clear_all(CPUState *cs)
@@ -511,11 +516,42 @@ void latx_fast_jmp_cache_clear_all(CPUState *cs)
     X86CPU *cpu = X86_CPU(cs);
     CPUX86State *env = &cpu->env;
     FastTB *fast_jmp_cache = (FastTB *)env->tb_jmp_cache_ptr;
+    LatxAotV2FastTB *aot_v2_cache = env->aot_v2_jmp_cache_ptr;
 
     for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
         fast_jmp_cache[i].pc = FASTTB_INVALID_PC;
         fast_jmp_cache[i].ptr = NULL;
+        aot_v2_cache[i].pc = FASTTB_INVALID_PC;
+        aot_v2_cache[i].ptr = NULL;
     }
+}
+
+void latx_aot_v2_fast_jmp_cache_add(CPUState *cs, int h,
+                                    unsigned long guest_pc, const void *ptr,
+                                    const void *context,
+                                    const uint64_t *generation_address,
+                                    uint64_t generation,
+                                    const uint64_t *guest_slots_end,
+                                    uint64_t guest_slot_count)
+{
+    CPUX86State *env = &X86_CPU(cs)->env;
+    LatxAotV2FastTB *entry = &((LatxAotV2FastTB *)
+        env->aot_v2_jmp_cache_ptr)[h];
+
+    qatomic_set(&entry->pc, FASTTB_INVALID_PC);
+    qatomic_set(&entry->ptr, ptr);
+    qatomic_set(&entry->context, context);
+    qatomic_set(&entry->generation_address, generation_address);
+    qatomic_set(&entry->generation, generation);
+    qatomic_set(&entry->guest_slots_end, guest_slots_end);
+    qatomic_set(&entry->guest_slot_count, guest_slot_count);
+    qatomic_set(&entry->pc, guest_pc);
+}
+
+void latx_aot_v2_fast_jmp_cache_set_context(CPUState *cs,
+                                            const void *context)
+{
+    qatomic_set(&X86_CPU(cs)->env.aot_v2_current_context, context);
 }
 
 bool latx_fast_jmp_cache_init(void *env)
@@ -531,8 +567,11 @@ bool latx_fast_jmp_cache_init(void *env)
     fast_jmp_cache = cache->entries;
     for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
         fast_jmp_cache[i].pc = FASTTB_INVALID_PC;
+        cache->aot_v2_entries[i].pc = FASTTB_INVALID_PC;
     }
     x86env->tb_jmp_cache_ptr = fast_jmp_cache;
+    x86env->aot_v2_jmp_cache_ptr = cache->aot_v2_entries;
+    x86env->aot_v2_current_context = NULL;
 
     return true;
 }

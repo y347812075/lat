@@ -6,6 +6,10 @@ linux_user_ss.add(files(
   'guest-seccomp.c',
   'linuxload.c',
   'main.c',
+  'latc-bundle-loader.c',
+  'guest-elf-map.c',
+  'latcd-client.c',
+  'latc-aot-v2-runner.c',
   'mmap.c',
   'safe-syscall.S',
   'signal.c',
@@ -17,6 +21,10 @@ linux_user_ss.add(files(
   'pressure-vessel.c'
 ))
 linux_user_ss.add(rt)
+
+if 'CONFIG_LATX' in config_host
+  linux_user_ss.add(lat_aot_runtime_dep)
+endif
 
 linux_user_ss.add(when: 'TARGET_HAS_BFLT', if_true: files('flatload.c'))
 linux_user_ss.add(when: 'CONFIG_ARM_COMPATIBLE_SEMIHOSTING', if_true: files('semihost.c'))

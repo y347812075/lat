@@ -215,6 +215,7 @@ int cpu_get_pic_interrupt(CPUX86State *env)
 void fork_start(void)
 {
     start_exclusive();
+    latc_aot_v2_fork_start();
     mmap_fork_start();
     sigact_fork_start();
     path_fork_start();
@@ -226,6 +227,7 @@ void fork_end(int child)
     mmap_fork_end(child);
     sigact_fork_end(child);
     path_fork_end(child);
+    latc_aot_v2_fork_end(thread_cpu, child != 0);
     if (child) {
         CPUState *cpu, *next_cpu;
         /* Child processes created by fork() only have a single thread.

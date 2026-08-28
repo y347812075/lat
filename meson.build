@@ -483,6 +483,57 @@ subdir('hw')
 subdir('fpu')
 subdir('accel')
 subdir('plugins')
+
+if 'CONFIG_LATX' in config_host
+  lat_aot_runtime_inc = include_directories(
+    'tools/latc/aot-v2/include',
+    'tools/latc/aot-v2/runtime',
+  )
+  lat_aot_runtime_map = files('tools/latc/aot-v2/runtime/runtime.map')
+  lat_aot_runtime = shared_library(
+    'lat-aot-runtime',
+    files(
+      'tools/latc/aot-v2/runtime/runtime-abi.c',
+      'tools/latc/aot-v2/runtime/runtime-entry.S',
+      'tools/latc/aot-v2/runtime/elf-validate.c',
+      'tools/latc/aot-v2/runtime/module-loader.c',
+      'tools/latc/aot-v2/runtime/registry.c',
+    ),
+    include_directories: lat_aot_runtime_inc,
+    dependencies: [libdl, dependency('threads')],
+    link_args: [
+      '-Wl,-z,defs',
+      '-Wl,-z,now',
+      '-Wl,-z,relro',
+      '-Wl,--build-id=sha1',
+      '-Wl,--version-script=' + meson.current_source_dir() +
+        '/tools/latc/aot-v2/runtime/runtime.map',
+    ],
+    link_depends: lat_aot_runtime_map,
+    soversion: '2',
+    install: true,
+  )
+  lat_aot_runtime_dep = declare_dependency(link_with: lat_aot_runtime)
+
+  latcd_inc = include_directories(
+    'tools/latc/aot-v2/include',
+    'tools/latc/aot-v2/compiler',
+    'tools/latc/aot-v2/runtime',
+  )
+  latcd = executable(
+    'latcd',
+    files(
+      'tools/latc/latcd/main.c',
+      'tools/latc/latcd/protocol.c',
+      'tools/latc/aot-v2/compiler/module-inspect.c',
+      'tools/latc/aot-v2/runtime/elf-validate.c',
+    ),
+    include_directories: latcd_inc,
+    dependencies: [glib, dependency('threads')],
+    install: true,
+  )
+endif
+
 subdir('linux-user')
 
 linux_user_ss.add(files('gdbstub.c', 'thunk.c'))

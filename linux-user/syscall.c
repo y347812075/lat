@@ -146,6 +146,18 @@
 #include "ioctl/mpt3sas_ctl.h"
 
 #include "qemu.h"
+#include "latc-aot-v2-runner.h"
+#include "latc-x86-syscall-abi.h"
+#ifdef TARGET_X86_64
+_Static_assert(sizeof(struct target_stat) == sizeof(LatcX86Stat),
+               "LATC x86 stat ABI drifted from linux-user");
+_Static_assert(sizeof(struct target_sigaction) == sizeof(LatcX86Sigaction),
+               "LATC x86 sigaction ABI drifted from linux-user");
+_Static_assert(sizeof(struct target_sysinfo) == sizeof(LatcX86Sysinfo),
+               "LATC x86 sysinfo ABI drifted from linux-user");
+_Static_assert(sizeof(struct target_rlimit64) == sizeof(LatcX86Rlimit64),
+               "LATC x86 rlimit64 ABI drifted from linux-user");
+#endif
 #include "guest-seccomp.h"
 #include "signal-common.h"
 #include "qemu/guest-random.h"
@@ -1220,10 +1232,16 @@ static inline int target_to_host_errno(int err)
 
 static inline abi_long get_errno(abi_long ret)
 {
-    if (ret == -1)
+    if (ret == -1) {
+#ifdef TARGET_X86_64
+        return (abi_long)latc_x86_syscall_result(
+            ret, host_to_target_errno(errno));
+#else
         return -host_to_target_errno(errno);
-    else
+#endif
+    } else {
         return ret;
+    }
 }
 
 const char *target_strerror(int err)
@@ -1747,6 +1765,9 @@ static inline abi_ulong host_to_target_rlim(rlim_t rlim)
 
 static inline int target_to_host_resource(int code)
 {
+#ifdef TARGET_X86_64
+    return latc_x86_target_to_host_resource(code);
+#else
     switch (code) {
     case TARGET_RLIMIT_AS:
         return RLIMIT_AS;
@@ -1781,6 +1802,7 @@ static inline int target_to_host_resource(int code)
     default:
         return code;
     }
+#endif
 }
 
 static inline abi_long copy_from_user_timeval(struct timeval *tv,
@@ -14421,6 +14443,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         }
 
         pthread_mutex_unlock(&clone_lock);
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+        latc_aot_v2_report_stats();
+#endif
         preexit_cleanup(cpu_env, arg1);
 
         /* dump basic block here. TODO */
@@ -16543,6 +16568,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                                         v5, v6, 1));
 #ifdef TARGET_I386
             mmap_unlock();
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+            latc_aot_v2_drain_mmaps();
+#endif
 #endif
         }
 #else
@@ -16572,6 +16600,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                                     arg6, 1));
 #ifdef TARGET_I386
         mmap_unlock();
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+        latc_aot_v2_drain_mmaps();
+#endif
 #endif
 #endif
         return ret;
@@ -16594,6 +16625,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                           arg5, (uint64_t)arg6 << MMAP_SHIFT, 1);
 #ifdef TARGET_I386
         mmap_unlock();
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+        latc_aot_v2_drain_mmaps();
+#endif
 #endif
         return get_errno(ret);
 #endif
@@ -17195,6 +17229,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #ifdef __NR_exit_group
         /* new thread calls */
     case TARGET_NR_exit_group:
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+        latc_aot_v2_report_stats();
+#endif
         preexit_cleanup(cpu_env, arg1);
         /* dump basic block here. TODO */
 #ifdef CONFIG_LATX_AOT

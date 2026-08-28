@@ -61,7 +61,6 @@ int mydebug = 1;
 #include "latx-options.h"
 #include "latx-runtime.h"
 #include "aot.h"
-#include <openssl/evp.h>
 #endif
 #ifdef CONFIG_LATX_PERF
 #include "latx-perf.h"
@@ -74,6 +73,9 @@ int mydebug = 1;
 #include "elfloader_private.h"
 #include "khash.h"
 #include "elfload_dump.h"
+#include "latc-bundle-loader.h"
+#include "latc-build-id.h"
+#include "latc-aot-v2-runner.h"
 #include "librarian.h"
 #include "wrapper.h"
 #if defined(CONFIG_LATX_KZT)
@@ -216,6 +218,7 @@ int cpu_get_pic_interrupt(CPUX86State *env)
 void fork_start(void)
 {
     start_exclusive();
+    latc_aot_v2_fork_start();
     mmap_fork_start();
     sigact_fork_start();
     path_fork_start();
@@ -229,6 +232,7 @@ void fork_end(int child)
     sigact_fork_end(child);
     path_fork_end(child);
     fd_trans_fork_end();
+    latc_aot_v2_fork_end(thread_cpu, child != 0);
     if (child) {
         CPUState *cpu, *next_cpu;
         /* Child processes created by fork() only have a single thread.
@@ -1334,6 +1338,76 @@ int main(int argc, char **argv, char **envp)
     int log_mask;
     unsigned long max_reserved_va;
     bool preserve_argv0;
+
+    if (argc == 2 && !strcmp(argv[1], "--latc-print-x86-env-offsets")) {
+#define LATC_ENV_OFFSET(name, member) \
+        printf("#define LATC_X86_ENV_%s_OFFSET %zu\n", name, \
+               offsetof(CPUX86State, member))
+        puts("#ifndef LATC_X86_ENV_OFFSETS_H");
+        puts("#define LATC_X86_ENV_OFFSETS_H");
+        printf("#define LATC_X86_ENV_BUILD_ID \"%s\"\n", LATC_BUILD_ID);
+        LATC_ENV_OFFSET("EXCEPTION_NEXT_EIP", exception_next_eip);
+        LATC_ENV_OFFSET("RAX", regs[R_EAX]);
+        LATC_ENV_OFFSET("RCX", regs[R_ECX]);
+        LATC_ENV_OFFSET("RDX", regs[R_EDX]);
+        LATC_ENV_OFFSET("RBX", regs[R_EBX]);
+        LATC_ENV_OFFSET("RSP", regs[R_ESP]);
+        LATC_ENV_OFFSET("RBP", regs[R_EBP]);
+        LATC_ENV_OFFSET("RSI", regs[R_ESI]);
+        LATC_ENV_OFFSET("RDI", regs[R_EDI]);
+        LATC_ENV_OFFSET("R8", regs[R_R8]);
+        LATC_ENV_OFFSET("R9", regs[R_R9]);
+        LATC_ENV_OFFSET("R10", regs[R_R10]);
+        LATC_ENV_OFFSET("R11", regs[R_R11]);
+        LATC_ENV_OFFSET("R12", regs[R_R12]);
+        LATC_ENV_OFFSET("R13", regs[R_R13]);
+        LATC_ENV_OFFSET("R14", regs[R_R14]);
+        LATC_ENV_OFFSET("R15", regs[R_R15]);
+        LATC_ENV_OFFSET("EFLAGS", eflags);
+        LATC_ENV_OFFSET("FS_BASE", segs[R_FS].base);
+        LATC_ENV_OFFSET("GS_BASE", segs[R_GS].base);
+        LATC_ENV_OFFSET("TB_JMP_CACHE_PTR", tb_jmp_cache_ptr);
+        LATC_ENV_OFFSET("FPREG0", fpregs[0]);
+        LATC_ENV_OFFSET("FPREG1", fpregs[1]);
+        LATC_ENV_OFFSET("FPREG2", fpregs[2]);
+        LATC_ENV_OFFSET("FPREG3", fpregs[3]);
+        LATC_ENV_OFFSET("FPREG4", fpregs[4]);
+        LATC_ENV_OFFSET("FPREG5", fpregs[5]);
+        LATC_ENV_OFFSET("FPREG6", fpregs[6]);
+        LATC_ENV_OFFSET("FPREG7", fpregs[7]);
+        LATC_ENV_OFFSET("XMM0", xmm_regs[0]);
+        LATC_ENV_OFFSET("XMM1", xmm_regs[1]);
+        LATC_ENV_OFFSET("XMM2", xmm_regs[2]);
+        LATC_ENV_OFFSET("XMM3", xmm_regs[3]);
+        LATC_ENV_OFFSET("XMM4", xmm_regs[4]);
+        LATC_ENV_OFFSET("XMM5", xmm_regs[5]);
+        LATC_ENV_OFFSET("XMM6", xmm_regs[6]);
+        LATC_ENV_OFFSET("XMM7", xmm_regs[7]);
+        LATC_ENV_OFFSET("XMM8", xmm_regs[8]);
+        LATC_ENV_OFFSET("XMM9", xmm_regs[9]);
+        LATC_ENV_OFFSET("XMM10", xmm_regs[10]);
+        LATC_ENV_OFFSET("XMM11", xmm_regs[11]);
+        LATC_ENV_OFFSET("XMM12", xmm_regs[12]);
+        LATC_ENV_OFFSET("XMM13", xmm_regs[13]);
+        LATC_ENV_OFFSET("XMM14", xmm_regs[14]);
+        LATC_ENV_OFFSET("XMM15", xmm_regs[15]);
+        puts("#endif");
+#undef LATC_ENV_OFFSET
+        return 0;
+    }
+
+    int latc_bundle = latc_bundle_inject_argv(&argc, &argv);
+    if (latc_bundle < 0) {
+        fprintf(stderr, "latc: invalid embedded guest: %s\n", strerror(errno));
+        return EXIT_FAILURE;
+    }
+    if (latc_bundle > 0) {
+        argv0 = strdup(argv[0]);
+        if (!argv0) {
+            fprintf(stderr, "latc: cannot preserve guest argv[0]\n");
+            return EXIT_FAILURE;
+        }
+    }
 #ifdef TARGET_I386
     int initial_guest_exe_fd = -1;
     unsigned int inherited_guest_mdwe = 0;
@@ -1658,9 +1732,7 @@ int main(int argc, char **argv, char **envp)
     }
 
 #ifdef CONFIG_LATX_AOT
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    unsigned char hash[EVP_MAX_MD_SIZE];
-    unsigned int hash_len;
+    GChecksum *ctx = g_checksum_new(G_CHECKSUM_SHA1);
     char *buf;
     char real[PATH_MAX], *temp;
     char *aot_dir;
@@ -1686,8 +1758,7 @@ int main(int argc, char **argv, char **envp)
     if (temp == NULL) {
         lsassertm(0, "%s error!", __func__);
     }
-    EVP_DigestInit_ex(ctx, EVP_sha1(), NULL);
-    EVP_DigestUpdate(ctx, real, strlen(real));
+    g_checksum_update(ctx, (const guchar *)real, strlen(real));
     int aotac = 4;
     for (i = 0; i < target_argc; i++) {
         if (option_aot_wine == 0 && strstr(target_argv[i], "wine")) {
@@ -1702,15 +1773,13 @@ int main(int argc, char **argv, char **envp)
                 aotac = 2;
                 continue;
             }
-            EVP_DigestUpdate(ctx, target_argv[i], arglen);
+            g_checksum_update(ctx, (const guchar *)target_argv[i], arglen);
         }
     }
-    EVP_DigestFinal_ex(ctx, hash, &hash_len);
-    EVP_MD_CTX_free(ctx);
-    for (i = 0; i < hash_len; i++) {
-        sprintf(buf, "%02x", hash[i] & 0xff);
-        buf += 2;
-    }
+    const char *hash = g_checksum_get_string(ctx);
+    strcpy(buf, hash);
+    buf += strlen(hash);
+    g_checksum_free(ctx);
     aot_file_lock = malloc(PATH_MAX);
     strcpy(aot_file_lock, aot_file_path);
     strcat(aot_file_lock, ".lock");
@@ -1830,6 +1899,22 @@ int main(int argc, char **argv, char **envp)
 #endif
 
     target_cpu_copy_regs(env, regs);
+
+#ifdef CONFIG_LATX
+    if (latc_aot_v2_prepare(env) && getenv("LATX_AOT_V2_STRICT")) {
+        exit(EXIT_FAILURE);
+    }
+#endif
+
+    /* Prewarm every statically discovered TB before entering the CPU loop. */
+    latc_bundle_pretranslate(cpu, info->exec_entry);
+
+#ifdef CONFIG_LATX_AOT
+    if (getenv("LATC_EMIT_AOT")) {
+        aot_generate(cpu);
+        _exit(EXIT_SUCCESS);
+    }
+#endif
 
     if (gdbstub) {
         if (gdbserver_start(gdbstub) < 0) {
