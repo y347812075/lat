@@ -106,6 +106,8 @@ typedef struct InstPtnStats {
 
 typedef int scan_elem_t;
 
+#ifdef CONFIG_LATX_INSTS_PATTERN
+
 extern InstPtnStats instptn_stats[INSTPTN_OPT_COUNT];
 
 static inline bool instptn_option_enabled(InstPtnOption option)
@@ -125,6 +127,8 @@ void instptn_stats_record_eflags_fallback_opcode(InstPtnOpcode opcode);
 void instptn_stats_record_codegen_opcode(InstPtnOpcode opcode,
                                          uint64_t ir2_emitted,
                                          uint64_t host_emitted);
+
+#endif
 
 void insts_pattern_scan_con(TranslationBlock *tb, IR1_INST *ir1, int index, scan_elem_t *scan_buf);
 bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, scan_elem_t *scan_buf);
@@ -207,6 +211,8 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
 #define instptn_check_neg_cmovcc_0() INSTPTN_CHECK_XX_0(NEG_CMOVCC)
 
 #define instptn_check_shr_jcc_0() INSTPTN_CHECK_XX_0(SHR_JCC)
+#define instptn_check_sar_jcc_0() INSTPTN_CHECK_XX_0(SAR_JCC)
+#define instptn_check_shr_je_0() INSTPTN_CHECK_XX_0(SHR_JE)
 #define instptn_check_and_jcc_0() INSTPTN_CHECK_XX_0(AND_JCC)
 #define instptn_check_add_jcc_0() INSTPTN_CHECK_XX_0(ADD_JCC)
 #else
@@ -242,6 +248,8 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
 #define instptn_check_neg_cmovcc_0()
 
 #define instptn_check_shr_jcc_0()
+#define instptn_check_sar_jcc_0()
+#define instptn_check_shr_je_0()
 #define instptn_check_and_jcc_0()
 #define instptn_check_add_jcc_0()
 #endif

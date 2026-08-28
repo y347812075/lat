@@ -8,6 +8,14 @@ if 'x86_64-linux-user' in target_dirs
     ],
   }]
   latx_integration_tests += [{
+    'name': 'test-shift-jcc',
+    'runner': find_program('../../test-shift-jcc.sh'),
+    'args': [
+      emulators['latx-x86_64'],
+      files('../../shift-jcc.S'),
+    ],
+  }]
+  latx_integration_tests += [{
     'name': 'test-instptn-options',
     'runner': find_program('../../test-instptn-options.sh'),
     'args': [

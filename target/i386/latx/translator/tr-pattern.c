@@ -2034,7 +2034,29 @@ bool translate_bt_xx_jcc(IR1_INST *pir1)
     return true;
 }
 
-static bool translate_shr_jcc(IR1_INST *pir1)
+static inline void shift_jcc_gen_bcc(IR2_OPND result,
+        IR2_OPND target_label_opnd, IR1_INST *jcc_inst)
+{
+    switch (ir1_opcode(jcc_inst)) {
+    case WRAP(JE):
+        la_beqz(result, target_label_opnd);
+        break;
+    case WRAP(JNE):
+        la_bnez(result, target_label_opnd);
+        break;
+    case WRAP(JS):
+        la_blt(result, zero_ir2_opnd, target_label_opnd);
+        break;
+    case WRAP(JNS):
+        la_bge(result, zero_ir2_opnd, target_label_opnd);
+        break;
+    default:
+        lsassert(0);
+        break;
+    }
+}
+
+static bool translate_shift_jcc(IR1_INST *pir1)
 {
     IR1_INST *curr = pir1;
     IR1_INST *next = curr->instptn.next;
@@ -2045,42 +2067,45 @@ static bool translate_shr_jcc(IR1_INST *pir1)
     int opnd_size = ir1_opnd_size(opnd0);
     uint32 mask = (opnd_size == 64) ? 63 : 31;
     uint8 shift = ir1_opnd_uimm(opnd1) & mask;
+    bool is_sar = curr->instptn.opc == INSTPTN_OPC_SAR_JCC;
+    EXTENSION_MODE extension = is_sar ? SIGN_EXTENSION : ZERO_EXTENSION;
 
     IR2_OPND dest, src;
 
     if (ir1_opnd_is_gpr(opnd0) && (opnd_size >= 32)) {
         dest = ra_alloc_gpr(ir1_opnd_base_reg_num(opnd0));
-        if (shift) {
-            if (opnd_size == 64) {
-                src = ra_alloc_itemp();
-                la_mov64(src, dest);
-            } else {
-                src = load_ireg_from_ir1(opnd0, ZERO_EXTENSION, false);
-            }
-        }
+        src = ra_alloc_itemp();
+        load_ireg_from_ir1_2(src, opnd0, extension, false);
     } else {
-        src = load_ireg_from_ir1(opnd0, ZERO_EXTENSION, false);
+        src = load_ireg_from_ir1(opnd0, extension, false);
         dest = ra_alloc_itemp();
     }
 
     IR2_INST *(*shifti_inst)(IR2_OPND, IR2_OPND, int);
-    shifti_inst = (opnd_size == 64) ? la_srli_d : la_srli_w;
+    if (is_sar) {
+        shifti_inst = (opnd_size == 64) ? la_srai_d : la_srai_w;
+    } else {
+        shifti_inst = (opnd_size == 64) ? la_srli_d : la_srli_w;
+    }
 
     lsassert(ir1_opnd_is_imm(opnd1));
+    lsassert(shift != 0);
     bool can_use_imm = shift < opnd_size;
-    if (shift) {
-        shifti_inst(dest, src, shift);
-    }
-    if (shift || (ir1_opnd_is_gpr(opnd0) && (opnd_size == 32))) {
-        store_ireg_to_ir1(dest, opnd0, false);
-    }
-
-    if (!shift) {
-        translate_jcc(next);
-        return true;
-    }
+    shifti_inst(dest, src, shift);
+    store_ireg_to_ir1(dest, opnd0, false);
 
     IR2_OPND src1 = ir2_opnd_new(IR2_OPND_IMM, shift);
+    bool zero_branch = ir1_opcode(next) == WRAP(JE) ||
+                       ir1_opcode(next) == WRAP(JNE);
+    IR2_OPND branch_result;
+    if (opnd_size == 64 ||
+        (opnd_size == 32 && zero_branch && !GHBR_ON(curr))) {
+        branch_result = dest;
+    } else {
+        branch_result = load_opnd_from_opnd(
+            dest, zero_branch ? ZERO_EXTENSION : SIGN_EXTENSION,
+            opnd_size);
+    }
     IR2_OPND target_label_opnd = ra_alloc_label();
 
 #ifdef CONFIG_LATX_TU
@@ -2090,23 +2115,16 @@ static bool translate_shr_jcc(IR1_INST *pir1)
         TranslationBlock *tb_next = tb->s_data->next_tb[TU_TB_INDEX_NEXT];
         TranslationBlock *tb_target = tb->s_data->next_tb[TU_TB_INDEX_TARGET];
 
-        if (shift && tb_next->eflag_use && tb_target->eflag_use) {
+        if (tb_next->eflag_use && tb_target->eflag_use) {
             generate_eflag_calculation(src, src, src1, curr, can_use_imm);
         }
 
         la_label(tu_reset_label_opnd);
         tb->tu_jmp[TU_TB_INDEX_TARGET] = tu_reset_label_opnd._label_id;
-        switch (ir1_opcode(next)) {
-            case WRAP(JNE): //dest!=0
-                la_bnez(dest, target_label_opnd);
-                break;
-            default:
-                lsassert(0);
-                break;
-        }
+        shift_jcc_gen_bcc(branch_result, target_label_opnd, next);
         tu_jcc_nop_gen(tb);
 
-        if (shift && tb_next->eflag_use && !tb_target->eflag_use) {
+        if (tb_next->eflag_use && !tb_target->eflag_use) {
             generate_eflag_calculation(src, src, src1, curr, can_use_imm);
         }
 
@@ -2126,29 +2144,16 @@ static bool translate_shr_jcc(IR1_INST *pir1)
     }
 #endif
 
-    switch (ir1_opcode(next)) {
-        case WRAP(JNE): //dest!=0
-            la_bnez(dest, target_label_opnd);
-            break;
-        default:
-            lsassert(0);
-            break;
-    }
+    shift_jcc_gen_bcc(branch_result, target_label_opnd, next);
 
-    if (shift) {
-        EFLAGS_CACULATE(src, src1, curr, 0, can_use_imm);
-    }
+    EFLAGS_CACULATE(src, src1, curr, 0, can_use_imm);
     tr_generate_exit_tb(next, 0);
 
     la_label(target_label_opnd);
 
-    if (shift) {
-        EFLAGS_CACULATE(src, src1, curr, 1, can_use_imm);
-    }
+    EFLAGS_CACULATE(src, src1, curr, 1, can_use_imm);
     tr_generate_exit_tb(next, 1);
-    if (shift) {
-        EFLAGS_CACULATE(src, src1, curr, EFLAG_BACKUP, can_use_imm);
-    }
+    EFLAGS_CACULATE(src, src1, curr, EFLAG_BACKUP, can_use_imm);
     return true;
 }
 
@@ -2610,7 +2615,9 @@ static bool try_translate_instptn_impl(IR1_INST *pir1)
     case INSTPTN_OPC_NEG_CMOVCC:
         return translate_neg_cmovcc(pir1);
     case INSTPTN_OPC_SHR_JCC:
-        return translate_shr_jcc(pir1);
+    case INSTPTN_OPC_SAR_JCC:
+    case INSTPTN_OPC_SHR_JE:
+        return translate_shift_jcc(pir1);
     case INSTPTN_OPC_AND_JCC:
         return translate_and_jcc(pir1);
     case INSTPTN_OPC_ADD_JCC:

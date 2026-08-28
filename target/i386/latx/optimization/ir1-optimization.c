@@ -31,12 +31,33 @@
 #ifdef CONFIG_LATX_TU
 #if defined(CONFIG_LATX_FLAG_REDUCTION) && \
     defined(CONFIG_LATX_INSTS_PATTERN)
-static void reduce_add_jcc_local_eflags(IR1_INST *ir1,
-                                        uint8 *pending_use,
-                                        uint8 eflag_out)
+static bool result_jcc_option(IR1_INST *ir1, InstPtnOption *option)
 {
-    if (!option_flag_reduction ||
-        ir1->instptn.opc != INSTPTN_OPC_ADD_JCC) {
+    switch (ir1->instptn.opc) {
+    case INSTPTN_OPC_ADD_JCC:
+        *option = INSTPTN_OPT_ADD_JCC;
+        return true;
+    case INSTPTN_OPC_SAR_JCC:
+        *option = INSTPTN_OPT_SAR_JCC;
+        return true;
+    case INSTPTN_OPC_SHR_JCC:
+        *option = INSTPTN_OPT_SHR_JCC;
+        return true;
+    case INSTPTN_OPC_SHR_JE:
+        *option = INSTPTN_OPT_SHR_JE;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void reduce_result_jcc_local_eflags(IR1_INST *ir1,
+                                           uint8 *pending_use,
+                                           uint8 eflag_out)
+{
+    InstPtnOption option;
+
+    if (!option_flag_reduction || !result_jcc_option(ir1, &option)) {
         return;
     }
 
@@ -66,7 +87,7 @@ static void reduce_add_jcc_local_eflags(IR1_INST *ir1,
     *pending_use &= ~eliminated;
     ir1_set_eflag_def(ir1,
                       ir1_get_eflag_def(ir1) & ~eliminated);
-    instptn_stats_record_eflags_eliminated(INSTPTN_OPT_ADD_JCC);
+    instptn_stats_record_eflags_eliminated(option);
 }
 #endif
 
@@ -94,8 +115,8 @@ static void ir1_optimization_over_tb(TranslationBlock *tb)
         OPT_INSTS_PTN(tb, ir1, i, ptn);
 #if defined(CONFIG_LATX_FLAG_REDUCTION) && \
     defined(CONFIG_LATX_INSTS_PATTERN)
-        reduce_add_jcc_local_eflags(ir1, &rdtn_pending_use,
-                                    tb->s_data->eflag_out);
+        reduce_result_jcc_local_eflags(ir1, &rdtn_pending_use,
+                                       tb->s_data->eflag_out);
 #endif
     }
     SAVE_FLAG_TO_TB(rdtn, tb);

@@ -167,6 +167,12 @@ static bool instptn_opcode_to_option(InstPtnOpcode opcode,
     case INSTPTN_OPC_ADD_JCC:
         *option = INSTPTN_OPT_ADD_JCC;
         break;
+    case INSTPTN_OPC_SAR_JCC:
+        *option = INSTPTN_OPT_SAR_JCC;
+        break;
+    case INSTPTN_OPC_SHR_JE:
+        *option = INSTPTN_OPT_SHR_JE;
+        break;
     default:
         return false;
     }
@@ -721,6 +727,8 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *pir1, int pir1_i
     IR1_INST *ir1_jcc = NULL;
     IR1_OPND *opnd0 = NULL;
     IR1_OPND *opnd1 = NULL;
+    InstPtnOption shift_option;
+    InstPtnOpcode shift_opcode;
     switch (ir1_opcode(pir1)) {
         case WRAP(CMP):
         SCAN_CHECK(scan, 0);
@@ -867,39 +875,85 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *pir1, int pir1_i
             INSTPTN_REJECT_AND_RETURN(INSTPTN_OPT_SUB_JCC,
                                       INSTPTN_REJECT_UNSUPPORTED_CC, false);
         }
-    case WRAP(SHR):
+    case WRAP(SAR):
         SCAN_CHECK(scan, 0);
         ir1_jcc = SCAN_IR1(tb, scan, 0);
+        opnd0 = ir1_get_opnd(pir1, 0);
         opnd1 = ir1_get_opnd(pir1, 1);
         if (!ir1_opnd_is_imm(opnd1)) {
             INSTPTN_REJECT_AND_RETURN(
-                INSTPTN_OPT_SHR_JCC,
+                INSTPTN_OPT_SAR_JCC,
                 INSTPTN_REJECT_UNSUPPORTED_OPERAND, false);
         }
         if ((ir1_opnd_uimm(opnd1) &
-             (ir1_opnd_size(ir1_get_opnd(pir1, 0)) == 64 ? 63 : 31)) == 0) {
+             (ir1_opnd_size(opnd0) == 64 ? 63 : 31)) == 0) {
             INSTPTN_REJECT_AND_RETURN(
-                INSTPTN_OPT_SHR_JCC,
+                INSTPTN_OPT_SAR_JCC,
                 INSTPTN_REJECT_ZERO_SHIFT_COUNT, false);
         }
         switch (ir1_opcode(ir1_jcc)) {
+        case WRAP(JE):
         case WRAP(JNE):
+        case WRAP(JS):
+        case WRAP(JNS):
             if (pir1_index + 1 == SCAN_IDX(scan, 0)) {
-                instptn_check_shr_jcc_0();
-                pir1->instptn.opc  = INSTPTN_OPC_SHR_JCC;
+                instptn_check_sar_jcc_0();
+                pir1->instptn.opc = INSTPTN_OPC_SAR_JCC;
                 pir1->instptn.next = ir1_jcc;
-                ir1_jcc->instptn.opc  = INSTPTN_OPC_NOP;
-                // ir1_jcc->instptn.next = NULL;
+                ir1_jcc->instptn.opc = INSTPTN_OPC_NOP;
             } else {
                 instptn_stats_record_reject(
-                    INSTPTN_OPT_SHR_JCC,
+                    INSTPTN_OPT_SAR_JCC,
                     INSTPTN_REJECT_NON_ADJACENT);
             }
             return false;
         default:
+            INSTPTN_REJECT_AND_RETURN(INSTPTN_OPT_SAR_JCC,
+                                      INSTPTN_REJECT_UNSUPPORTED_CC, false);
+        }
+    case WRAP(SHR):
+        SCAN_CHECK(scan, 0);
+        ir1_jcc = SCAN_IR1(tb, scan, 0);
+        switch (ir1_opcode(ir1_jcc)) {
+        case WRAP(JE):
+            shift_option = INSTPTN_OPT_SHR_JE;
+            shift_opcode = INSTPTN_OPC_SHR_JE;
+            break;
+        case WRAP(JNE):
+            shift_option = INSTPTN_OPT_SHR_JCC;
+            shift_opcode = INSTPTN_OPC_SHR_JCC;
+            break;
+        default:
             INSTPTN_REJECT_AND_RETURN(INSTPTN_OPT_SHR_JCC,
                                       INSTPTN_REJECT_UNSUPPORTED_CC, false);
         }
+        opnd0 = ir1_get_opnd(pir1, 0);
+        opnd1 = ir1_get_opnd(pir1, 1);
+        if (!ir1_opnd_is_imm(opnd1)) {
+            INSTPTN_REJECT_AND_RETURN(
+                shift_option,
+                INSTPTN_REJECT_UNSUPPORTED_OPERAND, false);
+        }
+        if ((ir1_opnd_uimm(opnd1) &
+             (ir1_opnd_size(opnd0) == 64 ? 63 : 31)) == 0) {
+            INSTPTN_REJECT_AND_RETURN(
+                shift_option,
+                INSTPTN_REJECT_ZERO_SHIFT_COUNT, false);
+        }
+        if (pir1_index + 1 == SCAN_IDX(scan, 0)) {
+            if (shift_option == INSTPTN_OPT_SHR_JE) {
+                instptn_check_shr_je_0();
+            } else {
+                instptn_check_shr_jcc_0();
+            }
+            pir1->instptn.opc = shift_opcode;
+            pir1->instptn.next = ir1_jcc;
+            ir1_jcc->instptn.opc = INSTPTN_OPC_NOP;
+        } else {
+            instptn_stats_record_reject(
+                shift_option, INSTPTN_REJECT_NON_ADJACENT);
+        }
+        return false;
     case WRAP(AND):
         SCAN_CHECK(scan, 0);
         ir1_jcc = SCAN_IR1(tb, scan, 0);
