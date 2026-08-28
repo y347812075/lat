@@ -2,6 +2,7 @@
 
 #include "profile.h"
 
+#include <elf.h>
 #include <errno.h>
 #include <glib.h>
 #include <inttypes.h>
@@ -35,6 +36,55 @@ static int source_digest(const char *path, char digest[65],
     g_checksum_free(checksum);
     g_free(contents);
     return 0;
+}
+
+static int source_load_base(const char *path, uint64_t *base,
+                            char *error, size_t error_size)
+{
+    gchar *contents = NULL;
+    gsize size = 0;
+    GError *gerror = NULL;
+    if (!g_file_get_contents(path, &contents, &size, &gerror)) {
+        if (error && error_size) {
+            snprintf(error, error_size, "%s: %s", path,
+                     gerror ? gerror->message : "cannot read source");
+        }
+        g_clear_error(&gerror);
+        return -1;
+    }
+    Elf64_Ehdr header;
+    if (size < sizeof(header)) goto malformed;
+    memcpy(&header, contents, sizeof(header));
+    if (memcmp(header.e_ident, ELFMAG, SELFMAG) ||
+        header.e_ident[EI_CLASS] != ELFCLASS64 ||
+        header.e_ident[EI_DATA] != ELFDATA2LSB ||
+        header.e_phentsize != sizeof(Elf64_Phdr) || !header.e_phnum ||
+        header.e_phoff > size ||
+        header.e_phnum > (size - header.e_phoff) / sizeof(Elf64_Phdr)) {
+        goto malformed;
+    }
+    uint64_t result = UINT64_MAX;
+    for (uint16_t i = 0; i < header.e_phnum; i++) {
+        Elf64_Phdr phdr;
+        memcpy(&phdr, contents + header.e_phoff + i * sizeof(phdr),
+               sizeof(phdr));
+        if (phdr.p_type == PT_LOAD && phdr.p_memsz &&
+            phdr.p_vaddr < result) {
+            result = phdr.p_vaddr;
+        }
+    }
+    if (result == UINT64_MAX) goto malformed;
+    g_free(contents);
+    *base = result;
+    return 0;
+
+malformed:
+    g_free(contents);
+    if (error && error_size) {
+        snprintf(error, error_size,
+                 "%s: cannot determine preferred guest base", path);
+    }
+    return -1;
 }
 
 static int parse_v2_header(const char *path, size_t line_no, char *p,
@@ -83,6 +133,7 @@ int latc_profile_apply(const char *path, const char *source_path,
     }
     size_t hit = 0, miss = 0, skip = 0, line_no = 0;
     bool v2 = false, saw_data = false;
+    uint64_t v2_load_base = 0;
     char *line = NULL;
     size_t cap = 0;
     while (getline(&line, &cap, fp) >= 0) {
@@ -96,6 +147,10 @@ int latc_profile_apply(const char *path, const char *source_path,
                                 error, error_size)) {
                 free(line); fclose(fp); return -1;
             }
+            if (source_load_base(source_path, &v2_load_base,
+                                 error, error_size)) {
+                free(line); fclose(fp); return -1;
+            }
             v2 = true;
             saw_data = true;
             continue;
@@ -105,6 +160,10 @@ int latc_profile_apply(const char *path, const char *source_path,
         char *end = NULL;
         uint64_t pc = strtoull(p, &end, 0);
         if (errno || end == p) goto malformed;
+        if (v2) {
+            if (pc > UINT64_MAX - v2_load_base) goto malformed;
+            pc += v2_load_base;
+        }
         p = end;
         uint64_t raw_flags = CFG_TB_CODE64;
         if (v2) {

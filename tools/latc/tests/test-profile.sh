@@ -33,8 +33,8 @@ source_sha=$(sha256sum "$guest" | awk '{print $1}')
 v2="$bundle.v2.profile"
 {
     printf 'LATC_PROFILE_V2 %s\n' "$source_sha"
-    printf '0x401000 0x1 100\n'
-    printf '0x401000 0x3 25\n'
+    printf '0x1000 0x1 100\n'
+    printf '0x1000 0x3 25\n'
 } >"$v2"
 message=$("$latc" compile "$guest" -o "$bundle.v2" --runner "$guest" \
     --profile "$v2" 2>&1)
@@ -48,7 +48,7 @@ esac
 wrong="$bundle.wrong-source.profile"
 {
     printf 'LATC_PROFILE_V2 %064d\n' 0
-    printf '0x401000 0x1 1\n'
+    printf '0x1000 0x1 1\n'
 } >"$wrong"
 if "$latc" compile "$guest" -o "$bundle.wrong-source" --runner "$guest" \
     --profile "$wrong" >/dev/null 2>&1; then

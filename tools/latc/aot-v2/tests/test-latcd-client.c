@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int fail(const char *message)
@@ -35,10 +36,19 @@ int main(void)
         return fail("cannot create test listener");
     }
     int source = open("/dev/null", O_RDONLY | O_CLOEXEC);
-    char error[128] = {0};
-    if (source < 0 || latcd_client_submit_fd(path, source,
-            LATCD_PRIORITY_STARTUP, 42, error, sizeof(error))) {
-        return fail(error);
+    if (source < 0) {
+        return fail("cannot open test source");
+    }
+    pid_t submitter = fork();
+    if (submitter < 0) {
+        return fail("cannot fork submitter");
+    }
+    if (!submitter) {
+        char error[128] = {0};
+        int result = latcd_client_submit_fd(path, source,
+            LATCD_PRIORITY_STARTUP, 42, error, sizeof(error));
+        if (result) fprintf(stderr, "test-latcd-client: %s\n", error);
+        _exit(result ? 1 : 0);
     }
     int client = accept4(server, NULL, NULL, SOCK_CLOEXEC);
     LatcdRequestV1 request;
@@ -66,19 +76,36 @@ int main(void)
     if (fcntl(received_fd, F_GETFL) < 0) {
         return fail("received FD is invalid");
     }
+    LatcdResponseV1 response = {
+        .magic = LATCD_RESPONSE_MAGIC,
+        .version = LATCD_PROTOCOL_VERSION,
+        .size = sizeof(response),
+        .status = LATCD_STATUS_OK,
+        .request_id = request.request_id,
+    };
+    if (send(client, &response, sizeof(response), MSG_NOSIGNAL) !=
+        sizeof(response)) {
+        return fail("cannot acknowledge submission");
+    }
     close(received_fd);
     close(client);
+    int submit_status = 0;
+    if (waitpid(submitter, &submit_status, 0) != submitter ||
+        !WIFEXITED(submit_status) || WEXITSTATUS(submit_status)) {
+        return fail("submission was not acknowledged");
+    }
     close(source);
     close(server);
     unlink(path);
     rmdir(directory);
 
+    char error[128] = {0};
     errno = 0;
     if (!latcd_client_submit_fd(path, STDIN_FILENO, LATCD_PRIORITY_LIBRARY,
                                 43, error, sizeof(error)) ||
         (errno != ENOENT && errno != ECONNREFUSED)) {
         return fail("missing daemon was not reported immediately");
     }
-    puts("latcd nonblocking client tests: PASS");
+    puts("latcd acknowledged client tests: PASS");
     return 0;
 }

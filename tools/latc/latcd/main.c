@@ -312,6 +312,18 @@ static int snapshot_profile(int profile_fd, const char *source_path,
         return fail(error, error_size, "cannot read profile source segments");
     }
     close(source_fd);
+    uint64_t load_base = UINT64_MAX;
+    for (uint16_t i = 0; i < header.e_phnum; i++) {
+        if (phdrs[i].p_type == PT_LOAD && phdrs[i].p_memsz &&
+            phdrs[i].p_vaddr < load_base) {
+            load_base = phdrs[i].p_vaddr;
+        }
+    }
+    if (load_base == UINT64_MAX) {
+        g_free(phdrs);
+        return fail(error, error_size,
+                    "profile source ELF has no loadable segments");
+    }
 
     int input_fd = dup(profile_fd);
     FILE *input = input_fd >= 0 ? fdopen(input_fd, "r") : NULL;
@@ -360,9 +372,10 @@ static int snapshot_profile(int profile_fd, const char *source_path,
         while (*end == ' ' || *end == '\t' || *end == '\r') end++;
         int executable = 0;
         for (uint16_t i = 0; i < header.e_phnum; i++) {
+            uint64_t segment_rva = phdrs[i].p_vaddr - load_base;
             if (phdrs[i].p_type == PT_LOAD && (phdrs[i].p_flags & PF_X) &&
-                rva >= phdrs[i].p_vaddr &&
-                rva < phdrs[i].p_vaddr + phdrs[i].p_memsz) {
+                phdrs[i].p_vaddr >= load_base && rva >= segment_rva &&
+                rva - segment_rva < phdrs[i].p_memsz) {
                 executable = 1;
                 break;
             }
