@@ -112,6 +112,54 @@ wait_stats 's["active_jobs"] == 2 and s["queue_depth"] == 0 and s["workers"] == 
 wait_stats 's["compiled"] == 2 and s["active_jobs"] == 0'
 stop_service
 
+start_service same-source-workers "$script_dir/fake-latc-slow.sh" --workers 2
+python3 - "$socket" "$guest" <<'PY'
+import array
+import hashlib
+import os
+import socket
+import struct
+import sys
+import tempfile
+
+socket_path, source_path = sys.argv[1:]
+source_sha = hashlib.sha256(open(source_path, "rb").read()).hexdigest()
+with open(source_path, "rb") as source:
+    source.seek(24)
+    entry = struct.unpack("<Q", source.read(8))[0]
+
+for request_id, count in ((101, 1), (102, 2)):
+    profile = tempfile.NamedTemporaryFile(mode="w", delete=False)
+    try:
+        profile.write("LATC_PROFILE_V2 %s\n" % source_sha)
+        profile.write("0x%x 0x1 %d\n" % (entry, count))
+        profile.close()
+        source_fd = os.open(source_path, os.O_RDONLY)
+        profile_fd = os.open(profile.name, os.O_RDONLY)
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        connection.connect(socket_path)
+        request = struct.pack("=IHHIIQ", 0x4c415444, 1, 24,
+                              100, 1, request_id)
+        connection.sendmsg(
+            [request],
+            [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+              array.array("i", [source_fd, profile_fd]))])
+        response = connection.recv(248)
+        assert len(response) == 248
+        assert struct.unpack_from("=i", response, 8)[0] == 0
+        connection.close()
+        os.close(source_fd)
+        os.close(profile_fd)
+    finally:
+        try:
+            os.unlink(profile.name)
+        except FileNotFoundError:
+            pass
+PY
+wait_stats 's["active_jobs"] == 2 and s["queue_depth"] == 1 and s["running_sources"] == 1'
+wait_stats 's["compiled"] == 2 and s["active_jobs"] == 0 and s["running_sources"] == 0'
+stop_service
+
 start_service negative /bin/false --negative-ms 500
 python3 - "$socket" <<'PY'
 import socket

@@ -62,6 +62,7 @@ typedef struct LatcdJob {
     char *snapshot;
     char *profile;
     char key[130];
+    char source_key[65];
     uint8_t digest[32];
     uint32_t priority;
     uint64_t sequence;
@@ -80,6 +81,7 @@ typedef struct LatcdService {
     pthread_cond_t ready;
     GPtrArray *queue;
     GHashTable *active;
+    GHashTable *running_sources;
     GHashTable *negative;
     pthread_t *workers;
     int stopping;
@@ -1086,13 +1088,14 @@ static void write_stats_locked(const LatcdService *service)
         ",\"compiled\":%" PRIu64 ",\"failed\":%" PRIu64
         ",\"negative_hits\":%" PRIu64 ",\"queue_full\":%" PRIu64
         ",\"queue_depth\":%u,\"queue_bytes\":%" PRIu64
-        ",\"active_jobs\":%u,\"workers\":%u"
+        ",\"active_jobs\":%u,\"running_sources\":%u,\"workers\":%u"
         ",\"max_cache_bytes\":%" PRIu64 "}\n",
         service->requests, service->queued, service->deduplicated,
         service->cache_hits, service->compiled, service->failed,
         service->negative_hits, service->queue_full, service->queue->len,
         service->queued_bytes,
-        g_hash_table_size(service->active), service->config->workers,
+        g_hash_table_size(service->active),
+        g_hash_table_size(service->running_sources), service->config->workers,
         service->config->max_cache_bytes);
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
@@ -1117,18 +1120,27 @@ static LatcdJob *queue_take_next_locked(LatcdService *service)
         return NULL;
     }
     guint selected = 0;
-    LatcdJob *best = g_ptr_array_index(service->queue, 0);
-    for (guint i = 1; i < service->queue->len; i++) {
+    LatcdJob *best = NULL;
+    for (guint i = 0; i < service->queue->len; i++) {
         LatcdJob *candidate = g_ptr_array_index(service->queue, i);
-        if (candidate->priority > best->priority ||
+        if (g_hash_table_contains(service->running_sources,
+                                  candidate->source_key)) {
+            continue;
+        }
+        if (!best || candidate->priority > best->priority ||
             (candidate->priority == best->priority &&
              candidate->sequence < best->sequence)) {
             selected = i;
             best = candidate;
         }
     }
+    if (!best) {
+        return NULL;
+    }
     g_ptr_array_remove_index(service->queue, selected);
     service->queued_bytes -= best->source_size;
+    g_hash_table_add(service->running_sources,
+                     g_strdup(best->source_key));
     return best;
 }
 
@@ -1162,14 +1174,17 @@ static void *compiler_worker(void *opaque)
     LatcdService *service = worker->service;
     for (;;) {
         pthread_mutex_lock(&service->lock);
-        while (!service->stopping && !service->queue->len) {
-            pthread_cond_wait(&service->ready, &service->lock);
+        LatcdJob *job = NULL;
+        while (!job) {
+            if (service->stopping && !service->queue->len) {
+                pthread_mutex_unlock(&service->lock);
+                return NULL;
+            }
+            job = queue_take_next_locked(service);
+            if (!job) {
+                pthread_cond_wait(&service->ready, &service->lock);
+            }
         }
-        if (service->stopping && !service->queue->len) {
-            pthread_mutex_unlock(&service->lock);
-            break;
-        }
-        LatcdJob *job = queue_take_next_locked(service);
         write_stats_locked(service);
         pthread_mutex_unlock(&service->lock);
 
@@ -1195,6 +1210,7 @@ static void *compiler_worker(void *opaque)
         g_free(canonical);
 
         pthread_mutex_lock(&service->lock);
+        g_hash_table_remove(service->running_sources, job->source_key);
         g_hash_table_remove(service->active, job->key);
         if (!result) {
             service->compiled++;
@@ -1204,6 +1220,7 @@ static void *compiler_worker(void *opaque)
             negative_record_locked(service, job->key, response.status);
         }
         write_stats_locked(service);
+        pthread_cond_broadcast(&service->ready);
         pthread_mutex_unlock(&service->lock);
         job_free(job);
     }
@@ -1346,6 +1363,8 @@ static int service_queue_request(LatcdService *service, int source_fd,
     job->snapshot = snapshot;
     job->profile = profile;
     g_strlcpy(job->key, key, sizeof(job->key));
+    memcpy(job->source_key, key, 64);
+    job->source_key[64] = '\0';
     memcpy(job->digest, response->source_sha256, sizeof(job->digest));
     job->priority = request->priority;
     job->sequence = service->next_sequence++;
@@ -1493,6 +1512,8 @@ static int run_service(const LatcdConfig *config)
         .ready = PTHREAD_COND_INITIALIZER,
         .queue = g_ptr_array_new(),
         .active = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL),
+        .running_sources = g_hash_table_new_full(
+            g_str_hash, g_str_equal, g_free, NULL),
         .negative = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                           g_free),
         .workers = g_new0(pthread_t, config->workers),
@@ -1535,6 +1556,7 @@ static int run_service(const LatcdConfig *config)
         g_free(service.workers);
         g_ptr_array_free(service.queue, TRUE);
         g_hash_table_destroy(service.active);
+        g_hash_table_destroy(service.running_sources);
         g_hash_table_destroy(service.negative);
         return 1;
     }
@@ -1611,6 +1633,7 @@ static int run_service(const LatcdConfig *config)
     }
     g_ptr_array_free(service.queue, TRUE);
     g_hash_table_destroy(service.active);
+    g_hash_table_destroy(service.running_sources);
     g_hash_table_destroy(service.negative);
     g_free(worker_args);
     g_free(service.workers);
