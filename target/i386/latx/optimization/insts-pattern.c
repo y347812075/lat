@@ -762,6 +762,19 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *pir1, int pir1_i
                 tb->has_jcc_end_ptn = true;
             }
             return false;
+        case WRAP(JS):
+        case WRAP(JNS):
+            if (pir1_index + 1 == SCAN_IDX(scan, 0)) {
+                instptn_check_cmp_jcc_0();
+                pir1->instptn.opc = INSTPTN_OPC_CMP_JCC;
+                pir1->instptn.next = ir1_jcc;
+                ir1_jcc->instptn.opc = INSTPTN_OPC_NOP;
+            } else {
+                instptn_stats_record_reject(
+                    INSTPTN_OPT_CMP_JCC,
+                    INSTPTN_REJECT_NON_ADJACENT);
+            }
+            return false;
         default:
             INSTPTN_REJECT_AND_RETURN(
                 pir1_index + 1 == SCAN_IDX(scan, 0) ?
@@ -862,6 +875,8 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *pir1, int pir1_i
         case WRAP(JGE):
         case WRAP(JLE):
         case WRAP(JG):
+        case WRAP(JS):
+        case WRAP(JNS):
             if (pir1_index + 1 == SCAN_IDX(scan, 0)) {
                 instptn_check_sub_jcc_0();
                 pir1->instptn.opc  = INSTPTN_OPC_SUB_JCC;
@@ -961,6 +976,7 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *pir1, int pir1_i
         SCAN_CHECK(scan, 0);
         ir1_jcc = SCAN_IR1(tb, scan, 0);
         switch (ir1_opcode(ir1_jcc)) {
+        case WRAP(JE):
         case WRAP(JNE):
             if (pir1_index + 1 == SCAN_IDX(scan, 0)) {
                 instptn_check_and_jcc_0();

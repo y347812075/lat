@@ -15,7 +15,7 @@ _start:
 
     /* Unsupported Jcc for the existing SUB pattern. */
     subl $0, %r8d
-    js 2f
+    jo 2f
 2:
     /* Existing SUB pattern is adjacent-only. */
     subl $0, %r8d

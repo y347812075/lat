@@ -24,6 +24,14 @@ if 'x86_64-linux-user' in target_dirs
     ],
   }]
   latx_integration_tests += [{
+    'name': 'test-jcc-conditions',
+    'runner': find_program('../../test-jcc-conditions.sh'),
+    'args': [
+      emulators['latx-x86_64'],
+      files('../../jcc-conditions.S'),
+    ],
+  }]
+  latx_integration_tests += [{
     'name': 'test-instptn-options',
     'runner': find_program('../../test-instptn-options.sh'),
     'args': [

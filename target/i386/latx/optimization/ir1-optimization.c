@@ -49,6 +49,15 @@ static bool result_jcc_option(IR1_INST *ir1, InstPtnOption *option)
     case INSTPTN_OPC_OR_JCC:
         *option = INSTPTN_OPT_OR_JCC;
         return true;
+    case INSTPTN_OPC_CMP_JCC:
+        *option = INSTPTN_OPT_CMP_JCC;
+        return true;
+    case INSTPTN_OPC_SUB_JCC:
+        *option = INSTPTN_OPT_SUB_JCC;
+        return true;
+    case INSTPTN_OPC_AND_JCC:
+        *option = INSTPTN_OPT_AND_JCC;
+        return true;
     default:
         return false;
     }
@@ -65,23 +74,17 @@ static void reduce_result_jcc_local_eflags(IR1_INST *ir1,
     }
 
     IR1_INST *jcc = ir1->instptn.next;
-    uint8 local_use;
-
     switch (ir1_opcode(jcc)) {
     case dt_X86_INS_JE:
     case dt_X86_INS_JNE:
-        local_use = __ZF;
-        break;
     case dt_X86_INS_JS:
     case dt_X86_INS_JNS:
-        local_use = __SF;
         break;
     default:
         return;
     }
 
-    uint8 dead_local_use = local_use & ~eflag_out;
-    uint8 eliminated = dead_local_use & ir1_get_eflag_def(ir1);
+    uint8 eliminated = ir1_get_eflag_def(ir1) & ~eflag_out;
 
     if (!eliminated) {
         return;
