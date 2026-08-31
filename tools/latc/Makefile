@@ -34,7 +34,8 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-latcd-service test-latcd-runner test-aot-v2-real-app test-aot-v2-m4 \
 		test-aot-v2-complex-apps \
 		test-aot-v2-sanitize test-aot-v2-tsan test-aot-v2-libfuzzer \
-		check-import
+		test-aot-v2-source-sync test-prepare-runner-source \
+		sync-aot-v2-sources check-import
 
 
 all: $(BUILD)/latc $(BUILD)/latcd/latcd $(BUILD)/liblatc_cfg.a
@@ -410,6 +411,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  $(BUILD)/tests/native-image | \
 	  python3 -c 'import json,sys; d=json.load(sys.stdin)[0]; assert d["tb_count"] == 1; assert d["relocation_count"] == 1; assert d["pc_map_count"] == 0'
 	$(MAKE) test-aot-v2
+	$(MAKE) test-aot-v2-source-sync
+	$(MAKE) test-prepare-runner-source
 	$(MAKE) check-import
 
 $(BUILD)/tests/test-latcd-protocol: \
@@ -951,6 +954,17 @@ test-specint-aot-v2: all
 	  --runtime-dir $(AOT_V2_RUNTIME_DIR) --spec-root $(SPEC_ROOT) \
 	  --workdir $(BUILD)/specint-aot-v2 \
 	  $(if $(SPEC_BENCHMARK),--benchmark $(SPEC_BENCHMARK),)
+
+test-aot-v2-source-sync:
+	python3 tests/test-aot-v2-source-sync.py \
+	  scripts/sync-aot-v2-sources.py
+
+test-prepare-runner-source:
+	python3 tests/test-prepare-runner-source.py \
+	  scripts/prepare-runner-source.py $(abspath ../..)
+
+sync-aot-v2-sources:
+	python3 scripts/sync-aot-v2-sources.py
 
 check-import:
 	python3 scripts/check-import.py

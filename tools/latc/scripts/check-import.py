@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +16,13 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 def main() -> int:
+    source_check = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/sync-aot-v2-sources.py"),
+         "--check"],
+        check=False,
+    )
+    if source_check.returncode:
+        return source_check.returncode
     manifest = json.loads((ROOT / "cfg-import.json").read_text())
     missing = []
     for kind in ("modified", "added"):
