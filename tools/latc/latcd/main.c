@@ -1,8 +1,11 @@
 #define _GNU_SOURCE
 
 #include "latcd-protocol.h"
+#include "lat-aot-v2.h"
+#include "latc-build-id.h"
 #include "module-inspect.h"
 
+#include <dlfcn.h>
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -16,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -127,6 +131,155 @@ static void digest_hex(const uint8_t digest[32], char hex[65])
     hex[64] = '\0';
 }
 
+static void expected_codegen_id(uint8_t digest[32])
+{
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    g_checksum_update(checksum, (const guchar *)LATC_BUILD_ID,
+                      strlen(LATC_BUILD_ID));
+    gsize length = 32;
+    g_checksum_get_digest(checksum, digest, &length);
+    g_checksum_free(checksum);
+}
+
+static int read_program_build_id(const char *label, const char *path,
+                                 const char *argument,
+                                 const char *runtime_dir,
+                                 char actual[65], char *error,
+                                 size_t error_size)
+{
+    int output[2];
+    if (pipe2(output, O_CLOEXEC | O_NONBLOCK)) {
+        return fail(error, error_size, "cannot probe %s %s: %s", label, path,
+                    strerror(errno));
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        dup2(output[1], STDOUT_FILENO);
+        close(output[0]);
+        close(output[1]);
+        if (runtime_dir) {
+            setenv("LD_LIBRARY_PATH", runtime_dir, 1);
+        }
+        execl(path, path, argument, (char *)NULL);
+        _exit(127);
+    }
+    close(output[1]);
+    if (child < 0) {
+        close(output[0]);
+        return fail(error, error_size, "cannot start %s %s: %s", label, path,
+                    strerror(errno));
+    }
+
+    char buffer[128] = {0};
+    size_t used = 0;
+    int status = 0;
+    int64_t deadline = g_get_monotonic_time() + 2 * G_TIME_SPAN_SECOND;
+    for (;;) {
+        struct pollfd poll_fd = { .fd = output[0], .events = POLLIN | POLLHUP };
+        int64_t remaining = deadline - g_get_monotonic_time();
+        if (remaining <= 0) {
+            kill(child, SIGKILL);
+            waitpid(child, &status, 0);
+            close(output[0]);
+            return fail(error, error_size, "%s identity probe timed out: %s",
+                        label, path);
+        }
+        poll(&poll_fd, 1, MIN(50, (int)(remaining / 1000)));
+        ssize_t count;
+        while (used < sizeof(buffer) - 1 &&
+               (count = read(output[0], buffer + used,
+                             sizeof(buffer) - 1 - used)) > 0) {
+            used += count;
+        }
+        pid_t waited = waitpid(child, &status, WNOHANG);
+        if (waited == child) {
+            while (used < sizeof(buffer) - 1 &&
+                   (count = read(output[0], buffer + used,
+                                 sizeof(buffer) - 1 - used)) > 0) {
+                used += count;
+            }
+            break;
+        }
+        if (waited < 0 && errno != EINTR) {
+            close(output[0]);
+            return fail(error, error_size, "cannot wait for %s identity: %s",
+                        label, strerror(errno));
+        }
+    }
+    close(output[0]);
+    buffer[used] = '\0';
+    g_strchomp(buffer);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) || strlen(buffer) != 64) {
+        return fail(error, error_size,
+                    "%s identity probe failed for %s (status=%d, output=%s)",
+                    label, path, WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+                    buffer[0] ? buffer : "<empty>");
+    }
+    memcpy(actual, buffer, 65);
+    return 0;
+}
+
+static int validate_toolchain(const LatcdConfig *config, char *error,
+                              size_t error_size)
+{
+    char actual[65];
+    if (read_program_build_id("latc", config->compiler, "build-id",
+                              config->runtime_dir, actual, error, error_size)) {
+        return -1;
+    }
+    if (strcmp(actual, LATC_BUILD_ID)) {
+        return fail(error, error_size,
+                    "latc build identity mismatch: %s expected=%s actual=%s",
+                    config->compiler, LATC_BUILD_ID, actual);
+    }
+    if (read_program_build_id("runner", config->runner, "--latc-build-id",
+                              config->runtime_dir, actual, error, error_size)) {
+        return -1;
+    }
+    if (strcmp(actual, LATC_BUILD_ID)) {
+        return fail(error, error_size,
+                    "runner build identity mismatch: %s expected=%s actual=%s",
+                    config->runner, LATC_BUILD_ID, actual);
+    }
+
+    char *runtime_path = g_build_filename(
+        config->runtime_dir, LAT_AOT_V2_RUNTIME_SONAME, NULL);
+    void *runtime = dlopen(runtime_path, RTLD_NOW | RTLD_LOCAL);
+    if (!runtime) {
+        fail(error, error_size, "cannot load AOT runtime %s: %s", runtime_path,
+             dlerror());
+        g_free(runtime_path);
+        return -1;
+    }
+    uint32_t (*abi_version)(void) = dlsym(runtime,
+        "lat_aot_runtime_abi_version");
+    const char *(*build_id)(void) = dlsym(runtime,
+        "lat_aot_runtime_build_id");
+    if (!abi_version || !build_id || abi_version() != LAT_AOT_V2_ABI_VERSION) {
+        dlclose(runtime);
+        int result = fail(error, error_size,
+                          "AOT runtime ABI mismatch: %s expected=%u",
+                          runtime_path, LAT_AOT_V2_ABI_VERSION);
+        g_free(runtime_path);
+        return result;
+    }
+    const char *runtime_id = build_id();
+    if (!runtime_id || strcmp(runtime_id, LATC_BUILD_ID)) {
+        char mismatch[65] = {0};
+        g_strlcpy(mismatch, runtime_id ? runtime_id : "<missing>",
+                  sizeof(mismatch));
+        dlclose(runtime);
+        int result = fail(error, error_size,
+                          "AOT runtime build identity mismatch: %s expected=%s actual=%s",
+                          runtime_path, LATC_BUILD_ID, mismatch);
+        g_free(runtime_path);
+        return result;
+    }
+    dlclose(runtime);
+    g_free(runtime_path);
+    return 0;
+}
+
 static void signal_stop(int signal_number)
 {
     (void)signal_number;
@@ -151,6 +304,59 @@ static int ensure_private_directory(const char *path, char *error,
                     strerror(errno));
     }
     return 0;
+}
+
+static int acquire_cache_owner(const LatcdConfig *config, char *error,
+                               size_t error_size)
+{
+    if (ensure_private_directory(config->cache_dir, error, error_size)) {
+        return -1;
+    }
+    char *path = g_build_filename(config->cache_dir, ".latcd.lock", NULL);
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        fail(error, error_size, "cannot open cache owner lock %s: %s", path,
+             strerror(errno));
+        g_free(path);
+        return -1;
+    }
+    struct stat status;
+    if (fstat(fd, &status) || !S_ISREG(status.st_mode) ||
+        status.st_uid != geteuid() || status.st_nlink != 1 ||
+        fchmod(fd, 0600)) {
+        fail(error, error_size,
+             "cache owner lock is not a private user-owned file: %s", path);
+        close(fd);
+        g_free(path);
+        return -1;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB)) {
+        if (errno == EWOULDBLOCK) {
+            fail(error, error_size,
+                 "cache is already owned by another latcd: %s",
+                 config->cache_dir);
+        } else {
+            fail(error, error_size, "cannot lock cache %s: %s",
+                 config->cache_dir, strerror(errno));
+        }
+        close(fd);
+        g_free(path);
+        return -1;
+    }
+    char owner[256];
+    int length = snprintf(owner, sizeof(owner),
+                          "pid=%ld\nsocket=%s\nbuild_id=%s\n",
+                          (long)getpid(), config->socket_path, LATC_BUILD_ID);
+    if (ftruncate(fd, 0) || pwrite(fd, owner, length, 0) != length ||
+        fsync(fd)) {
+        fail(error, error_size, "cannot record cache owner in %s: %s", path,
+             strerror(errno));
+        close(fd);
+        g_free(path);
+        return -1;
+    }
+    g_free(path);
+    return fd;
 }
 
 static int validate_x86_elf(int fd, uint64_t file_size, char *error,
@@ -547,6 +753,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *output,
                         char *error, size_t error_size)
 {
+    if (validate_toolchain(config, error, error_size)) {
+        return -1;
+    }
     char *arguments[] = {
         (char *)config->compiler, "compile-module", (char *)source,
         "-o", (char *)output, "--runner", (char *)config->runner,
@@ -661,15 +870,23 @@ static int sync_directory(const char *path, char *error, size_t error_size)
     return 0;
 }
 
-static int cached_module_inspect(const char *path, const uint8_t digest[32],
-                                 LatAotModuleInfoV2 *info)
+static int owned_module_inspect(const char *path, LatAotModuleInfoV2 *info)
 {
     struct stat status;
     return !lstat(path, &status) && S_ISREG(status.st_mode) &&
            status.st_uid == geteuid() && status.st_nlink == 1 &&
            !(status.st_mode & 0222) &&
-           !lat_aot_v2_module_inspect_file(path, info, NULL, 0) &&
-           !memcmp(info->note.source_sha256, digest, 32);
+           !lat_aot_v2_module_inspect_file(path, info, NULL, 0);
+}
+
+static int cached_module_inspect(const char *path, const uint8_t digest[32],
+                                 LatAotModuleInfoV2 *info)
+{
+    uint8_t codegen_id[32];
+    expected_codegen_id(codegen_id);
+    return owned_module_inspect(path, info) &&
+           !memcmp(info->note.source_sha256, digest, 32) &&
+           !memcmp(info->note.codegen_id, codegen_id, 32);
 }
 
 typedef struct LatcdCacheEntry {
@@ -788,7 +1005,8 @@ static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
             total += status.st_size;
         }
         LatAotModuleInfoV2 info;
-        if (cached_module_inspect(module_path, digest, &info)) {
+        if (owned_module_inspect(module_path, &info) &&
+            !memcmp(info.note.source_sha256, digest, 32)) {
             LatcdCacheEntry *entry = g_new0(LatcdCacheEntry, 1);
             entry->module_path = module_path;
             entry->index_path = g_strdup_printf("%s/%s.current",
@@ -932,12 +1150,16 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         status = LATCD_STATUS_COMPILE_FAILED;
         goto out;
     }
+    uint8_t codegen_id[32];
+    expected_codegen_id(codegen_id);
     if (lat_aot_v2_module_inspect_file(module, &info, error, sizeof(error)) ||
         memcmp(info.note.source_sha256, digest, 32) ||
+        memcmp(info.note.codegen_id, codegen_id, 32) ||
         (profile && lat_aot_v2_module_validate_profile_file(
             module, profile, error, sizeof(error)))) {
         if (!error[0]) {
-            snprintf(error, sizeof(error), "compiled module source digest mismatch");
+            snprintf(error, sizeof(error),
+                     "compiled module source or codegen identity mismatch");
         }
         status = LATCD_STATUS_INVALID_MODULE;
         goto out;
@@ -1114,14 +1336,15 @@ static void write_stats_locked(const LatcdService *service)
         ",\"negative_hits\":%" PRIu64 ",\"queue_full\":%" PRIu64
         ",\"queue_depth\":%u,\"queue_bytes\":%" PRIu64
         ",\"active_jobs\":%u,\"running_sources\":%u,\"workers\":%u"
-        ",\"max_cache_bytes\":%" PRIu64 "}\n",
+        ",\"max_cache_bytes\":%" PRIu64
+        ",\"cache_owner_pid\":%ld}\n",
         service->requests, service->queued, service->deduplicated,
         service->cache_hits, service->compiled, service->failed,
         service->negative_hits, service->queue_full, service->queue->len,
         service->queued_bytes,
         g_hash_table_size(service->active),
         g_hash_table_size(service->running_sources), service->config->workers,
-        service->config->max_cache_bytes);
+        service->config->max_cache_bytes, (long)getpid());
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
         ssize_t written = write(fd, contents, length);
@@ -1734,12 +1957,17 @@ static void usage(const char *name)
             " [--workers N]"
             " [--cpu-seconds N] [--address-space BYTES]"
             " [--file-size BYTES] [--open-files N]\n"
-            "  %s --submit --socket PATH [--priority N] X86_ELF\n",
-            name, name, name);
+            "  %s --submit --socket PATH [--priority N] X86_ELF\n"
+            "  %s --build-id\n",
+            name, name, name, name);
 }
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--build-id")) {
+        puts(LATC_BUILD_ID);
+        return 0;
+    }
     int once = 0, serve = 0, submit = 0;
     const char *source = NULL;
     uint32_t priority = LATCD_PRIORITY_LIBRARY;
@@ -1819,5 +2047,17 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return 2;
     }
-    return serve ? run_service(&config) : run_once(&config);
+    char error[512] = {0};
+    if (validate_toolchain(&config, error, sizeof(error))) {
+        fprintf(stderr, "latcd: %s\n", error);
+        return 1;
+    }
+    int cache_owner = acquire_cache_owner(&config, error, sizeof(error));
+    if (cache_owner < 0) {
+        fprintf(stderr, "latcd: %s\n", error);
+        return 1;
+    }
+    int result = serve ? run_service(&config) : run_once(&config);
+    close(cache_owner);
+    return result;
 }

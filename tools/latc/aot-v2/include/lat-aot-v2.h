@@ -131,6 +131,7 @@ typedef struct LatAotRuntimeTargetsV2 {
 } LatAotRuntimeTargetsV2;
 
 uint32_t lat_aot_runtime_abi_version(void);
+const char *lat_aot_runtime_build_id(void);
 typedef void (*LatAotRuntimeSyscallCallbackV2)(void *opaque);
 int lat_aot_runtime_bind_syscall(LatAotRuntimeSyscallCallbackV2 callback,
                                  void *opaque);

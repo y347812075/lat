@@ -23,7 +23,16 @@ fixture 和模块，再执行四种缓存组合。每次记录模块内容和运
 保留现有外部 runner hook。内部把已加载模块、guest 实例、host text 范围、
 generation 和 PC map 作为同一生命周期记录发布。dispatch、signal 恢复和失效
 不得分别构造互不关联的模块身份。fork parent 保留状态；fork child 在 exec 前
-停用继承的 AOT 可变状态并只走 JIT；exec 由新进程重新注册。
+停用继承的 AOT 状态、清空当前模块和跳转缓存、关闭 latcd 连接并只走 JIT；
+exec 替换宿主进程，由新进程初始化空 registry 后重新发现模块。
+
+source 指完整 x86 ELF 及其 SHA256；module 指一个不可变 AOT ELF；instance 指
+module 在某个 guest load bias 的一次映射。instance 注册时 generation 从 1 开始；
+失效时先从 range snapshot 移除，再清 active、增加 generation 并清理缓存目标。
+dispatch 和 signal PC 恢复都必须同时匹配 instance、generation 和翻译标志。
+profile 是按 source 合并的目标集合；current 是通过临时文件、只读权限、文件
+fsync、原子 rename 和目录 fsync 发布的小型 JSON 索引。JIT fallback 表示无法
+证明有有效 AOT target 时继续普通 LAT 翻译，不表示运行中热替换 module。
 
 ## 源码唯一来源
 
@@ -50,6 +59,10 @@ latcd 打开 cache 后立即取得跨进程独占锁，并在整个服务期持�
 
 ## 测试调度和文档
 
-复杂应用每个阶段使用独立目录和进程组，结果记录命令、整数退出码、stdout 和
-stderr。共享设计文档固定 source、module、instance、generation、profile、
-current 和 JIT fallback 的含义，并在实现变化后同步更新。
+复杂应用每个阶段使用独立目录；每个 guest 命令通过 `setsid` 取得独立 session
+和进程组，并使用该阶段自己的 HOME。阶段目录内的 `commands.jsonl` 逐条记录
+环境、argv、stdout/stderr 路径和整数退出码，`result.json` 记录阶段、应用清单、
+迭代次数和最终结果。cold 和 warm 阶段都在进入下一阶段前等待 latcd 队列及 worker
+清空，故障测试不会复制正在发布的 cache。stdout 和 stderr 继续按应用单独保存。
+共享设计文档固定 source、module、instance、generation、profile、current 和 JIT
+fallback 的含义，并在实现变化后同步更新。

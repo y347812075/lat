@@ -2,9 +2,11 @@ CC ?= cc
 X86_CC ?= $(CC)
 AR ?= ar
 HOST_ARCH := $(shell uname -m)
+AOT_V2_BUILD_ID := $(shell python3 scripts/compute-aot-v2-build-id.py ../..)
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=c11
 FUZZ_CC ?= clang
 CPPFLAGS += -Icfg/include
+CPPFLAGS += -DLATC_BUILD_ID=\"$(AOT_V2_BUILD_ID)\"
 CPPFLAGS += -Iformat -Ilat/include -Inative/include -Inative/format \
 	-Inative/runtime -Iaot-v2/include -Iaot-v2/runtime \
 	-Iaot-v2/compiler \
@@ -35,6 +37,8 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-aot-v2-complex-apps \
 		test-aot-v2-sanitize test-aot-v2-tsan test-aot-v2-libfuzzer \
 		test-aot-v2-source-sync test-prepare-runner-source \
+		test-aot-v2-build-id \
+		test-aot-v2-install \
 		sync-aot-v2-sources check-import
 
 
@@ -53,7 +57,7 @@ $(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/profile.o \
 $(BUILD)/latcd/latcd: $(BUILD)/latcd/main.o $(BUILD)/latcd/protocol.o \
 		$(BUILD)/aot-v2/compiler/module-inspect.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread -ldl
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -209,11 +213,11 @@ $(BUILD)/tests/x86-argv-env42: tests/x86-argv-env42.S
 
 $(BUILD)/tests/x86-static-hello: tests/x86-static-hello.S
 	@mkdir -p $(dir $@)
-	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+	$(X86_CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
 
 $(BUILD)/tests/x86-glibc-hello: tests/x86-glibc-hello.c
 	@mkdir -p $(dir $@)
-	$(CC) -O2 -static -no-pie -Wl,--build-id=none -o $@ $<
+	$(X86_CC) -O2 -static -no-pie -Wl,--build-id=none -o $@ $<
 
 $(BUILD)/tests/x86-signal-recover: tests/x86-signal-recover.c \
 		tests/x86-signal-sites.S
@@ -226,7 +230,7 @@ $(BUILD)/tests/x86-signal-recover.profile: \
 
 $(BUILD)/tests/x86-dynamic-hello: tests/x86-glibc-hello.c
 	@mkdir -p $(dir $@)
-	$(X86_CC) -O2 -pie -Wl,--build-id=none -o $@ $<
+	$(X86_CC) -O2 -fPIE -pie -Wl,--build-id=none -o $@ $<
 
 $(BUILD)/tests/x86-dlopen-plugin.so: tests/x86-dlopen-plugin.c \
 		tests/x86-dlopen-signal.S
@@ -319,7 +323,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  tests/test-aot-v2-dynamic-semantics.sh \
 	  tests/test-aot-v2-invalidation.sh tests/test-latcd-once.sh \
 	  tests/test-aot-v2-fork.sh \
-	  tests/fake-latc-invalid-module.sh tests/test-latcd-service.sh \
+	  tests/fake-latc-invalid-module.sh tests/fake-latc-fail.sh \
+	  tests/test-latcd-service.sh \
 	  tests/fake-latc-slow.sh tests/fake-latc-cpu.sh \
 	  tests/test-latcd-runner.sh tests/test-aot-v2-real-app.sh \
 	  tests/test-aot-v2-complex-apps.sh scripts/prepare-complex-rootfs.sh
@@ -962,6 +967,16 @@ test-aot-v2-source-sync:
 test-prepare-runner-source:
 	python3 tests/test-prepare-runner-source.py \
 	  scripts/prepare-runner-source.py $(abspath ../..)
+
+test-aot-v2-build-id:
+	python3 tests/test-aot-v2-build-id.py
+
+test-aot-v2-install:
+	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_ROOTFS)" \
+	  -a -n "$(X86_GUEST)" || \
+	  { echo "usage: make test-aot-v2-install INSTALL_PREFIX=... X86_ROOTFS=... X86_GUEST=..."; exit 2; }
+	sh tests/test-aot-v2-install.sh $(INSTALL_PREFIX) $(X86_ROOTFS) \
+	  $(X86_GUEST) $(BUILD)/aot-v2-install-test
 
 sync-aot-v2-sources:
 	python3 scripts/sync-aot-v2-sources.py

@@ -13,6 +13,7 @@ runtime_dir=$4
 guest=$5
 work=$6
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+export LATC_FAKE_REAL=$latc
 rm -rf "$work"
 mkdir -m 700 -p "$work"
 
@@ -70,6 +71,102 @@ stop_service()
     kill -TERM "$server_pid"
     wait "$server_pid"
 }
+
+owner_cache=$work/cache-owner
+owner_phase=$work/cache-owner-primary
+mkdir -m 700 "$owner_phase"
+owner_socket=$owner_phase/latcd.sock
+owner_stats=$owner_phase/stats.json
+"$latcd" --serve --socket "$owner_socket" --cache-dir "$owner_cache" \
+  --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+  --stats "$owner_stats" >"$owner_phase/server.stdout" \
+  2>"$owner_phase/server.stderr" &
+owner_pid=$!
+n=0
+while [ ! -S "$owner_socket" ] && kill -0 "$owner_pid" 2>/dev/null; do
+    n=$((n + 1))
+    [ "$n" -lt 500 ] || break
+    sleep 0.01
+done
+[ -S "$owner_socket" ]
+test "$(stat -c %a "$owner_cache/.latcd.lock")" = 600
+grep -q "^pid=$owner_pid$" "$owner_cache/.latcd.lock"
+
+second_phase=$work/cache-owner-second
+mkdir -m 700 "$second_phase"
+if "$latcd" --serve --socket "$second_phase/latcd.sock" \
+     --cache-dir "$owner_cache" --latc "$latc" --runner "$runner" \
+     --runtime-dir "$runtime_dir" >"$second_phase/server.stdout" \
+     2>"$second_phase/server.stderr"; then
+    echo "second latcd acquired an owned cache" >&2
+    exit 1
+fi
+grep -q 'cache is already owned by another latcd' \
+  "$second_phase/server.stderr"
+test ! -e "$second_phase/latcd.sock"
+test -z "$(find "$owner_cache" -maxdepth 1 -type f \
+  \( -name '*.so' -o -name '*.current' \) -print -quit)"
+
+kill -TERM "$owner_pid"
+wait "$owner_pid"
+normal_phase=$work/cache-owner-normal-recovery
+mkdir -m 700 "$normal_phase"
+normal_socket=$normal_phase/latcd.sock
+"$latcd" --serve --socket "$normal_socket" --cache-dir "$owner_cache" \
+  --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+  >"$normal_phase/server.stdout" 2>"$normal_phase/server.stderr" &
+normal_pid=$!
+n=0
+while [ ! -S "$normal_socket" ] && kill -0 "$normal_pid" 2>/dev/null; do
+    n=$((n + 1))
+    [ "$n" -lt 500 ] || break
+    sleep 0.01
+done
+[ -S "$normal_socket" ]
+kill -KILL "$normal_pid"
+wait "$normal_pid" 2>/dev/null || true
+
+kill_phase=$work/cache-owner-kill-recovery
+mkdir -m 700 "$kill_phase"
+kill_socket=$kill_phase/latcd.sock
+kill_stats=$kill_phase/stats.json
+"$latcd" --serve --socket "$kill_socket" --cache-dir "$owner_cache" \
+  --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+  --stats "$kill_stats" >"$kill_phase/server.stdout" \
+  2>"$kill_phase/server.stderr" &
+kill_pid=$!
+n=0
+while [ ! -S "$kill_socket" ] && kill -0 "$kill_pid" 2>/dev/null; do
+    n=$((n + 1))
+    [ "$n" -lt 500 ] || break
+    sleep 0.01
+done
+[ -S "$kill_socket" ]
+"$latcd" --submit --socket "$kill_socket" "$guest" \
+  >"$kill_phase/client"
+stats=$kill_stats
+wait_stats 's["compiled"] == 1 and s["active_jobs"] == 0 and s["cache_owner_pid"] > 0'
+find "$owner_cache" -maxdepth 1 -type f \
+  \( -name '*.so' -o -name '*.current' \) -print0 | sort -z | \
+  xargs -0 sha256sum >"$kill_phase/cache.before"
+test "$(wc -l <"$kill_phase/cache.before")" -ge 2
+data_second=$work/cache-owner-second-with-data
+mkdir -m 700 "$data_second"
+if "$latcd" --serve --socket "$data_second/latcd.sock" \
+     --cache-dir "$owner_cache" --latc "$latc" --runner "$runner" \
+     --runtime-dir "$runtime_dir" >"$data_second/server.stdout" \
+     2>"$data_second/server.stderr"; then
+    echo "second latcd acquired an owned populated cache" >&2
+    exit 1
+fi
+grep -q 'cache is already owned by another latcd' \
+  "$data_second/server.stderr"
+find "$owner_cache" -maxdepth 1 -type f \
+  \( -name '*.so' -o -name '*.current' \) -print0 | sort -z | \
+  xargs -0 sha256sum >"$kill_phase/cache.after"
+cmp "$kill_phase/cache.before" "$kill_phase/cache.after"
+kill -TERM "$kill_pid"
+wait "$kill_pid"
 
 start_service concurrent "$latc"
 cp "$guest" "$work/same-bytes.elf"
@@ -209,7 +306,7 @@ assert len(list(cache.glob(f"{source_sha}-*.so"))) == 2
 PY
 stop_service
 
-start_service negative /bin/false --negative-ms 500
+start_service negative "$script_dir/fake-latc-fail.sh" --negative-ms 500
 python3 - "$socket" <<'PY'
 import socket
 import struct

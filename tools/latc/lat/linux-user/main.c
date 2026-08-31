@@ -1334,6 +1334,10 @@ int main(int argc, char **argv, char **envp)
     unsigned long max_reserved_va;
     bool preserve_argv0;
 
+    if (argc == 2 && !strcmp(argv[1], "--latc-build-id")) {
+        puts(LATC_BUILD_ID);
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "--latc-print-x86-env-offsets")) {
 #define LATC_ENV_OFFSET(name, member) \
         printf("#define LATC_X86_ENV_%s_OFFSET %zu\n", name, \

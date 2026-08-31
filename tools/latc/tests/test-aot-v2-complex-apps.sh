@@ -25,6 +25,8 @@ subscriber_pid=
 socket=
 cache=
 stats=
+phase_home=
+export LATC_FAKE_REAL=$latc
 
 cleanup()
 {
@@ -73,7 +75,7 @@ test -f "$metadata_dir/source.json" || {
 
 rm -rf "$work"
 mkdir -m 700 -p "$work"
-mkdir -m 700 "$work/home" "$work/cache"
+mkdir -m 700 "$work/cache"
 cache=$work/cache
 socket=$work/latcd.sock
 stats=$work/latcd.json
@@ -82,11 +84,19 @@ run_guest()
 {
     stderr=$1
     shift
-    env HOME="$work/home" LC_ALL=C.UTF-8 LD_LIBRARY_PATH="$runtime_dir" \
+    command_log=$(dirname "$stderr")/commands.jsonl
+    status=0
+    setsid env HOME="$phase_home" LC_ALL=C.UTF-8 \
+      LD_LIBRARY_PATH="$runtime_dir" \
       LATC_DISABLE_PRETRANSLATE=1 LATC_COMPLEX_RUNNER="$runner" \
       LATC_COMPLEX_ROOTFS="$rootfs" $phase_environment \
       timeout -k 2s "$timeout_seconds" "$runner" -L "$rootfs" "$@" \
-      2>"$stderr"
+      2>"$stderr" || status=$?
+    python3 "$script_dir/record-complex-result.py" \
+      --exit-code "$status" --stderr "$stderr" \
+      --environment "$phase_environment" "$command_log" -- \
+      "$runner" -L "$rootfs" "$@"
+    return "$status"
 }
 
 run_python()
@@ -192,7 +202,7 @@ run_redis()
     start_redis()
     {
         suffix=$1
-        setsid env HOME="$work/home" LC_ALL=C.UTF-8 \
+        setsid env HOME="$phase_home" LC_ALL=C.UTF-8 \
           LD_LIBRARY_PATH="$runtime_dir" LATC_DISABLE_PRETRANSLATE=1 \
           LATC_COMPLEX_RUNNER="$runner" LATC_COMPLEX_ROOTFS="$rootfs" \
           $phase_environment "$runner" -L "$rootfs" \
@@ -241,7 +251,7 @@ run_redis()
       "$rootfs/usr/bin/redis-cli" -h 127.0.0.1 -p "$redis_port" \
       get counter)" = 4
 
-    setsid env HOME="$work/home" LC_ALL=C.UTF-8 \
+    setsid env HOME="$phase_home" LC_ALL=C.UTF-8 \
       LD_LIBRARY_PATH="$runtime_dir" LATC_DISABLE_PRETRANSLATE=1 \
       LATC_COMPLEX_RUNNER="$runner" LATC_COMPLEX_ROOTFS="$rootfs" \
       $phase_environment timeout -k 1s 5s "$runner" -L "$rootfs" \
@@ -361,6 +371,8 @@ run_fault_python()
     fault_environment=$2
     fault_dir=$work/faults/$label
     mkdir "$fault_dir"
+    phase_home=$fault_dir/home
+    mkdir -m 700 "$phase_home"
     phase_environment=$fault_environment
     printf '%s\n' "$phase_environment" >"$fault_dir/environment.txt"
     run_python "$fault_dir"
@@ -404,7 +416,8 @@ run_faults()
 
     compiler_cache=$work/faults/compiler-failure-cache
     mkdir -m 700 "$compiler_cache"
-    start_fault_daemon compiler-failure /bin/false "$compiler_cache"
+    start_fault_daemon compiler-failure "$script_dir/fake-latc-fail.sh" \
+        "$compiler_cache"
     run_fault_python compiler-failure \
       "LATX_AOT=0 LATX_AOT_V2_CACHE_DIR=$compiler_cache LATX_AOT_V2_LATCD_SOCKET=$fault_socket LATX_AOT_V2_REPORT=1 LATX_AOT_V2_MAX_SUBMISSIONS=1"
     n=0
@@ -422,15 +435,20 @@ PY
     done
     stop_fault_daemon
 
-    readonly_cache=$work/faults/readonly-cache-dir
-    mkdir -m 500 "$readonly_cache"
+    readonly_cache=/proc/latc-aot-v2-readonly-$$
     start_fault_daemon readonly-cache "$latc" "$readonly_cache" || true
     run_fault_python readonly-cache \
       "LATX_AOT=0 LATX_AOT_V2_CACHE_DIR=$readonly_cache LATX_AOT_V2_LATCD_SOCKET=$work/readonly-cache.sock LATX_AOT_V2_REPORT=1 LATX_AOT_V2_MAX_SUBMISSIONS=1"
     stop_fault_daemon
-    chmod 700 "$readonly_cache"
 
     printf 'complex fault fallbacks: PASS cases=5\n'
+    python3 - "$work/faults/result.json" <<'PY'
+import json
+import sys
+
+json.dump({"cases": 5, "exit_code": 0, "phase": "faults"},
+          open(sys.argv[1], "w"), sort_keys=True)
+PY
 }
 
 run_phase()
@@ -443,6 +461,8 @@ run_phase()
         run_faults
         return
     fi
+    phase_home=$phase_root/home
+    mkdir -m 700 "$phase_home"
     case "$phase" in
       jit)
         phase_environment='LATX_AOT=0'
@@ -488,6 +508,19 @@ run_phase()
             return 1
         }
     fi
+    python3 - "$phase_root/result.json" "$phase" "$iteration" \
+      "$((phase_finished - phase_started))" <<'PY'
+import json
+import sys
+
+json.dump({
+    "applications": ["python", "git", "sqlite", "redis"],
+    "elapsed_seconds": int(sys.argv[4]),
+    "exit_code": 0,
+    "iterations": int(sys.argv[3]),
+    "phase": sys.argv[2],
+}, open(sys.argv[1], "w"), sort_keys=True)
+PY
     printf 'complex phase %s: PASS iterations=%s elapsed=%ss\n' \
       "$phase" "$iteration" "$((phase_finished - phase_started))"
 }
@@ -511,7 +544,7 @@ esac
 
 for phase in $phases; do
     run_phase "$phase"
-    if [ "$phase" = cold ]; then
+    if [ "$phase" = cold ] || [ "$phase" = warm ]; then
         wait_for_compiler
     fi
 done

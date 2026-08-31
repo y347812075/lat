@@ -37,6 +37,16 @@ genh = []
 target_dirs = config_host['TARGET_DIRS'].split()
 
 python = import('python').find_installation()
+latc_build_id = run_command(
+  python,
+  meson.current_source_dir() / 'tools/latc/scripts/compute-aot-v2-build-id.py',
+  meson.current_source_dir(),
+  check: true,
+).stdout().strip()
+add_project_arguments(
+  '-DLATC_BUILD_ID="' + latc_build_id + '"',
+  language: ['c', 'cpp', 'objc'],
+)
 
 supported_oses = ['linux']
 supported_cpus = ['x86', 'x86_64', 'mips', 'mips64', 'loongarch64']
@@ -515,6 +525,59 @@ if 'CONFIG_LATX' in config_host
   )
   lat_aot_runtime_dep = declare_dependency(link_with: lat_aot_runtime)
 
+  latc_inc = include_directories(
+    'include',
+    'tools/latc/cfg/include',
+    'tools/latc/format',
+    'tools/latc/native/include',
+    'tools/latc/native/format',
+    'tools/latc/aot-v2/include',
+    'tools/latc/aot-v2/runtime',
+    'tools/latc/aot-v2/compiler',
+  )
+  latc_helper_dir = get_option('prefix') / get_option('libexecdir') / 'latc'
+  latc = executable(
+    'latc',
+    files(
+      'tools/latc/compiler/latc.c',
+      'tools/latc/compiler/profile.c',
+      'tools/latc/aot-v2/compiler/module-pack.c',
+      'tools/latc/aot-v2/compiler/module-inspect.c',
+      'tools/latc/aot-v2/runtime/elf-validate.c',
+      'tools/latc/format/bundle.c',
+      'tools/latc/native/format/native-image.c',
+      'tools/latc/cfg/src/common.c',
+      'tools/latc/cfg/src/elf_image.c',
+      'tools/latc/cfg/src/function_symbols.c',
+      'tools/latc/cfg/src/ijmp_resolve.c',
+      'tools/latc/cfg/src/cfg_decoder.c',
+      'tools/latc/cfg/src/cfg_program.c',
+    ),
+    include_directories: latc_inc,
+    dependencies: [glib],
+    c_args: [
+      '-DLATC_INSTALLED_SCRIPT_DIR="' + latc_helper_dir / 'scripts' + '"',
+    ],
+    install: true,
+  )
+
+  install_data(
+    'tools/latc/scripts/compile-aot-v2-module.sh',
+    'tools/latc/scripts/compile-native-image.sh',
+    'tools/latc/scripts/compile-aot.sh',
+    'tools/latc/scripts/link-aot-v2-module.sh',
+    install_dir: latc_helper_dir / 'scripts',
+    install_mode: 'rwxr-xr-x',
+  )
+  install_data(
+    'tools/latc/aot-v2/include/lat-aot-v2.h',
+    install_dir: latc_helper_dir / 'aot-v2/include',
+  )
+  install_data(
+    'tools/latc/aot-v2/compiler/module.map',
+    install_dir: latc_helper_dir / 'aot-v2/compiler',
+  )
+
   latcd_inc = include_directories(
     'tools/latc/aot-v2/include',
     'tools/latc/aot-v2/compiler',
@@ -529,7 +592,7 @@ if 'CONFIG_LATX' in config_host
       'tools/latc/aot-v2/runtime/elf-validate.c',
     ),
     include_directories: latcd_inc,
-    dependencies: [glib, dependency('threads')],
+    dependencies: [glib, libdl, dependency('threads')],
     install: true,
   )
 endif

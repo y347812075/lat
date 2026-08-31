@@ -615,9 +615,12 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
   and never unlinks or patches AOT code.
 - AOT syscalls use the existing LAT `linux-user/syscall.c`; the runtime library
   does not carry a second x86 syscall implementation.
-- `fork()` retains immutable modules and instances, discards other threads'
-  execution contexts, clears jump caches, and reinitializes locks, epochs, and
-  the compiler-service connection. `execve()` starts a new registry.
+- A successful `fork()` keeps the parent's AOT state unchanged, but the child
+  marks inherited AOT state unusable before returning to guest code. The child
+  clears its current module and jump cache, stops module discovery and signal
+  PC-map lookup, closes the inherited compiler-service connection, and runs
+  JIT-only until `execve()`. `execve()` replaces the host process and therefore
+  starts with a newly initialized registry.
 - Profile updates are merged and debounced. Recompilation requires a coverage
   or execution threshold, or an explicit refresh. Artifacts are immutable and
   selected through an atomic `current` index.
@@ -629,3 +632,28 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
 - Given identical source, codegen, CPU variant, options, and profile digest,
   compilation must produce a byte-identical ELF without timestamps, temporary
   paths, process addresses, or random build IDs.
+
+## 14. Current state names and ownership
+
+- **source** is the complete x86 ELF identified by SHA-256. A pathname is only
+  diagnostic and never identifies cached code.
+- **module** is one immutable AOT ELF for a source, codegen identity and optional
+  merged profile. Host module text stays mapped until process exit.
+- **instance** is one guest mapping of a module at a specific load bias. It owns
+  the guest executable ranges, host text/PC map and dispatch context used by
+  normal lookup and signal recovery.
+- **generation** starts at one for a registered instance. Deactivation removes
+  the instance from the published range snapshot, clears `active`, increments
+  generation, and invalidates dispatch entries. A cached target is usable only
+  while its saved instance, generation and translation flags still match.
+- **profile** is a per-source set of observed guest targets. `latcd` serializes
+  merges for one source and uses the merged file's digest in a versioned module
+  name.
+- **current** is `<source-sha>.current`, a small JSON index naming one immutable
+  module and its source/codegen identity. `latcd` writes it to a private
+  temporary file, changes it to read-only, calls `fsync()`, atomically renames
+  it over the old index, then synchronizes the cache directory. The cache owner
+  lock prevents a second latcd from publishing concurrently.
+- **JIT fallback** means normal LAT translation after no active, matching AOT
+  target can be proven. A cache miss never makes an existing process adopt a
+  newly compiled module; later processes or later module loads can select it.

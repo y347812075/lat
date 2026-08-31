@@ -13,6 +13,7 @@ runtime_dir=$4
 guest=$5
 work=$6
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+export LATC_FAKE_REAL=$latc
 rm -rf "$work"
 mkdir -m 700 -p "$work"
 
@@ -37,7 +38,7 @@ start_once()
 }
 
 failure_cache=$work/failure-cache
-start_once "$work/failure.sock" "$failure_cache" /bin/false
+start_once "$work/failure.sock" "$failure_cache" "$script_dir/fake-latc-fail.sh"
 if "$latcd" --submit --socket "$work/failure.sock" "$guest" \
      >"$work/failure.client" 2>&1; then
     echo "latcd accepted compiler failure" >&2
@@ -52,7 +53,7 @@ test -z "$(find "$failure_cache" -maxdepth 1 -type f -name '*.so' -print -quit)"
 test -z "$(find "$failure_cache/.tmp" -mindepth 1 -maxdepth 1 -print -quit)"
 
 bad_cache=$work/bad-cache
-start_once "$work/bad.sock" "$bad_cache" /bin/false
+start_once "$work/bad.sock" "$bad_cache" "$script_dir/fake-latc-fail.sh"
 if "$latcd" --submit --socket "$work/bad.sock" /etc/hosts \
      >"$work/bad.client" 2>&1; then
     echo "latcd accepted non-ELF source" >&2
@@ -66,7 +67,7 @@ grep -q '^status=2$' "$work/bad.client"
 test -z "$(find "$bad_cache/.tmp" -mindepth 1 -maxdepth 1 -print -quit)"
 
 writable_cache=$work/writable-cache
-start_once "$work/writable.sock" "$writable_cache" /bin/false
+start_once "$work/writable.sock" "$writable_cache" "$script_dir/fake-latc-fail.sh"
 python3 - "$work/writable.sock" "$guest" <<'PY'
 import array
 import os
@@ -139,20 +140,26 @@ LATX_AOT_V2_STRICT=1 \
 LATX_AOT_V2_REPORT=1 \
 LATC_DISABLE_PRETRANSLATE=1 \
 LATC_STRICT_AOT=1 \
+LATC_STATS_OUT="$work/guest.stats.json" \
   timeout 60 "$runner" "$guest" >"$work/guest.stdout" \
   2>"$work/guest.stderr"
 grep -q 'module=registered' "$work/guest.stderr"
-grep -Eq 'aot_lookups=[1-9][0-9]* jit_fallbacks=0' "$work/guest.stderr"
-grep -q 'compat_tb_allocations=0' "$work/guest.stderr"
+python3 - "$work/guest.stats.json" <<'PY'
+import json
+import sys
 
-start_once "$work/hit.sock" "$cache" /bin/false
+stats = json.load(open(sys.argv[1]))
+assert stats["runtime_file_tb_gen_attempts"] == 0, stats
+PY
+
+start_once "$work/hit.sock" "$cache" "$script_dir/fake-latc-fail.sh"
 "$latcd" --submit --socket "$work/hit.sock" "$guest" >"$work/hit.client"
 wait "$server_pid"
 grep -q 'cache hit:' "$work/hit.client"
 test -z "$(find "$cache/.tmp" -mindepth 1 -maxdepth 1 -print -quit)"
 
 chmod 0644 "$module"
-start_once "$work/writable-module.sock" "$cache" /bin/false
+start_once "$work/writable-module.sock" "$cache" "$script_dir/fake-latc-fail.sh"
 if "$latcd" --submit --socket "$work/writable-module.sock" "$guest" \
      >"$work/writable-module.client" 2>&1; then
     echo "latcd accepted externally writable cached module" >&2

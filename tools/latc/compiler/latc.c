@@ -4,6 +4,7 @@
 #include "native-image.h"
 #include "module-pack.h"
 #include "module-inspect.h"
+#include "latc-build-id.h"
 
 #include <errno.h>
 #include <glib.h>
@@ -30,6 +31,7 @@ static void usage(const char *name)
             " --runtime-dir DIRECTORY [--profile FILE]\n",
             name);
     fprintf(stderr, "  %s inspect-module [--json] MODULE\n", name);
+    fprintf(stderr, "  %s build-id\n", name);
 }
 
 static int inspect_native(const char *path, int json)
@@ -131,10 +133,15 @@ static int compile_module(const char *input, const char *output,
         g_clear_error(&gerror);
         return 1;
     }
+#ifdef LATC_INSTALLED_SCRIPT_DIR
+    gchar *script = g_build_filename(LATC_INSTALLED_SCRIPT_DIR,
+                                     "compile-aot-v2-module.sh", NULL);
+#else
     gchar *build_dir = g_path_get_dirname(executable);
     gchar *tool_dir = g_path_get_dirname(build_dir);
     gchar *script = g_build_filename(tool_dir, "scripts",
                                      "compile-aot-v2-module.sh", NULL);
+#endif
     pid_t child = fork();
     if (child == 0) {
         if (profile) {
@@ -149,8 +156,10 @@ static int compile_module(const char *input, const char *output,
         _exit(127);
     }
     g_free(script);
+#ifndef LATC_INSTALLED_SCRIPT_DIR
     g_free(tool_dir);
     g_free(build_dir);
+#endif
     g_free(executable);
     if (child < 0) {
         fprintf(stderr, "latc: cannot start module compiler: %s\n",
@@ -275,6 +284,10 @@ static int analyze(const char *path, int json)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "build-id") == 0) {
+        puts(LATC_BUILD_ID);
+        return 0;
+    }
     if (argc < 3) {
         usage(argv[0]);
         return 2;
