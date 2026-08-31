@@ -4,6 +4,8 @@
 import argparse
 import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 from aot_v2_sources import load_runner_overlays
@@ -49,9 +51,11 @@ def main() -> None:
         destination = source / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(adapter, destination)
-    manifest = json.loads((Path(__file__).resolve().parents[1] /
-                           "lat-import.json").read_text())
-    build_id = f"lat-{manifest['source_commit']}-x64-v3"
+    build_id_script = latc_root / "scripts/compute-aot-v2-build-id.py"
+    build_id = subprocess.check_output(
+        [sys.executable, str(build_id_script), str(latc_root.parents[1])],
+        text=True,
+    ).strip()
     (source / "include/latc-build-id.h").write_text(
         "#ifndef LATC_BUILD_ID_H\n#define LATC_BUILD_ID_H\n"
         f"#define LATC_BUILD_ID \"{build_id}\"\n#endif\n"

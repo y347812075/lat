@@ -52,6 +52,15 @@ def main() -> int:
             assert (staging / relative).read_bytes() == (
                 repository / relative
             ).read_bytes(), relative
+        build_id = subprocess.check_output(
+            [sys.executable,
+             str(repository / "tools/latc/scripts/compute-aot-v2-build-id.py"),
+             str(repository)],
+            text=True,
+        ).strip()
+        assert f'#define LATC_BUILD_ID "{build_id}"' in (
+            staging / "include/latc-build-id.h"
+        ).read_text()
 
         without = create_staging(Path(temp) / "source-without-aot-v2")
         completed = prepare(script, without, "--without-aot-v2")

@@ -24,6 +24,7 @@
 
     {"source": "tools/latc/aot-v2/include/lat-aot-v2.h", "target": "include/lat-aot-v2.h"},
     {"source": "tools/latc/aot-v2/include/latcd-protocol.h", "target": "include/latcd-protocol.h"},
+    {"source": "tools/latc/aot-v2/include/latc-build-id.h", "target": "include/latc-build-id.h"},
     {"source": "tools/latc/aot-v2/runtime/registry.h", "target": "include/registry.h"},
     {"source": "tools/latc/aot-v2/runtime/module-loader.h", "target": "include/module-loader.h"},
     {"source": "tools/latc/aot-v2/runtime/guest-elf-map.c", "target": "linux-user/guest-elf-map.c"},

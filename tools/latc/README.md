@@ -341,6 +341,47 @@ exist only in the minimal imported tree and remain directly maintained there.
 `check-import` prints both the generated path and its canonical source when
 they differ.
 
+## Main build and installation
+
+On a LoongArch host, the main Meson build installs one matching AOT v2
+toolchain. Configure an explicit prefix, build, and install it as one unit:
+
+```sh
+mkdir build-aot-v2 && cd build-aot-v2
+../configure --target-list=x86_64-linux-user --enable-latx \
+  --optimize-O1 --disable-docs --prefix=/path/to/prefix
+ninja
+meson install
+```
+
+The prefix contains `bin/latx-x86_64`, `bin/latc`, `bin/latcd`,
+`lib/liblat-aot-runtime.so.2`, and the compiler helper files below
+`libexec/latc`. All four programs and libraries embed the same deterministic
+64-character build identity. `latcd` checks the compiler, runner, runtime ABI,
+and runtime identity before creating a socket, writing cache files, or running
+a compile job. A mismatch is reported and the application can continue with
+its normal JIT fallback.
+
+Run the installation-tree integration test with an x86 rootfs and a dynamic
+x86 guest. The test does not use binaries or helper scripts from the build
+directory:
+
+```sh
+make -C tools/latc test-aot-v2-install \
+  INSTALL_PREFIX=/path/to/prefix \
+  X86_ROOTFS=/path/to/x86-rootfs \
+  X86_GUEST=/path/to/x86-rootfs/usr/bin/echo
+```
+
+Each `latcd --serve` or `latcd --once` process takes a non-blocking exclusive
+lock on `<cache>/.latcd.lock` before it creates a socket, temporary file,
+module, profile, or `current` index. A second process using the same cache exits
+with `cache is already owned by another latcd`; use a separate cache directory
+if both daemons must run. The lock descriptor remains open for the daemon's
+whole lifetime. The kernel releases it after either a normal exit or a crash,
+so the text left in `.latcd.lock` is diagnostic information, not a PID-file
+liveness check. Service statistics include `cache_owner_pid`.
+
 Analyze all twelve SPECint2000 integer executables with:
 
 ```sh

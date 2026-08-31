@@ -1,6 +1,7 @@
 LAT_AOT_RUNTIME_2.0 {
     global:
         lat_aot_runtime_abi_version;
+        lat_aot_runtime_build_id;
         lat_aot_runtime_bind_syscall;
         lat_aot_runtime_bind_targets;
         lat_aot_runtime_raise_syscall;

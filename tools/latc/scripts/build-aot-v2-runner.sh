@@ -12,6 +12,7 @@ case "$build_dir" in /*) ;; *) build_dir="$(pwd)/$build_dir";; esac
 staging_dir="${build_dir}.source"
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 latc_dir=$(dirname "$script_dir")
+build_id=$(python3 "$script_dir/compute-aot-v2-build-id.py" "$source_dir")
 
 rm -rf "$build_dir" "$staging_dir"
 mkdir -p "$staging_dir"
@@ -21,6 +22,7 @@ python3 "$script_dir/prepare-runner-source.py" "$staging_dir"
 mkdir -p "$build_dir"
 
 "${CC:-cc}" -I"$latc_dir/aot-v2/include" \
+  -DLATC_BUILD_ID=\"$build_id\" \
   -I"$latc_dir/aot-v2/runtime" -O2 -fPIC -shared \
   -Wl,-soname,liblat-aot-runtime.so.2 -Wl,-z,defs \
   -Wl,-z,now -Wl,-z,relro \

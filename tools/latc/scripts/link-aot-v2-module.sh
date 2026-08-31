@@ -28,7 +28,7 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
       -Wl,--unique=.rodata.lat.guest \
       -Wl,--unique=.rodata.lat.map \
       -Wl,--unique=.data.rel.ro.lat.module \
-      -Wl,--version-script="$script_dir/../aot-v2/tests/module.map" \
+      -Wl,--version-script="$script_dir/../aot-v2/compiler/module.map" \
       -Wl,--build-id=sha1 -L"$runtime_dir" -Wl,--no-as-needed \
       -l:liblat-aot-runtime.so.2 -o "$output" module-meta.o module-text.o
 )

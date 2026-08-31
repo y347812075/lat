@@ -35,6 +35,12 @@
 ## 复杂应用
 
 - Python、Git、SQLite WAL 和 Redis BGSAVE/restart 在 JIT、冷 AOT、暖 AOT 下通过。
+- 每个阶段使用独立目录和独立 `HOME`。每个 guest 命令由 `setsid` 建立新的进程组，
+  并向该阶段的 `commands.jsonl` 写入命令、环境、整数退出码、stdout/stderr 路径和
+  `new_process_group=true`。每个阶段另写 `result.json`，记录应用、迭代次数、耗时和
+  阶段退出码。
+- Redis 启动探测允许在服务就绪前返回非零；这些尝试同样记录在 `commands.jsonl`，
+  但必须在阶段最终成功前得到 `PONG`。冷、暖阶段结束后必须等待 latcd 的
+  `active_jobs=0`、`queue_depth=0`，才可进入下一阶段或故障测试。
 - latcd 缺失、编译失败、current 损坏、module 损坏和只读 cache 时输出与 JIT 金
   标准一致，无崩溃、死锁或遗留进程。
-
