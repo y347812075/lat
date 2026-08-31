@@ -323,6 +323,24 @@ The script treats `/path/to/full/lat` as read-only. It creates a disposable
 `/path/to/build-latc-runner.source` staging tree and applies the local adapter
 there. Delete both build directories after copying out `latx-x86_64`.
 
+`aot-v2-source-map.json` records every canonical AOT v2 integration source and
+its generated copy. It covers the main LAT to `tools/latc/lat` copies, the
+`tools/latc/aot-v2` runtime files copied into the main runner tree, and the
+shared native headers. Generated files marked in `lat-local.json` keep the
+minimal imported LAT tree complete; do not edit any mapped target directly.
+Regenerate and verify all mapped targets with:
+
+```sh
+make -C tools/latc sync-aot-v2-sources
+make -C tools/latc check-import
+```
+
+`prepare-runner-source.py` reads the same source map and copies its canonical
+files into a staging runner. Files in `lat-local.json` without `generated=true`
+exist only in the minimal imported tree and remain directly maintained there.
+`check-import` prints both the generated path and its canonical source when
+they differ.
+
 Analyze all twelve SPECint2000 integer executables with:
 
 ```sh

@@ -2,14 +2,17 @@
   "added": [
     {
       "path": "lat/include/latc-bundle-format.h",
+      "generated": true,
       "reason": "shared stable on-disk bundle layout"
     },
     {
       "path": "lat/linux-user/latc-bundle-loader.h",
+      "generated": true,
       "reason": "self-contained runner argument injection interface"
     },
     {
       "path": "lat/linux-user/latc-bundle-loader.c",
+      "generated": true,
       "reason": "verify and restore embedded x86 guest, CFG, and LAT AOT data"
     },
     {
@@ -22,18 +25,22 @@
     },
     {
       "path": "lat/target/i386/latx/sbt/latc_native_export.c",
+      "generated": true,
       "reason": "export LAT AOT code into the stable standalone image format and reject invalid executable targets"
     },
     {
       "path": "lat/target/i386/latx/sbt/latc_native_export.h",
+      "generated": true,
       "reason": "native image exporter interface"
     },
     {
       "path": "lat/include/latc-aot-v2-runner.h",
+      "generated": true,
       "reason": "AOT v2 module lookup adapter interface for the disposable LAT runner"
     },
     {
       "path": "lat/linux-user/latc-aot-v2-runner.c",
+      "generated": true,
       "reason": "load per-ELF AOT v2 modules, track mappings, and submit missing source FDs to latcd"
     },
     {
@@ -44,58 +51,72 @@
   "modified": [
     {
       "path": "lat/linux-user/main.c",
+      "generated": true,
       "reason": "detect bundles, pretranslate CFG input, and support compile-time AOT emission"
     },
     {
       "path": "lat/linux-user/syscall.c",
+      "generated": true,
       "reason": "share x86-64 syscall ABI definitions and drain deferred AOT v2 ELF mappings after releasing the outer mmap lock"
     },
     {
       "path": "lat/linux-user/elfload.c",
+      "generated": true,
       "reason": "disable the runner-provided guest vDSO while a static AOT v2 module is selected"
     },
     {
       "path": "lat/linux-user/mmap.c",
+      "generated": true,
       "reason": "notify AOT v2 about successful mappings and unmaps after releasing the mmap lock"
     },
     {
       "path": "lat/linux-user/signal.c",
+      "generated": true,
       "reason": "recognize synchronous exceptions raised inside AOT v2 module text before restoring guest state from the generated PC map"
     },
     {
       "path": "lat/accel/tcg/translate-all.c",
+      "generated": true,
       "reason": "count and reject runtime TB generation for strict AOT verification"
     },
     {
       "path": "lat/target/i386/latx/sbt/aot_recover_tb.c",
+      "generated": true,
       "reason": "provide opt-in diagnostics for static AOT loading"
     },
     {
       "path": "lat/target/i386/latx/sbt/aot.c",
+      "generated": true,
       "reason": "provide opt-in diagnostics for static AOT coverage"
     },
     {
       "path": "lat/accel/tcg/cpu-exec.c",
+      "generated": true,
       "reason": "query the AOT v2 module registry after a normal TB lookup miss"
     },
     {
       "path": "lat/target/i386/latx/latx-config.c",
+      "generated": true,
       "reason": "allocate per-thread guest address slots and a module-aware AOT v2 indirect jump cache"
     },
     {
       "path": "lat/include/exec/fasttb.h",
+      "generated": true,
       "reason": "define generation-checked AOT v2 fast jump entries alongside the original LAT cache"
     },
     {
       "path": "lat/target/i386/cpu.h",
+      "generated": true,
       "reason": "hold the per-thread AOT v2 fast cache and active module context"
     },
     {
       "path": "lat/target/i386/latx/include/lsenv.h",
+      "generated": true,
       "reason": "expose AOT v2 cache fields to generated indirect jump code"
     },
     {
       "path": "lat/target/i386/latx/translator/translate.c",
+      "generated": true,
       "reason": "check module context and generation before an AOT v2 indirect fast jump"
     }
   ]

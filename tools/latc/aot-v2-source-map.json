@@ -1,0 +1,44 @@
+{
+  "generated": [
+    {"source": "include/latc-bundle-format.h", "target": "tools/latc/lat/include/latc-bundle-format.h"},
+    {"source": "linux-user/latc-bundle-loader.h", "target": "tools/latc/lat/linux-user/latc-bundle-loader.h"},
+    {"source": "linux-user/latc-bundle-loader.c", "target": "tools/latc/lat/linux-user/latc-bundle-loader.c"},
+    {"source": "target/i386/latx/sbt/latc_native_export.c", "target": "tools/latc/lat/target/i386/latx/sbt/latc_native_export.c"},
+    {"source": "target/i386/latx/sbt/latc_native_export.h", "target": "tools/latc/lat/target/i386/latx/sbt/latc_native_export.h"},
+    {"source": "include/latc-aot-v2-runner.h", "target": "tools/latc/lat/include/latc-aot-v2-runner.h"},
+    {"source": "linux-user/latc-aot-v2-runner.c", "target": "tools/latc/lat/linux-user/latc-aot-v2-runner.c"},
+    {"source": "linux-user/main.c", "target": "tools/latc/lat/linux-user/main.c"},
+    {"source": "linux-user/syscall.c", "target": "tools/latc/lat/linux-user/syscall.c"},
+    {"source": "linux-user/elfload.c", "target": "tools/latc/lat/linux-user/elfload.c"},
+    {"source": "linux-user/mmap.c", "target": "tools/latc/lat/linux-user/mmap.c"},
+    {"source": "linux-user/signal.c", "target": "tools/latc/lat/linux-user/signal.c"},
+    {"source": "accel/tcg/translate-all.c", "target": "tools/latc/lat/accel/tcg/translate-all.c"},
+    {"source": "target/i386/latx/sbt/aot_recover_tb.c", "target": "tools/latc/lat/target/i386/latx/sbt/aot_recover_tb.c"},
+    {"source": "target/i386/latx/sbt/aot.c", "target": "tools/latc/lat/target/i386/latx/sbt/aot.c"},
+    {"source": "accel/tcg/cpu-exec.c", "target": "tools/latc/lat/accel/tcg/cpu-exec.c"},
+    {"source": "target/i386/latx/latx-config.c", "target": "tools/latc/lat/target/i386/latx/latx-config.c"},
+    {"source": "include/exec/fasttb.h", "target": "tools/latc/lat/include/exec/fasttb.h"},
+    {"source": "target/i386/cpu.h", "target": "tools/latc/lat/target/i386/cpu.h"},
+    {"source": "target/i386/latx/include/lsenv.h", "target": "tools/latc/lat/target/i386/latx/include/lsenv.h"},
+    {"source": "target/i386/latx/translator/translate.c", "target": "tools/latc/lat/target/i386/latx/translator/translate.c"},
+
+    {"source": "tools/latc/aot-v2/include/lat-aot-v2.h", "target": "include/lat-aot-v2.h"},
+    {"source": "tools/latc/aot-v2/include/latcd-protocol.h", "target": "include/latcd-protocol.h"},
+    {"source": "tools/latc/aot-v2/runtime/registry.h", "target": "include/registry.h"},
+    {"source": "tools/latc/aot-v2/runtime/module-loader.h", "target": "include/module-loader.h"},
+    {"source": "tools/latc/aot-v2/runtime/guest-elf-map.c", "target": "linux-user/guest-elf-map.c"},
+    {"source": "tools/latc/aot-v2/runtime/guest-elf-map.h", "target": "linux-user/guest-elf-map.h"},
+    {"source": "tools/latc/aot-v2/runtime/latcd-client.c", "target": "linux-user/latcd-client.c"},
+    {"source": "tools/latc/aot-v2/runtime/latcd-client.h", "target": "linux-user/latcd-client.h"},
+
+    {"source": "tools/latc/native/include/lat-native-image.h", "target": "lat-native-image.h"},
+    {"source": "tools/latc/native/include/lat-native-image.h", "target": "include/lat-native-image.h"},
+    {"source": "tools/latc/native/include/latc-x86-syscall-abi.h", "target": "include/latc-x86-syscall-abi.h"}
+  ],
+  "runner_variants": {
+    "without-aot-v2": {
+      "source": "tools/latc/lat/linux-user/latc-aot-v2-runner-stub.c",
+      "target": "linux-user/latc-aot-v2-runner.c"
+    }
+  }
+}

@@ -27,9 +27,13 @@ generation 和 PC map 作为同一生命周期记录发布。dispatch、signal �
 
 ## 源码唯一来源
 
-保留 `tools/latc` 的最小 imported LAT 树，不复制完整仓库。AOT v2 新增实现指定
-一个规范位置，主 LAT 与隔离 runner 通过构建输入或可重复生成步骤使用它。任何
-生成副本都必须带来源说明，并由检查脚本比较内容；生成文件不接受手工修改。
+保留 `tools/latc` 的最小 imported LAT 树，不复制完整仓库。主 LAT 路径是 AOT v2
+集成实现的规范位置。`aot-v2-source-map.json` 记录规范文件与生成副本的关系，
+同时覆盖主 LAT、`tools/latc/lat` imported 树、AOT runtime 和 native 公共头文件；
+隔离 runner staging 读取同一清单。`lat-local.json` 只标记 imported 树中的生成
+文件。只有 `latc-verify` 和 AOT v2 stub 等主 LAT 没有的独立文件继续在 imported
+树维护。`sync-aot-v2-sources.py` 可重复生成副本，`check-import` 强制逐字节一致；
+检查失败同时打印生成文件和规范来源，禁止把手工修改后的副本带入构建。
 
 ## 构建与安装
 
@@ -49,4 +53,3 @@ latcd 打开 cache 后立即取得跨进程独占锁，并在整个服务期持�
 复杂应用每个阶段使用独立目录和进程组，结果记录命令、整数退出码、stdout 和
 stderr。共享设计文档固定 source、module、instance、generation、profile、
 current 和 JIT fallback 的含义，并在实现变化后同步更新。
-
