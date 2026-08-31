@@ -16,8 +16,8 @@ work=$7
 run_timeout=$8
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 rm -rf "$work"
-mkdir -p "$work/empty-cache" "$work/hot-cache" "$work/mixed-cache" \
-  "$work/race-cache"
+mkdir -p "$work/empty-cache" "$work/hot-cache" "$work/loader-cache" \
+  "$work/libc-cache" "$work/mixed-cache" "$work/race-cache"
 
 interp=$(readlink -f "$rootfs/lib64/ld-linux-x86-64.so.2")
 libc=$(readlink -f "$rootfs/lib/x86_64-linux-gnu/libc.so.6")
@@ -54,9 +54,11 @@ plugin_sha=$(sha256sum "$plugin" | awk '{print $1}')
 cp "$work/plugin.so" "$work/race-cache/$plugin_sha.so"
 compile_module "$interp" "$work/interp.so"
 interp_sha=$(sha256sum "$interp" | awk '{print $1}')
+cp "$work/interp.so" "$work/loader-cache/$interp_sha.so"
 cp "$work/interp.so" "$work/mixed-cache/$interp_sha.so"
 compile_module "$libc" "$work/libc.so"
 libc_sha=$(sha256sum "$libc" | awk '{print $1}')
+cp "$work/libc.so" "$work/libc-cache/$libc_sha.so"
 cp "$work/libc.so" "$work/mixed-cache/$libc_sha.so"
 
 run_guest()
@@ -64,12 +66,19 @@ run_guest()
     cache=$1
     output=$2
     error=$3
+    rc_file=${output%.out}.rc
     shift 3
-    env LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-      LATX_AOT=0 LATX_AOT_V2_CACHE_DIR="$cache" \
-      LATX_AOT_V2_REPORT=1 \
-      "$@" timeout -k 2s "$run_timeout" "$runner" -L "$rootfs" \
-      "$guest" >"$output" 2>"$error"
+    if env LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        LATX_AOT=0 LATX_AOT_V2_CACHE_DIR="$cache" \
+        LATX_AOT_V2_REPORT=1 \
+        "$@" timeout -k 2s "$run_timeout" "$runner" -L "$rootfs" \
+        "$guest" >"$output" 2>"$error"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    printf '%s\n' "$rc" >"$rc_file"
+    return "$rc"
 }
 
 printf 'dlopen loads=100 signals=100 concurrent_invalidation=0 result=40 moved=1\n' \
@@ -77,6 +86,24 @@ printf 'dlopen loads=100 signals=100 concurrent_invalidation=0 result=40 moved=1
 run_guest "$work/empty-cache" "$work/cold.out" "$work/cold.err"
 cmp "$work/expected" "$work/cold.out"
 test "$(grep -c 'discovered ELF.*module=missing' "$work/cold.err")" -ge 102
+
+run_guest "$work/loader-cache" "$work/loader.out" "$work/loader.err"
+cmp "$work/expected" "$work/loader.out"
+grep -Eq "module stats source=$interp_sha .*module=registered aot_lookups=[1-9]" \
+  "$work/loader.err"
+grep -Eq "module stats source=$libc_sha .*module=missing aot_lookups=0" \
+  "$work/loader.err"
+grep -Eq "module stats source=$plugin_sha .*module=missing aot_lookups=0" \
+  "$work/loader.err"
+
+run_guest "$work/libc-cache" "$work/libc.out" "$work/libc.err"
+cmp "$work/expected" "$work/libc.out"
+grep -Eq "module stats source=$interp_sha .*module=missing aot_lookups=0" \
+  "$work/libc.err"
+grep -Eq "module stats source=$libc_sha .*module=registered aot_lookups=[1-9]" \
+  "$work/libc.err"
+grep -Eq "module stats source=$plugin_sha .*module=missing aot_lookups=0" \
+  "$work/libc.err"
 
 run_guest "$work/mixed-cache" "$work/mixed.out" "$work/mixed.err"
 cmp "$work/expected" "$work/mixed.out"
