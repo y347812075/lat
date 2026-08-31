@@ -66,3 +66,16 @@ latcd 打开 cache 后立即取得跨进程独占锁，并在整个服务期持�
 清空，故障测试不会复制正在发布的 cache。stdout 和 stderr 继续按应用单独保存。
 共享设计文档固定 source、module、instance、generation、profile、current 和 JIT
 fallback 的含义，并在实现变化后同步更新。
+
+## T-316：暖缓存性能
+
+冷运行先提交每个 ELF 的基础模块，只有基础提交成功的 source 才在进程退出时提交
+实际执行路径的 profile。latcd 按 source 合并 profile；同一 source 最多保留一个
+等待编译的 profile 任务，并让它排在基础模块之后。编译线程读取 profile 时先复制
+不可变快照，避免新请求改变正在编译模块的身份。若编译期间又合并了新 profile，
+服务自动补排一次任务。
+
+暖运行用 ELF 的设备号、inode、大小、mtime 和 ctime 查找 latcd 发布的 SHA256，
+不再为每次进程启动重新读取大文件。没有活动 AOT 模块时，普通运行不再为每个 TB
+扫描模块统计；已确认不命中的 `(pc,cflags)` 按注册表代数缓存在 TB 跳转缓存中，
+模块注册、停用或 `fork()` 后自动失效。

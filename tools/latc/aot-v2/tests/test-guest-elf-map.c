@@ -5,10 +5,15 @@
 #include "guest-elf-map.h"
 
 #include <elf.h>
+#include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int executable_mapping(int fd, uint64_t bias, uint64_t *start,
@@ -36,11 +41,203 @@ static int executable_mapping(int fd, uint64_t bias, uint64_t *start,
     return -1;
 }
 
+static int inspect_once(int fd, uint8_t digest[32])
+{
+    LatGuestElfTrackerV2 *tracker = lat_guest_elf_tracker_new_v2();
+    uint64_t start, size, offset;
+    const LatGuestElfInfoV2 *info;
+    int added;
+    char error[256] = {0};
+    int result = !tracker || executable_mapping(
+        fd, UINT64_C(0x555500000000), &start, &size, &offset) ||
+        lat_guest_elf_tracker_note_v2(tracker, fd, start, size, offset, 4096,
+                                      &info, &added, error, sizeof(error)) ||
+        !added;
+    if (!result) {
+        memcpy(digest, info->source_sha256, 32);
+    }
+    lat_guest_elf_tracker_free_v2(tracker);
+    return result;
+}
+
+static int copy_file(const char *source, char path[64])
+{
+    int input = open(source, O_RDONLY | O_CLOEXEC);
+    strcpy(path, "/tmp/latc-guest-elf-XXXXXX");
+    int output = mkstemp(path);
+    char buffer[65536];
+    ssize_t count = 0;
+    while (input >= 0 && output >= 0 &&
+           (count = read(input, buffer, sizeof(buffer))) > 0) {
+        if (write(output, buffer, count) != count) {
+            count = -1;
+            break;
+        }
+    }
+    if (input >= 0) close(input);
+    if (count < 0 || input < 0 || output < 0 || fsync(output)) {
+        if (output >= 0) close(output);
+        unlink(path);
+        return -1;
+    }
+    return output;
+}
+
+static int count_identities(const char *cache)
+{
+    char path[128];
+    snprintf(path, sizeof(path), "%s/.identities", cache);
+    DIR *directory = opendir(path);
+    int count = 0;
+    if (!directory) return -1;
+    struct dirent *entry;
+    while ((entry = readdir(directory))) {
+        if (entry->d_name[0] != '.') count++;
+    }
+    closedir(directory);
+    return count;
+}
+
+static int publish_identity(const char *cache, int source_fd,
+                            const uint8_t digest[32])
+{
+    char directory[128];
+    snprintf(directory, sizeof(directory), "%s/.identities", cache);
+    if (mkdir(directory, 0700) && errno != EEXIST) return -1;
+    struct stat status;
+    if (fstat(source_fd, &status)) return -1;
+    char path[512];
+    snprintf(path, sizeof(path),
+        "%s/%llx-%llx-%llx-%llx-%lx-%llx-%lx.sha256", directory,
+        (unsigned long long)status.st_dev,
+        (unsigned long long)status.st_ino,
+        (unsigned long long)status.st_size,
+        (unsigned long long)status.st_mtim.tv_sec,
+        (unsigned long)status.st_mtim.tv_nsec,
+        (unsigned long long)status.st_ctim.tv_sec,
+        (unsigned long)status.st_ctim.tv_nsec);
+    static const char digits[] = "0123456789abcdef";
+    char text[65];
+    for (size_t i = 0; i < 32; i++) {
+        text[i * 2] = digits[digest[i] >> 4];
+        text[i * 2 + 1] = digits[digest[i] & 15];
+    }
+    text[64] = '\n';
+    int output = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    int result = output < 0 || write(output, text, sizeof(text)) != sizeof(text);
+    if (output >= 0) close(output);
+    return result ? -1 : 0;
+}
+
+static int corrupt_identity(const char *cache)
+{
+    char directory[128];
+    snprintf(directory, sizeof(directory), "%s/.identities", cache);
+    DIR *identities = opendir(directory);
+    struct dirent *entry;
+    int result = -1;
+    while (identities && (entry = readdir(identities))) {
+        if (entry->d_name[0] == '.') continue;
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", directory, entry->d_name);
+        int fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC);
+        if (fd >= 0) {
+            result = write(fd, "bad\n", 4) == 4 ? 0 : -1;
+            close(fd);
+        }
+        break;
+    }
+    if (identities) closedir(identities);
+    return result;
+}
+
+static int test_identity_cache(const char *source)
+{
+    char cache[] = "/tmp/latc-identity-cache-XXXXXX";
+    char copy[64];
+    if (!mkdtemp(cache) || setenv("LATX_AOT_V2_CACHE_DIR", cache, 1)) {
+        return -1;
+    }
+    int fd = copy_file(source, copy);
+    uint8_t before[32], cached[32], changed[32];
+    if (fd < 0 || inspect_once(fd, before) || count_identities(cache) != -1 ||
+        publish_identity(cache, fd, before) || count_identities(cache) != 1 ||
+        inspect_once(fd, cached) || memcmp(before, cached, 32) ||
+        count_identities(cache) != 1 || corrupt_identity(cache) ||
+        inspect_once(fd, cached) || memcmp(before, cached, 32)) {
+        if (fd >= 0) close(fd);
+        unlink(copy);
+        return -1;
+    }
+    struct stat status;
+    unsigned char byte;
+    if (fstat(fd, &status) || status.st_size < 1 ||
+        pread(fd, &byte, 1, status.st_size - 1) != 1) {
+        close(fd);
+        unlink(copy);
+        return -1;
+    }
+    struct timespec times[2] = { status.st_atim, status.st_mtim };
+    byte ^= 1;
+    if (pwrite(fd, &byte, 1, status.st_size - 1) != 1 || fsync(fd) ||
+        futimens(fd, times) || !inspect_once(fd, changed) ||
+        setenv("LATX_AOT_V2_LATCD_SOCKET", "/tmp/latcd-test.sock", 1) ||
+        inspect_once(fd, changed) || unsetenv("LATX_AOT_V2_LATCD_SOCKET") ||
+        !memcmp(before, changed, 32) || count_identities(cache) != 1 ||
+        publish_identity(cache, fd, changed) || count_identities(cache) != 2) {
+        close(fd);
+        unlink(copy);
+        return -1;
+    }
+    for (int child = 0; child < 8; child++) {
+        pid_t pid = fork();
+        if (!pid) {
+            uint8_t concurrent[32];
+            _exit(inspect_once(fd, concurrent) ||
+                  memcmp(changed, concurrent, 32));
+        }
+        if (pid < 0) {
+            close(fd);
+            unlink(copy);
+            return -1;
+        }
+    }
+    int result = 0;
+    for (int child = 0; child < 8; child++) {
+        int wait_status;
+        if (wait(&wait_status) < 0 || !WIFEXITED(wait_status) ||
+            WEXITSTATUS(wait_status)) {
+            result = -1;
+        }
+    }
+    close(fd);
+    unlink(copy);
+    char directory[128];
+    snprintf(directory, sizeof(directory), "%s/.identities", cache);
+    DIR *identities = opendir(directory);
+    struct dirent *entry;
+    while (identities && (entry = readdir(identities))) {
+        if (entry->d_name[0] == '.') continue;
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", directory, entry->d_name);
+        unlink(path);
+    }
+    if (identities) closedir(identities);
+    rmdir(directory);
+    rmdir(cache);
+    unsetenv("LATX_AOT_V2_CACHE_DIR");
+    return result;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 4) {
         fprintf(stderr, "usage: %s MAIN INTERPRETER DSO\n", argv[0]);
         return 2;
+    }
+    if (test_identity_cache(argv[1])) {
+        fprintf(stderr, "AOT v2 identity cache validation failed\n");
+        return 1;
     }
     LatGuestElfTrackerV2 *tracker = lat_guest_elf_tracker_new_v2();
     if (!tracker) {
@@ -114,6 +311,6 @@ int main(int argc, char **argv)
         return 1;
     }
     lat_guest_elf_tracker_free_v2(tracker);
-    puts("test-aot-v2-guest-elf-map: PASS modules=3 duplicates=0 removed=1");
+    puts("test-aot-v2-guest-elf-map: PASS modules=3 duplicates=0 removed=1 identities=2 concurrent=8");
     return 0;
 }

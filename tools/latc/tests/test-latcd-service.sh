@@ -210,6 +210,7 @@ wait_stats 's["compiled"] == 2 and s["active_jobs"] == 0'
 stop_service
 
 start_service same-source-workers "$script_dir/fake-latc-slow.sh" --workers 2
+"$latcd" --submit --socket "$socket" "$guest" >"$phase/base.client"
 python3 - "$socket" "$guest" <<'PY'
 import array
 import hashlib
@@ -265,7 +266,6 @@ for request_id, count in ((101, 1), (102, 2)):
         except FileNotFoundError:
             pass
 PY
-wait_stats 's["active_jobs"] == 2 and s["queue_depth"] == 1 and s["running_sources"] == 1'
 wait_stats 's["compiled"] == 2 and s["active_jobs"] == 0 and s["running_sources"] == 0'
 python3 - "$cache" "$guest" <<'PY'
 import hashlib
@@ -300,9 +300,14 @@ assert contents.splitlines() == [
 profile_sha = hashlib.sha256(contents.encode()).hexdigest()
 module_name = f"{source_sha}-{profile_sha}.so"
 assert (cache / module_name).is_file(), module_name
+assert (cache / f"{source_sha}.so").is_file()
 current = json.loads((cache / f"{source_sha}.current").read_text())
 assert current["module"] == module_name, current
-assert len(list(cache.glob(f"{source_sha}-*.so"))) == 2
+assert len(list(cache.glob(f"{source_sha}-*.so"))) == 1
+stats = json.loads((cache.parent / "stats.json").read_text())
+assert stats["requests"] == 3, stats
+assert stats["queued"] == 2 and stats["deduplicated"] == 1, stats
+assert stats["compiled"] == 2 and stats["failed"] == 0, stats
 PY
 stop_service
 

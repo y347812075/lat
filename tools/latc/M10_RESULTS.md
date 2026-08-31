@@ -164,3 +164,40 @@ cache、CPU 限制、优先级、队列容量、退出清理、普通和 version
 ELF 变异、AOT v2 格式、注册表、模块封装、guest ELF 映射、源码同步、runner 源码
 准备和 import 检查。最终产品共同身份保持为
 `4836c3f7d266cac658327a93dce8e0b56039ccd029ac9e33cd60eccd68d94464`。
+
+## T-316 / WI-2333：暖 AOT 性能修复
+
+原始结果 JIT 约 10 秒、冷 AOT 17 秒、暖 AOT 18 秒。主要原因不是加载 AOT 文件
+本身，而是未命中路径每个 TB 都扫描模块统计、重复查注册表，进程启动还会重新读取
+ELF 计算 SHA256。全量静态模块也没有覆盖实际运行时的全部 TB flags 和间接路径，
+因此既支付加载成本，又继续产生大量 JIT。
+
+修复后，latcd 发布由 `(dev,ino,size,mtime,ctime)` 索引的 source SHA256；暖启动直接
+读取这个私有索引。未命中的 `(pc,cflags)` 按注册表代数缓存，模块注册、停用和
+`fork()` 后失效。冷进程退出时提交实际运行 profile；latcd 按 source 合并并只保留
+一个等待任务，编译线程使用不可变 profile 快照。Git 因两级 guest 地址表上限只能
+生成部分模块，缺失 TB 继续 JIT；完全不覆盖 profile 的模块仍拒绝发布。
+
+最终在 `3a6000` 使用干净安装树
+`/home/zenglu/latc-wi2333-verified3-install`，产品 build-id 为
+`221688bb2b6a7d4663efe1a911300b2cded964b3cb3cbd6b98e1b6fc123f4602`。
+最终 cache 的 5 个 profile 请求全部编译成功：`requests=5`、`queued=5`、
+`compiled=5`、`failed=0`。Python、Git、SQLite、Redis server 和 Redis client 均有
+独立 `current` 和模块；性能阶段没有启动 latcd，记录
+`compiler_requests=0`、`compiler_failures=0`，测试前后 cache 清单和 SHA256 不变。
+
+5 轮 JIT/暖 AOT 交替结果如下，时间为四个应用的 `CLOCK_MONOTONIC` 合计：
+
+| 轮次 | 顺序 | JIT 秒 | 暖 AOT 秒 | 暖/JIT |
+|---|---|---:|---:|---:|
+| 1 | JIT→暖 | 10.242 | 9.622 | 0.939547 |
+| 2 | 暖→JIT | 10.240 | 9.610 | 0.938511 |
+| 3 | JIT→暖 | 10.237 | 9.646 | 0.942316 |
+| 4 | 暖→JIT | 10.235 | 9.618 | 0.939715 |
+| 5 | JIT→暖 | 10.225 | 9.606 | 0.939488 |
+
+五轮均为暖 AOT 更快，改善 5.8% 至 6.1%。Python 从约 1.28 秒降到约 0.68 秒；
+Git 因部分 AOT 基本持平。额外离线统计运行中，Python 为 18,552 次 AOT lookup、
+4 次 JIT fallback；Git 为 6,484 次 AOT lookup、76,393 次 JIT fallback；SQLite、
+Redis server 和 Redis client 均注册模块并产生 AOT lookup。所有进程的
+`compiler_submissions=0`。

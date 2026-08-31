@@ -829,23 +829,34 @@ static inline TranslationBlock *tb_find(CPUState *cpu,
 #ifdef CONFIG_LATX
     if (aot_target) {
         uint32_t hash = tb_jmp_cache_hash_func(pc);
+        bool lookup_target = true;
         LatcAotV2Target *cached = cpu_aot_v2_target_cache ?
             &cpu_aot_v2_target_cache[hash] : NULL;
-        if (cached && cached->host_address && cached->guest_pc == pc &&
+        if (cached && cached->guest_pc == pc &&
             cached->cflags == cflags && cached->generation_address &&
             cached->generation == atomic_load_explicit(
                 cached->generation_address, memory_order_acquire)) {
             *aot_target = *cached;
-            /*
-             * Generated fast jumps update env->aot_v2_current_context
-             * without returning here.  Revalidate the real context instead
-             * of keeping a second C-side context value that can go stale.
-             */
-            aot_v2 = latc_aot_v2_activate_target(cpu, cached);
+            if (cached->host_address) {
+                /*
+                 * Generated fast jumps update env->aot_v2_current_context
+                 * without returning here.  Revalidate the real context
+                 * instead of keeping a second C-side context value that can
+                 * go stale.
+                 */
+                aot_v2 = latc_aot_v2_activate_target(cpu, cached);
+                lookup_target = !aot_v2;
+            } else {
+                /* A registry generation change invalidates this miss. */
+                if (cached->context) {
+                    latc_aot_v2_note_cached_miss(cached);
+                }
+                lookup_target = false;
+            }
         }
-        if (!aot_v2) {
+        if (!aot_v2 && lookup_target) {
             aot_v2 = latc_aot_v2_find_target(cpu, pc, cflags, aot_target);
-            if (aot_v2) {
+            if (aot_v2 || aot_target->generation_address) {
                 if (!cpu_aot_v2_target_cache) {
                     cpu_aot_v2_target_cache = g_new0(
                         LatcAotV2Target, TB_JMP_CACHE_SIZE);

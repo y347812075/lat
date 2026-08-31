@@ -105,9 +105,9 @@ static int write_fixture(const char *path, int overlap)
     return 0;
 }
 
-static int write_large_guest_table_fixture(const char *path)
+static int write_large_guest_table_fixture(const char *path,
+                                           size_t address_count)
 {
-    const size_t address_count = LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT + 1;
     const size_t code_size = address_count * 3 * sizeof(uint32_t);
     const size_t tb_offset = sizeof(LatNativeImageHeaderV2) + 8 + code_size;
     const size_t relocation_offset = tb_offset + sizeof(LatNativeTbV1);
@@ -198,7 +198,8 @@ int main(void)
         g_free(image_path);
         return 1;
     }
-    if (write_large_guest_table_fixture(image_path) ||
+    if (write_large_guest_table_fixture(
+            image_path, LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT + 1) ||
         lat_aot_v2_emit_module_sources(image_path, directory,
                                        error, sizeof(error))) {
         fprintf(stderr, "cannot emit two-level guest table: %s\n", error);
@@ -222,6 +223,20 @@ int main(void)
         return 1;
     }
     g_free(metadata);
+    metadata = NULL;
+    if (write_large_guest_table_fixture(
+            image_path, LAT_AOT_V2_GUEST_ADDRESS_LIMIT + 1) ||
+        !lat_aot_v2_emit_module_sources(image_path, directory,
+                                        error, sizeof(error)) ||
+        !strstr(error, "no TB supported")) {
+        fprintf(stderr, "guest address overflow was not rejected safely: %s\n",
+                error[0] ? error : "unexpected success");
+        g_free(text);
+        g_free(text_path);
+        g_free(metadata_path);
+        g_free(image_path);
+        return 1;
+    }
     const uint32_t *code = (const void *)text;
     if (code[0] != 0x18000044u ||
         (code[1] & 0xfc000000u) != 0x50000000u ||

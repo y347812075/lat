@@ -44,3 +44,14 @@
   `active_jobs=0`、`queue_depth=0`，才可进入下一阶段或故障测试。
 - latcd 缺失、编译失败、current 损坏、module 损坏和只读 cache 时输出与 JIT 金
   标准一致，无崩溃、死锁或遗留进程。
+
+## T-316 暖缓存性能
+
+- 在同一台 `3a6000`、同一 release 安装树和同一复杂应用 rootfs 上测试。
+- 冷运行结束后确认 Python、Git、SQLite、Redis server 和 client 都有有效
+  `current`，latcd 的 `failed=0`，再复制为只读测试来源。
+- JIT 与离线暖 AOT 交替执行至少 5 轮，奇数轮先 JIT、偶数轮先暖 AOT；每个应用
+  用 `CLOCK_MONOTONIC` 纳秒值计时，并保存各轮原始 stdout、stderr 和 JSON。
+- 每一轮要求暖 AOT 的四个应用总时间严格小于配对 JIT；性能阶段不启动 latcd，
+  cache 内容测试前后 SHA256 必须相同，记录 `compiler_requests=0` 和
+  `compiler_failures=0`。

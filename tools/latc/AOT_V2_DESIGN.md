@@ -621,9 +621,12 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
   PC-map lookup, closes the inherited compiler-service connection, and runs
   JIT-only until `execve()`. `execve()` replaces the host process and therefore
   starts with a newly initialized registry.
-- Profile updates are merged and debounced. Recompilation requires a coverage
-  or execution threshold, or an explicit refresh. Artifacts are immutable and
-  selected through an atomic `current` index.
+- Profile updates are merged by source. A cold process submits profiles only
+  for sources whose base-module request succeeded. One pending profile job
+  consumes the latest merged data after the base job; updates received during
+  compilation mark it dirty and schedule one follow-up job. The compiler uses
+  an immutable profile snapshot, and artifacts are selected through an atomic
+  `current` index.
 - The per-user compiler defaults to one low-priority job. It prioritizes the
   main executable, interpreter, startup libraries, and later plugins, with
   configurable concurrency and resource limits.
@@ -638,7 +641,12 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
 - **source** is the complete x86 ELF identified by SHA-256. A pathname is only
   diagnostic and never identifies cached code.
 - **module** is one immutable AOT ELF for a source, codegen identity and optional
-  merged profile. Host module text stays mapped until process exit.
+  merged profile. Host module text stays mapped until process exit. A profile
+  module may omit requested TB variants when a hard module resource limit makes
+  them unsupported; missing variants use JIT. A profile module that covers none
+  of its requested variants is rejected before publication. End-to-end
+  performance tests, rather than a guessed coverage percentage, decide whether
+  a partial module is useful.
 - **instance** is one guest mapping of a module at a specific load bias. It owns
   the guest executable ranges, host text/PC map and dispatch context used by
   normal lookup and signal recovery.
@@ -647,8 +655,8 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
   generation, and invalidates dispatch entries. A cached target is usable only
   while its saved instance, generation and translation flags still match.
 - **profile** is a per-source set of observed guest targets. `latcd` serializes
-  merges for one source and uses the merged file's digest in a versioned module
-  name.
+  merges for one source, compiles from an immutable snapshot, and uses that
+  snapshot's digest in a versioned module name.
 - **current** is `<source-sha>.current`, a small JSON index naming one immutable
   module and its source/codegen identity. `latcd` writes it to a private
   temporary file, changes it to read-only, calls `fsync()`, atomically renames
