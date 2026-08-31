@@ -111,6 +111,9 @@ static _Atomic(LatAotV2ModuleStats *) module_stats;
 static _Atomic size_t module_stats_count;
 static bool prepared;
 static _Atomic bool active;
+/* Invalidates cached registry misses when module membership changes. */
+static _Atomic uint64_t registry_generation = 1;
+static const char tracked_nonfile_miss;
 static _Atomic bool fork_child_jit_only;
 static bool registry_initialized;
 static bool runtime_bound;
@@ -141,6 +144,7 @@ static _Atomic uint64_t direct_targets;
 static _Atomic uint64_t file_dispatch_misses;
 static _Atomic uint64_t nonfile_dispatch_misses;
 static _Atomic uint64_t traced_dispatch_misses;
+static _Atomic int dispatch_miss_tracking = -1;
 static _Atomic uint64_t compiler_submissions;
 static _Atomic uint64_t compiler_submission_failures;
 static _Atomic uint64_t compiler_submission_duplicates;
@@ -175,6 +179,13 @@ static bool next_compiler_request_id(uint64_t *request_id)
     *request_id = ((uint64_t)getpid() << 32) ^ sequence;
     return true;
 }
+
+static void next_profile_request_id(uint64_t *request_id)
+{
+    uint64_t sequence = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
+    *request_id = ((uint64_t)getpid() << 32) ^ sequence;
+}
+
 static _Atomic uint64_t invalidation_reasons[4];
 static _Atomic uint64_t signal_pc_lookups;
 static _Atomic uint64_t signal_pc_hits;
@@ -191,6 +202,7 @@ static bool signal_invalidation_test;
 static bool signal_invalidation_test_worker_started;
 static uint64_t discovered_elfs;
 static GHashTable *submitted_sources;
+static GHashTable *profile_sources;
 
 void latc_aot_v2_fork_start(void)
 {
@@ -214,6 +226,7 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
      */
     atomic_store_explicit(&fork_child_jit_only, true, memory_order_release);
     atomic_store_explicit(&active, false, memory_order_release);
+    atomic_fetch_add_explicit(&registry_generation, 1, memory_order_release);
     if (getenv("LATX_AOT_V2_REPORT")) {
         static const char message[] =
             "latx: AOT v2 fork child switched to JIT\n";
@@ -613,6 +626,20 @@ static LatAotV2ModuleStats *module_stats_for_pc(uint64_t guest_pc)
     return NULL;
 }
 
+static bool dispatch_miss_tracking_enabled(void)
+{
+    int enabled = atomic_load_explicit(&dispatch_miss_tracking,
+                                       memory_order_acquire);
+    if (enabled >= 0) {
+        return enabled;
+    }
+    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
+    enabled = getenv("LATX_AOT_V2_REPORT") || (socket && *socket);
+    atomic_store_explicit(&dispatch_miss_tracking, enabled,
+                          memory_order_release);
+    return enabled;
+}
+
 bool latc_aot_v2_is_file_pc(target_ulong guest_pc)
 {
     return module_stats_for_pc(guest_pc) != NULL;
@@ -713,6 +740,13 @@ static void submit_missing_module(int fd, const LatGuestElfInfoV2 *info,
         }
         return;
     }
+    if (!profile_sources) {
+        profile_sources = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                g_free, NULL);
+    }
+    if (profile_sources) {
+        g_hash_table_add(profile_sources, g_strdup(source));
+    }
     atomic_fetch_add(&compiler_submissions, 1);
     if (getenv("LATX_AOT_V2_REPORT")) {
         fprintf(stderr,
@@ -751,12 +785,17 @@ static void submit_runtime_profiles(void)
             continue;
         }
         g_array_sort(entries, profile_entry_compare);
+        char source[65];
+        digest_hex(stats->source_sha256, source);
+        if (!profile_sources ||
+            !g_hash_table_contains(profile_sources, source)) {
+            g_array_free(entries, TRUE);
+            continue;
+        }
         gchar *path = NULL;
         GError *gerror = NULL;
         int output_fd = g_file_open_tmp("latc-profile-XXXXXX", &path, &gerror);
         FILE *output = output_fd >= 0 ? fdopen(output_fd, "w") : NULL;
-        char source[65];
-        digest_hex(stats->source_sha256, source);
         int failed = !output;
         if (output) {
             fprintf(output, "LATC_PROFILE_V2 %s\n", source);
@@ -775,16 +814,7 @@ static void submit_runtime_profiles(void)
         int profile_fd = !failed ? open(path, O_RDONLY | O_CLOEXEC) : -1;
         if (profile_fd >= 0) unlink(path);
         uint64_t request_id;
-        if (!next_compiler_request_id(&request_id)) {
-            if (profile_fd >= 0) close(profile_fd);
-            if (path) {
-                unlink(path);
-                g_free(path);
-            }
-            g_clear_error(&gerror);
-            g_array_free(entries, TRUE);
-            return;
-        }
+        next_profile_request_id(&request_id);
         char error[256] = {0};
         if (profile_fd < 0 || latcd_client_submit_profile_fd(
                 socket, stats->source_fd, profile_fd,
@@ -1071,6 +1101,8 @@ bool latc_aot_v2_invalidate_range(CPUState *cpu, uint64_t guest_start,
                                   memory_order_release);
     }
     if (deactivated) {
+        atomic_fetch_add_explicit(&registry_generation, 1,
+                                  memory_order_release);
         atomic_fetch_add(&invalidated_instances, deactivated);
         atomic_fetch_add(&invalidated_exec_ranges, deactivated_exec_ranges);
         atomic_fetch_add(&invalidation_reasons[reason], 1);
@@ -1388,6 +1420,7 @@ static int register_module_instance(LatAotV2RuntimeModule *module,
         *result = runtime_instance;
     }
     atomic_store_explicit(&active, true, memory_order_release);
+    atomic_fetch_add_explicit(&registry_generation, 1, memory_order_release);
     return 0;
 }
 
@@ -1912,17 +1945,53 @@ int latc_aot_v2_prepare(CPUArchState *env)
     return 0;
 }
 
+static void set_registry_miss_target(LatcAotV2Target *result,
+                                     target_ulong guest_pc, uint32_t cflags,
+                                     uint64_t generation,
+                                     LatAotV2ModuleStats *stats,
+                                     bool track)
+{
+    *result = (LatcAotV2Target) {
+        .context = track ? (stats ? (const void *)stats :
+                           (const void *)&tracked_nonfile_miss) : NULL,
+        .generation_address = &registry_generation,
+        .guest_pc = guest_pc,
+        .generation = generation,
+        .cflags = cflags,
+    };
+}
+
+void latc_aot_v2_note_cached_miss(const LatcAotV2Target *target)
+{
+    if (!target || !target->context || target->host_address) {
+        return;
+    }
+    LatAotV2ModuleStats *stats =
+        target->context == (const void *)&tracked_nonfile_miss ? NULL :
+        (LatAotV2ModuleStats *)target->context;
+    note_dispatch_miss(stats, target->guest_pc, target->cflags);
+}
+
 bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
                              uint32_t cflags, LatcAotV2Target *result)
 {
     if (!registry_initialized || !result) {
         return false;
     }
-    LatAotV2ModuleStats *stats = module_stats_for_pc(guest_pc);
+    uint64_t inactive_generation = atomic_load_explicit(
+        &registry_generation, memory_order_acquire);
     if (!atomic_load_explicit(&active, memory_order_acquire)) {
-        note_dispatch_miss(stats, guest_pc, cflags);
+        bool track = dispatch_miss_tracking_enabled();
+        LatAotV2ModuleStats *stats = track ? module_stats_for_pc(guest_pc) :
+                                           NULL;
+        set_registry_miss_target(result, guest_pc, cflags,
+                                 inactive_generation, stats, track);
+        if (track) {
+            note_dispatch_miss(stats, guest_pc, cflags);
+        }
         return false;
     }
+    LatAotV2ModuleStats *stats = NULL;
     if (!aot_v2_target_cache) {
         aot_v2_target_cache = g_new0(LatAotV2TargetCacheEntry,
                                      LAT_AOT_V2_TARGET_CACHE_SIZE);
@@ -1951,10 +2020,28 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
     }
     LatAotTargetV2 target = {0};
     if (!target_held) {
-        if (lat_aot_v2_registry_lookup(&registry, guest_pc,
-                                       aot_v2_semantic_flags(cflags),
-                                       &target)) {
-            note_dispatch_miss(stats, guest_pc, cflags);
+        uint64_t generation;
+        for (;;) {
+            generation = atomic_load_explicit(&registry_generation,
+                                              memory_order_acquire);
+            if (!lat_aot_v2_registry_lookup(&registry, guest_pc,
+                                            aot_v2_semantic_flags(cflags),
+                                            &target)) {
+                break;
+            }
+            if (generation != atomic_load_explicit(
+                    &registry_generation, memory_order_acquire)) {
+                continue;
+            }
+            bool track = dispatch_miss_tracking_enabled();
+            if (track) {
+                stats = module_stats_for_pc(guest_pc);
+            }
+            set_registry_miss_target(result, guest_pc, cflags, generation,
+                                     stats, track);
+            if (track) {
+                note_dispatch_miss(stats, guest_pc, cflags);
+            }
             return false;
         }
         entry->guest_pc = guest_pc;

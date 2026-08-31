@@ -18,6 +18,13 @@ phases=${LATC_COMPLEX_PHASES:-jit}
 timeout_seconds=${LATC_COMPLEX_TIMEOUT:-60}
 stress_seconds=${LATC_COMPLEX_STRESS_SECONDS:-0}
 stress_phases=${LATC_COMPLEX_STRESS_PHASES:-jit warm}
+latcd_cpu_seconds=${LATC_COMPLEX_LATCD_CPU_SECONDS:-60}
+compiler_wait_seconds=${LATC_COMPLEX_COMPILER_WAIT_SECONDS:-1200}
+require_compiler_success=${LATC_COMPLEX_REQUIRE_COMPILER_SUCCESS:-0}
+cache_source=${LATC_COMPLEX_CACHE_SOURCE:-}
+warm_socket=${LATC_COMPLEX_WARM_SOCKET:-1}
+require_registered=${LATC_COMPLEX_REQUIRE_REGISTERED:-1}
+warm_report=${LATC_COMPLEX_WARM_REPORT:-0}
 daemon_pid=
 fault_daemon_pid=
 redis_pid=
@@ -77,6 +84,10 @@ rm -rf "$work"
 mkdir -m 700 -p "$work"
 mkdir -m 700 "$work/cache"
 cache=$work/cache
+if [ -n "$cache_source" ]; then
+    test -d "$cache_source"
+    cp -a "$cache_source/." "$cache/"
+fi
 socket=$work/latcd.sock
 stats=$work/latcd.json
 
@@ -326,10 +337,21 @@ assert s["requests"] > 0
 assert s["active_jobs"] == 0 and s["queue_depth"] == 0
 PY
         then
+            if [ "$require_compiler_success" -eq 1 ] &&
+               ! python3 - "$stats" 2>/dev/null <<'PY'
+import json
+import sys
+assert json.load(open(sys.argv[1]))["failed"] == 0
+PY
+            then
+                echo "latcd reported a compiler failure" >&2
+                cat "$stats" >&2
+                return 1
+            fi
             return
         fi
         n=$((n + 1))
-        [ "$n" -lt 3600 ] || return 1
+        [ "$n" -lt $((compiler_wait_seconds * 10)) ] || return 1
         sleep 0.1
     done
 }
@@ -470,8 +492,13 @@ run_phase()
       cold|warm)
         if [ "$phase" = cold ]; then
             phase_environment="LATX_AOT=0 LATX_AOT_V2_CACHE_DIR= LATX_AOT_V2_MODULE= LATX_AOT_V2_LATCD_SOCKET=$socket LATX_AOT_V2_REPORT=1 LATX_AOT_V2_MAX_SUBMISSIONS=1"
-        else
+        elif [ "$warm_socket" -eq 1 ]; then
             phase_environment="LATX_AOT=0 LATX_AOT_V2_CACHE_DIR=$cache LATX_AOT_V2_LATCD_SOCKET=$socket LATX_AOT_V2_REPORT=1 LATX_AOT_V2_MAX_SUBMISSIONS=1"
+        else
+            phase_environment="LATX_AOT=0 LATX_AOT_V2_CACHE_DIR=$cache"
+            if [ "$warm_report" -eq 1 ]; then
+                phase_environment="$phase_environment LATX_AOT_V2_REPORT=1"
+            fi
         fi
         ;;
       *) echo "unknown complex application phase: $phase" >&2; exit 2 ;;
@@ -486,10 +513,15 @@ run_phase()
             iteration_dir=$phase_root/iteration-$iteration
             mkdir "$iteration_dir"
         fi
-        run_python "$iteration_dir"
-        run_git "$iteration_dir"
-        run_sqlite "$iteration_dir"
-        run_redis "$iteration_dir"
+        : >"$iteration_dir/app-timings.tsv"
+        for application in python git sqlite redis; do
+            application_started=$(python3 "$script_dir/monotonic-ns.py")
+            "run_$application" "$iteration_dir"
+            application_finished=$(python3 "$script_dir/monotonic-ns.py")
+            printf '%s\t%s\n' "$application" \
+              "$((application_finished - application_started))" \
+              >>"$iteration_dir/app-timings.tsv"
+        done
         case " $stress_phases " in
           *" $phase "*) ;;
           *) break ;;
@@ -502,19 +534,25 @@ run_phase()
     phase_finished=$(date +%s)
     printf 'iterations=%s elapsed_seconds=%s\n' "$iteration" \
       "$((phase_finished - phase_started))" >"$phase_root/stress-result.txt"
-    if [ "$phase" = warm ]; then
+    if [ "$phase" = warm ] && [ "$require_registered" -eq 1 ]; then
         grep -Rqs 'module=registered' "$phase_root"/*.stderr || {
             echo "warm phase registered no AOT module" >&2
             return 1
         }
     fi
     python3 - "$phase_root/result.json" "$phase" "$iteration" \
-      "$((phase_finished - phase_started))" <<'PY'
+      "$((phase_finished - phase_started))" "$phase_root/app-timings.tsv" <<'PY'
 import json
 import sys
 
+timings = {}
+for line in open(sys.argv[5]):
+    application, elapsed = line.rstrip().split("\t")
+    timings[application] = int(elapsed)
 json.dump({
     "applications": ["python", "git", "sqlite", "redis"],
+    "application_elapsed_ns": timings,
+    "application_total_ns": sum(timings.values()),
     "elapsed_seconds": int(sys.argv[4]),
     "exit_code": 0,
     "iterations": int(sys.argv[3]),
@@ -525,11 +563,12 @@ PY
       "$phase" "$iteration" "$((phase_finished - phase_started))"
 }
 
-case " $phases " in
-  *' cold '*|*' warm '*)
+case " $phases $warm_socket " in
+  *' cold '*|*' warm 1 '*)
     "$latcd" --serve --socket "$socket" --cache-dir "$cache" \
       --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
       --x86-rootfs "$rootfs" --stats "$stats" --workers 2 \
+      --cpu-seconds "$latcd_cpu_seconds" \
       >"$work/latcd.stdout" 2>"$work/latcd.stderr" &
     daemon_pid=$!
     n=0
@@ -544,7 +583,8 @@ esac
 
 for phase in $phases; do
     run_phase "$phase"
-    if [ "$phase" = cold ] || [ "$phase" = warm ]; then
+    if [ "$phase" = cold ] ||
+       { [ "$phase" = warm ] && [ "$warm_socket" -eq 1 ]; }; then
         wait_for_compiler
     fi
 done

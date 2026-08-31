@@ -56,6 +56,7 @@ bool latc_aot_v2_is_file_pc(target_ulong guest_pc);
 int latc_aot_v2_prepare(CPUArchState *env);
 bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
                              uint32_t cflags, LatcAotV2Target *target);
+void latc_aot_v2_note_cached_miss(const LatcAotV2Target *target);
 bool latc_aot_v2_activate_target(CPUState *cpu,
                                  const LatcAotV2Target *target);
 bool latc_aot_v2_contains_host_pc(uintptr_t host_pc);

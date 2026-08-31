@@ -169,6 +169,9 @@ int lat_aot_v2_module_validate_profile_file(const char *path,
         result = fail(error, error_size, "compiled profile is empty");
     }
     size_t record = 0;
+    size_t missing = 0;
+    uint64_t first_missing_rva = 0;
+    uint64_t first_missing_flags = 0;
     while (!result && getline(&line, &capacity, profile) >= 0) {
         uint64_t rva, flags, count;
         record++;
@@ -182,13 +185,23 @@ int lat_aot_v2_module_validate_profile_file(const char *path,
         snprintf(key, sizeof(key), "%016" PRIx64 ":%08" PRIx64,
                  rva, flags);
         if (!g_hash_table_contains(keys, key)) {
-            result = fail(error, error_size,
-                          "profile TB missing from module: rva=0x%" PRIx64
-                          " flags=0x%" PRIx64, rva, flags);
+            if (!missing) {
+                first_missing_rva = rva;
+                first_missing_flags = flags;
+            }
+            missing++;
         }
     }
     if (!result && ferror(profile)) {
         result = fail(error, error_size, "cannot read compiled profile");
+    }
+    size_t covered = record - missing;
+    if (!result && record && !covered) {
+        result = fail(error, error_size,
+                      "profile has no TB in module: covered=%zu total=%zu "
+                      "first_missing_rva=0x%" PRIx64 " flags=0x%" PRIx64,
+                      covered, record, first_missing_rva,
+                      first_missing_flags);
     }
     free(line);
     fclose(profile);

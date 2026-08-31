@@ -274,6 +274,8 @@ static int find_tb(const ModulePack *pack, uint64_t guest_pc, uint32_t flags)
             pack->tbs[left + 1].guest_pc != guest_pc) ? (int)left : -1;
 }
 
+static int guest_slot(ModulePack *pack, uint64_t guest_rva);
+
 static void select_supported_tbs(ModulePack *pack)
 {
     memset(pack->supported, 1, pack->header->tb_count);
@@ -295,6 +297,27 @@ static void select_supported_tbs(ModulePack *pack)
     int changed;
     do {
         changed = 0;
+        g_array_set_size(pack->guest_rvas, 0);
+        if (pack->header->flags & LAT_NATIVE_IMAGE_PIE) {
+            for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
+                const LatNativeRelocationV1 *relocation =
+                    &pack->relocations[i];
+                if (relocation->kind != LAT_NATIVE_RELOC_GUEST_ADDRESS) {
+                    continue;
+                }
+                int owner = find_code_tb(pack, relocation->code_offset);
+                if (owner < 0 || !pack->supported[owner]) {
+                    continue;
+                }
+                if ((uint64_t)relocation->addend <
+                        pack->header->preferred_guest_base ||
+                    guest_slot(pack, (uint64_t)relocation->addend -
+                               pack->header->preferred_guest_base) < 0) {
+                    pack->supported[owner] = 0;
+                    changed = 1;
+                }
+            }
+        }
         for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
             const LatNativeRelocationV1 *relocation = &pack->relocations[i];
             if (relocation->kind != LAT_NATIVE_RELOC_TB_TARGET) {

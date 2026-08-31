@@ -34,7 +34,7 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 		test-aot-v2-dynamic-semantics test-aot-v2-invalidation \
 		test-aot-v2-fork test-latcd-once \
 		test-latcd-service test-latcd-runner test-aot-v2-real-app test-aot-v2-m4 \
-		test-aot-v2-complex-apps \
+		test-aot-v2-complex-apps test-aot-v2-complex-performance \
 		test-aot-v2-sanitize test-aot-v2-tsan test-aot-v2-libfuzzer \
 		test-aot-v2-source-sync test-prepare-runner-source \
 		test-aot-v2-build-id \
@@ -686,6 +686,15 @@ test-aot-v2-complex-apps: all
 	sh tests/test-aot-v2-complex-apps.sh $(BUILD)/latcd/latcd $(BUILD)/latc \
 	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) \
 	  $(BUILD)/aot-v2-complex-apps-test
+
+test-aot-v2-complex-performance: all
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_ROOTFS)" -a -n "$(AOT_V2_CACHE)" || \
+	  { echo "usage: make test-aot-v2-complex-performance AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_ROOTFS=... AOT_V2_CACHE=..."; exit 2; }
+	python3 tests/test-aot-v2-complex-performance.py \
+	  $(BUILD)/latcd/latcd $(BUILD)/latc $(AOT_V2_RUNNER) \
+	  $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) $(AOT_V2_CACHE) \
+	  $(BUILD)/aot-v2-complex-performance-test
 
 test-aot-v2-m4: all $(BUILD)/tests/x86-static-hello \
 		$(BUILD)/tests/x86-glibc-hello $(BUILD)/tests/x86-signal-recover \

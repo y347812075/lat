@@ -32,7 +32,8 @@ else
 fi
 
 round=1
-while [ "$round" -le 20 ]; do
+max_rounds=${LATC_NATIVE_MAX_ROUNDS:-20}
+while [ "$round" -le "$max_rounds" ]; do
     missing="$work/missing-$round.profile"
     rm -f "$output" "$missing"
     if LATC_NATIVE_IMAGE_OUT="$output" LATC_NATIVE_MISSING_OUT="$missing" \
@@ -48,7 +49,24 @@ while [ "$round" -le 20 ]; do
         head -n 1 "$supplements" >"$work/supplements-next.profile"
         {
             tail -n +2 "$supplements"
-            awk '{ print $1, "0x1", $2 }' "$missing"
+            python3 - "$guest" "$missing" <<'PY'
+import struct
+import sys
+
+with open(sys.argv[1], "rb") as source:
+    elf = source.read(64)
+    phoff = struct.unpack_from("<Q", elf, 32)[0]
+    phentsize, phnum = struct.unpack_from("<HH", elf, 54)
+    source.seek(phoff)
+    headers = source.read(phentsize * phnum)
+bases = [struct.unpack_from("<Q", headers, offset + 16)[0]
+         for offset in range(0, len(headers), phentsize)
+         if struct.unpack_from("<I", headers, offset)[0] == 1]
+base = min(bases)
+for line in open(sys.argv[2]):
+    pc, count = line.split()
+    print(hex(int(pc, 0) - base), "0x1", count)
+PY
         } | awk '{ key=$1 " " $2; count[key]+=$3 }
                   END { for (key in count) print key, count[key] }' | \
             sort -k1,1 -k2,2 >>"$work/supplements-next.profile"

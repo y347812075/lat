@@ -6,6 +6,7 @@
 
 #include <elf.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <glib.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -45,7 +46,82 @@ static int align_up(uint64_t value, uint64_t alignment, uint64_t *result)
     return 0;
 }
 
-static int digest_fd(int fd, uint8_t digest[32])
+static int same_identity(const struct stat *left, const struct stat *right)
+{
+    return left->st_dev == right->st_dev && left->st_ino == right->st_ino &&
+        left->st_size == right->st_size &&
+        left->st_mtim.tv_sec == right->st_mtim.tv_sec &&
+        left->st_mtim.tv_nsec == right->st_mtim.tv_nsec &&
+        left->st_ctim.tv_sec == right->st_ctim.tv_sec &&
+        left->st_ctim.tv_nsec == right->st_ctim.tv_nsec;
+}
+
+static char *digest_cache_path(const struct stat *status)
+{
+    const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
+    if (!cache || !*cache) {
+        return NULL;
+    }
+    struct stat root;
+    if (lstat(cache, &root) || !S_ISDIR(root.st_mode) ||
+        root.st_uid != geteuid() || (root.st_mode & 0077)) {
+        return NULL;
+    }
+    char *directory = g_build_filename(cache, ".identities", NULL);
+    struct stat identity_dir;
+    if (lstat(directory, &identity_dir) || !S_ISDIR(identity_dir.st_mode) ||
+        identity_dir.st_uid != geteuid() || (identity_dir.st_mode & 0077)) {
+        g_free(directory);
+        return NULL;
+    }
+    char *name = g_strdup_printf(
+        "%llx-%llx-%llx-%llx-%lx-%llx-%lx.sha256",
+        (unsigned long long)status->st_dev,
+        (unsigned long long)status->st_ino,
+        (unsigned long long)status->st_size,
+        (unsigned long long)status->st_mtim.tv_sec,
+        (unsigned long)status->st_mtim.tv_nsec,
+        (unsigned long long)status->st_ctim.tv_sec,
+        (unsigned long)status->st_ctim.tv_nsec);
+    char *path = g_build_filename(directory, name, NULL);
+    g_free(name);
+    g_free(directory);
+    return path;
+}
+
+static int decode_digest(const char text[64], uint8_t digest[32])
+{
+    for (size_t i = 0; i < 32; i++) {
+        int high = g_ascii_xdigit_value(text[i * 2]);
+        int low = g_ascii_xdigit_value(text[i * 2 + 1]);
+        if (high < 0 || low < 0) {
+            return -1;
+        }
+        digest[i] = (uint8_t)((high << 4) | low);
+    }
+    return 0;
+}
+
+static int read_cached_digest(const char *path, uint8_t digest[32])
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        return errno == ENOENT ? 1 : -1;
+    }
+    struct stat status;
+    char text[65];
+    ssize_t count = read(fd, text, sizeof(text));
+    int valid = !fstat(fd, &status) &&
+        S_ISREG(status.st_mode) && status.st_uid == geteuid() &&
+        status.st_nlink == 1 && !(status.st_mode & 0077) &&
+        status.st_size == 65 && count == 65 &&
+        text[64] == '\n' && !decode_digest(text, digest);
+    close(fd);
+    if (!valid) errno = EINVAL;
+    return valid ? 0 : -1;
+}
+
+static int digest_fd_uncached(int fd, uint8_t digest[32])
 {
     unsigned char buffer[64 * 1024];
     GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
@@ -70,6 +146,46 @@ static int digest_fd(int fd, uint8_t digest[32])
     g_checksum_get_digest(checksum, digest, &size);
     g_checksum_free(checksum);
     return size == 32 ? 0 : -1;
+}
+
+static int digest_fd(int fd, const struct stat *initial, uint8_t digest[32])
+{
+    for (int attempt = 0; attempt < 2; attempt++) {
+        struct stat before = *initial;
+        if (attempt && fstat(fd, &before)) {
+            return -1;
+        }
+        char *path = digest_cache_path(&before);
+        int cache_result = path ? read_cached_digest(path, digest) : 1;
+        int cached = cache_result == 0;
+        const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
+        if (path && cache_result == 1 && (!socket || !*socket)) {
+            /*
+             * This product build's latcd publishes an identity before it
+             * publishes a module.  In offline warm mode, a missing identity
+             * therefore proves that no compatible cached module exists.
+             */
+            g_free(path);
+            errno = ENOENT;
+            return -1;
+        }
+        if (!cached && digest_fd_uncached(fd, digest)) {
+            g_free(path);
+            return -1;
+        }
+        struct stat after;
+        if (fstat(fd, &after)) {
+            g_free(path);
+            return -1;
+        }
+        if (same_identity(&before, &after)) {
+            g_free(path);
+            return 0;
+        }
+        g_free(path);
+    }
+    errno = EAGAIN;
+    return -1;
 }
 
 int lat_guest_elf_inspect_mapping_v2(int fd, uint64_t guest_start,
@@ -186,7 +302,7 @@ int lat_guest_elf_inspect_mapping_v2(int fd, uint64_t guest_start,
     if (output.preferred_base == UINT64_MAX ||
         output.guest_begin == UINT64_MAX ||
         output.guest_end <= output.guest_begin || !output.exec_range_count ||
-        digest_fd(fd, output.source_sha256)) {
+        digest_fd(fd, &status, output.source_sha256)) {
         return invalid(error, error_size, "cannot identify mapped ELF");
     }
     *info = output;
