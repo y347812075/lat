@@ -1952,6 +1952,122 @@ bool translate_cmp_xx_jcc(IR1_INST *pir1)
     return true;
 }
 
+static bool translate_or_xx_jcc(IR1_INST *pir1)
+{
+    TRANSLATION_DATA *td = lsenv->tr_data;
+
+    if (ir1_opcode(pir1) == WRAP(OR)) {
+        IR1_INST *jcc = pir1->instptn.next;
+        IR1_OPND *opnd0 = ir1_get_opnd(pir1, 0);
+        IR1_OPND *opnd1 = ir1_get_opnd(pir1, 1);
+        int opnd0_size = ir1_opnd_size(opnd0);
+        bool zero_branch = ir1_opcode(jcc) == WRAP(JE) ||
+                           ir1_opcode(jcc) == WRAP(JNE);
+        IR2_OPND dest;
+
+        td->ptn_itemp0 = a0_ir2_opnd;
+        if (opnd0_size >= 32) {
+            dest = convert_gpr_opnd(opnd0, UNKNOWN_EXTENSION);
+        } else {
+            dest = td->ptn_itemp0;
+            load_ireg_from_ir1_2(dest, opnd0, UNKNOWN_EXTENSION, false);
+        }
+        if (ir1_opnd_is_s2uimm12(opnd1)) {
+            la_ori(dest, dest, ir1_opnd_s2uimm(opnd1));
+        } else {
+            IR2_OPND src1 = load_ireg_from_ir1(
+                opnd1, UNKNOWN_EXTENSION, false);
+            la_or(dest, dest, src1);
+        }
+
+        if (opnd0_size == 32) {
+            if (zero_branch) {
+                la_mov32_zx(td->ptn_itemp0, dest);
+            } else {
+                la_mov32_sx(td->ptn_itemp0, dest);
+            }
+            store_ireg_to_ir1(dest, opnd0, false);
+        } else if (opnd0_size == 64) {
+            la_mov64(td->ptn_itemp0, dest);
+        } else if (opnd0_size == 16) {
+            if (zero_branch) {
+                la_bstrpick_d(td->ptn_itemp0, td->ptn_itemp0, 15, 0);
+            } else {
+                la_ext_w_h(td->ptn_itemp0, td->ptn_itemp0);
+            }
+        } else if (opnd0_size == 8) {
+            if (zero_branch) {
+                la_andi(td->ptn_itemp0, td->ptn_itemp0, 0xff);
+            } else {
+                la_ext_w_b(td->ptn_itemp0, td->ptn_itemp0);
+            }
+        }
+        if (opnd0_size < 32) {
+            store_ireg_to_ir1(td->ptn_itemp0, opnd0, false);
+        }
+        return true;
+    }
+
+    IR1_INST *or_inst = pir1->instptn.next;
+    IR2_OPND result = td->ptn_itemp0;
+    IR2_OPND target_label_opnd = ra_alloc_label();
+
+#ifdef CONFIG_LATX_TU
+    TranslationBlock *tb = td->curr_tb;
+    if (judge_tu_eflag_gen(tb)) {
+        IR2_OPND tu_reset_label_opnd = ra_alloc_label();
+        TranslationBlock *tb_next =
+            tb->s_data->next_tb[TU_TB_INDEX_NEXT];
+        TranslationBlock *tb_target =
+            tb->s_data->next_tb[TU_TB_INDEX_TARGET];
+
+        if (tb_next->eflag_use && tb_target->eflag_use) {
+            generate_eflag_calculation(result, result, result,
+                                       or_inst, true);
+        }
+
+        la_label(tu_reset_label_opnd);
+        tb->tu_jmp[TU_TB_INDEX_TARGET] =
+            tu_reset_label_opnd._label_id;
+        add_jcc_gen_bcc(result, target_label_opnd, pir1);
+        tu_jcc_nop_gen(tb);
+
+        if (tb_next->eflag_use && !tb_target->eflag_use) {
+            generate_eflag_calculation(result, result, result,
+                                       or_inst, true);
+        }
+        if (tb->tu_jmp[TU_TB_INDEX_NEXT] !=
+            TB_JMP_RESET_OFFSET_INVALID) {
+            IR2_OPND translated_label_opnd = ra_alloc_label();
+            la_label(translated_label_opnd);
+            la_b(imm_zero_ir2_opnd);
+            la_nop();
+            tb->tu_jmp[TU_TB_INDEX_NEXT] =
+                translated_label_opnd._label_id;
+        }
+
+        IR2_OPND unlink_label_opnd = ra_alloc_label();
+        la_label(unlink_label_opnd);
+        tb->tu_unlink.stub_offset = unlink_label_opnd._label_id;
+        tb->tu_unlink.rel_num = 2;
+        set_use_tu_jmp(tb);
+    }
+#endif
+
+    add_jcc_gen_bcc(result, target_label_opnd, pir1);
+
+    EFLAGS_CACULATE_RESULT(result, result, result, or_inst, 0, true);
+    tr_generate_exit_tb(pir1, 0);
+
+    la_label(target_label_opnd);
+    EFLAGS_CACULATE_RESULT(result, result, result, or_inst, 1, true);
+    tr_generate_exit_tb(pir1, 1);
+
+    EFLAGS_CACULATE_RESULT(result, result, result, or_inst,
+                           EFLAG_BACKUP, true);
+    return true;
+}
+
 /* Return true when it is a branch. */
 static inline bool test_xx_jcc_gen_bcc(IR2_OPND itemp,
         IR2_OPND target_label_opnd, IR1_INST *jcc_inst)
@@ -2834,6 +2950,8 @@ static bool try_translate_instptn_impl(IR1_INST *pir1)
         return translate_add_jcc(pir1);
     case INSTPTN_OPC_OR_JCC:
         return translate_or_jcc(pir1);
+    case INSTPTN_OPC_OR_XX_JCC:
+        return translate_or_xx_jcc(pir1);
     default:
         lsassert(0);
         break;
@@ -2870,7 +2988,8 @@ void opt_instptn_fix(CPUState *cpu, TranslationBlock *tb, int index)
         IR1_INST *pir1 = tb_ir1_inst(tb, i);
         if (pir1->instptn.opc == INSTPTN_OPC_CMP_XX_JCC ||
             pir1->instptn.opc == INSTPTN_OPC_TEST_XX_JCC ||
-            pir1->instptn.opc == INSTPTN_OPC_BT_XX_JCC) {
+            pir1->instptn.opc == INSTPTN_OPC_BT_XX_JCC ||
+            pir1->instptn.opc == INSTPTN_OPC_OR_XX_JCC) {
 
             int opnd_size = ir1_opnd_size(ir1_get_opnd(pir1, 0));
             ucontext_t *uc = env->puc;
@@ -3020,6 +3139,91 @@ void opt_instptn_fix(CPUState *cpu, TranslationBlock *tb, int index)
                 }
                 env->eflags = env->eflags & ~(0b100011000101);
                 env->eflags = env->eflags | (eflags & 0b100011000101);
+            }
+            break;
+            case WRAP(OR):
+            {
+                uint64_t result = UC_GR(uc)[4];
+                uint64_t eflags = 0;
+
+                switch (opnd_size) {
+                case 8:
+                    asm volatile (
+                        DEFINE_PARSE_R
+                        "parse_r_%= __src, %[src]\n\t"
+                        "parse_r_%= __dst, %[dst]\n\t"
+                        /* x86or.b */
+                        ".word (0x003f8014 | (__src << 10) | "
+                        "(__dst << 5))\n\t"
+                        "parse_r_%= __flags, %[flags]\n\t"
+                        /* x86mfflag */
+                        ".word (0x005c0000 | (0x3f << 10) | "
+                        "__flags)\n\t"
+                        : [dst]"+r"(result),
+                        [flags]"=r"(eflags)
+                        : [src]"r"(result)
+                        : "cc"
+                    );
+                    break;
+                case 16:
+                    asm volatile (
+                        DEFINE_PARSE_R
+                        "parse_r_%= __src, %[src]\n\t"
+                        "parse_r_%= __dst, %[dst]\n\t"
+                        /* x86or.h */
+                        ".word (0x003f8015 | (__src << 10) | "
+                        "(__dst << 5))\n\t"
+                        "parse_r_%= __flags, %[flags]\n\t"
+                        /* x86mfflag */
+                        ".word (0x005c0000 | (0x3f << 10) | "
+                        "__flags)\n\t"
+                        : [dst]"+r"(result),
+                        [flags]"=r"(eflags)
+                        : [src]"r"(result)
+                        : "cc"
+                    );
+                    break;
+                case 32:
+                    asm volatile (
+                        DEFINE_PARSE_R
+                        "parse_r_%= __src, %[src]\n\t"
+                        "parse_r_%= __dst, %[dst]\n\t"
+                        /* x86or.w */
+                        ".word (0x003f8016 | (__src << 10) | "
+                        "(__dst << 5))\n\t"
+                        "parse_r_%= __flags, %[flags]\n\t"
+                        /* x86mfflag */
+                        ".word (0x005c0000 | (0x3f << 10) | "
+                        "__flags)\n\t"
+                        : [dst]"+r"(result),
+                        [flags]"=r"(eflags)
+                        : [src]"r"(result)
+                        : "cc"
+                    );
+                    break;
+                case 64:
+                    asm volatile (
+                        DEFINE_PARSE_R
+                        "parse_r_%= __src, %[src]\n\t"
+                        "parse_r_%= __dst, %[dst]\n\t"
+                        /* x86or.d */
+                        ".word (0x003f8017 | (__src << 10) | "
+                        "(__dst << 5))\n\t"
+                        "parse_r_%= __flags, %[flags]\n\t"
+                        /* x86mfflag */
+                        ".word (0x005c0000 | (0x3f << 10) | "
+                        "__flags)\n\t"
+                        : [dst]"+r"(result),
+                        [flags]"=r"(eflags)
+                        : [src]"r"(result)
+                        : "cc"
+                    );
+                    break;
+                default:
+                    break;
+                }
+                const uint64_t mask = 0x8c5;
+                env->eflags = (env->eflags & ~mask) | (eflags & mask);
             }
             break;
             case WRAP(BT):

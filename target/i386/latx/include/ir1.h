@@ -143,6 +143,7 @@ typedef enum InstPtnOpcode {
     INSTPTN_OPC_SAR_JCC,
     INSTPTN_OPC_SHR_JE,
     INSTPTN_OPC_OR_JCC,
+    INSTPTN_OPC_OR_XX_JCC,
 } InstPtnOpcode;
 #endif
 

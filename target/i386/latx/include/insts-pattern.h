@@ -216,6 +216,7 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
 #define instptn_check_and_jcc_0() INSTPTN_CHECK_XX_0(AND_JCC)
 #define instptn_check_add_jcc_0() INSTPTN_CHECK_XX_0(ADD_JCC)
 #define instptn_check_or_jcc_0() INSTPTN_CHECK_XX_0(OR_JCC)
+#define instptn_check_or_xx_jcc_0() INSTPTN_CHECK_XX_0(OR_XX_JCC)
 #else
 #define instptn_check_void(option)
 #define instptn_check_false(option)
@@ -254,6 +255,7 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
 #define instptn_check_and_jcc_0()
 #define instptn_check_add_jcc_0()
 #define instptn_check_or_jcc_0()
+#define instptn_check_or_xx_jcc_0()
 #endif
 
 bool try_translate_instptn(IR1_INST *pir1);

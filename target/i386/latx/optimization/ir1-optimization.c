@@ -49,6 +49,9 @@ static bool result_jcc_option(IR1_INST *ir1, InstPtnOption *option)
     case INSTPTN_OPC_OR_JCC:
         *option = INSTPTN_OPT_OR_JCC;
         return true;
+    case INSTPTN_OPC_OR_XX_JCC:
+        *option = INSTPTN_OPT_OR_XX_JCC;
+        return true;
     case INSTPTN_OPC_CMP_JCC:
         *option = INSTPTN_OPT_CMP_JCC;
         return true;
