@@ -643,9 +643,11 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
   merged profile. Host module text stays mapped until process exit. A profile
   module may omit requested TB variants when a hard module resource limit makes
   them unsupported; missing variants use JIT. A profile module that covers none
-  of its requested variants is rejected before publication. End-to-end
-  performance tests, rather than a guessed coverage percentage, decide whether
-  a partial module is useful.
+  of its requested variants is rejected before publication. Complex-application
+  acceptance counts every executed file-backed ELF, including missing modules,
+  and requires at least 99.9% AOT lookup coverage for each selected application.
+  Coverage and end-to-end performance are separate gates: partial AOT cannot
+  pass only because it happens to improve elapsed time.
 - **instance** is one guest mapping of a module at a specific load bias. It owns
   the guest executable ranges, host text/PC map and dispatch context used by
   normal lookup and signal recovery.

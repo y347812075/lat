@@ -182,6 +182,20 @@ ELF 计算 SHA256。全量静态模块也没有覆盖实际运行时的全部 TB
 工作负载及其动态链接器、libc、libz、libpcre2 的离线暖运行达到 40800/40800 AOT
 lookup，JIT fallback 为 0。详见 `T318_RESULTS.md`。
 
+2026-09-01 又对 Python、SQLite 和 Redis 执行了所有文件型 ELF 覆盖率验收。
+测试脚本现在按应用汇总全部 stderr，将 `module=missing`、动态链接器和动态库纳入
+分母，并检查暖运行编译提交及 fork 子进程切换 JIT。使用 T-318 Git 稳定 cache 的
+离线基线均未达到 99.9%：Python 为 30302/39474（76.764%），SQLite 为
+5209/71145（7.322%），Redis 为 20975/25369（82.680%）。
+
+完整工作负载训练共排队 54 个任务，48 个成功、6 个失败。失败来自三个 source 各
+一次无 profile 和一次带 profile 编译：`libm.so.6` 缺少 `LOAD_HOST_LOG2` 运行时
+目标，`libgcrypt.so.20.4.1` 缺少 AESENC helper 运行时目标，`libcrypto.so.3` 因
+无效指令位置导致稳定 PC map 无法导出。训练后离线覆盖率仍只有 Python 66.593%、
+SQLite 79.965%、Redis 59.201%；主要的已注册模块缺口来自 `libc.so.6`。Python 和
+Redis 还各记录一次 `fork child switched to JIT`。因此这三个应用目前都不能按
+基本完全 AOT 判定通过。
+
 最终在 `3a6000` 使用干净安装树
 `/home/zenglu/latc-wi2333-verified3-install`，产品 build-id 为
 `221688bb2b6a7d4663efe1a911300b2cded964b3cb3cbd6b98e1b6fc123f4602`。

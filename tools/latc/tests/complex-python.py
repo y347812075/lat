@@ -53,7 +53,7 @@ runner = os.environ["LATC_COMPLEX_RUNNER"]
 rootfs = os.environ["LATC_COMPLEX_ROOTFS"]
 child = subprocess.run([runner, "-L", rootfs, sys.executable, "-c",
                         "import threading; print('PY_CHILD_OK', threading.active_count())"],
-                       check=True, text=True, capture_output=True)
+                       check=True, text=True, stdout=subprocess.PIPE)
 assert child.stdout.strip() == "PY_CHILD_OK 1", child
 print("PYTHON_OK", sys.version.split()[0], sqlite3.sqlite_version,
       len(ssl.OPENSSL_VERSION), digest[:16])
