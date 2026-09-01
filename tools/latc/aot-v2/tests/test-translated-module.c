@@ -10,18 +10,29 @@
 
 #include <setjmp.h>
 #include <glib.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static sigjmp_buf syscall_jump;
+static _Thread_local sigjmp_buf syscall_jump;
 
 static void capture_syscall(void *opaque)
 {
     (void)opaque;
     siglongjmp(syscall_jump, 1);
+}
+
+static void *capture_bound_syscall_in_thread(void *opaque)
+{
+    bool *captured = opaque;
+    if (!sigsetjmp(syscall_jump, 1)) {
+        lat_aot_runtime_raise_syscall();
+    }
+    *captured = true;
+    return NULL;
 }
 
 static uint64_t load_u64(const unsigned char *environment, size_t offset)
@@ -192,6 +203,15 @@ int main(int argc, char **argv)
     }
     if (lat_aot_runtime_bind_syscall(capture_syscall, NULL)) {
         perror("bind syscall callback");
+        g_free(image);
+        return 1;
+    }
+    bool thread_captured = false;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, capture_bound_syscall_in_thread,
+                       &thread_captured) ||
+        pthread_join(thread, NULL) || !thread_captured) {
+        fprintf(stderr, "worker thread did not inherit syscall callback\n");
         g_free(image);
         return 1;
     }

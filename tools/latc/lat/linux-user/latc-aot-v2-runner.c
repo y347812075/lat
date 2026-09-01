@@ -18,6 +18,7 @@
 
 #include <elf.h>
 #include <glib.h>
+#include <math.h>
 
 /* Loongnix 20 predates the public LoongArch HWCAP names. */
 #ifndef HWCAP_LOONGARCH_LSX
@@ -114,7 +115,6 @@ static _Atomic bool active;
 /* Invalidates cached registry misses when module membership changes. */
 static _Atomic uint64_t registry_generation = 1;
 static const char tracked_nonfile_miss;
-static _Atomic bool fork_child_jit_only;
 static bool registry_initialized;
 static bool runtime_bound;
 static LatGuestElfTrackerV2 *elf_tracker;
@@ -219,17 +219,30 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
     }
 
     /*
-     * A fork child inherits code mappings, registry pointers and descriptors,
-     * but it does not inherit the threads that owned or maintained them.
-     * Disable those inherited objects before returning to guest code.  execve
-     * will create a fresh runner; a child that keeps running falls back to JIT.
+     * fork_start holds both writer-side locks, so every immutable module,
+     * registry snapshot and guest mapping inherited by the child is stable.
+     * Reader counts can include threads that only exist in the parent; reset
+     * those counts before allowing the single child thread to use AOT again.
      */
-    atomic_store_explicit(&fork_child_jit_only, true, memory_order_release);
-    atomic_store_explicit(&active, false, memory_order_release);
+    if (registry_initialized) {
+        atomic_store_explicit(&registry.readers, 0, memory_order_release);
+    }
+    atomic_store_explicit(&host_module_readers, 0, memory_order_release);
+    for (LatAotV2RuntimeInstance *runtime = runtime_instances; runtime;
+         runtime = runtime->next) {
+        atomic_store_explicit(&runtime->instance.readers, 0,
+                              memory_order_release);
+    }
+    for (LatAotV2RuntimeInstance *runtime = runtime_instances_retired; runtime;
+         runtime = runtime->next) {
+        atomic_store_explicit(&runtime->instance.readers, 0,
+                              memory_order_release);
+    }
     atomic_fetch_add_explicit(&registry_generation, 1, memory_order_release);
-    if (getenv("LATX_AOT_V2_REPORT")) {
+    if (getenv("LATX_AOT_V2_REPORT") &&
+        atomic_load_explicit(&active, memory_order_acquire)) {
         static const char message[] =
-            "latx: AOT v2 fork child switched to JIT\n";
+            "latx: AOT v2 fork child retained AOT\n";
         (void)write(STDERR_FILENO, message, sizeof(message) - 1);
     }
     aot_v2_current_instance = NULL;
@@ -243,31 +256,6 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
 #else
     (void)cpu;
 #endif
-
-    for (LatAotV2PendingMapping *mapping = pending_mapping_head; mapping;
-         mapping = mapping->next) {
-        if (mapping->fd >= 0) {
-            close(mapping->fd);
-            mapping->fd = -1;
-        }
-    }
-    pending_mapping_head = NULL;
-    pending_mapping_tail = &pending_mapping_head;
-    for (LatAotV2SourceMapping *mapping = source_mappings; mapping;
-         mapping = mapping->next) {
-        if (mapping->fd >= 0) {
-            close(mapping->fd);
-            mapping->fd = -1;
-        }
-    }
-    source_mappings = NULL;
-    for (LatAotV2ModuleStats *stats = atomic_load_explicit(
-             &module_stats, memory_order_acquire); stats; stats = stats->next) {
-        if (stats->source_fd >= 0) {
-            close(stats->source_fd);
-            stats->source_fd = -1;
-        }
-    }
 
     pthread_mutex_unlock(&profile_lock);
     pthread_mutex_unlock(&elf_tracker_lock);
@@ -284,6 +272,19 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
                                       LatAotV2RuntimeInstance **instance,
                                       char *error, size_t error_size);
 static void digest_hex(const uint8_t digest[32], char output[65]);
+
+static void enable_profile_submission(const uint8_t source_sha256[32])
+{
+    if (!profile_sources) {
+        profile_sources = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                g_free, NULL);
+    }
+    if (profile_sources) {
+        char source[65];
+        digest_hex(source_sha256, source);
+        g_hash_table_add(profile_sources, g_strdup(source));
+    }
+}
 static void recycle_retired_instances_locked(void);
 
 static uint64_t available_aot_features(void)
@@ -454,9 +455,6 @@ static const char *invalidation_reason_name(LatcAotV2InvalidationReason reason)
 void latc_aot_v2_report_stats(void)
 {
     static _Atomic bool reported;
-    if (atomic_load_explicit(&fork_child_jit_only, memory_order_acquire)) {
-        return;
-    }
     if (atomic_exchange(&reported, true)) {
         return;
     }
@@ -694,9 +692,6 @@ static void note_dispatch_miss(LatAotV2ModuleStats *stats,
 
 bool latc_aot_v2_mapping_enabled(void)
 {
-    if (atomic_load_explicit(&fork_child_jit_only, memory_order_acquire)) {
-        return false;
-    }
     const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
     const char *module = getenv("LATX_AOT_V2_MODULE");
     const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
@@ -740,13 +735,7 @@ static void submit_missing_module(int fd, const LatGuestElfInfoV2 *info,
         }
         return;
     }
-    if (!profile_sources) {
-        profile_sources = g_hash_table_new_full(g_str_hash, g_str_equal,
-                                                g_free, NULL);
-    }
-    if (profile_sources) {
-        g_hash_table_add(profile_sources, g_strdup(source));
-    }
+    enable_profile_submission(info->source_sha256);
     atomic_fetch_add(&compiler_submissions, 1);
     if (getenv("LATX_AOT_V2_REPORT")) {
         fprintf(stderr,
@@ -889,6 +878,9 @@ static void drain_mappings(void)
                 registered == 0 ? LAT_AOT_V2_MODULE_MISSING :
                                   LAT_AOT_V2_MODULE_REJECTED,
                 pending->fd);
+            if (registered > 0 && getenv("LATX_AOT_V2_LATCD_SOCKET")) {
+                enable_profile_submission(info->source_sha256);
+            }
             if (stats) {
                 atomic_store_explicit(&stats->registration_ns,
                                       registration_ns,
@@ -1154,6 +1146,61 @@ static int bind_runtime_targets(void)
     targets.target[LAT_AOT_TARGET_PCMPISTRM_XMM] =
         (uintptr_t)helper_pcmpistrm_xmm;
     targets.target[LAT_AOT_TARGET_EFLAGTF] = (uintptr_t)helper_eflagtf;
+    targets.target[LAT_AOT_TARGET_LOG2] = (uintptr_t)log2;
+    targets.target[LAT_AOT_TARGET_POW] = (uintptr_t)pow;
+    targets.target[LAT_AOT_TARGET_SIN] = (uintptr_t)sin;
+    targets.target[LAT_AOT_TARGET_COS] = (uintptr_t)cos;
+    targets.target[LAT_AOT_TARGET_ATAN2] = (uintptr_t)atan2;
+    targets.target[LAT_AOT_TARGET_LOGB] = (uintptr_t)logb;
+    targets.target[LAT_AOT_TARGET_SINCOS] = (uintptr_t)sincos;
+    targets.target[LAT_AOT_TARGET_FPATAN] = (uintptr_t)helper_fpatan;
+    targets.target[LAT_AOT_TARGET_FPTAN] = (uintptr_t)helper_fptan;
+    targets.target[LAT_AOT_TARGET_FPREM] = (uintptr_t)helper_fprem;
+    targets.target[LAT_AOT_TARGET_FPREM1] = (uintptr_t)helper_fprem1;
+    targets.target[LAT_AOT_TARGET_FRNDINT] = (uintptr_t)helper_frndint;
+    targets.target[LAT_AOT_TARGET_F2XM1] = (uintptr_t)helper_f2xm1;
+    targets.target[LAT_AOT_TARGET_FXTRACT] = (uintptr_t)helper_fxtract;
+    targets.target[LAT_AOT_TARGET_FYL2X] = (uintptr_t)helper_fyl2x;
+    targets.target[LAT_AOT_TARGET_FYL2XP1] = (uintptr_t)helper_fyl2xp1;
+    targets.target[LAT_AOT_TARGET_FSINCOS] = (uintptr_t)helper_fsincos;
+    targets.target[LAT_AOT_TARGET_FSIN] = (uintptr_t)helper_fsin;
+    targets.target[LAT_AOT_TARGET_FCOS] = (uintptr_t)helper_fcos;
+    targets.target[LAT_AOT_TARGET_FBLD_ST0] = (uintptr_t)helper_fbld_ST0;
+    targets.target[LAT_AOT_TARGET_FBST_ST0] = (uintptr_t)helper_fbst_ST0;
+    targets.target[LAT_AOT_TARGET_AESIMC_XMM] =
+        (uintptr_t)helper_aesimc_xmm;
+    targets.target[LAT_AOT_TARGET_AESKEYGENASSIST_XMM] =
+        (uintptr_t)helper_aeskeygenassist_xmm;
+    targets.target[LAT_AOT_TARGET_AESDEC_XMM] =
+        (uintptr_t)helper_aesdec_xmm;
+    targets.target[LAT_AOT_TARGET_AESDECLAST_XMM] =
+        (uintptr_t)helper_aesdeclast_xmm;
+    targets.target[LAT_AOT_TARGET_AESENC_XMM] =
+        (uintptr_t)helper_aesenc_xmm;
+    targets.target[LAT_AOT_TARGET_AESENCLAST_XMM] =
+        (uintptr_t)helper_aesenclast_xmm;
+    targets.target[LAT_AOT_TARGET_SHA1NEXTE] = (uintptr_t)helper_sha1nexte;
+    targets.target[LAT_AOT_TARGET_SHA1MSG1] = (uintptr_t)helper_sha1msg1;
+    targets.target[LAT_AOT_TARGET_SHA1MSG2] = (uintptr_t)helper_sha1msg2;
+    targets.target[LAT_AOT_TARGET_SHA256MSG1] = (uintptr_t)helper_sha256msg1;
+    targets.target[LAT_AOT_TARGET_SHA256MSG2] = (uintptr_t)helper_sha256msg2;
+    targets.target[LAT_AOT_TARGET_SHA1RNDS4_F0] =
+        (uintptr_t)helper_sha1rnds4_f0;
+    targets.target[LAT_AOT_TARGET_SHA1RNDS4_F1] =
+        (uintptr_t)helper_sha1rnds4_f1;
+    targets.target[LAT_AOT_TARGET_SHA1RNDS4_F2] =
+        (uintptr_t)helper_sha1rnds4_f2;
+    targets.target[LAT_AOT_TARGET_SHA1RNDS4_F3] =
+        (uintptr_t)helper_sha1rnds4_f3;
+    targets.target[LAT_AOT_TARGET_SHA256RNDS2_XMM0] =
+        (uintptr_t)helper_sha256rnds2_xmm0;
+    targets.target[LAT_AOT_TARGET_RAISE_INT] = (uintptr_t)helper_raise_int;
+    targets.target[LAT_AOT_TARGET_RAISE_TRAPOP] =
+        (uintptr_t)helper_raise_trapop;
+    targets.target[LAT_AOT_TARGET_RAISE_INTO] = (uintptr_t)helper_raise_into;
+    targets.target[LAT_AOT_TARGET_RAISE_BOUND] =
+        (uintptr_t)helper_raise_bound;
+    targets.target[LAT_AOT_TARGET_XGETBV] = (uintptr_t)helper_xgetbv;
     return lat_aot_runtime_bind_targets(&targets);
 }
 

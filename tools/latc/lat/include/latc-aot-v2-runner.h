@@ -33,7 +33,7 @@ typedef enum LatcAotV2InvalidationReason {
     LATC_AOT_V2_INVALIDATE_CODE_WRITE,
 } LatcAotV2InvalidationReason;
 
-/* Serialize AOT state across fork; the child deliberately continues in JIT. */
+/* Serialize AOT state across fork and retain registered modules in the child. */
 void latc_aot_v2_fork_start(void);
 void latc_aot_v2_fork_end(CPUState *cpu, bool child);
 bool latc_aot_v2_mapping_enabled(void);
