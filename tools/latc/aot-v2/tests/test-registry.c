@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct LookupThread {
     LatAotRegistryV2 *registry;
@@ -133,6 +134,57 @@ int main(void)
         large_context[254] != (uintptr_t)(pages + 256) ||
         pages[0] != 0x401000 || pages[256] != 0x401800) {
         fprintf(stderr, "two-level guest context table was not populated\n");
+        return 1;
+    }
+    free(pages);
+    free(large_slots);
+    const size_t three_level_count =
+        LAT_AOT_V2_TWO_LEVEL_GUEST_ADDRESS_LIMIT + 1;
+    const size_t three_level_leaf_pages =
+        (three_level_count + LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT - 1) /
+        LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+    const size_t three_level_roots =
+        (three_level_leaf_pages + LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT - 1) /
+        LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+    const size_t three_level_storage_count =
+        (three_level_leaf_pages + three_level_roots) *
+        LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+    large_slots = calloc(three_level_count, sizeof(*large_slots));
+    pages = calloc(three_level_storage_count, sizeof(*pages));
+    if (!large_slots || !pages) {
+        perror("allocate three-level guest table test");
+        return 1;
+    }
+    for (size_t i = 0; i < three_level_count; i++) {
+        size_t page = i / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+        size_t root = page / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+        size_t middle = page % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+        size_t entry = i % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+        large_slots[i] = (LatAotGuestSlotV2) {
+            .guest_rva = 0x1000 + i * 8,
+            .fp_offset = -(int32_t)((root + 1) * 8),
+            .reserved = (uint32_t)((middle * 8) << 16) |
+                        (uint32_t)(entry * 8),
+        };
+    }
+    large_descriptor = (LatAotModuleV2) {
+        .module_flags = LAT_AOT_MODULE_THREE_LEVEL_GUEST_SLOTS,
+        .guest_slot_begin = large_slots,
+        .guest_slot_end = large_slots + three_level_count,
+    };
+    context_slot_count = 0;
+    memset(large_context, 0, sizeof(large_context));
+    if (lat_aot_v2_context_apply_guest_table(
+            &large_descriptor, 0x400000,
+            large_context + LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT,
+            pages, three_level_storage_count, &context_slot_count) ||
+        context_slot_count != 2 ||
+        large_context[255] != (uintptr_t)pages ||
+        large_context[254] != (uintptr_t)(pages + 256) ||
+        pages[0] != (uintptr_t)(pages + 512) ||
+        pages[256] != (uintptr_t)(pages + 512 + 256 * 256) ||
+        pages[512] != 0x401000 || pages[512 + 256 * 256] != 0x481000) {
+        fprintf(stderr, "three-level guest context table was not populated\n");
         return 1;
     }
     free(pages);

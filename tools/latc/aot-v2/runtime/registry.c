@@ -406,7 +406,8 @@ int lat_aot_v2_context_apply_guest_slots(const LatAotModuleV2 *module,
         return -1;
     }
     size_t count = (end - begin) / sizeof(LatAotGuestSlotV2);
-    if (module->module_flags & LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS) {
+    if (module->module_flags & (LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS |
+                                LAT_AOT_MODULE_THREE_LEVEL_GUEST_SLOTS)) {
         errno = ENOTSUP;
         return -1;
     }
@@ -446,18 +447,36 @@ int lat_aot_v2_context_apply_guest_table(const LatAotModuleV2 *module,
         return -1;
     }
     size_t count = (end - begin) / sizeof(LatAotGuestSlotV2);
-    if (!(module->module_flags & LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS)) {
+    int two_level = !!(module->module_flags &
+                       LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS);
+    int three_level = !!(module->module_flags &
+                         LAT_AOT_MODULE_THREE_LEVEL_GUEST_SLOTS);
+    if (two_level && three_level) {
+        errno = ENOEXEC;
+        return -1;
+    }
+    if (!two_level && !three_level) {
         *context_slot_count = count;
         return lat_aot_v2_context_apply_guest_slots(module, guest_load_bias,
                                                     jump_cache);
     }
-    if (count > LAT_AOT_V2_GUEST_ADDRESS_LIMIT) {
+    size_t limit = three_level ? LAT_AOT_V2_GUEST_ADDRESS_LIMIT :
+                                LAT_AOT_V2_TWO_LEVEL_GUEST_ADDRESS_LIMIT;
+    if (count > limit) {
         errno = E2BIG;
         return -1;
     }
-    size_t page_count = (count + LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT - 1) /
-                        LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
-    size_t required = page_count * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+    size_t leaf_page_count =
+        (count + LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT - 1) /
+        LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+    size_t root_count = three_level ?
+        (leaf_page_count + LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT - 1) /
+            LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT :
+        leaf_page_count;
+    size_t root_storage_count = three_level ?
+        root_count * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT : 0;
+    size_t required = root_storage_count +
+        leaf_page_count * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
     if (required && (!page_storage || page_storage_count < required)) {
         errno = ENOSPC;
         return -1;
@@ -466,23 +485,39 @@ int lat_aot_v2_context_apply_guest_table(const LatAotModuleV2 *module,
         memset(page_storage, 0, required * sizeof(*page_storage));
     }
     uint64_t *context = jump_cache;
-    for (size_t page = 0; page < page_count; page++) {
-        context[-(ptrdiff_t)(page + 1)] =
-            (uintptr_t)&page_storage[page * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT];
+    for (size_t root = 0; root < root_count; root++) {
+        context[-(ptrdiff_t)(root + 1)] = (uintptr_t)&page_storage[
+            root * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT];
+    }
+    if (three_level) {
+        for (size_t page = 0; page < leaf_page_count; page++) {
+            size_t root = page / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+            size_t middle = page % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+            page_storage[root * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT + middle] =
+                (uintptr_t)&page_storage[root_storage_count +
+                    page * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT];
+        }
     }
     for (size_t i = 0; i < count; i++) {
         const LatAotGuestSlotV2 *slot = &module->guest_slot_begin[i];
         size_t page = i / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
         size_t entry = i % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
-        if (slot->fp_offset != -(int32_t)((page + 1) * 8) ||
-            slot->reserved != entry * 8 ||
+        size_t root = three_level ?
+            page / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT : page;
+        size_t middle = page % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+        uint32_t reserved = three_level ?
+            (uint32_t)((middle * 8) << 16) | (uint32_t)(entry * 8) :
+            (uint32_t)(entry * 8);
+        if (slot->fp_offset != -(int32_t)((root + 1) * 8) ||
+            slot->reserved != reserved ||
             guest_load_bias > UINT64_MAX - slot->guest_rva) {
             errno = ENOEXEC;
             return -1;
         }
-        page_storage[page * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT + entry] =
-            guest_load_bias + slot->guest_rva;
+        size_t value_index = (three_level ? root_storage_count : 0) +
+            page * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT + entry;
+        page_storage[value_index] = guest_load_bias + slot->guest_rva;
     }
-    *context_slot_count = page_count;
+    *context_slot_count = root_count;
     return 0;
 }

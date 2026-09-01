@@ -14,7 +14,7 @@ profile v2 首行为 `LATC_PROFILE_V2 <source-sha256>`，后续记录为
 运行时只在 AOT 查找失败并准备生成 JIT TB 时记录 profile。它用已验证的 ELF
 映射把 PC 转换为 source SHA 和 RVA，并将文件型 ELF 与 vDSO/匿名代码分开计数。
 
-## 两级 guest 地址表
+## 两级和三级 guest 地址表
 
 旧格式把每个 guest 地址直接放在 `$fp` 之前，LoongArch `ld.d` 的立即数范围
 将其限制为 256 个槽。新模块使用最多 256 个一级页指针，每页保存 256 个
@@ -27,6 +27,10 @@ guest 地址：
 `LatAotGuestSlotV2.fp_offset` 保存一级页指针槽，原 `reserved` 字段在新模块标志
 存在时保存页内字节偏移。旧模块没有该标志，继续使用原平面表。页号按排序后的
 guest RVA 确定，保证相同输入生成相同模块。
+
+T-318 增加三级格式。超过 65536 个地址时，第二条 `ld.d` 读取叶页指针，第三条
+`ld.d` 再读取 guest 地址；容量提高到 16777216。`reserved` 高 16 位保存中间页
+偏移，低 16 位保存叶页偏移。小模块仍使用两级格式，避免增加一次内存读取。
 
 打包器对删除原因分别计数。任何 profile 请求键在依赖删除后缺失都使
 `compile-module` 失败；未执行的 CFG TB 仍允许形成部分模块。

@@ -646,7 +646,7 @@ static int snapshot_profile(int profile_fd, const char *source_path,
             (semantic_flags != LAT_AOT_TB_CODE64 &&
              semantic_flags != (LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL)) ||
             (*end && *end != '\n' && *end != '#') || !executable ||
-            ++record_count > LAT_AOT_V2_GUEST_ADDRESS_LIMIT) {
+            ++record_count > LAT_AOT_V2_PROFILE_RECORD_LIMIT) {
             result = fail(error, error_size,
                           "profile record %zu is invalid", record_count);
             break;
@@ -755,7 +755,8 @@ static int merge_profile(const LatcdConfig *config, const uint8_t digest[32],
                  profile_table_load(incoming, source_hex, table, 0,
                                     error, error_size);
     char *temporary = NULL;
-    if (!result && g_hash_table_size(table) > LAT_AOT_V2_GUEST_ADDRESS_LIMIT) {
+    if (!result &&
+        g_hash_table_size(table) > LAT_AOT_V2_PROFILE_RECORD_LIMIT) {
         result = fail(error, error_size, "canonical profile has too many keys");
     }
     if (!result) {

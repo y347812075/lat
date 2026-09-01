@@ -126,8 +126,9 @@ assigns each referenced guest RVA a context slot. The runtime writes
 `guest_load_bias + guest_rva` to that per-instance slot, and generated code
 loads the value with one `$fp`-relative `ld.d`. The artifact's executable pages
 remain read-only and shareable from the moment the host dynamic linker maps
-them. The initial direct-offset form supports 256 slots; larger modules need a
-two-level table lowering before this becomes a production limit.
+them. The direct-offset form supports 256 slots. Two-level tables support
+65,536 addresses with two loads. Larger modules use three loads and a
+three-level table with up to 16,777,216 addresses.
 
 Cross-module direct linking is deliberately deferred. The initial runtime
 always uses indirect dispatch across module boundaries. Later it may patch
@@ -505,12 +506,10 @@ map and restores guest state without a runtime TB. A static x86 regression
 test raises `SIGFPE` inside AOT code, changes guest `RIP` in its handler, and
 exits with zero runtime translation.
 
-This is still partial coverage. PIE modules may require more than the current
-256 guest-address context slots. The packager keeps a dependency-complete TB
-subset that fits: explicit TB targets and Host-code fall-through successors
-must all remain present, otherwise the owner TB is excluded. Missing TBs use
-JIT. The two-level guest-address table described above is still required for
-full coverage.
+PIE modules select a two-level or three-level guest-address table according to
+their address count. Explicit TB targets and Host-code fall-through successors
+must all remain present; unsupported relocations still exclude the dependent
+TB rather than executing an invalid partial graph.
 
 Cache-directory mode does not publish module targets to the shared `FastTB`
 cache. A direct cross-module jump could otherwise enter code while the guest

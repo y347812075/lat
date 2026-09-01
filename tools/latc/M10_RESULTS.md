@@ -178,6 +178,10 @@ ELF 计算 SHA256。全量静态模块也没有覆盖实际运行时的全部 TB
 一个等待任务，编译线程使用不可变 profile 快照。Git 因两级 guest 地址表上限只能
 生成部分模块，缺失 TB 继续 JIT；完全不覆盖 profile 的模块仍拒绝发布。
 
+该 Git 限制已在 T-318 修复。超过 65536 个 guest 地址的模块改用三级表；固定 Git
+工作负载及其动态链接器、libc、libz、libpcre2 的离线暖运行达到 40800/40800 AOT
+lookup，JIT fallback 为 0。详见 `T318_RESULTS.md`。
+
 最终在 `3a6000` 使用干净安装树
 `/home/zenglu/latc-wi2333-verified3-install`，产品 build-id 为
 `221688bb2b6a7d4663efe1a911300b2cded964b3cb3cbd6b98e1b6fc123f4602`。

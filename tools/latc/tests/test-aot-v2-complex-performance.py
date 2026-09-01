@@ -18,6 +18,9 @@ parser.add_argument("rootfs")
 parser.add_argument("cache")
 parser.add_argument("workdir")
 parser.add_argument("--rounds", type=int, default=5)
+parser.add_argument("--applications", nargs="+",
+                    choices=("python", "git", "sqlite", "redis"),
+                    default=("python", "git", "sqlite", "redis"))
 args = parser.parse_args()
 if args.rounds < 5:
     parser.error("at least five alternating rounds are required")
@@ -41,8 +44,15 @@ def cache_manifest():
 initial_manifest = cache_manifest()
 if not initial_manifest:
     raise SystemExit("stable cache contains no AOT module")
+application_binaries = {
+    "python": ("python3",),
+    "git": ("git",),
+    "sqlite": ("sqlite3",),
+    "redis": ("redis-server", "redis-cli"),
+}
 registered_sources = {}
-for name in ("python3", "git", "sqlite3", "redis-server", "redis-cli"):
+for name in (name for application in args.applications
+             for name in application_binaries[application]):
     source = pathlib.Path(args.rootfs) / "usr/bin" / name
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     current = pathlib.Path(args.cache) / f"{digest}.current"
@@ -58,6 +68,7 @@ for round_number in range(1, args.rounds + 1):
         environment = os.environ.copy()
         environment.update({
             "LATC_COMPLEX_PHASES": mode,
+            "LATC_COMPLEX_APPLICATIONS": " ".join(args.applications),
             "LATC_COMPLEX_WARM_SOCKET": "0",
             "LATC_COMPLEX_WARM_REPORT": "0",
             "LATC_COMPLEX_REQUIRE_REGISTERED": "0",

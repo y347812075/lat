@@ -24,6 +24,8 @@ typedef struct ModulePack {
     unsigned char *supported;
     GArray *code_order;
     GArray *guest_rvas;
+    GHashTable *guest_rva_indexes;
+    int three_level_guest_slots;
     uint64_t runtime_trampolines;
     uint64_t pf_table;
 } ModulePack;
@@ -298,6 +300,8 @@ static void select_supported_tbs(ModulePack *pack)
     do {
         changed = 0;
         g_array_set_size(pack->guest_rvas, 0);
+        g_hash_table_remove_all(pack->guest_rva_indexes);
+        pack->three_level_guest_slots = 0;
         if (pack->header->flags & LAT_NATIVE_IMAGE_PIE) {
             for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
                 const LatNativeRelocationV1 *relocation =
@@ -315,6 +319,25 @@ static void select_supported_tbs(ModulePack *pack)
                                pack->header->preferred_guest_base) < 0) {
                     pack->supported[owner] = 0;
                     changed = 1;
+                }
+            }
+            pack->three_level_guest_slots =
+                pack->guest_rvas->len >
+                LAT_AOT_V2_TWO_LEVEL_GUEST_ADDRESS_LIMIT;
+            if (pack->three_level_guest_slots) {
+                for (uint64_t i = 0;
+                     i < pack->header->relocation_count; i++) {
+                    const LatNativeRelocationV1 *relocation =
+                        &pack->relocations[i];
+                    if (relocation->kind != LAT_NATIVE_RELOC_GUEST_ADDRESS ||
+                        relocation->slots >= 3) {
+                        continue;
+                    }
+                    int owner = find_code_tb(pack, relocation->code_offset);
+                    if (owner >= 0 && pack->supported[owner]) {
+                        pack->supported[owner] = 0;
+                        changed = 1;
+                    }
                 }
             }
         }
@@ -485,16 +508,20 @@ static int patch_runtime_target(uint32_t *instructions, uint32_t slots,
 
 static int guest_slot(ModulePack *pack, uint64_t guest_rva)
 {
-    for (guint i = 0; i < pack->guest_rvas->len; i++) {
-        if (g_array_index(pack->guest_rvas, uint64_t, i) == guest_rva) {
-            return (int)i;
-        }
+    gpointer found = g_hash_table_lookup(pack->guest_rva_indexes, &guest_rva);
+    if (found) {
+        return (int)GPOINTER_TO_UINT(found) - 1;
     }
     if (pack->guest_rvas->len >= LAT_AOT_V2_GUEST_ADDRESS_LIMIT) {
         return -1;
     }
+    uint64_t *key = g_new(uint64_t, 1);
+    *key = guest_rva;
     g_array_append_val(pack->guest_rvas, guest_rva);
-    return (int)pack->guest_rvas->len - 1;
+    guint index = pack->guest_rvas->len - 1;
+    g_hash_table_insert(pack->guest_rva_indexes, key,
+                        GUINT_TO_POINTER(index + 1));
+    return (int)index;
 }
 
 static int patch_absolute_guest_address(uint32_t *instructions,
@@ -536,19 +563,30 @@ static int patch_guest_address(ModulePack *pack,
     }
     uint64_t guest_rva = target - pack->header->preferred_guest_base;
     int slot = guest_slot(pack, guest_rva);
-    if (slot < 0 || relocation->slots < 2 || relocation->slots > 3) {
+    if (slot < 0 || relocation->slots < 2 || relocation->slots > 3 ||
+        (pack->three_level_guest_slots && relocation->slots < 3)) {
         return -1;
     }
     uint32_t destination = instructions[0] & 0x1f;
     uint32_t page = (uint32_t)slot / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
     uint32_t entry = (uint32_t)slot % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
-    int32_t offset = -(int32_t)((page + 1) * 8);
+    uint32_t root = pack->three_level_guest_slots ?
+        page / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT : page;
+    uint32_t middle = page % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+    int32_t offset = -(int32_t)((root + 1) * 8);
     instructions[0] = 0x28c00000u | ((uint32_t)offset & 0xfff) << 10 |
                       22u << 5 | destination;
-    instructions[1] = 0x28c00000u | (entry * 8) << 10 |
+    instructions[1] = 0x28c00000u |
+                      ((pack->three_level_guest_slots ? middle : entry) * 8)
+                          << 10 |
                       destination << 5 | destination;
-    for (uint32_t i = 2; i < relocation->slots; i++) {
-        instructions[i] = 0x03400000u;
+    if (pack->three_level_guest_slots) {
+        instructions[2] = 0x28c00000u | (entry * 8) << 10 |
+                          destination << 5 | destination;
+    } else {
+        for (uint32_t i = 2; i < relocation->slots; i++) {
+            instructions[i] = 0x03400000u;
+        }
     }
     return 0;
 }
@@ -629,6 +667,9 @@ static int emit_metadata(const char *path, const ModulePack *pack,
     }
     uint8_t codegen[32];
     lat_aot_v2_codegen_digest(pack->header->lat_build_id, codegen);
+    const char *guest_slot_flag = pack->three_level_guest_slots ?
+        "LAT_AOT_MODULE_THREE_LEVEL_GUEST_SLOTS" :
+        "LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS";
     fprintf(file,
         "#include \"lat-aot-v2.h\"\n#include <elf.h>\n"
         "#define MAGIC { 'L','A','T','A','O','T','2',0 }\n"
@@ -639,8 +680,9 @@ static int emit_metadata(const char *path, const ModulePack *pack,
         "static const Note note = { {4,sizeof(LatAotNoteV2),0x4c415432},"
         "\"LAT\", { MAGIC,2,sizeof(LatAotNoteV2),"
         "LAT_AOT_MODULE_PARTIAL|LAT_AOT_MODULE_READONLY_TEXT|"
-        "LAT_AOT_MODULE_PRECISE_PC_MAP|LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS,"
-        "LAT_AOT_V2_REQUIRED_BASE_FEATURES|LAT_AOT_FEATURE_LASX,{ ");
+        "LAT_AOT_MODULE_PRECISE_PC_MAP|%s,"
+        "LAT_AOT_V2_REQUIRED_BASE_FEATURES|LAT_AOT_FEATURE_LASX,{ ",
+        guest_slot_flag);
     print_bytes(file, pack->header->guest_sha256);
     fprintf(file, " },{ ");
     print_bytes(file, codegen);
@@ -685,11 +727,19 @@ static int emit_metadata(const char *path, const ModulePack *pack,
         "__attribute__((section(\".rodata.lat.guest\"),used))\n"
         "static const LatAotGuestSlotV2 guest_slots[] = {\n");
     for (guint i = 0; i < pack->guest_rvas->len; i++) {
+        guint page = i / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+        guint root = pack->three_level_guest_slots ?
+            page / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT : page;
+        guint middle_offset = pack->three_level_guest_slots ?
+            (page % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT) * 8 : 0;
+        guint entry_offset =
+            (i % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT) * 8;
+        guint reserved = pack->three_level_guest_slots ?
+            (middle_offset << 16) | entry_offset : entry_offset;
         fprintf(file, "{0x%llx,-%u,%u},\n",
                 (unsigned long long)g_array_index(pack->guest_rvas,
                                                   uint64_t, i),
-                (i / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT + 1) * 8,
-                (i % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT) * 8);
+                (root + 1) * 8, reserved);
     }
     if (!pack->guest_rvas->len) {
         fprintf(file, "{0,0,0},\n");
@@ -701,8 +751,9 @@ static int emit_metadata(const char *path, const ModulePack *pack,
         "const LatAotModuleV2 lat_aot_module_v2 = {"
         "MAGIC,2,sizeof(LatAotModuleV2),"
         "LAT_AOT_MODULE_PARTIAL|LAT_AOT_MODULE_READONLY_TEXT|"
-        "LAT_AOT_MODULE_PRECISE_PC_MAP|LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS,"
-        "LAT_AOT_V2_REQUIRED_BASE_FEATURES|LAT_AOT_FEATURE_LASX,{ ");
+        "LAT_AOT_MODULE_PRECISE_PC_MAP|%s,"
+        "LAT_AOT_V2_REQUIRED_BASE_FEATURES|LAT_AOT_FEATURE_LASX,{ ",
+        guest_slot_flag);
     print_bytes(file, pack->header->guest_sha256);
     fprintf(file, " },{ ");
     print_bytes(file, codegen);
@@ -795,6 +846,8 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
                                         sizeof(const LatNativeTbV1 *),
                                         header->tb_count),
         .guest_rvas = g_array_new(FALSE, FALSE, sizeof(uint64_t)),
+        .guest_rva_indexes = g_hash_table_new_full(
+            g_int64_hash, g_int64_equal, g_free, NULL),
         .runtime_trampolines = (header->code_size + 3) & ~(uint64_t)3,
     };
     pack.pf_table = pack.runtime_trampolines +
@@ -837,6 +890,7 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
         g_free(metadata_path);
         g_free(assembly_path);
     }
+    g_hash_table_destroy(pack.guest_rva_indexes);
     g_array_free(pack.guest_rvas, TRUE);
     g_array_free(pack.code_order, TRUE);
     g_free(pack.supported);
