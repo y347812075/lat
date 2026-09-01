@@ -98,7 +98,7 @@ static size_t build_elf(unsigned char file[FILE_SIZE])
     note->description.required_features = LAT_AOT_V2_REQUIRED_BASE_FEATURES;
     memset(note->description.source_sha256, 0x11, 32);
     memset(note->description.codegen_id, 0x22, 32);
-    memset(note->description.profile_digest, 0x33, 32);
+    memset(note->description.tbset_digest, 0x33, 32);
 
     char *strings = (void *)(file + STRING_OFFSET);
     size_t needed = 1;

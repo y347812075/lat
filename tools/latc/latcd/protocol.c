@@ -25,17 +25,15 @@ static int request_header_valid(const LatcdRequestV1 *request)
     return request->magic == LATCD_REQUEST_MAGIC &&
            request->version == LATCD_PROTOCOL_VERSION &&
            request->size == sizeof(*request) &&
-           !(request->flags & ~LATCD_REQUEST_HAS_PROFILE);
+           request->flags == LATCD_REQUEST_HAS_TBSET;
 }
 
-int latcd_send_request(int socket_fd, int source_fd, int profile_fd,
+int latcd_send_request(int socket_fd, int source_fd, int tbset_fd,
                        const LatcdRequestV1 *request,
                        char *error, size_t error_size)
 {
-    int has_profile = !!(request &&
-                         (request->flags & LATCD_REQUEST_HAS_PROFILE));
     if (socket_fd < 0 || source_fd < 0 || !request ||
-        (has_profile != (profile_fd >= 0)) ||
+        tbset_fd < 0 ||
         !request_header_valid(request)) {
         return fail(error, error_size, "invalid latcd request arguments");
     }
@@ -56,8 +54,8 @@ int latcd_send_request(int socket_fd, int source_fd, int profile_fd,
     struct cmsghdr *header = CMSG_FIRSTHDR(&message);
     header->cmsg_level = SOL_SOCKET;
     header->cmsg_type = SCM_RIGHTS;
-    int descriptors[2] = { source_fd, profile_fd };
-    size_t descriptor_count = has_profile ? 2 : 1;
+    int descriptors[2] = { source_fd, tbset_fd };
+    size_t descriptor_count = 2;
     header->cmsg_len = CMSG_LEN(sizeof(int) * descriptor_count);
     memcpy(CMSG_DATA(header), descriptors,
            sizeof(int) * descriptor_count);
@@ -74,14 +72,14 @@ int latcd_send_request(int socket_fd, int source_fd, int profile_fd,
 }
 
 int latcd_receive_request(int socket_fd, LatcdRequestV1 *request,
-                          int *source_fd, int *profile_fd,
+                          int *source_fd, int *tbset_fd,
                           char *error, size_t error_size)
 {
-    if (socket_fd < 0 || !request || !source_fd || !profile_fd) {
+    if (socket_fd < 0 || !request || !source_fd || !tbset_fd) {
         return fail(error, error_size, "invalid latcd receive arguments");
     }
     *source_fd = -1;
-    *profile_fd = -1;
+    *tbset_fd = -1;
     struct iovec iov = { .iov_base = request, .iov_len = sizeof(*request) };
     union {
         struct cmsghdr align;
@@ -119,8 +117,7 @@ int latcd_receive_request(int socket_fd, LatcdRequestV1 *request,
         }
         return fail(error, error_size, "invalid latcd request packet");
     }
-    size_t expected_count = (request->flags & LATCD_REQUEST_HAS_PROFILE) ?
-                            2 : 1;
+    size_t expected_count = 2;
     if (!request_header_valid(request) ||
         descriptor_count != expected_count) {
         for (size_t i = 0; i < descriptor_count; i++) {
@@ -130,9 +127,7 @@ int latcd_receive_request(int socket_fd, LatcdRequestV1 *request,
                     "latcd request header or descriptor count is invalid");
     }
     *source_fd = descriptors[0];
-    if (expected_count == 2) {
-        *profile_fd = descriptors[1];
-    }
+    *tbset_fd = descriptors[1];
     return 0;
 }
 

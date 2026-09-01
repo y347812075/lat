@@ -2,6 +2,7 @@
 
 #include "qemu.h"
 #include "exec/exec-all.h"
+#include "exec/tb-context.h"
 #include "exec/tb-hash.h"
 #ifdef CONFIG_LATX_FAST_JMPCACHE
 #include "exec/fasttb.h"
@@ -55,16 +56,14 @@ typedef struct LatAotV2ModuleStats {
     _Atomic uint64_t registration_ns;
     _Atomic size_t live_instances;
     int source_fd;
-    GArray *profile_entries;
+    GHashTable *jit_tbset;
     struct LatAotV2ModuleStats *next;
 } LatAotV2ModuleStats;
 
-typedef struct LatAotV2ProfileEntry {
+typedef struct LatAotV2TbsetEntry {
     uint64_t rva;
     uint32_t flags;
-    uint32_t reserved;
-    uint64_t count;
-} LatAotV2ProfileEntry;
+} LatAotV2TbsetEntry;
 
 typedef struct LatAotV2RuntimeInstance {
     LatAotModuleInstanceV2 instance;
@@ -119,7 +118,7 @@ static bool registry_initialized;
 static bool runtime_bound;
 static LatGuestElfTrackerV2 *elf_tracker;
 static pthread_mutex_t elf_tracker_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t profile_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t tbset_lock = PTHREAD_MUTEX_INITIALIZER;
 typedef struct LatAotV2PendingMapping {
     int fd;
     uint64_t guest_start;
@@ -161,7 +160,7 @@ static _Atomic uint64_t invalidated_exec_ranges;
 static _Atomic uint64_t revalidated_instances;
 static _Atomic uint64_t revalidation_failures;
 
-static void submit_runtime_profiles(void);
+static void submit_runtime_tbsets(void);
 
 static bool next_compiler_request_id(uint64_t *request_id)
 {
@@ -180,12 +179,6 @@ static bool next_compiler_request_id(uint64_t *request_id)
     return true;
 }
 
-static void next_profile_request_id(uint64_t *request_id)
-{
-    uint64_t sequence = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
-    *request_id = ((uint64_t)getpid() << 32) ^ sequence;
-}
-
 static _Atomic uint64_t invalidation_reasons[4];
 static _Atomic uint64_t signal_pc_lookups;
 static _Atomic uint64_t signal_pc_hits;
@@ -201,19 +194,17 @@ static _Atomic unsigned int signal_invalidation_test_state;
 static bool signal_invalidation_test;
 static bool signal_invalidation_test_worker_started;
 static uint64_t discovered_elfs;
-static GHashTable *submitted_sources;
-static GHashTable *profile_sources;
 
 void latc_aot_v2_fork_start(void)
 {
     pthread_mutex_lock(&elf_tracker_lock);
-    pthread_mutex_lock(&profile_lock);
+    pthread_mutex_lock(&tbset_lock);
 }
 
 void latc_aot_v2_fork_end(CPUState *cpu, bool child)
 {
     if (!child) {
-        pthread_mutex_unlock(&profile_lock);
+        pthread_mutex_unlock(&tbset_lock);
         pthread_mutex_unlock(&elf_tracker_lock);
         return;
     }
@@ -257,7 +248,7 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
     (void)cpu;
 #endif
 
-    pthread_mutex_unlock(&profile_lock);
+    pthread_mutex_unlock(&tbset_lock);
     pthread_mutex_unlock(&elf_tracker_lock);
 }
 
@@ -273,18 +264,6 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
                                       char *error, size_t error_size);
 static void digest_hex(const uint8_t digest[32], char output[65]);
 
-static void enable_profile_submission(const uint8_t source_sha256[32])
-{
-    if (!profile_sources) {
-        profile_sources = g_hash_table_new_full(g_str_hash, g_str_equal,
-                                                g_free, NULL);
-    }
-    if (profile_sources) {
-        char source[65];
-        digest_hex(source_sha256, source);
-        g_hash_table_add(profile_sources, g_strdup(source));
-    }
-}
 static void recycle_retired_instances_locked(void);
 
 static uint64_t available_aot_features(void)
@@ -459,7 +438,7 @@ void latc_aot_v2_report_stats(void)
         return;
     }
     latc_bundle_flush_stats();
-    submit_runtime_profiles();
+    submit_runtime_tbsets();
     if (!getenv("LATX_AOT_V2_REPORT")) return;
     LatAotRegistryCountsV2 registry_counts = {0};
     if (registry_initialized) {
@@ -560,6 +539,20 @@ void latc_aot_v2_report_stats(void)
     }
 }
 
+static guint tbset_entry_hash(gconstpointer value)
+{
+    const LatAotV2TbsetEntry *entry = value;
+    uint64_t mixed = entry->rva ^ ((uint64_t)entry->flags << 32);
+    return (guint)(mixed ^ (mixed >> 32));
+}
+
+static gboolean tbset_entry_equal(gconstpointer left, gconstpointer right)
+{
+    const LatAotV2TbsetEntry *a = left;
+    const LatAotV2TbsetEntry *b = right;
+    return a->rva == b->rva && a->flags == b->flags;
+}
+
 static LatAotV2ModuleStats *add_module_stats(
     const LatGuestElfInfoV2 *info, LatAotV2ModuleState state, int source_fd)
 {
@@ -589,8 +582,9 @@ static LatAotV2ModuleStats *add_module_stats(
     }
     stats->source_fd = source_fd >= 0 ?
         fcntl(source_fd, F_DUPFD_CLOEXEC, 3) : -1;
-    stats->profile_entries = g_array_new(FALSE, FALSE,
-                                         sizeof(LatAotV2ProfileEntry));
+    stats->jit_tbset = g_hash_table_new_full(tbset_entry_hash,
+                                             tbset_entry_equal,
+                                             g_free, NULL);
     memcpy(stats->source_sha256, info->source_sha256,
            sizeof(stats->source_sha256));
     atomic_store_explicit(&stats->guest_begin, info->guest_begin,
@@ -631,8 +625,7 @@ static bool dispatch_miss_tracking_enabled(void)
     if (enabled >= 0) {
         return enabled;
     }
-    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
-    enabled = getenv("LATX_AOT_V2_REPORT") || (socket && *socket);
+    enabled = getenv("LATX_AOT_V2_REPORT") != NULL;
     atomic_store_explicit(&dispatch_miss_tracking, enabled,
                           memory_order_release);
     return enabled;
@@ -653,27 +646,6 @@ static void note_dispatch_miss(LatAotV2ModuleStats *stats,
             &stats->source_base, memory_order_acquire);
         uint64_t rva = guest_pc - source_base;
         uint32_t semantic_flags = aot_v2_semantic_flags(cflags);
-        pthread_mutex_lock(&profile_lock);
-        bool found = false;
-        if (stats->profile_entries) {
-            for (guint i = 0; i < stats->profile_entries->len; i++) {
-                LatAotV2ProfileEntry *entry = &g_array_index(
-                    stats->profile_entries, LatAotV2ProfileEntry, i);
-                if (entry->rva == rva && entry->flags == semantic_flags) {
-                    if (entry->count != UINT64_MAX) entry->count++;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found && stats->profile_entries->len <
-                          LAT_AOT_V2_GUEST_ADDRESS_LIMIT) {
-                LatAotV2ProfileEntry entry = {
-                    .rva = rva, .flags = semantic_flags, .count = 1,
-                };
-                g_array_append_val(stats->profile_entries, entry);
-            }
-        }
-        pthread_mutex_unlock(&profile_lock);
         uint64_t trace_index = atomic_fetch_add(&traced_dispatch_misses, 1);
         if (trace_index < 1024 && getenv("LATX_AOT_V2_TRACE_MISSES")) {
             char source[65];
@@ -698,132 +670,155 @@ bool latc_aot_v2_mapping_enabled(void)
     return (cache && *cache) || (module && *module) || (socket && *socket);
 }
 
-static void submit_missing_module(int fd, const LatGuestElfInfoV2 *info,
-                                  uint32_t priority)
+static void snapshot_jit_tb_locked(TranslationBlock *tb)
+{
+    uint32_t cflags = qatomic_read(&tb->cflags);
+    if (cflags & CF_INVALID) {
+        return;
+    }
+    LatAotV2ModuleStats *stats = module_stats_for_pc(tb->pc);
+    if (!stats || !stats->jit_tbset ||
+        g_hash_table_size(stats->jit_tbset) >= LAT_AOT_V2_TBSET_RECORD_LIMIT) {
+        return;
+    }
+    uint64_t source_base = atomic_load_explicit(&stats->source_base,
+                                                memory_order_acquire);
+    if (tb->pc < source_base) {
+        return;
+    }
+    LatAotV2TbsetEntry candidate = {
+        .rva = tb->pc - source_base,
+        .flags = aot_v2_semantic_flags(cflags),
+    };
+    if (g_hash_table_contains(stats->jit_tbset, &candidate)) {
+        return;
+    }
+    LatAotV2TbsetEntry *entry = g_new(LatAotV2TbsetEntry, 1);
+    if (!entry) {
+        return;
+    }
+    *entry = candidate;
+    g_hash_table_add(stats->jit_tbset, entry);
+}
+
+static void snapshot_jit_tb(void *value, uint32_t hash, void *opaque)
+{
+    (void)hash;
+    (void)opaque;
+    snapshot_jit_tb_locked(value);
+}
+
+void latc_aot_v2_snapshot_jit_tb(TranslationBlock *tb)
+{
+    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
+    if (!socket || !*socket || !tb) {
+        return;
+    }
+    pthread_mutex_lock(&tbset_lock);
+    snapshot_jit_tb_locked(tb);
+    pthread_mutex_unlock(&tbset_lock);
+}
+
+void latc_aot_v2_snapshot_jit_tbs(void)
 {
     const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
     if (!socket || !*socket) {
         return;
     }
-    if (!submitted_sources) {
-        submitted_sources = g_hash_table_new_full(g_str_hash, g_str_equal,
-                                                   g_free, NULL);
-        if (!submitted_sources) {
-            atomic_fetch_add(&compiler_submission_failures, 1);
-            return;
-        }
-    }
-    char source[65];
-    digest_hex(info->source_sha256, source);
-    if (g_hash_table_contains(submitted_sources, source)) {
-        atomic_fetch_add(&compiler_submission_duplicates, 1);
-        return;
-    }
-    g_hash_table_add(submitted_sources, g_strdup(source));
-    uint64_t request_id;
-    if (!next_compiler_request_id(&request_id)) {
-        return;
-    }
-    char error[256] = {0};
-    if (latcd_client_submit_fd(socket, fd, priority, request_id,
-                               error, sizeof(error))) {
-        atomic_fetch_add(&compiler_submission_failures, 1);
-        if (getenv("LATX_AOT_V2_REPORT")) {
-            fprintf(stderr,
-                    "latx: AOT v2 compiler submission failed source=%s: %s\n",
-                    source, error[0] ? error : strerror(errno));
-        }
-        return;
-    }
-    enable_profile_submission(info->source_sha256);
-    atomic_fetch_add(&compiler_submissions, 1);
-    if (getenv("LATX_AOT_V2_REPORT")) {
-        fprintf(stderr,
-                "latx: AOT v2 compiler submitted source=%s priority=%u\n",
-                source, priority);
-    }
+    pthread_mutex_lock(&tbset_lock);
+    qht_iter(&tb_ctx.htable, snapshot_jit_tb, NULL);
+    pthread_mutex_unlock(&tbset_lock);
 }
 
-static int profile_entry_compare(gconstpointer left, gconstpointer right)
+static int tbset_entry_compare(gconstpointer left, gconstpointer right)
 {
-    const LatAotV2ProfileEntry *a = left;
-    const LatAotV2ProfileEntry *b = right;
+    const LatAotV2TbsetEntry *a = left;
+    const LatAotV2TbsetEntry *b = right;
     if (a->rva != b->rva) return a->rva < b->rva ? -1 : 1;
     if (a->flags != b->flags) return a->flags < b->flags ? -1 : 1;
     return 0;
 }
 
-static void submit_runtime_profiles(void)
+static void submit_runtime_tbsets(void)
 {
     const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
     if (!socket || !*socket) return;
+    latc_aot_v2_snapshot_jit_tbs();
     for (LatAotV2ModuleStats *stats = atomic_load_explicit(
              &module_stats, memory_order_acquire); stats;
          stats = stats->next) {
-        pthread_mutex_lock(&profile_lock);
-        guint count = stats->profile_entries ?
-                      stats->profile_entries->len : 0;
+        pthread_mutex_lock(&tbset_lock);
+        guint count = stats->jit_tbset ?
+                      g_hash_table_size(stats->jit_tbset) : 0;
         GArray *entries = count ? g_array_sized_new(
-            FALSE, FALSE, sizeof(LatAotV2ProfileEntry), count) : NULL;
+            FALSE, FALSE, sizeof(LatAotV2TbsetEntry), count) : NULL;
         if (entries) {
-            g_array_append_vals(entries, stats->profile_entries->data, count);
+            GHashTableIter iterator;
+            gpointer key;
+            g_hash_table_iter_init(&iterator, stats->jit_tbset);
+            while (g_hash_table_iter_next(&iterator, &key, NULL)) {
+                g_array_append_val(entries, *(LatAotV2TbsetEntry *)key);
+            }
         }
-        pthread_mutex_unlock(&profile_lock);
+        pthread_mutex_unlock(&tbset_lock);
         if (!entries || stats->source_fd < 0) {
             if (entries) g_array_free(entries, TRUE);
             continue;
         }
-        g_array_sort(entries, profile_entry_compare);
+        g_array_sort(entries, tbset_entry_compare);
         char source[65];
         digest_hex(stats->source_sha256, source);
-        if (!profile_sources ||
-            !g_hash_table_contains(profile_sources, source)) {
-            g_array_free(entries, TRUE);
-            continue;
-        }
         gchar *path = NULL;
         GError *gerror = NULL;
-        int output_fd = g_file_open_tmp("latc-profile-XXXXXX", &path, &gerror);
+        int output_fd = g_file_open_tmp("latc-tbset-XXXXXX", &path, &gerror);
         FILE *output = output_fd >= 0 ? fdopen(output_fd, "w") : NULL;
         int failed = !output;
         if (output) {
-            fprintf(output, "LATC_PROFILE_V2 %s\n", source);
+            fprintf(output, "LATC_TBSET_V1 %s\n", source);
             for (guint i = 0; i < entries->len; i++) {
-                const LatAotV2ProfileEntry *entry = &g_array_index(
-                    entries, LatAotV2ProfileEntry, i);
-                fprintf(output, "0x%llx 0x%x %llu\n",
-                        (unsigned long long)entry->rva, entry->flags,
-                        (unsigned long long)entry->count);
+                const LatAotV2TbsetEntry *entry = &g_array_index(
+                    entries, LatAotV2TbsetEntry, i);
+                fprintf(output, "0x%llx 0x%x\n",
+                        (unsigned long long)entry->rva, entry->flags);
             }
             failed = fflush(output) || fsync(fileno(output));
             if (fclose(output)) failed = 1;
         } else if (output_fd >= 0) {
             close(output_fd);
         }
-        int profile_fd = !failed ? open(path, O_RDONLY | O_CLOEXEC) : -1;
-        if (profile_fd >= 0) unlink(path);
+        int tbset_fd = !failed ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+        if (tbset_fd >= 0) unlink(path);
         uint64_t request_id;
-        next_profile_request_id(&request_id);
+        if (!next_compiler_request_id(&request_id)) {
+            if (tbset_fd >= 0) close(tbset_fd);
+            if (path) {
+                unlink(path);
+                g_free(path);
+            }
+            g_clear_error(&gerror);
+            g_array_free(entries, TRUE);
+            continue;
+        }
         char error[256] = {0};
-        if (profile_fd < 0 || latcd_client_submit_profile_fd(
-                socket, stats->source_fd, profile_fd,
+        if (tbset_fd < 0 || latcd_client_submit_tbset_fd(
+                socket, stats->source_fd, tbset_fd,
                 LATCD_PRIORITY_LIBRARY, request_id,
                 error, sizeof(error))) {
             atomic_fetch_add(&compiler_submission_failures, 1);
             if (getenv("LATX_AOT_V2_REPORT")) {
                 fprintf(stderr,
-                        "latx: AOT v2 profile submission failed source=%s: %s\n",
+                        "latx: AOT v2 TB set submission failed source=%s: %s\n",
                         source, error[0] ? error : strerror(errno));
             }
         } else {
             atomic_fetch_add(&compiler_submissions, 1);
             if (getenv("LATX_AOT_V2_REPORT")) {
                 fprintf(stderr,
-                        "latx: AOT v2 profile submitted source=%s keys=%u\n",
+                        "latx: AOT v2 TB set submitted source=%s keys=%u\n",
                         source, count);
             }
         }
-        if (profile_fd >= 0) close(profile_fd);
+        if (tbset_fd >= 0) close(tbset_fd);
         if (path) {
             unlink(path);
             g_free(path);
@@ -867,20 +862,11 @@ static void drain_mappings(void)
                 info, &instance, error, sizeof(error));
             uint64_t registration_ns =
                 (g_get_monotonic_time() - registration_start) * 1000;
-            if (registered <= 0) {
-                submit_missing_module(
-                    pending->fd, info,
-                    discovered_elfs <= 2 ? LATCD_PRIORITY_STARTUP :
-                                           LATCD_PRIORITY_LIBRARY);
-            }
             LatAotV2ModuleStats *stats = add_module_stats(
                 info, registered > 0 ? LAT_AOT_V2_MODULE_REGISTERED :
                 registered == 0 ? LAT_AOT_V2_MODULE_MISSING :
                                   LAT_AOT_V2_MODULE_REJECTED,
                 pending->fd);
-            if (registered > 0 && getenv("LATX_AOT_V2_LATCD_SOCKET")) {
-                enable_profile_submission(info->source_sha256);
-            }
             if (stats) {
                 atomic_store_explicit(&stats->registration_ns,
                                       registration_ns,
@@ -1594,7 +1580,7 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
         if (index_fd >= 0) close(index_fd);
         g_free(index_path);
         if (!basename) {
-            basename = g_strdup_printf("%s.so", source_hex);
+            return 0;
         }
         char *path = g_build_filename(cache, basename, NULL);
         g_free(basename);

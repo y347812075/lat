@@ -47,7 +47,7 @@ all: $(BUILD)/latc $(BUILD)/latcd/latcd $(BUILD)/liblatc_cfg.a
 $(BUILD)/liblatc_cfg.a: $(CFG_OBJ)
 	$(AR) rcs $@ $^
 
-$(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/profile.o \
+$(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/tbset.o \
 		$(BUILD)/aot-v2/compiler/module-pack.o \
 		$(BUILD)/aot-v2/compiler/module-inspect.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o \
@@ -224,9 +224,10 @@ $(BUILD)/tests/x86-signal-recover: tests/x86-signal-recover.c \
 	@mkdir -p $(dir $@)
 	$(X86_CC) -O2 -static -no-pie -Wl,--build-id=none -o $@ $^
 
-$(BUILD)/tests/x86-signal-recover.profile: \
+$(BUILD)/tests/x86-signal-recover.tbset: \
 		$(BUILD)/tests/x86-signal-recover
-	nm -n $< | awk '$$3 ~ /^signal_.*_(site|fault|resume)$$/ { print "0x" $$1, 1 }' >$@
+	python3 tests/make-symbol-tbset.py $< \
+	  'signal_.*_(site|fault|resume)' $@
 
 $(BUILD)/tests/x86-dynamic-hello: tests/x86-glibc-hello.c
 	@mkdir -p $(dir $@)
@@ -308,8 +309,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/latc analyze $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc compile $(BUILD)/tests/cfg-fixture -o $(BUILD)/tests/cfg-bundle --runner $(BUILD)/tests/cfg-fixture
 	$(BUILD)/latc inspect --json $(BUILD)/tests/cfg-bundle
-	sh tests/test-profile.sh $(BUILD)/latc $(BUILD)/tests/cfg-fixture \
-	  tests/cfg-fixture.profile $(BUILD)/tests/cfg-profile-bundle
+	sh tests/test-tbset.sh $(BUILD)/latc $(BUILD)/tests/cfg-fixture \
+	  $(BUILD)/tests/cfg-tbset-bundle
 	sh tests/test-aot-bundle.sh $(BUILD)/latc $(BUILD)/tests/cfg-fixture \
 	  tests/fake.aot2 $(BUILD)/tests/cfg-aot-bundle
 	sh tests/test-bundle-corruption.sh $(BUILD)/latc $(BUILD)/tests/cfg-bundle $(BUILD)/tests/cfg-bundle.bad
@@ -700,7 +701,7 @@ test-aot-v2-complex-performance: all
 
 test-aot-v2-m4: all $(BUILD)/tests/x86-static-hello \
 		$(BUILD)/tests/x86-glibc-hello $(BUILD)/tests/x86-signal-recover \
-		$(BUILD)/tests/x86-signal-recover.profile \
+		$(BUILD)/tests/x86-signal-recover.tbset \
 		$(BUILD)/tests/x86-dynamic-hello $(BUILD)/tests/x86-dlopen-main \
 		$(BUILD)/tests/x86-dlopen-plugin.so \
 		$(BUILD)/tests/x86-semantics-main \
@@ -720,7 +721,7 @@ test-aot-v2-m4: all $(BUILD)/tests/x86-static-hello \
 	  scripts/compile-native-image.sh $(BUILD)/latc $(RUNNER) \
 	  $(BUILD)/tests/x86-signal-recover \
 	  $(BUILD)/aot-v2-m4/signal.latnative \
-	  $(BUILD)/tests/x86-signal-recover.profile
+	  $(BUILD)/tests/x86-signal-recover.tbset
 	$(MAKE) test-latcd-once AOT_V2_RUNNER=$(AOT_V2_RUNNER) \
 	  AOT_V2_RUNTIME_DIR=$(AOT_V2_RUNTIME_DIR) \
 	  X86_GUEST=$(BUILD)/tests/x86-static-hello
@@ -999,7 +1000,7 @@ clean:
 	rm -rf $(BUILD)
 
 -include $(CFG_OBJ:.o=.d) $(BUILD)/compiler/latc.d \
-	$(BUILD)/compiler/profile.d $(BUILD)/format/bundle.d \
+	$(BUILD)/compiler/tbset.d $(BUILD)/format/bundle.d \
 	$(BUILD)/aot-v2/compiler/module-pack.d \
 	$(BUILD)/aot-v2/runtime/elf-validate.d \
 	$(BUILD)/aot-v2/runtime/registry.d \

@@ -35,7 +35,7 @@ def cache_manifest():
     root = pathlib.Path(args.cache)
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
-        tracked = (path.suffix in (".so", ".current", ".profile", ".sha256"))
+        tracked = (path.suffix in (".so", ".current", ".tbset", ".sha256"))
         if path.is_file() and tracked:
             result[str(relative)] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result

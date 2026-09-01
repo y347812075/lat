@@ -1247,7 +1247,7 @@ static void use_h32(TranslationBlock *tb, IR1_INST *ir1)
                 int base_num = ir1_opnd_base_reg_num(opnd);
                 set_use_reg(tb, ir1, base_num);
             }
-            if (ir1_opnd_has_index(opnd)) {
+            if (ir1_opnd_has_index(opnd) && ir1_opnd_index_is_gpr(opnd)) {
                 int index_num = ir1_opnd_index_reg_num(opnd);
                 set_use_reg(tb, ir1, index_num);
             }

@@ -47,9 +47,11 @@ plugin_pc=$(nm -D "$plugin" | awk '$3 == "latc_plugin_apply" { print "0x" $1; ex
 signal_pc=$(nm -D "$plugin" | awk '$3 == "latc_plugin_signal_site" { print "0x" $1; exit }')
 resume_pc=$(nm -D "$plugin" | awk '$3 == "latc_plugin_signal_resume" { print "0x" $1; exit }')
 test -n "$plugin_pc" -a -n "$signal_pc" -a -n "$resume_pc"
-printf '%s 1\n%s 1\n%s 1\n' "$plugin_pc" "$signal_pc" "$resume_pc" \
-  >"$work/plugin.profile"
-compile_module "$plugin" "$work/plugin.so" "$work/plugin.profile"
+{
+  printf 'LATC_TBSET_V1 %s\n' "$(sha256sum "$plugin" | awk '{print $1}')"
+  printf '%s 0x1\n%s 0x1\n%s 0x1\n' "$plugin_pc" "$signal_pc" "$resume_pc"
+} >"$work/plugin.tbset"
+compile_module "$plugin" "$work/plugin.so" "$work/plugin.tbset"
 plugin_sha=$(sha256sum "$plugin" | awk '{print $1}')
 cp "$work/plugin.so" "$work/race-cache/$plugin_sha.so"
 compile_module "$interp" "$work/interp.so"

@@ -1,6 +1,6 @@
 #include "cfg_program.h"
 #include "bundle.h"
-#include "profile.h"
+#include "tbset.h"
 #include "native-image.h"
 #include "module-pack.h"
 #include "module-inspect.h"
@@ -19,8 +19,8 @@ static void usage(const char *name)
 {
     fprintf(stderr, "usage:\n"
             "  %s analyze [--json] X86_ELF\n"
-            "  %s compile X86_ELF -o OUTPUT --runner RUNNER [--profile FILE]"
-            " [--profile-ignore-outside-exec] [--aot FILE]\n"
+            "  %s compile X86_ELF -o OUTPUT --runner RUNNER [--tbset FILE]"
+            " [--tbset-ignore-outside-exec] [--aot FILE]\n"
             "  %s inspect [--json] BUNDLE\n", name, name, name);
     fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
@@ -28,7 +28,7 @@ static void usage(const char *name)
             name);
     fprintf(stderr,
             "  %s compile-module X86_ELF -o MODULE --runner RUNNER"
-            " --runtime-dir DIRECTORY [--profile FILE]\n",
+            " --runtime-dir DIRECTORY [--tbset FILE]\n",
             name);
     fprintf(stderr, "  %s inspect-module [--json] MODULE\n", name);
     fprintf(stderr, "  %s build-id\n", name);
@@ -123,7 +123,7 @@ static int inspect_module(const char *path, int json)
 
 static int compile_module(const char *input, const char *output,
                           const char *runner,
-                          const char *runtime_dir, const char *profile)
+                          const char *runtime_dir, const char *tbset)
 {
     GError *gerror = NULL;
     gchar *executable = g_file_read_link("/proc/self/exe", &gerror);
@@ -144,9 +144,9 @@ static int compile_module(const char *input, const char *output,
 #endif
     pid_t child = fork();
     if (child == 0) {
-        if (profile) {
+        if (tbset) {
             execl(script, script, executable, runner, input, runtime_dir, output,
-                  profile, (char *)NULL);
+                  tbset, (char *)NULL);
         } else {
             execl(script, script, executable, runner, input, runtime_dir, output,
                   (char *)NULL);
@@ -178,8 +178,8 @@ static int compile_module(const char *input, const char *output,
 }
 
 static int compile_bundle(const char *input, const char *output,
-                          const char *runner, const char *profile,
-                          int profile_ignore_outside_exec, const char *aot)
+                          const char *runner, const char *tbset,
+                          int tbset_ignore_outside_exec, const char *aot)
 {
     CfgProgram program;
     CfgAnalyzeOptions options = { .resolve_jump_tables = true };
@@ -187,17 +187,17 @@ static int compile_bundle(const char *input, const char *output,
     if (cfg_analyze_elf(input, &options, &program, error, sizeof(error)) != 0) {
         fprintf(stderr, "latc: %s\n", error); return 1;
     }
-    if (profile) {
+    if (tbset) {
         size_t matched = 0, unmatched = 0, ignored = 0;
-        if (latc_profile_apply(profile, input, &program,
-                               profile_ignore_outside_exec,
-                               &matched, &unmatched, &ignored,
-                               error, sizeof(error)) != 0) {
+        if (latc_tbset_apply(tbset, input, &program,
+                            tbset_ignore_outside_exec,
+                            &matched, &unmatched, &ignored,
+                            error, sizeof(error)) != 0) {
             fprintf(stderr, "latc: %s\n", error);
             cfg_program_destroy(&program);
             return 1;
         }
-        fprintf(stderr, "latc: profile matched=%zu added=%zu ignored=%zu\n",
+        fprintf(stderr, "latc: TB set matched=%zu added=%zu ignored=%zu\n",
                 matched, unmatched, ignored);
     }
     int rc = latc_bundle_write(runner, input, output, aot, &program,
@@ -220,25 +220,25 @@ static int inspect_bundle(const char *path, int json)
                ",\"runner_size\":%" PRIu64
                ",\"guest_size\":%" PRIu64 ",\"cfg_size\":%" PRIu64
                ",\"functions\":%" PRIu64 ",\"tbs\":%" PRIu64
-               ",\"edges\":%" PRIu64 ",\"profiled_tbs\":%" PRIu64
+               ",\"edges\":%" PRIu64 ",\"selected_tbs\":%" PRIu64
                ",\"aot_size\":%" PRIu64 ",\"aot_name\":\"%s\""
                ",\"guest_sha256\":\"%s\"}\n",
                path, LATC_EXECUTION_MODEL, info.runner_size, info.guest_size,
                info.cfg_size,
                info.function_count, info.tb_count, info.edge_count,
-               info.profiled_tb_count,
+               info.selected_tb_count,
                info.aot_size, info.aot_name,
                info.guest_sha256);
     } else {
         printf("bundle=%s\nexecution_model=%s\nrunner_size=%" PRIu64
                "\nguest_size=%" PRIu64
                "\ncfg_size=%" PRIu64 "\nfunctions=%" PRIu64
-               "\ntbs=%" PRIu64 "\nedges=%" PRIu64 "\nprofiled_tbs=%" PRIu64
+               "\ntbs=%" PRIu64 "\nedges=%" PRIu64 "\nselected_tbs=%" PRIu64
                "\naot_size=%" PRIu64 "\naot_name=%s"
                "\nguest_sha256=%s\n", path, LATC_EXECUTION_MODEL,
                info.runner_size,
                info.guest_size, info.cfg_size, info.function_count,
-               info.tb_count, info.edge_count, info.profiled_tb_count,
+               info.tb_count, info.edge_count, info.selected_tb_count,
                info.aot_size, info.aot_name,
                info.guest_sha256);
     }
@@ -294,28 +294,28 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "compile") == 0) {
         const char *input = argv[2], *output = NULL, *runner = NULL;
-        const char *profile = NULL;
+        const char *tbset = NULL;
         const char *aot = NULL;
-        int profile_ignore_outside_exec = 0;
+        int tbset_ignore_outside_exec = 0;
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) output = argv[++i];
             else if (strcmp(argv[i], "--runner") == 0 && i + 1 < argc) runner = argv[++i];
-            else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) profile = argv[++i];
-            else if (strcmp(argv[i], "--profile-ignore-outside-exec") == 0)
-                profile_ignore_outside_exec = 1;
+            else if (strcmp(argv[i], "--tbset") == 0 && i + 1 < argc) tbset = argv[++i];
+            else if (strcmp(argv[i], "--tbset-ignore-outside-exec") == 0)
+                tbset_ignore_outside_exec = 1;
             else if (strcmp(argv[i], "--aot") == 0 && i + 1 < argc) aot = argv[++i];
             else { usage(argv[0]); return 2; }
         }
         if (!output || !runner) { usage(argv[0]); return 2; }
-        return compile_bundle(input, output, runner, profile,
-                              profile_ignore_outside_exec, aot);
+        return compile_bundle(input, output, runner, tbset,
+                              tbset_ignore_outside_exec, aot);
     }
     if (strcmp(argv[1], "compile-module") == 0) {
         const char *input = argv[2];
         const char *output = NULL;
         const char *runner = getenv("LATC_AOT_RUNNER");
         const char *runtime_dir = getenv("LATC_AOT_RUNTIME_DIR");
-        const char *profile = NULL;
+        const char *tbset = NULL;
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
                 output = argv[++i];
@@ -324,8 +324,8 @@ int main(int argc, char **argv)
             } else if (strcmp(argv[i], "--runtime-dir") == 0 &&
                        i + 1 < argc) {
                 runtime_dir = argv[++i];
-            } else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
-                profile = argv[++i];
+            } else if (strcmp(argv[i], "--tbset") == 0 && i + 1 < argc) {
+                tbset = argv[++i];
             } else {
                 usage(argv[0]);
                 return 2;
@@ -335,7 +335,7 @@ int main(int argc, char **argv)
             usage(argv[0]);
             return 2;
         }
-        return compile_module(input, output, runner, runtime_dir, profile);
+        return compile_module(input, output, runner, runtime_dir, tbset);
     }
     if (strcmp(argv[1], "inspect") == 0) {
         int json = 0; const char *path = NULL;

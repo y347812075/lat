@@ -356,7 +356,7 @@ refer to the original mapping.
 `latc` gains a module command instead of extending the static-shell command:
 
 ```text
-latc compile-module X86_ELF -o MODULE.so [--profile FILE]
+latc compile-module X86_ELF -o MODULE.so --tbset FILE
 latc inspect-module MODULE.so
 latc verify-module MODULE.so X86_ELF
 ```
@@ -368,6 +368,12 @@ The implementation should reuse:
 - the native exporter's stable TB and relocation classification;
 - the current runtime's x86 state ABI, syscall handling, and dispatch code;
 - LAT's existing executable mmap discovery and per-segment AOT recovery timing.
+
+`FILE` must use `LATC_TBSET_V1 SOURCE_SHA256`, followed only by ELF-relative
+`RVA FLAGS` records. It contains no execution count, and no older profile
+format is accepted. The runtime builds this set by scanning its existing JIT
+TB table at exit or before a global TB flush; normal dispatch and TB creation
+do not update an AOT counter or set.
 
 The static native-image container remains a test vehicle during migration. The
 new ELF writer should consume a versioned module intermediate representation,

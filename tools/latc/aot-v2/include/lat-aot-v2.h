@@ -19,7 +19,7 @@
 #define LAT_AOT_V2_GUEST_ADDRESS_LIMIT \
     (LAT_AOT_V2_TWO_LEVEL_GUEST_ADDRESS_LIMIT * \
      LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT)
-#define LAT_AOT_V2_PROFILE_RECORD_LIMIT 65536u
+#define LAT_AOT_V2_TBSET_RECORD_LIMIT 1048576u
 #define LAT_AOT_RUNTIME_TARGET_COUNT 59u
 
 enum LatAotFeatureV2 {
@@ -61,7 +61,7 @@ typedef struct LatAotNoteV2 {
     uint64_t required_features;
     uint8_t source_sha256[32];
     uint8_t codegen_id[32];
-    uint8_t profile_digest[32];
+    uint8_t tbset_digest[32];
 } LatAotNoteV2;
 
 typedef struct LatAotTbV2 {
@@ -93,7 +93,7 @@ typedef struct LatAotModuleV2 {
     uint64_t required_features;
     uint8_t source_sha256[32];
     uint8_t codegen_id[32];
-    uint8_t profile_digest[32];
+    uint8_t tbset_digest[32];
     const uint8_t *text_begin;
     const uint8_t *text_end;
     const LatAotTbV2 *tb_begin;

@@ -42,8 +42,8 @@ static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
                sizeof(note->source_sha256)) ||
         memcmp(descriptor->codegen_id, note->codegen_id,
                sizeof(note->codegen_id)) ||
-        memcmp(descriptor->profile_digest, note->profile_digest,
-               sizeof(note->profile_digest))) {
+        memcmp(descriptor->tbset_digest, note->tbset_digest,
+               sizeof(note->tbset_digest))) {
         return fail(error, error_size,
                     "AOT descriptor does not match its ELF note");
     }

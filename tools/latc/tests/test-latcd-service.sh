@@ -29,7 +29,7 @@ start_service()
     stats=$phase/stats.json
     "$latcd" --serve --socket "$socket" --cache-dir "$cache" \
       --latc "$compiler" --runner "$runner" --runtime-dir "$runtime_dir" \
-      --stats "$stats" "$@" >"$phase/server.stdout" \
+      --stats "$stats" --workers 1 "$@" >"$phase/server.stdout" \
       2>"$phase/server.stderr" &
     server_pid=$!
     n=0
@@ -70,6 +70,25 @@ stop_service()
 {
     kill -TERM "$server_pid"
     wait "$server_pid"
+}
+
+submit_source()
+{
+    submit_socket=$1
+    submit_source_path=$2
+    submit_output=$3
+    shift 3
+    submit_tbset=$(mktemp "$work/submit.XXXXXX.tbset")
+    python3 "$script_dir/make-tbset.py" "$submit_source_path" "$submit_tbset"
+    if "$latcd" --submit --socket "$submit_socket" --tbset "$submit_tbset" \
+         "$@" "$submit_source_path" >"$submit_output"; then
+        rm -f "$submit_tbset"
+        return 0
+    else
+        submit_status=$?
+        rm -f "$submit_tbset"
+        return "$submit_status"
+    fi
 }
 
 owner_cache=$work/cache-owner
@@ -142,8 +161,7 @@ while [ ! -S "$kill_socket" ] && kill -0 "$kill_pid" 2>/dev/null; do
     sleep 0.01
 done
 [ -S "$kill_socket" ]
-"$latcd" --submit --socket "$kill_socket" "$guest" \
-  >"$kill_phase/client"
+submit_source "$kill_socket" "$guest" "$kill_phase/client"
 stats=$kill_stats
 wait_stats 's["compiled"] == 1 and s["active_jobs"] == 0 and s["cache_owner_pid"] > 0'
 find "$owner_cache" -maxdepth 1 -type f \
@@ -174,8 +192,7 @@ client_pids=
 n=1
 while [ "$n" -le 20 ]; do
     if [ $((n % 2)) -eq 0 ]; then source=$work/same-bytes.elf; else source=$guest; fi
-    "$latcd" --submit --socket "$socket" "$source" \
-      >"$phase/client.$n" 2>&1 &
+    submit_source "$socket" "$source" "$phase/client.$n" 2>&1 &
     client_pids="$client_pids $!"
     n=$((n + 1))
 done
@@ -197,11 +214,9 @@ cp "$guest" "$work/workers-a.elf"
 cp "$guest" "$work/workers-b.elf"
 printf a >>"$work/workers-a.elf"
 printf b >>"$work/workers-b.elf"
-"$latcd" --submit --socket "$socket" "$work/workers-a.elf" \
-  >"$phase/a.client" &
+submit_source "$socket" "$work/workers-a.elf" "$phase/a.client" &
 worker_client_a=$!
-"$latcd" --submit --socket "$socket" "$work/workers-b.elf" \
-  >"$phase/b.client" &
+submit_source "$socket" "$work/workers-b.elf" "$phase/b.client" &
 worker_client_b=$!
 wait "$worker_client_a"
 wait "$worker_client_b"
@@ -210,7 +225,6 @@ wait_stats 's["compiled"] == 2 and s["active_jobs"] == 0'
 stop_service
 
 start_service same-source-workers "$script_dir/fake-latc-slow.sh" --workers 2
-"$latcd" --submit --socket "$socket" "$guest" >"$phase/base.client"
 python3 - "$socket" "$guest" <<'PY'
 import array
 import hashlib
@@ -238,14 +252,14 @@ with open(source_path, "rb") as source:
     assert load_vaddrs and entry >= min(load_vaddrs)
     entry_rva = entry - min(load_vaddrs)
 
-for request_id, count in ((101, 1), (102, 2)):
-    profile = tempfile.NamedTemporaryFile(mode="w", delete=False)
+for request_id, flags in ((101, 1), (102, 3)):
+    tbset = tempfile.NamedTemporaryFile(mode="w", delete=False)
     try:
-        profile.write("LATC_PROFILE_V2 %s\n" % source_sha)
-        profile.write("0x%x 0x1 %d\n" % (entry_rva, count))
-        profile.close()
+        tbset.write("LATC_TBSET_V1 %s\n" % source_sha)
+        tbset.write("0x%x 0x%x\n" % (entry_rva, flags))
+        tbset.close()
         source_fd = os.open(source_path, os.O_RDONLY)
-        profile_fd = os.open(profile.name, os.O_RDONLY)
+        tbset_fd = os.open(tbset.name, os.O_RDONLY)
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         connection.connect(socket_path)
         request = struct.pack("=IHHIIQ", 0x4c415444, 1, 24,
@@ -253,16 +267,16 @@ for request_id, count in ((101, 1), (102, 2)):
         connection.sendmsg(
             [request],
             [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
-              array.array("i", [source_fd, profile_fd]))])
+              array.array("i", [source_fd, tbset_fd]))])
         response = connection.recv(248)
         assert len(response) == 248
         assert struct.unpack_from("=i", response, 8)[0] == 0
         connection.close()
         os.close(source_fd)
-        os.close(profile_fd)
+        os.close(tbset_fd)
     finally:
         try:
-            os.unlink(profile.name)
+            os.unlink(tbset.name)
         except FileNotFoundError:
             pass
 PY
@@ -291,21 +305,22 @@ with source.open("rb") as elf:
         if struct.unpack_from("<I", phdr)[0] == 1:
             load_vaddrs.append(struct.unpack_from("<Q", phdr, 16)[0])
 entry_rva = entry - min(load_vaddrs)
-profile = cache / ".profiles" / f"{source_sha}.profile"
-contents = profile.read_text()
+tbset = cache / ".tbsets" / f"{source_sha}.tbset"
+contents = tbset.read_text()
 assert contents.splitlines() == [
-    f"LATC_PROFILE_V2 {source_sha}",
-    f"0x{entry_rva:x} 0x1 3",
+    f"LATC_TBSET_V1 {source_sha}",
+    f"0x{entry_rva:x} 0x1",
+    f"0x{entry_rva:x} 0x3",
 ], contents
-profile_sha = hashlib.sha256(contents.encode()).hexdigest()
-module_name = f"{source_sha}-{profile_sha}.so"
+tbset_sha = hashlib.sha256(contents.encode()).hexdigest()
+module_name = f"{source_sha}-{tbset_sha}.so"
 assert (cache / module_name).is_file(), module_name
-assert (cache / f"{source_sha}.so").is_file()
+assert not (cache / f"{source_sha}.so").exists()
 current = json.loads((cache / f"{source_sha}.current").read_text())
 assert current["module"] == module_name, current
 assert len(list(cache.glob(f"{source_sha}-*.so"))) == 1
 stats = json.loads((cache.parent / "stats.json").read_text())
-assert stats["requests"] == 3, stats
+assert stats["requests"] == 2, stats
 assert stats["queued"] == 2 and stats["deduplicated"] == 1, stats
 assert stats["compiled"] == 2 and stats["failed"] == 0, stats
 PY
@@ -326,10 +341,9 @@ assert len(response) == 248
 assert struct.unpack_from("=i", response, 8)[0] == 1
 connection.close()
 PY
-"$latcd" --submit --socket "$socket" "$guest" >"$phase/first.client"
+submit_source "$socket" "$guest" "$phase/first.client"
 wait_stats 's["failed"] == 1 and s["active_jobs"] == 0'
-if "$latcd" --submit --socket "$socket" "$guest" \
-     >"$phase/second.client" 2>&1; then
+if submit_source "$socket" "$guest" "$phase/second.client" 2>&1; then
     echo "negative cache accepted immediate retry" >&2
     exit 1
 fi
@@ -338,7 +352,7 @@ wait_stats 's["negative_hits"] == 1'
 stop_service
 
 start_service cpu-limit "$script_dir/fake-latc-cpu.sh" --cpu-seconds 1
-"$latcd" --submit --socket "$socket" "$guest" >"$phase/client"
+submit_source "$socket" "$guest" "$phase/client"
 wait_stats 's["failed"] == 1 and s["active_jobs"] == 0'
 grep -q 'compiler terminated by signal' "$phase/server.stderr" || true
 stop_service
@@ -352,16 +366,13 @@ printf b >>"$work/b.elf"
 printf c >>"$work/c.elf"
 printf d >>"$work/d.elf"
 start_service priority "$script_dir/fake-latc-slow.sh" --max-jobs 2
-"$latcd" --submit --socket "$socket" --priority 0 "$work/a.elf" \
-  >"$phase/a.client"
+submit_source "$socket" "$work/a.elf" "$phase/a.client" --priority 0
 wait_stats 's["active_jobs"] == 1 and s["queue_depth"] == 0'
-"$latcd" --submit --socket "$socket" --priority 1 "$work/b.elf" \
-  >"$phase/b.client"
-"$latcd" --submit --socket "$socket" --priority 200 "$work/c.elf" \
-  >"$phase/c.client"
+submit_source "$socket" "$work/b.elf" "$phase/b.client" --priority 1
+submit_source "$socket" "$work/c.elf" "$phase/c.client" --priority 200
 wait_stats 's["queue_depth"] == 2'
-if "$latcd" --submit --socket "$socket" --priority 1 "$work/d.elf" \
-     >"$phase/d.client" 2>&1; then
+if submit_source "$socket" "$work/d.elf" "$phase/d.client" --priority 1 \
+     2>&1; then
     echo "full compiler queue accepted another request" >&2
     exit 1
 fi
@@ -369,10 +380,15 @@ grep -q '^status=6$' "$phase/d.client"
 wait_stats 's["compiled"] == 3 and s["active_jobs"] == 0'
 b_sha=$(sha256sum "$work/b.elf" | cut -d ' ' -f 1)
 c_sha=$(sha256sum "$work/c.elf" | cut -d ' ' -f 1)
-python3 - "$cache/$b_sha.so" "$cache/$c_sha.so" <<'PY'
+python3 - "$cache" "$b_sha" "$c_sha" <<'PY'
+import json
 import os
+from pathlib import Path
 import sys
-assert os.stat(sys.argv[2]).st_mtime_ns < os.stat(sys.argv[1]).st_mtime_ns
+cache = Path(sys.argv[1])
+b = json.loads((cache / f"{sys.argv[2]}.current").read_text())["module"]
+c = json.loads((cache / f"{sys.argv[3]}.current").read_text())["module"]
+assert os.stat(cache / c).st_mtime_ns < os.stat(cache / b).st_mtime_ns
 PY
 wait_stats 's["queue_full"] == 1 and s["compiled"] == 3'
 stop_service
@@ -380,12 +396,11 @@ stop_service
 source_size=$(wc -c <"$work/b.elf")
 start_service shutdown "$script_dir/fake-latc-cpu.sh" --cpu-seconds 60 \
   --max-jobs 10 --max-queue-bytes "$source_size"
-"$latcd" --submit --socket "$socket" "$work/a.elf" >"$phase/a.client"
+submit_source "$socket" "$work/a.elf" "$phase/a.client"
 wait_stats 's["active_jobs"] == 1 and s["queue_depth"] == 0'
-"$latcd" --submit --socket "$socket" "$work/b.elf" >"$phase/b.client"
+submit_source "$socket" "$work/b.elf" "$phase/b.client"
 wait_stats 's["queue_depth"] == 1 and s["queue_bytes"] > 0'
-if "$latcd" --submit --socket "$socket" "$work/c.elf" \
-     >"$phase/c.client" 2>&1; then
+if submit_source "$socket" "$work/c.elf" "$phase/c.client" 2>&1; then
     echo "byte-limited compiler queue accepted another request" >&2
     exit 1
 fi

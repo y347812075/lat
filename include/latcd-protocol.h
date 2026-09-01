@@ -16,7 +16,7 @@ enum LatcdPriority {
 };
 
 enum LatcdRequestFlag {
-    LATCD_REQUEST_HAS_PROFILE = 1u << 0,
+    LATCD_REQUEST_HAS_TBSET = 1u << 0,
 };
 
 enum LatcdStatus {
@@ -50,11 +50,11 @@ typedef struct LatcdResponseV1 {
     char message[LATCD_RESPONSE_MESSAGE_SIZE];
 } LatcdResponseV1;
 
-int latcd_send_request(int socket_fd, int source_fd, int profile_fd,
+int latcd_send_request(int socket_fd, int source_fd, int tbset_fd,
                        const LatcdRequestV1 *request,
                        char *error, size_t error_size);
 int latcd_receive_request(int socket_fd, LatcdRequestV1 *request,
-                          int *source_fd, int *profile_fd,
+                          int *source_fd, int *tbset_fd,
                           char *error, size_t error_size);
 int latcd_send_response(int socket_fd, const LatcdResponseV1 *response,
                         char *error, size_t error_size);

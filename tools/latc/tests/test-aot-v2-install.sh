@@ -204,7 +204,14 @@ assert stats["runtime_file_tb_gen_attempts"] == 0, stats
 PY
 
 source_sha=$(sha256sum "$guest" | cut -d ' ' -f 1)
-stale_module=$cache/$source_sha.so
+module_name=$(python3 - "$cache/$source_sha.current" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1]))["module"])
+PY
+)
+stale_module=$cache/$module_name
+tbset=$cache/.tbsets/$source_sha.tbset
 chmod 0644 "$stale_module"
 python3 - "$stale_module" "$codegen" <<'PY'
 from pathlib import Path
@@ -236,7 +243,8 @@ while [ ! -S "$socket" ] && kill -0 "$daemon_pid" 2>/dev/null; do
     sleep 0.01
 done
 test -S "$socket"
-"$latcd" --submit --socket "$socket" "$guest" >"$phase/submit.stdout"
+"$latcd" --submit --socket "$socket" --tbset "$tbset" "$guest" \
+  >"$phase/submit.stdout"
 n=0
 until python3 - "$stats" 2>/dev/null <<'PY'
 import json

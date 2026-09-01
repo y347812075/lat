@@ -48,7 +48,7 @@ static const LatAotElfNoteFixtureV2 fixture_note = {
         .required_features = LAT_AOT_V2_REQUIRED_BASE_FEATURES,
         .source_sha256 = BYTE_32(0x11),
         .codegen_id = BYTE_32(0x22),
-        .profile_digest = BYTE_32(0x33),
+        .tbset_digest = BYTE_32(0x33),
     },
 };
 
@@ -84,7 +84,7 @@ const LatAotModuleV2 lat_aot_module_v2 = {
     .required_features = LAT_AOT_V2_REQUIRED_BASE_FEATURES,
     .source_sha256 = BYTE_32(LAT_AOT_FIXTURE_DESCRIPTOR_SOURCE_BYTE),
     .codegen_id = BYTE_32(0x22),
-    .profile_digest = BYTE_32(0x33),
+    .tbset_digest = BYTE_32(0x33),
     .text_begin = (const uint8_t *)lat_aot_fixture_entry,
     .text_end = lat_aot_fixture_text_end,
     .tb_begin = fixture_tbs,

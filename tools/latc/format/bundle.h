@@ -19,7 +19,7 @@ typedef struct LatcBundleInfo {
     uint64_t function_count;
     uint64_t tb_count;
     uint64_t edge_count;
-    uint64_t profiled_tb_count;
+    uint64_t selected_tb_count;
     char guest_sha256[65];
     char aot_sha256[65];
     char aot_name[161];

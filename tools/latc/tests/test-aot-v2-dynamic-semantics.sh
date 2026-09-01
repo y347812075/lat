@@ -27,13 +27,14 @@ cp "$plugin" /tmp/latc-m3-semantics-plugin.so
 cp "$preload" /tmp/latc-m3-semantics-preload.so
 trap 'rm -f /tmp/liblatc-semantics-startup.so /tmp/latc-m3-semantics-plugin.so /tmp/latc-m3-semantics-preload.so' EXIT HUP INT TERM
 
-make_profile()
+make_tbset()
 {
     source=$1
     output=$2
     pattern=$3
+    printf 'LATC_TBSET_V1 %s\n' "$(sha256sum "$source" | awk '{print $1}')" >"$output"
     nm "$source" | awk -v pattern="$pattern" \
-      '$2 ~ /^[TtIi]$/ && $3 ~ pattern { print "0x" $1, 1 }' >"$output"
+      '$2 ~ /^[TtIi]$/ && $3 ~ pattern { print "0x" $1, "0x1" }' >>"$output"
     test -s "$output"
 }
 
@@ -51,12 +52,12 @@ compile_module()
     cp "$output" "$work/hot-cache/$sha.so"
 }
 
-make_profile "$startup" "$work/startup.profile" '^semantic_startup_'
-make_profile "$plugin" "$work/plugin.profile" '^semantic_'
-make_profile "$preload" "$work/preload.profile" '^semantic_'
-compile_module "$startup" "$work/startup.so" "$work/startup.profile"
-compile_module "$plugin" "$work/plugin.so" "$work/plugin.profile"
-compile_module "$preload" "$work/preload.so" "$work/preload.profile"
+make_tbset "$startup" "$work/startup.tbset" '^semantic_startup_'
+make_tbset "$plugin" "$work/plugin.tbset" '^semantic_'
+make_tbset "$preload" "$work/preload.tbset" '^semantic_'
+compile_module "$startup" "$work/startup.so" "$work/startup.tbset"
+compile_module "$plugin" "$work/plugin.so" "$work/plugin.tbset"
+compile_module "$preload" "$work/preload.so" "$work/preload.tbset"
 compile_module "$guest" "$work/main.so"
 compile_module "$interp" "$work/interp.so"
 compile_module "$libc" "$work/libc.so"

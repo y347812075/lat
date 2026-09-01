@@ -7,7 +7,7 @@ if [ "${1:-}" = "--module" ]; then
     shift
 fi
 if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
-    echo "usage: $0 [--module] LATC RUNNER X86_GUEST OUTPUT [PROFILE]" >&2
+    echo "usage: $0 [--module] LATC RUNNER X86_GUEST OUTPUT [TBSET]" >&2
     exit 2
 fi
 
@@ -15,7 +15,7 @@ latc=$1
 runner=$2
 guest=$3
 output=$4
-profile=${5:-}
+tbset=${5:-}
 
 case "$output" in
     /*) ;;
@@ -24,11 +24,11 @@ esac
 work=$(mktemp -d "${TMPDIR:-/tmp}/latc-native.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-supplements="$work/supplements.profile"
-if [ -n "$profile" ]; then
-    cp "$profile" "$supplements"
+supplements="$work/supplements.tbset"
+if [ -n "$tbset" ]; then
+    cp "$tbset" "$supplements"
 else
-    : >"$supplements"
+    printf 'LATC_TBSET_V1 %s\n' "$(sha256sum "$guest" | awk '{print $1}')" >"$supplements"
 fi
 
 round=1
@@ -36,7 +36,7 @@ max_rounds=${LATC_NATIVE_MAX_ROUNDS:-64}
 best_missing=2147483647
 stagnant_rounds=0
 while [ "$round" -le "$max_rounds" ]; do
-    missing="$work/missing-$round.profile"
+    missing="$work/missing-$round.tbset"
     rm -f "$output" "$missing"
     if LATC_NATIVE_IMAGE_OUT="$output" LATC_NATIVE_MISSING_OUT="$missing" \
         "$(dirname "$0")/compile-aot.sh" "$latc" "$runner" "$guest" \
@@ -59,7 +59,7 @@ while [ "$round" -le "$max_rounds" ]; do
         break
     fi
     repeated=0
-    for seen in "$work"/missing-*.profile; do
+    for seen in "$work"/missing-*.tbset; do
         if [ "$seen" != "$missing" ] && cmp -s "$seen" "$missing"; then
             repeated=1
             break
@@ -69,11 +69,10 @@ while [ "$round" -le "$max_rounds" ]; do
         echo "latc: static missing targets entered a cycle" >&2
         break
     fi
-    if head -n 1 "$supplements" | grep -q '^LATC_PROFILE_V2 '; then
-        head -n 1 "$supplements" >"$work/supplements-next.profile"
-        {
-            tail -n +2 "$supplements"
-            python3 - "$guest" "$missing" <<'PY'
+    head -n 1 "$supplements" >"$work/supplements-next.tbset"
+    {
+        tail -n +2 "$supplements"
+        python3 - "$guest" "$missing" <<'PY'
 import struct
 import sys
 
@@ -88,19 +87,11 @@ bases = [struct.unpack_from("<Q", headers, offset + 16)[0]
          if struct.unpack_from("<I", headers, offset)[0] == 1]
 base = min(bases)
 for line in open(sys.argv[2]):
-    pc, count = line.split()
-    print(hex(int(pc, 0) - base), "0x1", count)
+    pc, _ = line.split()
+    print(hex(int(pc, 0) - base), "0x1")
 PY
-        } | awk '{ key=$1 " " $2; count[key]+=$3 }
-                  END { for (key in count) print key, count[key] }' | \
-            sort -k1,1 -k2,2 >>"$work/supplements-next.profile"
-    else
-        cat "$supplements" "$missing" | \
-            awk '{ count[$1] += $2 }
-                  END { for (pc in count) print pc, count[pc] }' | \
-            sort -k1,1 >"$work/supplements-next.profile"
-    fi
-    mv "$work/supplements-next.profile" "$supplements"
+    } | sort -u -k1,1 -k2,2 >>"$work/supplements-next.tbset"
+    mv "$work/supplements-next.tbset" "$supplements"
     echo "latc: static supplement round $round added $(wc -l <"$missing") targets" >&2
     round=$((round + 1))
 done

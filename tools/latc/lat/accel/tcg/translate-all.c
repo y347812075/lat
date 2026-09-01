@@ -29,6 +29,9 @@
 #include "tcg/tcg.h"
 #if defined(CONFIG_USER_ONLY)
 #include "qemu.h"
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+#include "latc-aot-v2-runner.h"
+#endif
 #if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
 #include <sys/param.h>
 #if __FreeBSD_version >= 700104
@@ -1732,6 +1735,11 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
     uint32_t orig_cflags = tb_cflags(tb);
 
     assert_memory_lock();
+
+#if defined(CONFIG_USER_ONLY) && defined(CONFIG_LATX) && \
+    defined(TARGET_X86_64)
+    latc_aot_v2_snapshot_jit_tb(tb);
+#endif
 
     /* make sure no further incoming jumps will be chained to this TB */
     qemu_spin_lock(&tb->jmp_lock);

@@ -34,7 +34,7 @@ if [ "$min_aot_percent" = 0 ] && [ "$min_git_aot_percent" != 0 ]; then
     min_aot_percent=$min_git_aot_percent
     coverage_applications=git
 fi
-max_submissions=${LATC_COMPLEX_MAX_SUBMISSIONS:-1}
+max_submissions=${LATC_COMPLEX_MAX_SUBMISSIONS:-1024}
 daemon_pid=
 fault_daemon_pid=
 redis_pid=
@@ -587,7 +587,7 @@ case " $phases $warm_socket " in
   *' cold '*|*' warm 1 '*)
     "$latcd" --serve --socket "$socket" --cache-dir "$cache" \
       --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
-      --x86-rootfs "$rootfs" --stats "$stats" --workers 2 \
+      --x86-rootfs "$rootfs" --stats "$stats" \
       --cpu-seconds "$latcd_cpu_seconds" \
       >"$work/latcd.stdout" 2>"$work/latcd.stderr" &
     daemon_pid=$!

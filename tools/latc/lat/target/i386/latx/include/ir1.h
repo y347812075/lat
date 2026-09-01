@@ -353,6 +353,7 @@ void ir1_make_ins_NOP(IR1_INST *ir1, ADDRX addr);
 void ir1_make_ins_RET(IR1_INST *ir1, ADDRX addr);
 void ir1_make_ins_LIBFUNC(IR1_INST *ir1, ADDRX addr);
 int ir1_opnd_index_reg_num(IR1_OPND *opnd);
+int ir1_opnd_index_is_gpr(const IR1_OPND *opnd);
 int ir1_opnd_base_reg_num(const IR1_OPND *opnd);
 int ir1_opnd_vsib_index_reg_num(IR1_OPND *opnd);
 
