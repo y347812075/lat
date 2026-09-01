@@ -822,63 +822,12 @@ static int emit_metadata(const char *path, const ModulePack *pack,
     fprintf(file, " },{0} } };\n");
 
     fprintf(file,
-        "__attribute__((section(\".rodata.lat.tb\"),used))\n"
-        "static const LatAotTbV2 tbs[] = {\n");
-    size_t supported_count = 0;
-    for (uint64_t i = 0; i < pack->header->tb_count; i++) {
-        if (!pack->supported[i]) {
-            continue;
-        }
-        fprintf(file, "{0x%llx,0x%llx,%u,%u},\n",
-                (unsigned long long)(pack->tbs[i].guest_pc -
-                                     pack->header->preferred_guest_base),
-                (unsigned long long)pack->tbs[i].code_offset,
-                pack->tbs[i].code_size, pack->tbs[i].flags);
-        supported_count++;
-    }
-    fprintf(file, "};\n");
-    fprintf(file,
-        "__attribute__((section(\".rodata.lat.map\"),used))\n"
-        "static const LatAotPcMapV2 pc_maps[] = {\n");
-    size_t pc_map_count = 0;
-    for (uint64_t i = 0; i < pack->header->pc_map_count; i++) {
-        int owner = find_code_tb(pack, pack->pc_maps[i].host_offset_begin);
-        if (owner >= 0 && pack->supported[owner] &&
-            pc_map_in_tb(&pack->pc_maps[i], &pack->tbs[owner])) {
-            fprintf(file, "{0x%llx,0x%llx,0x%llx,%u,%u},\n",
-                    (unsigned long long)(pack->pc_maps[i].guest_pc -
-                                         pack->header->preferred_guest_base),
-                    (unsigned long long)pack->pc_maps[i].host_offset_begin,
-                    (unsigned long long)pack->pc_maps[i].host_offset_end,
-                    pack->pc_maps[i].state_record_offset,
-                    pack->pc_maps[i].flags);
-            pc_map_count++;
-        }
-    }
-    fprintf(file, "};\n");
-    fprintf(file,
-        "__attribute__((section(\".rodata.lat.guest\"),used))\n"
-        "static const LatAotGuestSlotV2 guest_slots[] = {\n");
-    for (guint i = 0; i < pack->guest_rvas->len; i++) {
-        guint page = i / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
-        guint root = pack->three_level_guest_slots ?
-            page / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT : page;
-        guint middle_offset = pack->three_level_guest_slots ?
-            (page % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT) * 8 : 0;
-        guint entry_offset =
-            (i % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT) * 8;
-        guint reserved = pack->three_level_guest_slots ?
-            (middle_offset << 16) | entry_offset : entry_offset;
-        fprintf(file, "{0x%llx,-%u,%u},\n",
-                (unsigned long long)g_array_index(pack->guest_rvas,
-                                                  uint64_t, i),
-                (root + 1) * 8, reserved);
-    }
-    if (!pack->guest_rvas->len) {
-        fprintf(file, "{0,0,0},\n");
-    }
-    fprintf(file, "};\n");
-    fprintf(file,
+        "extern const LatAotTbV2 lat_aot_generated_tbs_begin[];\n"
+        "extern const LatAotTbV2 lat_aot_generated_tbs_end[];\n"
+        "extern const LatAotPcMapV2 lat_aot_generated_maps_begin[];\n"
+        "extern const LatAotPcMapV2 lat_aot_generated_maps_end[];\n"
+        "extern const LatAotGuestSlotV2 lat_aot_generated_slots_begin[];\n"
+        "extern const LatAotGuestSlotV2 lat_aot_generated_slots_end[];\n"
         "__attribute__((visibility(\"default\"),"
         "section(\".data.rel.ro.lat.module\"),used))\n"
         "const LatAotModuleV2 lat_aot_module_v2 = {"
@@ -892,12 +841,91 @@ static int emit_metadata(const char *path, const ModulePack *pack,
     print_bytes(file, codegen);
     fprintf(file,
         " },{0},lat_aot_generated_text_begin,lat_aot_generated_text_end,"
-        "tbs,tbs+%zu,pc_maps,pc_maps+%zu,guest_slots,guest_slots+%u};\n",
-        supported_count, pc_map_count, pack->guest_rvas->len);
+        "lat_aot_generated_tbs_begin,lat_aot_generated_tbs_end,"
+        "lat_aot_generated_maps_begin,lat_aot_generated_maps_end,"
+        "lat_aot_generated_slots_begin,lat_aot_generated_slots_end};\n");
     int result = 0;
     if (fclose(file)) {
         result = fail(error, error_size, "cannot close %s", path);
     }
+    return result;
+}
+
+static int emit_tables(const char *directory, const ModulePack *pack,
+                       char *error, size_t error_size)
+{
+    char *tb_path = g_build_filename(directory, "tbs.bin", NULL);
+    char *map_path = g_build_filename(directory, "pc-maps.bin", NULL);
+    char *slot_path = g_build_filename(directory, "guest-slots.bin", NULL);
+    FILE *tb_file = fopen(tb_path, "wb");
+    FILE *map_file = fopen(map_path, "wb");
+    FILE *slot_file = fopen(slot_path, "wb");
+    int result = 0;
+    if (!tb_file || !map_file || !slot_file) {
+        result = fail(error, error_size, "cannot create binary module tables");
+        goto out;
+    }
+    for (uint64_t i = 0; i < pack->header->tb_count; i++) {
+        if (!pack->supported[i]) {
+            continue;
+        }
+        LatAotTbV2 tb = {
+            .guest_rva = pack->tbs[i].guest_pc -
+                         pack->header->preferred_guest_base,
+            .host_offset = pack->tbs[i].code_offset,
+            .host_size = pack->tbs[i].code_size,
+            .flags = pack->tbs[i].flags,
+        };
+        if (fwrite(&tb, sizeof(tb), 1, tb_file) != 1) {
+            result = fail(error, error_size, "cannot write binary TB table");
+            goto out;
+        }
+    }
+    for (uint64_t i = 0; i < pack->header->pc_map_count; i++) {
+        int owner = find_code_tb(pack, pack->pc_maps[i].host_offset_begin);
+        if (owner < 0 || !pack->supported[owner] ||
+            !pc_map_in_tb(&pack->pc_maps[i], &pack->tbs[owner])) {
+            continue;
+        }
+        LatAotPcMapV2 map = {
+            .guest_rva = pack->pc_maps[i].guest_pc -
+                         pack->header->preferred_guest_base,
+            .host_offset_begin = pack->pc_maps[i].host_offset_begin,
+            .host_offset_end = pack->pc_maps[i].host_offset_end,
+            .state_record_offset = pack->pc_maps[i].state_record_offset,
+            .flags = pack->pc_maps[i].flags,
+        };
+        if (fwrite(&map, sizeof(map), 1, map_file) != 1) {
+            result = fail(error, error_size, "cannot write binary PC map");
+            goto out;
+        }
+    }
+    for (guint i = 0; i < pack->guest_rvas->len; i++) {
+        guint page = i / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+        guint root = pack->three_level_guest_slots ?
+            page / LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT : page;
+        guint middle_offset = pack->three_level_guest_slots ?
+            (page % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT) * 8 : 0;
+        guint entry_offset =
+            (i % LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT) * 8;
+        LatAotGuestSlotV2 slot = {
+            .guest_rva = g_array_index(pack->guest_rvas, uint64_t, i),
+            .fp_offset = -(int32_t)((root + 1) * 8),
+            .reserved = pack->three_level_guest_slots ?
+                (middle_offset << 16) | entry_offset : entry_offset,
+        };
+        if (fwrite(&slot, sizeof(slot), 1, slot_file) != 1) {
+            result = fail(error, error_size, "cannot write binary guest slots");
+            goto out;
+        }
+    }
+out:
+    if (tb_file && fclose(tb_file) && !result) result = -1;
+    if (map_file && fclose(map_file) && !result) result = -1;
+    if (slot_file && fclose(slot_file) && !result) result = -1;
+    g_free(tb_path);
+    g_free(map_path);
+    g_free(slot_path);
     return result;
 }
 
@@ -939,7 +967,22 @@ static int emit_assembly(const char *path, char *error, size_t error_size)
         "b lat_aot_runtime_abi_version\n"
         ".global lat_aot_generated_text_end\n"
         ".hidden lat_aot_generated_text_end\n"
-        "lat_aot_generated_text_end:\n");
+        "lat_aot_generated_text_end:\n"
+        ".section .rodata.lat.tb,\"a\",@progbits\n.p2align 3\n"
+        ".global lat_aot_generated_tbs_begin\n.hidden lat_aot_generated_tbs_begin\n"
+        "lat_aot_generated_tbs_begin:\n.incbin \"tbs.bin\"\n"
+        ".global lat_aot_generated_tbs_end\n.hidden lat_aot_generated_tbs_end\n"
+        "lat_aot_generated_tbs_end:\n"
+        ".section .rodata.lat.map,\"a\",@progbits\n.p2align 3\n"
+        ".global lat_aot_generated_maps_begin\n.hidden lat_aot_generated_maps_begin\n"
+        "lat_aot_generated_maps_begin:\n.incbin \"pc-maps.bin\"\n"
+        ".global lat_aot_generated_maps_end\n.hidden lat_aot_generated_maps_end\n"
+        "lat_aot_generated_maps_end:\n"
+        ".section .rodata.lat.guest,\"a\",@progbits\n.p2align 3\n"
+        ".global lat_aot_generated_slots_begin\n.hidden lat_aot_generated_slots_begin\n"
+        "lat_aot_generated_slots_begin:\n.incbin \"guest-slots.bin\"\n"
+        ".global lat_aot_generated_slots_end\n.hidden lat_aot_generated_slots_end\n"
+        "lat_aot_generated_slots_end:\n.zero 16\n");
     int result = 0;
     if (fclose(file)) {
         result = fail(error, error_size, "cannot close %s", path);
@@ -1019,6 +1062,7 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
         char *assembly_path = g_build_filename(output_directory, "module.S", NULL);
         if (write_all(text_path, pack.code, header->code_size,
                       error, error_size) ||
+            emit_tables(output_directory, &pack, error, error_size) ||
             emit_metadata(metadata_path, &pack, error, error_size) ||
             emit_assembly(assembly_path, error, error_size)) {
             result = -1;

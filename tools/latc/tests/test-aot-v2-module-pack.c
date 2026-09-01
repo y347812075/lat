@@ -189,6 +189,9 @@ int main(void)
     }
     char *metadata_path = g_build_filename(directory, "module.c", NULL);
     char *text_path = g_build_filename(directory, "text.bin", NULL);
+    char *tbs_path = g_build_filename(directory, "tbs.bin", NULL);
+    char *maps_path = g_build_filename(directory, "pc-maps.bin", NULL);
+    char *slots_path = g_build_filename(directory, "guest-slots.bin", NULL);
     gchar *text = NULL;
     gsize text_size = 0;
     if (!g_file_get_contents(text_path, &text, &text_size, NULL) ||
@@ -234,12 +237,18 @@ int main(void)
         return 1;
     }
     gchar *metadata = NULL;
+    gchar *slots = NULL;
+    gsize slots_size = 0;
     if (!g_file_get_contents(metadata_path, &metadata, NULL, NULL) ||
         !strstr(metadata, "LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS") ||
         strstr(metadata, "LAT_AOT_MODULE_THREE_LEVEL_GUEST_SLOTS") ||
-        !strstr(metadata, "guest_slots,guest_slots+257") ||
-        !strstr(metadata, "{0x1800,-16,0}")) {
+        !g_file_get_contents(slots_path, &slots, &slots_size, NULL) ||
+        slots_size != 257 * sizeof(LatAotGuestSlotV2) ||
+        ((LatAotGuestSlotV2 *)slots)[256].guest_rva != 0x1800 ||
+        ((LatAotGuestSlotV2 *)slots)[256].fp_offset != -16 ||
+        ((LatAotGuestSlotV2 *)slots)[256].reserved != 0) {
         fprintf(stderr, "257-entry two-level guest table was not emitted\n");
+        g_free(slots);
         g_free(metadata);
         g_free(text);
         g_free(text_path);
@@ -247,6 +256,8 @@ int main(void)
         g_free(image_path);
         return 1;
     }
+    g_free(slots);
+    slots = NULL;
     g_free(metadata);
     metadata = NULL;
     if (write_large_guest_table_fixture(
@@ -257,17 +268,22 @@ int main(void)
         !strstr(metadata, "LAT_AOT_MODULE_THREE_LEVEL_GUEST_SLOTS") ||
         strstr(metadata, "LAT_AOT_MODULE_PRECISE_PC_MAP|"
                          "LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS") ||
-        !strstr(metadata, "guest_slots,guest_slots+65537") ||
-        !strstr(metadata, "{0x81000,-16,0}")) {
+        !g_file_get_contents(slots_path, &slots, &slots_size, NULL) ||
+        slots_size != 65537 * sizeof(LatAotGuestSlotV2) ||
+        ((LatAotGuestSlotV2 *)slots)[65536].guest_rva != 0x81000 ||
+        ((LatAotGuestSlotV2 *)slots)[65536].fp_offset != -16 ||
+        ((LatAotGuestSlotV2 *)slots)[65536].reserved != 0) {
         fprintf(stderr, "65537-entry three-level guest table failed: %s\n",
                 error[0] ? error : "invalid metadata");
         g_free(metadata);
+        g_free(slots);
         g_free(text);
         g_free(text_path);
         g_free(metadata_path);
         g_free(image_path);
         return 1;
     }
+    g_free(slots);
     g_free(metadata);
     const uint32_t *code = (const void *)text;
     if (code[0] != 0x18000044u ||
@@ -283,21 +299,27 @@ int main(void)
     }
     memset(error, 0, sizeof(error));
     gchar *incomplete_metadata = NULL;
+    gchar *incomplete_tbs = NULL;
+    gsize incomplete_tbs_size = 0;
     if (write_fixture(image_path, 0, 1) ||
         lat_aot_v2_emit_module_sources(image_path, directory,
                                        error, sizeof(error)) ||
         !g_file_get_contents(metadata_path, &incomplete_metadata,
                              NULL, NULL) ||
-        !strstr(incomplete_metadata, "tbs,tbs+1")) {
+        !g_file_get_contents(tbs_path, &incomplete_tbs,
+                             &incomplete_tbs_size, NULL) ||
+        incomplete_tbs_size != sizeof(LatAotTbV2)) {
         fprintf(stderr, "incomplete PC-map TB was not isolated: %s\n",
                 error);
         g_free(incomplete_metadata);
+        g_free(incomplete_tbs);
         g_free(text);
         g_free(text_path);
         g_free(metadata_path);
         g_free(image_path);
         return 1;
     }
+    g_free(incomplete_tbs);
     g_free(incomplete_metadata);
     memset(error, 0, sizeof(error));
     if (write_fixture(image_path, 1, 0) ||
@@ -312,6 +334,9 @@ int main(void)
     }
     g_free(text);
     g_remove(text_path);
+    g_remove(tbs_path);
+    g_remove(maps_path);
+    g_remove(slots_path);
     g_remove(metadata_path);
     g_remove(assembly_path);
     g_remove(image_path);
@@ -319,6 +344,9 @@ int main(void)
     g_free(assembly_path);
     g_free(metadata_path);
     g_free(text_path);
+    g_free(tbs_path);
+    g_free(maps_path);
+    g_free(slots_path);
     g_free(image_path);
     puts("test-aot-v2-module-pack: PASS");
     return 0;

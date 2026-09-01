@@ -197,9 +197,9 @@ int lat_aot_v2_module_validate_tbset_file(const char *path,
         result = fail(error, error_size, "cannot read compiled TB set");
     }
     size_t covered = record - missing;
-    if (!result && record && !covered) {
+    if (!result && missing) {
         result = fail(error, error_size,
-                      "TB set has no TB in module: covered=%zu total=%zu "
+                      "TB set is not fully covered: covered=%zu total=%zu "
                       "first_missing_rva=0x%" PRIx64 " flags=0x%" PRIx64,
                       covered, record, first_missing_rva,
                       first_missing_flags);

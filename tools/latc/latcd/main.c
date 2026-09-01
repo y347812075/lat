@@ -1494,6 +1494,52 @@ static int cache_contains_tbset(const LatcdConfig *config,
     return valid;
 }
 
+static int current_module_covers_tbset(const LatcdConfig *config,
+                                       const uint8_t digest[32],
+                                       const char *tbset)
+{
+    char source_hex[65];
+    digest_hex(digest, source_hex);
+    char *index_name = g_strdup_printf("%s.current", source_hex);
+    char *index_path = g_build_filename(config->cache_dir, index_name, NULL);
+    gchar *contents = NULL;
+    gsize size = 0;
+    char *module_name = NULL;
+    if (g_file_get_contents(index_path, &contents, &size, NULL) &&
+        size > 0 && size < 1024) {
+        char *start = strstr(contents, "\"module\":\"");
+        if (start) {
+            start += strlen("\"module\":\"");
+            char *end = strchr(start, '"');
+            if (end && end > start && end - start < 192 &&
+                !memchr(start, '/', end - start) &&
+                end - start > 3 && !memcmp(end - 3, ".so", 3)) {
+                module_name = g_strndup(start, end - start);
+            }
+        }
+    }
+    g_free(contents);
+    g_free(index_path);
+    g_free(index_name);
+    if (!module_name) {
+        return 0;
+    }
+    char *module_path = g_build_filename(config->cache_dir, module_name, NULL);
+    LatAotModuleInfoV2 info;
+    char error[256];
+    pthread_mutex_lock(&cache_lock);
+    int valid = cached_module_inspect(module_path, digest, &info) &&
+        !lat_aot_v2_module_validate_tbset_file(module_path, tbset, error,
+                                               sizeof(error));
+    if (valid) {
+        utimensat(AT_FDCWD, module_path, NULL, AT_SYMLINK_NOFOLLOW);
+    }
+    pthread_mutex_unlock(&cache_lock);
+    g_free(module_path);
+    g_free(module_name);
+    return valid;
+}
+
 static void write_stats_locked(const LatcdService *service)
 {
     if (!service->config->stats_path) {
@@ -1779,6 +1825,20 @@ static int service_queue_request(LatcdService *service, int source_fd,
         pthread_mutex_unlock(&service->lock);
         unlink(snapshot);
         if (tbset && !tbset_canonical) unlink(tbset);
+        g_free(snapshot);
+        g_free(tbset);
+        return 0;
+    }
+    if (tbset_canonical &&
+        current_module_covers_tbset(service->config,
+                                    response->source_sha256, tbset)) {
+        service->cache_hits++;
+        response->status = LATCD_STATUS_OK;
+        snprintf(response->message, sizeof(response->message),
+                 "cache hit: %s", key);
+        write_stats_locked(service);
+        pthread_mutex_unlock(&service->lock);
+        unlink(snapshot);
         g_free(snapshot);
         g_free(tbset);
         return 0;
