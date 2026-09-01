@@ -584,8 +584,8 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
                 failed++;
                 continue;
             }
-            bool is_profiled = disk_tb.profile_count != 0;
-            if ((pass == 0) != is_profiled) continue;
+            bool is_selected = disk_tb.selected != 0;
+            if ((pass == 0) != is_selected) continue;
             profiled += pass == 0;
             if (disk_tb.end < disk_tb.start ||
                 disk_tb.end > UINT64_MAX - load_bias) {

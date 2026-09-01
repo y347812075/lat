@@ -166,6 +166,17 @@ int add_rel_entry(aot_rel_kind kind, uint32_t **tc_offset,
     return i;
 }
 
+int aot_rel_table_checkpoint(void)
+{
+    return rel_entry_num;
+}
+
+void aot_rel_table_rollback(int checkpoint)
+{
+    assert(checkpoint >= 0 && checkpoint <= rel_entry_num);
+    rel_entry_num = checkpoint;
+}
+
 #ifdef CONFIG_LATX_TU
 void fix_rel_entry(int fix_id, uint32_t tc_offset)
 {

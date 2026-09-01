@@ -45,14 +45,14 @@ int main(void)
     }
     if (!submitter) {
         char error[128] = {0};
-        int result = latcd_client_submit_fd(path, source,
+        int result = latcd_client_submit_tbset_fd(path, source, source,
             LATCD_PRIORITY_STARTUP, 42, error, sizeof(error));
         if (result) fprintf(stderr, "test-latcd-client: %s\n", error);
         _exit(result ? 1 : 0);
     }
     int client = accept4(server, NULL, NULL, SOCK_CLOEXEC);
     LatcdRequestV1 request;
-    char control[CMSG_SPACE(sizeof(int))] = {0};
+    char control[CMSG_SPACE(sizeof(int) * 2)] = {0};
     struct iovec iov = { .iov_base = &request, .iov_len = sizeof(request) };
     struct msghdr message = {
         .msg_iov = &iov,
@@ -67,14 +67,15 @@ int main(void)
         return fail("received request does not match submission");
     }
     struct cmsghdr *header = CMSG_FIRSTHDR(&message);
-    int received_fd = -1;
+    int received_fds[2] = {-1, -1};
     if (!header || header->cmsg_level != SOL_SOCKET ||
         header->cmsg_type != SCM_RIGHTS) {
         return fail("submission did not carry an FD");
     }
-    memcpy(&received_fd, CMSG_DATA(header), sizeof(received_fd));
-    if (fcntl(received_fd, F_GETFL) < 0) {
-        return fail("received FD is invalid");
+    memcpy(received_fds, CMSG_DATA(header), sizeof(received_fds));
+    if (fcntl(received_fds[0], F_GETFL) < 0 ||
+        fcntl(received_fds[1], F_GETFL) < 0) {
+        return fail("received FDs are invalid");
     }
     LatcdResponseV1 response = {
         .magic = LATCD_RESPONSE_MAGIC,
@@ -87,7 +88,8 @@ int main(void)
         sizeof(response)) {
         return fail("cannot acknowledge submission");
     }
-    close(received_fd);
+    close(received_fds[0]);
+    close(received_fds[1]);
     close(client);
     int submit_status = 0;
     if (waitpid(submitter, &submit_status, 0) != submitter ||
@@ -101,8 +103,9 @@ int main(void)
 
     char error[128] = {0};
     errno = 0;
-    if (!latcd_client_submit_fd(path, STDIN_FILENO, LATCD_PRIORITY_LIBRARY,
-                                43, error, sizeof(error)) ||
+    if (!latcd_client_submit_tbset_fd(path, STDIN_FILENO, STDIN_FILENO,
+                                      LATCD_PRIORITY_LIBRARY,
+                                      43, error, sizeof(error)) ||
         (errno != ENOENT && errno != ECONNREFUSED)) {
         return fail("missing daemon was not reported immediately");
     }

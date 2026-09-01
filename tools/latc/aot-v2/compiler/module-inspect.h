@@ -18,9 +18,9 @@ int lat_aot_v2_module_inspect_file(const char *path,
                                    LatAotModuleInfoV2 *info,
                                    char *error, size_t error_size);
 
-int lat_aot_v2_module_validate_profile_file(const char *path,
-                                            const char *profile_path,
-                                            char *error,
-                                            size_t error_size);
+int lat_aot_v2_module_validate_tbset_file(const char *path,
+                                          const char *tbset_path,
+                                          char *error,
+                                          size_t error_size);
 
 #endif

@@ -67,7 +67,7 @@ static int write_cfg(FILE *out, const CfgProgram *p, uint64_t *size_out)
         uint32_t semantic_flags = tb->semantic_flags ?
             tb->semantic_flags : CFG_TB_CODE64;
         LatcDiskTb d = {tb->start, tb->end, tb->terminator_pc, tb->first_edge,
-                    tb->edge_count, tb->profile_count, tb->terminator,
+                    tb->edge_count, tb->selected, tb->terminator,
                     semantic_flags};
         if (fwrite(&d, sizeof(d), 1, out) != 1) return -1;
     }
@@ -116,9 +116,9 @@ int latc_bundle_write(const char *runner_path, const char *guest_path,
     uint64_t aot_offset = cfg_offset + cfg_size;
     if (aot && copy_stream(out, aot, aot_sum, &aot_size)) goto out;
     const char *aot_digest = g_checksum_get_string(aot_sum);
-    uint64_t profiled_tb_count = 0;
+    uint64_t selected_tb_count = 0;
     for (size_t i = 0; i < program->tb_count; i++)
-        profiled_tb_count += program->tbs[i].profile_count != 0;
+        selected_tb_count += program->tbs[i].selected;
     LatcDiskFooter footer = {
         .magic = {'L','A','T','C','B','N','D','1'},
         .version = LATC_BUNDLE_VERSION,
@@ -133,7 +133,7 @@ int latc_bundle_write(const char *runner_path, const char *guest_path,
         .function_count = program->function_count,
         .tb_count = program->tb_count,
         .edge_count = program->edge_count,
-        .profiled_tb_count = profiled_tb_count,
+        .selected_tb_count = selected_tb_count,
     };
     memcpy(footer.guest_sha256, digest, 64);
     if (aot_size) {
@@ -216,7 +216,7 @@ int latc_bundle_inspect(const char *path, LatcBundleInfo *info,
     info->cfg_size = f.cfg_size; info->aot_offset = f.aot_offset;
     info->aot_size = f.aot_size; info->function_count = f.function_count;
     info->tb_count = f.tb_count; info->edge_count = f.edge_count;
-    info->profiled_tb_count = f.profiled_tb_count;
+    info->selected_tb_count = f.selected_tb_count;
     memcpy(info->guest_sha256, f.guest_sha256, 64);
     memcpy(info->aot_sha256, f.aot_sha256, 64);
     memcpy(info->aot_name, f.aot_name, sizeof(f.aot_name));

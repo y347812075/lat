@@ -53,36 +53,28 @@ int main(void)
         .version = LATCD_PROTOCOL_VERSION,
         .size = sizeof(sent),
         .priority = LATCD_PRIORITY_STARTUP,
+        .flags = LATCD_REQUEST_HAS_TBSET,
         .request_id = 42,
     };
     char error[128] = {0};
-    if (source < 0 || latcd_send_request(sockets[0], source, -1, &sent,
+    if (source < 0 || latcd_send_request(sockets[0], source, source, &sent,
                                          error, sizeof(error))) {
         return fail(error);
     }
     LatcdRequestV1 received;
     int received_fd = -1;
-    int received_profile = -1;
+    int received_tbset = -1;
     if (latcd_receive_request(sockets[1], &received, &received_fd,
-                              &received_profile,
+                              &received_tbset,
                               error, sizeof(error)) ||
         received.request_id != sent.request_id || received_fd < 0 ||
-        received_profile >= 0) {
+        received_tbset < 0 ||
+        !(received.flags & LATCD_REQUEST_HAS_TBSET)) {
         return fail(error[0] ? error : "valid request changed in transit");
     }
     close(received_fd);
+    close(received_tbset);
 
-    sent.flags = LATCD_REQUEST_HAS_PROFILE;
-    if (latcd_send_request(sockets[0], source, source, &sent,
-                           error, sizeof(error)) ||
-        latcd_receive_request(sockets[1], &received, &received_fd,
-                              &received_profile, error, sizeof(error)) ||
-        received_fd < 0 || received_profile < 0 ||
-        !(received.flags & LATCD_REQUEST_HAS_PROFILE)) {
-        return fail(error[0] ? error : "profile request changed in transit");
-    }
-    close(received_fd);
-    close(received_profile);
     sent.flags = 0;
 
     if (send_raw_request(sockets[0], &sent, NULL, 0)) {
@@ -90,7 +82,7 @@ int main(void)
     }
     error[0] = '\0';
     if (!latcd_receive_request(sockets[1], &received, &received_fd,
-                               &received_profile,
+                               &received_tbset,
                                error, sizeof(error)) ||
         !strstr(error, "descriptor count")) {
         return fail("request without descriptor was accepted");
@@ -102,10 +94,10 @@ int main(void)
     }
     error[0] = '\0';
     if (!latcd_receive_request(sockets[1], &received, &received_fd,
-                               &received_profile,
+                               &received_tbset,
                                error, sizeof(error)) ||
         !strstr(error, "descriptor count")) {
-        return fail("request with two descriptors was accepted");
+        return fail("request without TB set flag was accepted");
     }
 
     int many_fds[5] = { source, source, source, source, source };
@@ -114,7 +106,7 @@ int main(void)
     }
     error[0] = '\0';
     if (!latcd_receive_request(sockets[1], &received, &received_fd,
-                               &received_profile,
+                               &received_tbset,
                                error, sizeof(error)) ||
         !strstr(error, "invalid latcd request packet")) {
         return fail("truncated descriptor set was accepted");
@@ -126,7 +118,7 @@ int main(void)
     }
     error[0] = '\0';
     if (!latcd_receive_request(sockets[1], &received, &received_fd,
-                               &received_profile,
+                               &received_tbset,
                                error, sizeof(error)) ||
         !strstr(error, "header or descriptor")) {
         return fail("request with invalid header was accepted");

@@ -32,7 +32,7 @@
 #define LATCD_DEFAULT_MAX_JOBS 64u
 #define LATCD_DEFAULT_MAX_QUEUE_BYTES (UINT64_C(4) << 30)
 #define LATCD_DEFAULT_MAX_CACHE_BYTES (UINT64_C(16) << 30)
-#define LATCD_DEFAULT_WORKERS 1u
+#define LATCD_AUTO_WORKERS_MAX 4u
 #define LATCD_MAX_WORKERS 32u
 #define LATCD_DEFAULT_MAX_NEGATIVE 128u
 #define LATCD_DEFAULT_NEGATIVE_MS 30000u
@@ -62,10 +62,20 @@ typedef struct LatcdConfig {
     uint32_t open_files;
 } LatcdConfig;
 
+static uint32_t default_worker_count(void)
+{
+    long online = sysconf(_SC_NPROCESSORS_ONLN);
+    if (online < 1) {
+        return 1;
+    }
+    return online > LATCD_AUTO_WORKERS_MAX ?
+           LATCD_AUTO_WORKERS_MAX : (uint32_t)online;
+}
+
 typedef struct LatcdJob {
     char *snapshot;
-    char *profile;
-    bool profile_canonical;
+    char *tbset;
+    bool tbset_canonical;
     bool running;
     bool dirty;
     char key[130];
@@ -542,19 +552,19 @@ static void publish_source_identity(const LatcdConfig *config,
     g_free(directory);
 }
 
-static int snapshot_profile(int profile_fd, const char *source_path,
-                            const char *temporary_dir,
-                            const uint8_t source_digest[32],
-                            char **snapshot_path,
-                            char *error, size_t error_size)
+static int snapshot_tbset(int tbset_fd, const char *source_path,
+                          const char *temporary_dir,
+                          const uint8_t source_digest[32],
+                          char **snapshot_path,
+                          char *error, size_t error_size)
 {
     struct stat status;
-    int flags = fcntl(profile_fd, F_GETFL);
+    int flags = fcntl(tbset_fd, F_GETFL);
     if (flags < 0 || (flags & O_ACCMODE) != O_RDONLY ||
-        fstat(profile_fd, &status) || !S_ISREG(status.st_mode) ||
-        status.st_size <= 0 || status.st_size > 16 * 1024 * 1024) {
+        fstat(tbset_fd, &status) || !S_ISREG(status.st_mode) ||
+        status.st_size <= 0 || status.st_size > 64 * 1024 * 1024) {
         return fail(error, error_size,
-                    "profile descriptor must be a bounded read-only regular file");
+                    "TB set descriptor must be a bounded read-only regular file");
     }
     int source_fd = open(source_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     Elf64_Ehdr header;
@@ -563,7 +573,7 @@ static int snapshot_profile(int profile_fd, const char *source_path,
         header.e_phentsize != sizeof(Elf64_Phdr) || !header.e_phnum ||
         header.e_phnum > 4096) {
         if (source_fd >= 0) close(source_fd);
-        return fail(error, error_size, "cannot validate profile source ELF");
+        return fail(error, error_size, "cannot validate TB set source ELF");
     }
     size_t phdr_size = header.e_phnum * sizeof(Elf64_Phdr);
     Elf64_Phdr *phdrs = g_malloc(phdr_size);
@@ -571,7 +581,7 @@ static int snapshot_profile(int profile_fd, const char *source_path,
                   (ssize_t)phdr_size) {
         g_free(phdrs);
         close(source_fd);
-        return fail(error, error_size, "cannot read profile source segments");
+        return fail(error, error_size, "cannot read TB set source segments");
     }
     close(source_fd);
     uint64_t load_base = UINT64_MAX;
@@ -584,12 +594,12 @@ static int snapshot_profile(int profile_fd, const char *source_path,
     if (load_base == UINT64_MAX) {
         g_free(phdrs);
         return fail(error, error_size,
-                    "profile source ELF has no loadable segments");
+                    "TB set source ELF has no loadable segments");
     }
 
-    int input_fd = dup(profile_fd);
+    int input_fd = dup(tbset_fd);
     FILE *input = input_fd >= 0 ? fdopen(input_fd, "r") : NULL;
-    char *path = g_build_filename(temporary_dir, "profile-XXXXXX", NULL);
+    char *path = g_build_filename(temporary_dir, "tbset-XXXXXX", NULL);
     int output_fd = g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
     FILE *output = output_fd >= 0 ? fdopen(output_fd, "w") : NULL;
     if (!input || !output) {
@@ -598,7 +608,7 @@ static int snapshot_profile(int profile_fd, const char *source_path,
         unlink(path);
         g_free(path);
         g_free(phdrs);
-        return fail(error, error_size, "cannot snapshot profile: %s",
+        return fail(error, error_size, "cannot snapshot TB set: %s",
                     strerror(errno));
     }
     char source_hex[65];
@@ -607,7 +617,7 @@ static int snapshot_profile(int profile_fd, const char *source_path,
     size_t capacity = 0;
     ssize_t length = getline(&line, &capacity, input);
     char header_text[96];
-    snprintf(header_text, sizeof(header_text), "LATC_PROFILE_V2 %s",
+    snprintf(header_text, sizeof(header_text), "LATC_TBSET_V1 %s",
              source_hex);
     int result = 0;
     if (length < 0 || strncmp(line, header_text, strlen(header_text)) ||
@@ -615,7 +625,7 @@ static int snapshot_profile(int profile_fd, const char *source_path,
          line[strlen(header_text)] != '\r' &&
          line[strlen(header_text)] != '\0')) {
         result = fail(error, error_size,
-                      "profile source SHA-256 header is invalid");
+                      "TB set source SHA-256 header is invalid");
     } else {
         fprintf(output, "%s\n", header_text);
     }
@@ -629,8 +639,6 @@ static int snapshot_profile(int profile_fd, const char *source_path,
         uint64_t rva = strtoull(p, &end, 0);
         p = end;
         uint64_t semantic_flags = strtoull(p, &end, 0);
-        p = end;
-        uint64_t count = strtoull(p, &end, 0);
         while (*end == ' ' || *end == '\t' || *end == '\r') end++;
         int executable = 0;
         for (uint16_t i = 0; i < header.e_phnum; i++) {
@@ -642,22 +650,22 @@ static int snapshot_profile(int profile_fd, const char *source_path,
                 break;
             }
         }
-        if (errno || end == p || !count ||
+        if (errno || end == p ||
             (semantic_flags != LAT_AOT_TB_CODE64 &&
              semantic_flags != (LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL)) ||
             (*end && *end != '\n' && *end != '#') || !executable ||
-            ++record_count > LAT_AOT_V2_PROFILE_RECORD_LIMIT) {
+            ++record_count > LAT_AOT_V2_TBSET_RECORD_LIMIT) {
             result = fail(error, error_size,
-                          "profile record %zu is invalid", record_count);
+                          "TB set record %zu is invalid", record_count);
             break;
         }
-        fprintf(output, "0x%" PRIx64 " 0x%" PRIx64 " %" PRIu64 "\n",
-                rva, semantic_flags, count);
+        fprintf(output, "0x%" PRIx64 " 0x%" PRIx64 "\n",
+                rva, semantic_flags);
     }
     free(line);
     g_free(phdrs);
     if (ferror(input) || fflush(output) || fsync(fileno(output))) {
-        result = fail(error, error_size, "cannot persist profile snapshot");
+        result = fail(error, error_size, "cannot persist TB set snapshot");
     }
     fclose(input);
     if (fclose(output)) result = -1;
@@ -670,102 +678,116 @@ static int snapshot_profile(int profile_fd, const char *source_path,
     return 0;
 }
 
-typedef struct LatcdProfileEntry {
+typedef struct LatcdTbsetEntry {
     uint64_t rva;
     uint32_t flags;
-    uint64_t count;
-} LatcdProfileEntry;
+} LatcdTbsetEntry;
 
-static int profile_entry_order(gconstpointer left, gconstpointer right)
+static int tbset_entry_order(gconstpointer left, gconstpointer right)
 {
-    const LatcdProfileEntry *a = *(LatcdProfileEntry *const *)left;
-    const LatcdProfileEntry *b = *(LatcdProfileEntry *const *)right;
+    const LatcdTbsetEntry *a = *(LatcdTbsetEntry *const *)left;
+    const LatcdTbsetEntry *b = *(LatcdTbsetEntry *const *)right;
     if (a->rva != b->rva) return a->rva < b->rva ? -1 : 1;
     if (a->flags != b->flags) return a->flags < b->flags ? -1 : 1;
     return 0;
 }
 
-static int profile_table_load(const char *path, const char *source_hex,
-                              GHashTable *table, int optional,
-                              char *error, size_t error_size)
+static int tbset_table_load(const char *path, const char *source_hex,
+                            GHashTable *table, int optional,
+                            char *error, size_t error_size)
 {
     FILE *file = fopen(path, "r");
     if (!file) {
         if (optional && errno == ENOENT) return 0;
-        return fail(error, error_size, "cannot read profile %s: %s",
+        return fail(error, error_size, "cannot read TB set %s: %s",
                     path, strerror(errno));
     }
     char *line = NULL;
     size_t capacity = 0;
     char expected[96];
-    snprintf(expected, sizeof(expected), "LATC_PROFILE_V2 %s", source_hex);
+    snprintf(expected, sizeof(expected), "LATC_TBSET_V1 %s", source_hex);
     if (getline(&line, &capacity, file) < 0 ||
         strncmp(line, expected, strlen(expected))) {
         free(line);
         fclose(file);
-        return fail(error, error_size, "canonical profile header is invalid");
+        return fail(error, error_size, "canonical TB set header is invalid");
     }
     while (getline(&line, &capacity, file) >= 0) {
-        uint64_t rva, flags, count;
-        if (sscanf(line, "%" SCNx64 " %" SCNx64 " %" SCNu64,
-                   &rva, &flags, &count) != 3) {
+        uint64_t rva, flags;
+        char extra;
+        if (sscanf(line, "%" SCNx64 " %" SCNx64 " %c",
+                   &rva, &flags, &extra) != 2) {
             free(line);
             fclose(file);
-            return fail(error, error_size, "canonical profile record is invalid");
+            return fail(error, error_size, "canonical TB set record is invalid");
         }
         char key[48];
         snprintf(key, sizeof(key), "%016" PRIx64 ":%08" PRIx64,
                  rva, flags);
-        LatcdProfileEntry *entry = g_hash_table_lookup(table, key);
+        LatcdTbsetEntry *entry = g_hash_table_lookup(table, key);
         if (!entry) {
-            entry = g_new0(LatcdProfileEntry, 1);
+            entry = g_new0(LatcdTbsetEntry, 1);
             entry->rva = rva;
             entry->flags = flags;
             g_hash_table_insert(table, g_strdup(key), entry);
         }
-        entry->count = UINT64_MAX - entry->count < count ?
-                       UINT64_MAX : entry->count + count;
     }
     free(line);
     int result = ferror(file) ?
-        fail(error, error_size, "cannot read canonical profile") : 0;
+        fail(error, error_size, "cannot read canonical TB set") : 0;
     fclose(file);
     return result;
 }
 
-static int merge_profile(const LatcdConfig *config, const uint8_t digest[32],
-                         const char *incoming, char **canonical,
-                         char *error, size_t error_size)
+static bool files_identical(const char *left, const char *right)
 {
+    gchar *left_data = NULL;
+    gchar *right_data = NULL;
+    gsize left_size = 0;
+    gsize right_size = 0;
+    bool identical = g_file_get_contents(left, &left_data, &left_size, NULL) &&
+                     g_file_get_contents(right, &right_data, &right_size, NULL) &&
+                     left_size == right_size &&
+                     !memcmp(left_data, right_data, left_size);
+    g_free(left_data);
+    g_free(right_data);
+    return identical;
+}
+
+static int merge_tbset(const LatcdConfig *config, const uint8_t digest[32],
+                       const char *incoming, char **canonical, bool *changed,
+                       char *error, size_t error_size)
+{
+    if (changed) *changed = false;
     char source_hex[65];
     digest_hex(digest, source_hex);
-    char *directory = g_build_filename(config->cache_dir, ".profiles", NULL);
+    char *directory = g_build_filename(config->cache_dir, ".tbsets", NULL);
     if (ensure_private_directory(directory, error, error_size)) {
         g_free(directory);
         return -1;
     }
-    char *name = g_strdup_printf("%s.profile", source_hex);
+    char *name = g_strdup_printf("%s.tbset", source_hex);
     char *final = g_build_filename(directory, name, NULL);
     g_free(name);
     GHashTable *table = g_hash_table_new_full(g_str_hash, g_str_equal,
                                                g_free, g_free);
     pthread_mutex_lock(&cache_lock);
-    int result = profile_table_load(final, source_hex, table, 1,
-                                    error, error_size) ||
-                 profile_table_load(incoming, source_hex, table, 0,
-                                    error, error_size);
+    int result = tbset_table_load(final, source_hex, table, 1,
+                                  error, error_size) ||
+                 tbset_table_load(incoming, source_hex, table, 0,
+                                  error, error_size);
     char *temporary = NULL;
     if (!result &&
-        g_hash_table_size(table) > LAT_AOT_V2_PROFILE_RECORD_LIMIT) {
-        result = fail(error, error_size, "canonical profile has too many keys");
+        g_hash_table_size(table) > LAT_AOT_V2_TBSET_RECORD_LIMIT) {
+        result = fail(error, error_size, "canonical TB set has too many keys");
     }
     if (!result) {
-        temporary = g_build_filename(directory, "profile-XXXXXX", NULL);
+        temporary = g_build_filename(directory, "tbset-XXXXXX", NULL);
         int fd = g_mkstemp_full(temporary, O_RDWR | O_CLOEXEC, 0600);
         FILE *file = fd >= 0 ? fdopen(fd, "w") : NULL;
         if (!file) {
             if (fd >= 0) close(fd);
-            result = fail(error, error_size, "cannot create canonical profile");
+            result = fail(error, error_size, "cannot create canonical TB set");
         } else {
             GPtrArray *entries = g_ptr_array_new();
             GHashTableIter iterator;
@@ -774,20 +796,27 @@ static int merge_profile(const LatcdConfig *config, const uint8_t digest[32],
             while (g_hash_table_iter_next(&iterator, NULL, &value)) {
                 g_ptr_array_add(entries, value);
             }
-            g_ptr_array_sort(entries, profile_entry_order);
-            fprintf(file, "LATC_PROFILE_V2 %s\n", source_hex);
+            g_ptr_array_sort(entries, tbset_entry_order);
+            fprintf(file, "LATC_TBSET_V1 %s\n", source_hex);
             for (guint i = 0; i < entries->len; i++) {
-                const LatcdProfileEntry *entry =
+                const LatcdTbsetEntry *entry =
                     g_ptr_array_index(entries, i);
-                fprintf(file, "0x%" PRIx64 " 0x%x %" PRIu64 "\n",
-                        entry->rva, entry->flags, entry->count);
+                fprintf(file, "0x%" PRIx64 " 0x%x\n",
+                        entry->rva, entry->flags);
             }
             g_ptr_array_free(entries, TRUE);
             if (fflush(file) || fsync(fileno(file))) result = -1;
             if (fclose(file)) result = -1;
-            if (!result && rename(temporary, final)) result = -1;
+            if (!result && files_identical(temporary, final)) {
+                unlink(temporary);
+                if (changed) *changed = false;
+            } else if (!result && rename(temporary, final)) {
+                result = -1;
+            } else if (!result && changed) {
+                *changed = true;
+            }
             if (result && !error[0]) {
-                fail(error, error_size, "cannot publish canonical profile: %s",
+                fail(error, error_size, "cannot publish canonical TB set: %s",
                      strerror(errno));
             }
         }
@@ -806,7 +835,7 @@ static int merge_profile(const LatcdConfig *config, const uint8_t digest[32],
 }
 
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
-                        const char *source, const char *profile,
+                        const char *source, const char *tbset,
                         const char *output,
                         char *error, size_t error_size)
 {
@@ -818,9 +847,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         "-o", (char *)output, "--runner", (char *)config->runner,
         "--runtime-dir", (char *)config->runtime_dir, NULL, NULL, NULL,
     };
-    if (profile) {
-        arguments[9] = "--profile";
-        arguments[10] = (char *)profile;
+    if (tbset) {
+        arguments[9] = "--tbset";
+        arguments[10] = (char *)tbset;
     }
     char *library_path = g_strdup_printf("LD_LIBRARY_PATH=%s",
                                          config->runtime_dir);
@@ -1143,8 +1172,45 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     return result;
 }
 
+static int remove_superseded_modules(const LatcdConfig *config,
+                                     const char *source_hex,
+                                     const char *current_name,
+                                     char *error, size_t error_size)
+{
+    GError *gerror = NULL;
+    GDir *directory = g_dir_open(config->cache_dir, 0, &gerror);
+    if (!directory) {
+        int result = fail(error, error_size, "cannot scan module cache: %s",
+                          gerror ? gerror->message : "unknown error");
+        g_clear_error(&gerror);
+        return result;
+    }
+    char prefix[66];
+    snprintf(prefix, sizeof(prefix), "%s-", source_hex);
+    const char *name;
+    int result = 0;
+    while ((name = g_dir_read_name(directory))) {
+        if (!g_str_has_prefix(name, prefix) ||
+            !g_str_has_suffix(name, ".so") || !strcmp(name, current_name)) {
+            continue;
+        }
+        char *path = g_build_filename(config->cache_dir, name, NULL);
+        struct stat status;
+        if (!lstat(path, &status) && S_ISREG(status.st_mode) && unlink(path)) {
+            result = fail(error, error_size,
+                          "cannot remove superseded module %s: %s",
+                          path, strerror(errno));
+            g_free(path);
+            break;
+        }
+        g_free(path);
+    }
+    g_dir_close(directory);
+    return result;
+}
+
 static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
-                            const char *snapshot, const char *profile,
+                            const char *snapshot, const char *tbset,
                             const uint8_t digest[32],
                             LatcdResponseV1 *response)
 {
@@ -1157,23 +1223,23 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     memcpy(response->source_sha256, digest, 32);
     char hex[65];
     digest_hex(digest, hex);
-    char profile_hex[65] = {0};
-    if (profile) {
-        gchar *profile_data = NULL;
-        gsize profile_size = 0;
-        if (!g_file_get_contents(profile, &profile_data, &profile_size, NULL)) {
-            fail(error, sizeof(error), "cannot read validated profile");
+    char tbset_hex[65] = {0};
+    if (tbset) {
+        gchar *tbset_data = NULL;
+        gsize tbset_size = 0;
+        if (!g_file_get_contents(tbset, &tbset_data, &tbset_size, NULL)) {
+            fail(error, sizeof(error), "cannot read validated TB set");
             goto out;
         }
         GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
-        g_checksum_update(checksum, (const guchar *)profile_data, profile_size);
-        g_strlcpy(profile_hex, g_checksum_get_string(checksum),
-                  sizeof(profile_hex));
+        g_checksum_update(checksum, (const guchar *)tbset_data, tbset_size);
+        g_strlcpy(tbset_hex, g_checksum_get_string(checksum),
+                  sizeof(tbset_hex));
         g_checksum_free(checksum);
-        g_free(profile_data);
+        g_free(tbset_data);
     }
-    module_name = profile ?
-        g_strdup_printf("%s-%s.so", hex, profile_hex) :
+    module_name = tbset ?
+        g_strdup_printf("%s-%s.so", hex, tbset_hex) :
         g_strdup_printf("%s.so", hex);
     final = g_build_filename(config->cache_dir, module_name, NULL);
 
@@ -1182,6 +1248,12 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     if (cached_module_inspect(final, digest, &info)) {
         if (publish_current_index(config, hex, module_name, &info,
                                   error, sizeof(error))) {
+            pthread_mutex_unlock(&cache_lock);
+            goto out;
+        }
+        if (remove_superseded_modules(config, hex, module_name,
+                                      error, sizeof(error)) ||
+            sync_directory(config->cache_dir, error, sizeof(error))) {
             pthread_mutex_unlock(&cache_lock);
             goto out;
         }
@@ -1202,7 +1274,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     }
     close(placeholder);
     unlink(module);
-    if (run_compiler(config, worker_index, snapshot, profile, module,
+    if (run_compiler(config, worker_index, snapshot, tbset, module,
                      error, sizeof(error))) {
         status = LATCD_STATUS_COMPILE_FAILED;
         goto out;
@@ -1212,8 +1284,8 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     if (lat_aot_v2_module_inspect_file(module, &info, error, sizeof(error)) ||
         memcmp(info.note.source_sha256, digest, 32) ||
         memcmp(info.note.codegen_id, codegen_id, 32) ||
-        (profile && lat_aot_v2_module_validate_profile_file(
-            module, profile, error, sizeof(error)))) {
+        (tbset && lat_aot_v2_module_validate_tbset_file(
+            module, tbset, error, sizeof(error)))) {
         if (!error[0]) {
             snprintf(error, sizeof(error),
                      "compiled module source or codegen identity mismatch");
@@ -1267,6 +1339,11 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         pthread_mutex_unlock(&cache_lock);
         goto out;
     }
+    if (remove_superseded_modules(config, hex, module_name,
+                                  error, sizeof(error))) {
+        pthread_mutex_unlock(&cache_lock);
+        goto out;
+    }
     if (sync_directory(config->cache_dir, error, sizeof(error))) {
         pthread_mutex_unlock(&cache_lock);
         goto out;
@@ -1289,13 +1366,13 @@ out:
 }
 
 static int process_request(const LatcdConfig *config, int source_fd,
-                           int profile_fd,
+                           int tbset_fd,
                            LatcdResponseV1 *response)
 {
     char error[sizeof(response->message)] = {0};
     char *temporary_dir = g_build_filename(config->cache_dir, ".tmp", NULL);
     char *snapshot = NULL;
-    char *profile = NULL;
+    char *tbset = NULL;
     char *canonical = NULL;
     int result = -1;
     if (ensure_private_directory(config->cache_dir, error, sizeof(error)) ||
@@ -1311,19 +1388,19 @@ static int process_request(const LatcdConfig *config, int source_fd,
         goto out;
     }
     publish_source_identity(config, &identity, response->source_sha256);
-    if (profile_fd >= 0 && snapshot_profile(
-            profile_fd, snapshot, temporary_dir, response->source_sha256,
-            &profile, error, sizeof(error))) {
+    if (tbset_fd >= 0 && snapshot_tbset(
+            tbset_fd, snapshot, temporary_dir, response->source_sha256,
+            &tbset, error, sizeof(error))) {
         response->status = LATCD_STATUS_BAD_REQUEST;
         goto out;
     }
-    if (profile && merge_profile(config, response->source_sha256, profile,
-                                 &canonical, error, sizeof(error))) {
+    if (tbset && merge_tbset(config, response->source_sha256, tbset,
+                               &canonical, NULL, error, sizeof(error))) {
         response->status = LATCD_STATUS_BAD_REQUEST;
         goto out;
     }
     result = publish_snapshot(config, 0, snapshot,
-                              canonical ? canonical : profile,
+                              canonical ? canonical : tbset,
                               response->source_sha256,
                               response);
 out:
@@ -1335,8 +1412,8 @@ out:
         unlink(snapshot);
     }
     g_free(snapshot);
-    if (profile) unlink(profile);
-    g_free(profile);
+    if (tbset) unlink(tbset);
+    g_free(tbset);
     g_free(canonical);
     g_free(temporary_dir);
     return result;
@@ -1350,11 +1427,11 @@ static void job_free(LatcdJob *job)
     if (job->snapshot) {
         unlink(job->snapshot);
     }
-    if (job->profile && !job->profile_canonical) {
-        unlink(job->profile);
+    if (job->tbset && !job->tbset_canonical) {
+        unlink(job->tbset);
     }
     g_free(job->snapshot);
-    g_free(job->profile);
+    g_free(job->tbset);
     g_free(job);
 }
 
@@ -1378,6 +1455,42 @@ static int cache_contains(const LatcdConfig *config, const uint8_t digest[32])
     }
     pthread_mutex_unlock(&cache_lock);
     g_free(path);
+    return valid;
+}
+
+static int cache_contains_tbset(const LatcdConfig *config,
+                                const uint8_t digest[32],
+                                const char *tbset)
+{
+    gchar *contents = NULL;
+    gsize size = 0;
+    if (!g_file_get_contents(tbset, &contents, &size, NULL)) {
+        return 0;
+    }
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    g_checksum_update(checksum, (const guchar *)contents, size);
+    char tbset_hex[65];
+    g_strlcpy(tbset_hex, g_checksum_get_string(checksum), sizeof(tbset_hex));
+    g_checksum_free(checksum);
+    g_free(contents);
+    char source_hex[65];
+    digest_hex(digest, source_hex);
+    char *module_name = g_strdup_printf("%s-%s.so", source_hex, tbset_hex);
+    char *path = g_build_filename(config->cache_dir, module_name, NULL);
+    LatAotModuleInfoV2 info;
+    pthread_mutex_lock(&cache_lock);
+    int valid = cached_module_inspect(path, digest, &info);
+    if (valid) {
+        char error[128];
+        valid = !publish_current_index(config, source_hex, module_name, &info,
+                                       error, sizeof(error));
+        if (valid) {
+            utimensat(AT_FDCWD, path, NULL, AT_SYMLINK_NOFOLLOW);
+        }
+    }
+    pthread_mutex_unlock(&cache_lock);
+    g_free(path);
+    g_free(module_name);
     return valid;
 }
 
@@ -1504,40 +1617,40 @@ static void *compiler_worker(void *opaque)
         };
         char error[sizeof(response.message)] = {0};
         char *canonical = NULL;
-        char *stable_profile = NULL;
-        int result = job->profile && !job->profile_canonical && merge_profile(
-            service->config, job->digest, job->profile, &canonical,
+        char *stable_tbset = NULL;
+        int result = job->tbset && !job->tbset_canonical && merge_tbset(
+            service->config, job->digest, job->tbset, &canonical, NULL,
             error, sizeof(error));
-        if (!result && job->profile_canonical) {
-            int profile_fd = open(job->profile,
+        if (!result && job->tbset_canonical) {
+            int tbset_fd = open(job->tbset,
                                   O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
             char *temporary_dir = g_build_filename(
                 service->config->cache_dir, ".tmp", NULL);
-            if (profile_fd < 0) {
+            if (tbset_fd < 0) {
                 result = fail(error, sizeof(error),
-                              "cannot open canonical profile: %s",
+                              "cannot open canonical TB set: %s",
                               strerror(errno));
             } else {
-                result = snapshot_profile(
-                    profile_fd, job->snapshot, temporary_dir, job->digest,
-                    &stable_profile, error, sizeof(error));
+                result = snapshot_tbset(
+                    tbset_fd, job->snapshot, temporary_dir, job->digest,
+                    &stable_tbset, error, sizeof(error));
             }
-            if (profile_fd >= 0) close(profile_fd);
+            if (tbset_fd >= 0) close(tbset_fd);
             g_free(temporary_dir);
         }
         if (!result) {
             result = publish_snapshot(service->config, worker->index,
                                       job->snapshot,
-                                      job->profile_canonical ? stable_profile :
-                                      (canonical ? canonical : job->profile),
+                                      job->tbset_canonical ? stable_tbset :
+                                      (canonical ? canonical : job->tbset),
                                       job->digest, &response);
         } else {
             response.status = LATCD_STATUS_BAD_REQUEST;
             g_strlcpy(response.message, error, sizeof(response.message));
         }
         g_free(canonical);
-        if (stable_profile) unlink(stable_profile);
-        g_free(stable_profile);
+        if (stable_tbset) unlink(stable_tbset);
+        g_free(stable_tbset);
 
         pthread_mutex_lock(&service->lock);
         g_hash_table_remove(service->running_sources, job->source_key);
@@ -1551,7 +1664,7 @@ static void *compiler_worker(void *opaque)
                     job->key, response.status,
                     response.message[0] ? response.message : "unknown error");
         }
-        if (!result && job->profile_canonical && job->dirty) {
+        if (!result && job->tbset_canonical && job->dirty) {
             job->running = false;
             job->dirty = false;
             job->sequence = service->next_sequence++;
@@ -1582,7 +1695,7 @@ static void response_init(LatcdResponseV1 *response, uint64_t request_id)
 }
 
 static int service_queue_request(LatcdService *service, int source_fd,
-                                 int profile_fd,
+                                 int tbset_fd,
                                  const LatcdRequestV1 *request,
                                  LatcdResponseV1 *response)
 {
@@ -1590,7 +1703,7 @@ static int service_queue_request(LatcdService *service, int source_fd,
     char *temporary_dir = g_build_filename(service->config->cache_dir,
                                             ".tmp", NULL);
     char *snapshot = NULL;
-    char *profile = NULL;
+    char *tbset = NULL;
     response_init(response, request->request_id);
     struct stat identity;
     if (snapshot_source(source_fd, temporary_dir,
@@ -1604,9 +1717,9 @@ static int service_queue_request(LatcdService *service, int source_fd,
     }
     publish_source_identity(service->config, &identity,
                             response->source_sha256);
-    if (profile_fd >= 0 && snapshot_profile(
-            profile_fd, snapshot, temporary_dir, response->source_sha256,
-            &profile, error, sizeof(error))) {
+    if (tbset_fd >= 0 && snapshot_tbset(
+            tbset_fd, snapshot, temporary_dir, response->source_sha256,
+            &tbset, error, sizeof(error))) {
         response->status = LATCD_STATUS_BAD_REQUEST;
         g_strlcpy(response->message, error, sizeof(response->message));
         unlink(snapshot);
@@ -1614,30 +1727,32 @@ static int service_queue_request(LatcdService *service, int source_fd,
         g_free(temporary_dir);
         return -1;
     }
-    bool profile_canonical = false;
-    if (profile) {
+    bool tbset_canonical = false;
+    bool tbset_changed = false;
+    if (tbset) {
         char *canonical = NULL;
-        if (merge_profile(service->config, response->source_sha256, profile,
-                          &canonical, error, sizeof(error))) {
+        if (merge_tbset(service->config, response->source_sha256, tbset,
+                        &canonical, &tbset_changed,
+                        error, sizeof(error))) {
             response->status = LATCD_STATUS_BAD_REQUEST;
             g_strlcpy(response->message, error, sizeof(response->message));
             unlink(snapshot);
-            unlink(profile);
+            unlink(tbset);
             g_free(snapshot);
-            g_free(profile);
+            g_free(tbset);
             g_free(temporary_dir);
             return -1;
         }
-        unlink(profile);
-        g_free(profile);
-        profile = canonical;
-        profile_canonical = true;
+        unlink(tbset);
+        g_free(tbset);
+        tbset = canonical;
+        tbset_canonical = true;
     }
     g_free(temporary_dir);
     char key[130];
     digest_hex(response->source_sha256, key);
-    if (profile) {
-        snprintf(key + 64, sizeof(key) - 64, "-profile");
+    if (tbset) {
+        snprintf(key + 64, sizeof(key) - 64, "-tbset");
     }
     struct stat snapshot_status;
     if (stat(snapshot, &snapshot_status) || snapshot_status.st_size < 0) {
@@ -1645,16 +1760,16 @@ static int service_queue_request(LatcdService *service, int source_fd,
         g_strlcpy(response->message, "cannot inspect source snapshot",
                   sizeof(response->message));
         unlink(snapshot);
-        if (profile && !profile_canonical) unlink(profile);
+        if (tbset && !tbset_canonical) unlink(tbset);
         g_free(snapshot);
-        g_free(profile);
+        g_free(tbset);
         return -1;
     }
     uint64_t source_size = snapshot_status.st_size;
 
     pthread_mutex_lock(&service->lock);
     service->requests++;
-    if (!profile && cache_contains(service->config,
+    if (!tbset && cache_contains(service->config,
                                    response->source_sha256)) {
         service->cache_hits++;
         response->status = LATCD_STATUS_OK;
@@ -1663,14 +1778,28 @@ static int service_queue_request(LatcdService *service, int source_fd,
         write_stats_locked(service);
         pthread_mutex_unlock(&service->lock);
         unlink(snapshot);
-        if (profile && !profile_canonical) unlink(profile);
+        if (tbset && !tbset_canonical) unlink(tbset);
         g_free(snapshot);
-        g_free(profile);
+        g_free(tbset);
+        return 0;
+    }
+    if (tbset_canonical && !tbset_changed &&
+        cache_contains_tbset(service->config, response->source_sha256,
+                             tbset)) {
+        service->cache_hits++;
+        response->status = LATCD_STATUS_OK;
+        snprintf(response->message, sizeof(response->message),
+                 "cache hit: %s", key);
+        write_stats_locked(service);
+        pthread_mutex_unlock(&service->lock);
+        unlink(snapshot);
+        g_free(snapshot);
+        g_free(tbset);
         return 0;
     }
     if (g_hash_table_contains(service->active, key)) {
         LatcdJob *active = g_hash_table_lookup(service->active, key);
-        if (profile_canonical && active && active->running) {
+        if (tbset_canonical && tbset_changed && active && active->running) {
             active->dirty = true;
         }
         service->deduplicated++;
@@ -1680,9 +1809,9 @@ static int service_queue_request(LatcdService *service, int source_fd,
         write_stats_locked(service);
         pthread_mutex_unlock(&service->lock);
         unlink(snapshot);
-        if (profile && !profile_canonical) unlink(profile);
+        if (tbset && !tbset_canonical) unlink(tbset);
         g_free(snapshot);
-        g_free(profile);
+        g_free(tbset);
         return 0;
     }
     LatcdNegativeEntry *negative = g_hash_table_lookup(service->negative, key);
@@ -1695,9 +1824,9 @@ static int service_queue_request(LatcdService *service, int source_fd,
         write_stats_locked(service);
         pthread_mutex_unlock(&service->lock);
         unlink(snapshot);
-        if (profile && !profile_canonical) unlink(profile);
+        if (tbset && !tbset_canonical) unlink(tbset);
         g_free(snapshot);
-        g_free(profile);
+        g_free(tbset);
         return -1;
     }
     if (service->queue->len >= service->config->max_jobs ||
@@ -1710,15 +1839,15 @@ static int service_queue_request(LatcdService *service, int source_fd,
         write_stats_locked(service);
         pthread_mutex_unlock(&service->lock);
         unlink(snapshot);
-        if (profile && !profile_canonical) unlink(profile);
+        if (tbset && !tbset_canonical) unlink(tbset);
         g_free(snapshot);
-        g_free(profile);
+        g_free(tbset);
         return -1;
     }
     LatcdJob *job = g_new0(LatcdJob, 1);
     job->snapshot = snapshot;
-    job->profile = profile;
-    job->profile_canonical = profile_canonical;
+    job->tbset = tbset;
+    job->tbset_canonical = tbset_canonical;
     g_strlcpy(job->key, key, sizeof(job->key));
     memcpy(job->source_key, key, 64);
     job->source_key[64] = '\0';
@@ -1798,21 +1927,21 @@ static int run_once(const LatcdConfig *config)
     } while (client < 0 && errno == EINTR);
     LatcdRequestV1 request = {0};
     int source = -1;
-    int profile = -1;
+    int tbset = -1;
     LatcdResponseV1 response = {
         .magic = LATCD_RESPONSE_MAGIC,
         .version = LATCD_PROTOCOL_VERSION,
         .size = sizeof(response),
     };
     if (client < 0 || !peer_is_current_user(client) ||
-        latcd_receive_request(client, &request, &source, &profile,
+        latcd_receive_request(client, &request, &source, &tbset,
                               error, sizeof(error))) {
         response.status = LATCD_STATUS_BAD_REQUEST;
         g_strlcpy(response.message, error[0] ? error : "accept failed",
                   sizeof(response.message));
     } else {
         response.request_id = request.request_id;
-        process_request(config, source, profile, &response);
+        process_request(config, source, tbset, &response);
     }
     if (client >= 0) {
         latcd_send_response(client, &response, NULL, 0);
@@ -1821,8 +1950,8 @@ static int run_once(const LatcdConfig *config)
     if (source >= 0) {
         close(source);
     }
-    if (profile >= 0) {
-        close(profile);
+    if (tbset >= 0) {
+        close(tbset);
     }
     close(server);
     unlink(config->socket_path);
@@ -1939,25 +2068,25 @@ static int run_service(const LatcdConfig *config)
         LatcdResponseV1 response;
         response_init(&response, 0);
         int source = -1;
-        int profile = -1;
+        int tbset = -1;
         if (!peer_is_current_user(client) || !request_is_ready(client)) {
             response.status = LATCD_STATUS_BAD_REQUEST;
             g_strlcpy(response.message, "request user does not own latcd",
                       sizeof(response.message));
-        } else if (latcd_receive_request(client, &request, &source, &profile,
+        } else if (latcd_receive_request(client, &request, &source, &tbset,
                                          error, sizeof(error))) {
             response.status = LATCD_STATUS_BAD_REQUEST;
             g_strlcpy(response.message, error, sizeof(response.message));
         } else {
-            service_queue_request(&service, source, profile, &request,
+            service_queue_request(&service, source, tbset, &request,
                                   &response);
         }
         latcd_send_response(client, &response, NULL, 0);
         if (source >= 0) {
             close(source);
         }
-        if (profile >= 0) {
-            close(profile);
+        if (tbset >= 0) {
+            close(tbset);
         }
         close(client);
     }
@@ -2000,14 +2129,16 @@ static int run_service(const LatcdConfig *config)
 }
 
 static int run_submit(const char *socket_path, const char *source_path,
-                      uint32_t priority)
+                      const char *tbset_path, uint32_t priority)
 {
     int source = open(source_path, O_RDONLY | O_CLOEXEC);
+    int tbset = open(tbset_path, O_RDONLY | O_CLOEXEC);
     int client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-    if (source < 0 || client < 0) {
+    if (source < 0 || tbset < 0 || client < 0) {
         fprintf(stderr, "latcd: cannot open submission input: %s\n",
                 strerror(errno));
         if (source >= 0) close(source);
+        if (tbset >= 0) close(tbset);
         if (client >= 0) close(client);
         return 1;
     }
@@ -2015,6 +2146,7 @@ static int run_submit(const char *socket_path, const char *source_path,
     if (strlen(socket_path) >= sizeof(address.sun_path)) {
         fprintf(stderr, "latcd: socket path is too long\n");
         close(source);
+        close(tbset);
         close(client);
         return 1;
     }
@@ -2022,6 +2154,7 @@ static int run_submit(const char *socket_path, const char *source_path,
     if (connect(client, (const void *)&address, sizeof(address))) {
         fprintf(stderr, "latcd: cannot connect: %s\n", strerror(errno));
         close(source);
+        close(tbset);
         close(client);
         return 1;
     }
@@ -2030,11 +2163,12 @@ static int run_submit(const char *socket_path, const char *source_path,
         .version = LATCD_PROTOCOL_VERSION,
         .size = sizeof(request),
         .priority = priority,
+        .flags = LATCD_REQUEST_HAS_TBSET,
         .request_id = ((uint64_t)getpid() << 32) ^ g_get_monotonic_time(),
     };
     char error[256] = {0};
     LatcdResponseV1 response;
-    int result = latcd_send_request(client, source, -1, &request, error,
+    int result = latcd_send_request(client, source, tbset, &request, error,
                                     sizeof(error)) ||
                  latcd_receive_response(client, &response, error,
                                         sizeof(error));
@@ -2048,6 +2182,7 @@ static int run_submit(const char *socket_path, const char *source_path,
         result = response.status != LATCD_STATUS_OK;
     }
     close(source);
+    close(tbset);
     close(client);
     return result;
 }
@@ -2066,7 +2201,7 @@ static void usage(const char *name)
             " [--workers N]"
             " [--cpu-seconds N] [--address-space BYTES]"
             " [--file-size BYTES] [--open-files N]\n"
-            "  %s --submit --socket PATH [--priority N] X86_ELF\n"
+            "  %s --submit --socket PATH --tbset FILE [--priority N] X86_ELF\n"
             "  %s --build-id\n",
             name, name, name, name);
 }
@@ -2079,6 +2214,7 @@ int main(int argc, char **argv)
     }
     int once = 0, serve = 0, submit = 0;
     const char *source = NULL;
+    const char *tbset = NULL;
     uint32_t priority = LATCD_PRIORITY_LIBRARY;
     LatcdConfig config = {
         .max_input = LATCD_DEFAULT_MAX_INPUT,
@@ -2087,7 +2223,7 @@ int main(int argc, char **argv)
         .max_queue_bytes = LATCD_DEFAULT_MAX_QUEUE_BYTES,
         .max_cache_bytes = LATCD_DEFAULT_MAX_CACHE_BYTES,
         .max_jobs = LATCD_DEFAULT_MAX_JOBS,
-        .workers = LATCD_DEFAULT_WORKERS,
+        .workers = 0,
         .max_negative = LATCD_DEFAULT_MAX_NEGATIVE,
         .negative_ms = LATCD_DEFAULT_NEGATIVE_MS,
         .cpu_seconds = LATCD_DEFAULT_CPU_SECONDS,
@@ -2135,6 +2271,8 @@ int main(int argc, char **argv)
             config.open_files = g_ascii_strtoull(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--priority") && i + 1 < argc)
             priority = g_ascii_strtoull(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--tbset") && i + 1 < argc)
+            tbset = argv[++i];
         else if (submit && !source) source = argv[i];
         else { usage(argv[0]); return 2; }
     }
@@ -2143,8 +2281,11 @@ int main(int argc, char **argv)
         return 2;
     }
     if (submit) {
-        if (!source) { usage(argv[0]); return 2; }
-        return run_submit(config.socket_path, source, priority);
+        if (!source || !tbset) { usage(argv[0]); return 2; }
+        return run_submit(config.socket_path, source, tbset, priority);
+    }
+    if (!config.workers) {
+        config.workers = default_worker_count();
     }
     if (!config.cache_dir || !config.compiler || !config.runner ||
         !config.runtime_dir || !config.max_input || !config.max_jobs ||

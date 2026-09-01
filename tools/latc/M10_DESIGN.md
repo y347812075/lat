@@ -12,7 +12,7 @@ fixture 和模块，再执行四种缓存组合。每次记录模块内容和运
 1. 宿主故障 PC 属于 AOT text、JIT code cache、runtime helper 或普通宿主代码；
 2. signal 使用的当前实例是否与宿主 PC 所属模块相同，generation 是否仍有效；
 3. 插件反复映射和卸载后，访客执行区间及跳转缓存是否已失效；
-4. module note 中的 source digest、codegen-id、CPU feature 和 profile 是否与实际
+4. module note 中的 source digest、codegen-id、CPU feature 和 TB 集合是否与实际
    loader/libc 匹配。
 
 只有当前 HEAD 的正式 fixture 失败才修改运行时代码。测试必须先稳定失败，再进行
@@ -30,7 +30,7 @@ source 指完整 x86 ELF 及其 SHA256；module 指一个不可变 AOT ELF；ins
 module 在某个 guest load bias 的一次映射。instance 注册时 generation 从 1 开始；
 失效时先从 range snapshot 移除，再清 active、增加 generation 并清理缓存目标。
 dispatch 和 signal PC 恢复都必须同时匹配 instance、generation 和翻译标志。
-profile 是按 source 合并的目标集合；current 是通过临时文件、只读权限、文件
+TB 集合是按 source 合并的 `(RVA, FLAGS)` 集合，不记录执行次数；current 是通过临时文件、只读权限、文件
 fsync、原子 rename 和目录 fsync 发布的小型 JSON 索引。JIT fallback 表示无法
 证明有有效 AOT target 时继续普通 LAT 翻译，不表示运行中热替换 module。
 
@@ -54,7 +54,7 @@ fsync、原子 rename 和目录 fsync 发布的小型 JSON 索引。JIT fallback
 
 latcd 打开 cache 后立即取得跨进程独占锁，并在整个服务期持有描述符。锁由内核
 在进程退出时自动释放，不用 PID 文件判断进程是否存活。第二个 latcd 获取失败时
-在创建临时文件、合并 profile 或清理 cache 前退出。现有临时文件、`rename()`、
+在创建临时文件、合并 TB 集合或清理 cache 前退出。现有临时文件、`rename()`、
 文件和目录同步顺序继续保留。
 
 ## 测试调度和文档
@@ -64,16 +64,15 @@ latcd 打开 cache 后立即取得跨进程独占锁，并在整个服务期持�
 环境、argv、stdout/stderr 路径和整数退出码，`result.json` 记录阶段、应用清单、
 迭代次数和最终结果。cold 和 warm 阶段都在进入下一阶段前等待 latcd 队列及 worker
 清空，故障测试不会复制正在发布的 cache。stdout 和 stderr 继续按应用单独保存。
-共享设计文档固定 source、module、instance、generation、profile、current 和 JIT
+共享设计文档固定 source、module、instance、generation、TB 集合、current 和 JIT
 fallback 的含义，并在实现变化后同步更新。
 
 ## T-316：暖缓存性能
 
-冷运行先提交每个 ELF 的基础模块，只有基础提交成功的 source 才在进程退出时提交
-实际执行路径的 profile。latcd 按 source 合并 profile；同一 source 最多保留一个
-等待编译的 profile 任务，并让它排在基础模块之后。编译线程读取 profile 时先复制
-不可变快照，避免新请求改变正在编译模块的身份。若编译期间又合并了新 profile，
-服务自动补排一次任务。
+冷运行不为刚发现的 ELF 编译空的基础模块。进程正常退出或全局清空 TB 前，运行时
+扫描已经存在的 JIT TB 表，按 source 生成 TB 集合并提交。latcd 按 source 合并集合；
+集合没有新增项时不重新编译。同一 source 最多保留一个等待任务；编译线程读取集合
+时先复制不可变快照。若编译期间集合增加，服务只补排一次任务。
 
 暖运行用 ELF 的设备号、inode、大小、mtime 和 ctime 查找 latcd 发布的 SHA256，
 不再为每次进程启动重新读取大文件。没有活动 AOT 模块时，普通运行不再为每个 TB

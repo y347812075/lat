@@ -76,6 +76,15 @@ void latc_aot_v2_report_stats(void)
 {
 }
 
+void latc_aot_v2_snapshot_jit_tbs(void)
+{
+}
+
+void latc_aot_v2_snapshot_jit_tb(TranslationBlock *tb)
+{
+    (void)tb;
+}
+
 bool latc_aot_v2_is_file_pc(target_ulong guest_pc)
 {
     (void)guest_pc;

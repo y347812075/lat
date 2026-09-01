@@ -26,7 +26,7 @@ static int fail(char *error, size_t error_size, const char *format, ...)
     return -1;
 }
 
-static int submit(const char *socket_path, int source_fd, int profile_fd,
+static int submit(const char *socket_path, int source_fd, int tbset_fd,
                   uint32_t priority, uint64_t request_id,
                   char *error, size_t error_size)
 {
@@ -55,7 +55,7 @@ static int submit(const char *socket_path, int source_fd, int profile_fd,
         .version = LATCD_PROTOCOL_VERSION,
         .size = sizeof(request),
         .priority = priority,
-        .flags = profile_fd >= 0 ? LATCD_REQUEST_HAS_PROFILE : 0,
+        .flags = LATCD_REQUEST_HAS_TBSET,
         .request_id = request_id,
     };
     struct iovec iov = {
@@ -75,8 +75,8 @@ static int submit(const char *socket_path, int source_fd, int profile_fd,
     struct cmsghdr *header = CMSG_FIRSTHDR(&message);
     header->cmsg_level = SOL_SOCKET;
     header->cmsg_type = SCM_RIGHTS;
-    int descriptors[2] = { source_fd, profile_fd };
-    size_t descriptor_count = profile_fd >= 0 ? 2 : 1;
+    int descriptors[2] = { source_fd, tbset_fd };
+    size_t descriptor_count = 2;
     header->cmsg_len = CMSG_LEN(sizeof(int) * descriptor_count);
     memcpy(CMSG_DATA(header), descriptors,
            sizeof(int) * descriptor_count);
@@ -135,23 +135,15 @@ static int submit(const char *socket_path, int source_fd, int profile_fd,
     return 0;
 }
 
-int latcd_client_submit_fd(const char *socket_path, int source_fd,
-                           uint32_t priority, uint64_t request_id,
-                           char *error, size_t error_size)
+int latcd_client_submit_tbset_fd(const char *socket_path, int source_fd,
+                                 int tbset_fd, uint32_t priority,
+                                 uint64_t request_id,
+                                 char *error, size_t error_size)
 {
-    return submit(socket_path, source_fd, -1, priority, request_id,
-                  error, error_size);
-}
-
-int latcd_client_submit_profile_fd(const char *socket_path, int source_fd,
-                                   int profile_fd, uint32_t priority,
-                                   uint64_t request_id,
-                                   char *error, size_t error_size)
-{
-    if (profile_fd < 0) {
+    if (tbset_fd < 0) {
         errno = EINVAL;
-        return fail(error, error_size, "invalid latcd profile descriptor");
+        return fail(error, error_size, "invalid latcd TB set descriptor");
     }
-    return submit(socket_path, source_fd, profile_fd, priority, request_id,
+    return submit(socket_path, source_fd, tbset_fd, priority, request_id,
                   error, error_size);
 }

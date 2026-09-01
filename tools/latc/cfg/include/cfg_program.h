@@ -55,7 +55,7 @@ typedef struct {
     uint64_t start;
     uint64_t end;
     uint64_t terminator_pc;
-    uint64_t profile_count;
+    bool selected;
     uint32_t semantic_flags;
     CfgTbTerm terminator;
     size_t first_edge;

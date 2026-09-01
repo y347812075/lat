@@ -80,6 +80,11 @@
       "reason": "count and reject runtime TB generation for strict AOT verification"
     },
     {
+      "path": "lat/accel/tcg/tb-flush.c",
+      "generated": true,
+      "reason": "snapshot existing JIT TBs immediately before the global TB table is cleared"
+    },
+    {
       "path": "lat/target/i386/latx/sbt/aot_recover_tb.c",
       "generated": true,
       "reason": "provide opt-in diagnostics for static AOT loading"
@@ -87,7 +92,32 @@
     {
       "path": "lat/target/i386/latx/sbt/aot.c",
       "generated": true,
-      "reason": "provide opt-in diagnostics for static AOT coverage"
+      "reason": "provide opt-in diagnostics for static AOT coverage and transactional relocation retry state"
+    },
+    {
+      "path": "lat/target/i386/latx/include/aot.h",
+      "generated": true,
+      "reason": "expose relocation table checkpoint and rollback for TU retries"
+    },
+    {
+      "path": "lat/target/i386/latx/include/ir1.h",
+      "generated": true,
+      "reason": "classify memory index registers before GPR-only analysis"
+    },
+    {
+      "path": "lat/target/i386/latx/ir1/ir1.c",
+      "generated": true,
+      "reason": "distinguish VSIB vector indices from GPR address indices"
+    },
+    {
+      "path": "lat/target/i386/latx/optimization/hbr.c",
+      "generated": true,
+      "reason": "exclude VSIB vector indices from GPR high-half analysis"
+    },
+    {
+      "path": "lat/target/i386/latx/optimization/tu.c",
+      "generated": true,
+      "reason": "roll back relocation and search state before retrying a TU"
     },
     {
       "path": "lat/accel/tcg/cpu-exec.c",

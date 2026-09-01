@@ -2,7 +2,7 @@
 set -eu
 
 if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
-    echo "usage: $0 LATC STATIC_RUNNER X86_GUEST OUTPUT [PROFILE]" >&2
+    echo "usage: $0 LATC STATIC_RUNNER X86_GUEST OUTPUT [TBSET]" >&2
     exit 2
 fi
 
@@ -10,7 +10,7 @@ latc=$1
 runner=$2
 guest=$3
 output=$4
-profile=${5:-}
+tbset=${5:-}
 work=$(mktemp -d "${TMPDIR:-/tmp}/latc-aot.XXXXXX")
 guest_hash=$(sha256sum "$guest" | awk '{print $1}')
 guest_prefix=$(printf '%s' "$guest_hash" | cut -c1-16)
@@ -23,9 +23,9 @@ cleanup()
 }
 trap cleanup EXIT HUP INT TERM
 
-if [ -n "$profile" ]; then
+if [ -n "$tbset" ]; then
     "$latc" compile "$guest" -o "$work/stage1.la64" --runner "$runner" \
-        --profile "$profile" --profile-ignore-outside-exec >/dev/null
+        --tbset "$tbset" --tbset-ignore-outside-exec >/dev/null
 else
     "$latc" compile "$guest" -o "$work/stage1.la64" --runner "$runner" \
         >/dev/null
@@ -39,9 +39,9 @@ if [ -z "$aot" ]; then
     exit 1
 fi
 
-if [ -n "$profile" ]; then
+if [ -n "$tbset" ]; then
     "$latc" compile "$guest" -o "$output" --runner "$runner" \
-        --profile "$profile" --profile-ignore-outside-exec --aot "$aot"
+        --tbset "$tbset" --tbset-ignore-outside-exec --aot "$aot"
 else
     "$latc" compile "$guest" -o "$output" --runner "$runner" --aot "$aot"
 fi

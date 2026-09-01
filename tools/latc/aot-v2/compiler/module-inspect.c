@@ -119,10 +119,10 @@ int lat_aot_v2_module_inspect_file(const char *path,
     return 0;
 }
 
-int lat_aot_v2_module_validate_profile_file(const char *path,
-                                            const char *profile_path,
-                                            char *error,
-                                            size_t error_size)
+int lat_aot_v2_module_validate_tbset_file(const char *path,
+                                          const char *tbset_path,
+                                          char *error,
+                                          size_t error_size)
 {
     LatAotModuleInfoV2 info;
     if (lat_aot_v2_module_inspect_file(path, &info, error, error_size)) {
@@ -155,30 +155,31 @@ int lat_aot_v2_module_validate_profile_file(const char *path,
                                     tbs[i].guest_rva, tbs[i].flags);
         g_hash_table_add(keys, key);
     }
-    FILE *profile = fopen(profile_path, "r");
-    if (!profile) {
+    FILE *tbset = fopen(tbset_path, "r");
+    if (!tbset) {
         g_hash_table_destroy(keys);
         g_free(contents);
-        return fail(error, error_size, "cannot read compiled profile: %s",
+        return fail(error, error_size, "cannot read compiled TB set: %s",
                     strerror(errno));
     }
     char *line = NULL;
     size_t capacity = 0;
     int result = 0;
-    if (getline(&line, &capacity, profile) < 0) {
-        result = fail(error, error_size, "compiled profile is empty");
+    if (getline(&line, &capacity, tbset) < 0) {
+        result = fail(error, error_size, "compiled TB set is empty");
     }
     size_t record = 0;
     size_t missing = 0;
     uint64_t first_missing_rva = 0;
     uint64_t first_missing_flags = 0;
-    while (!result && getline(&line, &capacity, profile) >= 0) {
-        uint64_t rva, flags, count;
+    while (!result && getline(&line, &capacity, tbset) >= 0) {
+        uint64_t rva, flags;
+        char extra;
         record++;
-        if (sscanf(line, "%" SCNx64 " %" SCNx64 " %" SCNu64,
-                   &rva, &flags, &count) != 3) {
+        if (sscanf(line, "%" SCNx64 " %" SCNx64 " %c",
+                   &rva, &flags, &extra) != 2) {
             result = fail(error, error_size,
-                          "compiled profile record %zu is invalid", record);
+                          "compiled TB set record %zu is invalid", record);
             break;
         }
         char key[48];
@@ -192,19 +193,19 @@ int lat_aot_v2_module_validate_profile_file(const char *path,
             missing++;
         }
     }
-    if (!result && ferror(profile)) {
-        result = fail(error, error_size, "cannot read compiled profile");
+    if (!result && ferror(tbset)) {
+        result = fail(error, error_size, "cannot read compiled TB set");
     }
     size_t covered = record - missing;
     if (!result && record && !covered) {
         result = fail(error, error_size,
-                      "profile has no TB in module: covered=%zu total=%zu "
+                      "TB set has no TB in module: covered=%zu total=%zu "
                       "first_missing_rva=0x%" PRIx64 " flags=0x%" PRIx64,
                       covered, record, first_missing_rva,
                       first_missing_flags);
     }
     free(line);
-    fclose(profile);
+    fclose(tbset);
     g_hash_table_destroy(keys);
     g_free(contents);
     return result;

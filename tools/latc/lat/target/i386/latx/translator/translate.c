@@ -2176,7 +2176,7 @@ int tr_ir2_generate(struct TranslationBlock *tb)
                     if (has_base) {
                         base_op = ir1_opnd_base_reg_num(opnd);
                     }
-                    if (has_index) {
+                    if (has_index && ir1_opnd_index_is_gpr(opnd)) {
                         index_op = ir1_opnd_index_reg_num(opnd);
                         scale = ir1_opnd_scale(opnd);
                         if (scale != 1 && scale != 2 && scale != 4 &&

@@ -52,6 +52,9 @@ bool latc_aot_v2_note_mremap(CPUState *cpu, uint64_t old_start,
                              uint64_t old_size, uint64_t new_start,
                              uint64_t new_size, bool keep_old);
 void latc_aot_v2_report_stats(void);
+/* Snapshot existing JIT TBs outside the dispatch and translation hot paths. */
+void latc_aot_v2_snapshot_jit_tbs(void);
+void latc_aot_v2_snapshot_jit_tb(TranslationBlock *tb);
 bool latc_aot_v2_is_file_pc(target_ulong guest_pc);
 int latc_aot_v2_prepare(CPUArchState *env);
 bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,

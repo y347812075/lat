@@ -20,15 +20,15 @@ source_sha=$(sha256sum "$guest" | awk '{print $1}')
 hot_rva=$(nm -n "$guest" | awk '$3 == "fork_hot_value" { print "0x" $1; exit }')
 test -n "$hot_rva"
 {
-    printf 'LATC_PROFILE_V2 %s\n' "$source_sha"
-    printf '%s 0x3 100\n' "$hot_rva"
-} >"$work/fork.profile"
+    printf 'LATC_TBSET_V1 %s\n' "$source_sha"
+    printf '%s 0x3\n' "$hot_rva"
+} >"$work/fork.tbset"
 
 LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 LAT_LD_PREFIX="$rootfs" \
   "$script_dir/../scripts/compile-aot-v2-module.sh" \
   "$latc" "$runner" "$guest" "$runtime_dir" "$work/fork.so" \
-  "$work/fork.profile" >"$work/compile.stdout"
+  "$work/fork.tbset" >"$work/compile.stdout"
 cp "$work/fork.so" "$work/cache/$source_sha.so"
 
 env HOME="$work/home" LD_LIBRARY_PATH="$runtime_dir" LATX_AOT=0 \

@@ -29,14 +29,16 @@ cross_pc=$(nm -D "$plugin" | awk \
 entry_pc=$(nm -D "$plugin" | awk \
   '$3 == "latc_invalidation_entry" { print "0x" $1; exit }')
 test -n "$value_pc" -a -n "$cross_pc" -a -n "$entry_pc"
-printf '%s 1\n%s 1\n%s 1\n' "$value_pc" "$cross_pc" "$entry_pc" \
-  >"$work/plugin.profile"
+{
+  printf 'LATC_TBSET_V1 %s\n' "$(sha256sum "$plugin" | awk '{print $1}')"
+  printf '%s 0x1\n%s 0x1\n%s 0x1\n' "$value_pc" "$cross_pc" "$entry_pc"
+} >"$work/plugin.tbset"
 
 LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 LAT_LD_PREFIX="$rootfs" \
   "$script_dir/../scripts/compile-aot-v2-module.sh" \
   "$latc" "$runner" "$plugin" "$runtime_dir" "$work/plugin.so" \
-  "$work/plugin.profile" >/dev/null
+  "$work/plugin.tbset" >/dev/null
 plugin_sha=$(sha256sum "$plugin" | awk '{print $1}')
 cp "$work/plugin.so" "$work/cache/$plugin_sha.so"
 

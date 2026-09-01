@@ -514,6 +514,16 @@ int ir1_index_reg_is_ymm(IR1_OPND *opnd)
     return dt_X86_REG_YMM0 <= index && index <= dt_X86_REG_YMM15;
 }
 
+int ir1_opnd_index_is_gpr(const IR1_OPND *opnd)
+{
+    IR1_OPND index = {
+        .type = dt_X86_OP_REG,
+        .reg = opnd->mem.index,
+    };
+
+    return ir1_opnd_is_gpr(&index);
+}
+
 
 int ir1_opnd_index_reg_num(IR1_OPND *opnd)
 {
@@ -1418,7 +1428,7 @@ int ir1_opnd_is_gpr_used(IR1_OPND *opnd, uint8_t gpr_index)
 #endif
             return ir1_opnd_base_reg_num(opnd) == gpr_index;
         }
-        if (ir1_opnd_has_index(opnd)) {
+        if (ir1_opnd_has_index(opnd) && ir1_opnd_index_is_gpr(opnd)) {
             return ir1_opnd_index_reg_num(opnd) == gpr_index;
         }
     }

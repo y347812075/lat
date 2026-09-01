@@ -540,7 +540,7 @@ if 'CONFIG_LATX' in config_host
     'latc',
     files(
       'tools/latc/compiler/latc.c',
-      'tools/latc/compiler/profile.c',
+      'tools/latc/compiler/tbset.c',
       'tools/latc/aot-v2/compiler/module-pack.c',
       'tools/latc/aot-v2/compiler/module-inspect.c',
       'tools/latc/aot-v2/runtime/elf-validate.c',

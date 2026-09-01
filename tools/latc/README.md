@@ -126,7 +126,7 @@ Generate the current stable native image on a LoongArch build host with:
 
 ```sh
 tools/latc/scripts/compile-native-image.sh build/latc \
-  /path/to/latx-x86_64 /path/to/x86-program program.latnative profile.txt
+  /path/to/latx-x86_64 /path/to/x86-program program.latnative program.tbset
 build/latc inspect-native --json program.latnative
 ```
 
@@ -293,17 +293,20 @@ include `aot_cache_hit`, `bundle_verify_ns`, `guest_extract_ns`, and
 `runtime_tb_gen_attempts` is counted at translator entry; strict mode rejects
 the attempt before decoding or generating host code.
 
-An optional train profile marks hot TBs so the runner translates them first:
+An optional TB set selects the translated blocks that belong in the output:
 
 ```text
-# x86 guest address  execution count
-0x401000 120034
-0x401038 98211
+LATC_TBSET_V1 SOURCE_SHA256
+0x1000 0x1
+0x1038 0x1
 ```
 
-Pass it with `--profile profile.txt`. Missing CFG addresses inside executable
-ELF sections are added as supplemental TB starts. Addresses outside executable
-sections and malformed lines fail compilation.
+Each record contains an ELF-relative virtual address and semantic translation
+flags. It deliberately contains no execution count. Pass it with
+`--tbset FILE`. Missing CFG addresses inside executable ELF sections are added
+as supplemental TB starts. A wrong source digest, an address outside executable
+sections, an unsupported flag, or a malformed line fails compilation. No older
+profile format is accepted.
 
 On LoongArch, validate a copied LAT runner and real x86 guest with:
 
@@ -404,10 +407,11 @@ splits. `edge_target_tbs` counts executable static-edge targets not represented
 by a standalone CFG block. Jump-table case targets must be CFG TB leaders; the
 runner does not scan past alignment NOPs to compensate for missing targets.
 
-`LATC_PROFILE_OUT=/path/missing.profile` records runtime-generated guest PCs.
-Passing that file back through `--profile` adds missing addresses that are
-inside executable ELF sections; addresses outside executable sections fail the
-compile instead of being trusted blindly.
+For AOT v2, the runtime does not increment counters or append records while a
+TB executes. At normal process exit and immediately before a global TB flush,
+it scans the existing JIT TB table once, groups entries by source ELF, and
+submits `LATC_TBSET_V1` files to latcd. latcd unions the address-and-flags sets;
+an unchanged set does not schedule another compile.
 
 All twelve SPECint2000 integer programs pass the official test workloads with
 zero main-ELF runtime code generation. Ten pass full strict mode with no JIT at

@@ -2,7 +2,7 @@
 set -eu
 
 if [ "$#" -lt 5 ] || [ "$#" -gt 6 ]; then
-    echo "usage: $0 LATC STATIC_RUNNER X86_GUEST RUNTIME_DIRECTORY OUTPUT [PROFILE]" >&2
+    echo "usage: $0 LATC STATIC_RUNNER X86_GUEST RUNTIME_DIRECTORY OUTPUT [TBSET]" >&2
     exit 2
 fi
 
@@ -11,16 +11,16 @@ runner=$2
 guest=$3
 runtime_dir=$4
 output=$5
-profile=${6:-}
+tbset=${6:-}
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 case "$output" in /*) ;; *) output="$(pwd)/$output";; esac
 work=$(mktemp -d "${TMPDIR:-/tmp}/latc-aot-v2-compile.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-if [ -n "$profile" ]; then
+if [ -n "$tbset" ]; then
     "$script_dir/compile-native-image.sh" --module \
         "$latc" "$runner" "$guest" \
-        "$work/module.latnative" "$profile" >/dev/null
+        "$work/module.latnative" "$tbset" >/dev/null
 else
     "$script_dir/compile-native-image.sh" --module \
         "$latc" "$runner" "$guest" \

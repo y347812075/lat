@@ -15,6 +15,7 @@ static_guest=$6
 dynamic_guest=$7
 work=$8
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+export LATC_FAKE_REAL=$latc
 rm -rf "$work"
 mkdir -m 700 -p "$work"
 daemon_pid=
@@ -86,7 +87,7 @@ LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 \
   timeout 60 "$runner" "$static_guest" >"$work/no-daemon.stdout" \
   2>"$work/no-daemon.stderr"
 test "$(cat "$work/no-daemon.stdout")" = "Hello, LATC!"
-grep -q 'compiler_submissions=0 compiler_submission_failures=2' \
+grep -q 'compiler_submissions=0 compiler_submission_failures=1' \
   "$work/no-daemon.stderr"
 
 start_daemon "$work/static-cold" "$script_dir/fake-latc-slow.sh"
@@ -99,19 +100,19 @@ end=$(date +%s%N)
 elapsed_ms=$(((end - start) / 1000000))
 test "$(cat "$phase/guest.stdout")" = "Hello, LATC!"
 test "$elapsed_ms" -lt 900
-grep -q 'compiler_submissions=2 compiler_submission_failures=0' \
+grep -q 'compiler_submissions=1 compiler_submission_failures=0' \
   "$phase/guest.stderr"
 grep -q 'module=missing' "$phase/guest.stderr"
-wait_stats 's["compiled"] == 2 and s["active_jobs"] == 0'
-test "$(find "$cache" -maxdepth 1 -name '*.so' | wc -l)" -eq 2
+wait_stats 's["compiled"] == 1 and s["active_jobs"] == 0'
+test "$(find "$cache" -maxdepth 1 -name '*.so' | wc -l)" -eq 1
 test "$(find "$cache" -maxdepth 1 -name '*.current' | wc -l)" -eq 1
 stop_daemon
 
 static_source_sha=$(sha256sum "$static_guest" | cut -d ' ' -f 1)
-static_profile="$cache/.profiles/$static_source_sha.profile"
-static_profile_sha=$(sha256sum "$static_profile" | cut -d ' ' -f 1)
+static_tbset="$cache/.tbsets/$static_source_sha.tbset"
+static_tbset_sha=$(sha256sum "$static_tbset" | cut -d ' ' -f 1)
 python3 - "$cache/$static_source_sha.current" \
-  "$static_source_sha-$static_profile_sha.so" <<'PY'
+  "$static_source_sha-$static_tbset_sha.so" <<'PY'
 import json
 import sys
 current = json.load(open(sys.argv[1]))
@@ -126,8 +127,10 @@ LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 LATC_STRICT_AOT=1 \
   timeout 60 "$runner" "$static_guest" \
   >"$work/corrupt-current.stdout" 2>"$work/corrupt-current.stderr"
 test "$(cat "$work/corrupt-current.stdout")" = "Hello, LATC!"
-grep -q 'module=registered' "$work/corrupt-current.stderr"
-grep -Eq 'aot_lookups=[1-9][0-9]* jit_fallbacks=0' \
+grep -q 'module=missing' "$work/corrupt-current.stderr"
+grep -Eq 'aot_lookups=0 jit_fallbacks=[1-9][0-9]*' \
+  "$work/corrupt-current.stderr"
+grep -q 'compiler_submissions=0 compiler_submission_failures=1' \
   "$work/corrupt-current.stderr"
 
 start_daemon "$work/dynamic" "$latc"
@@ -140,18 +143,17 @@ LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 \
 end=$(date +%s%N)
 dynamic_ms=$(((end - start) / 1000000))
 test "$(cat "$phase/cold.stdout")" = "Hello from glibc!"
-grep -q 'compiler_submissions=6 compiler_submission_failures=0' \
+grep -q 'compiler_submissions=3 compiler_submission_failures=0' \
   "$phase/cold.stderr"
-test "$(grep -c 'compiler submitted.*priority=200' "$phase/cold.stderr")" -eq 2
-test "$(grep -c 'compiler submitted.*priority=100' "$phase/cold.stderr")" -eq 1
+test "$(grep -c 'TB set submitted' "$phase/cold.stderr")" -eq 3
 test "$(grep -c 'discovered ELF.*module=missing' "$phase/cold.stderr")" -ge 3
-wait_stats 's["compiled"] == 6 and s["failed"] == 0 and s["active_jobs"] == 0'
-test "$(find "$cache" -maxdepth 1 -name '*.so' | wc -l)" -eq 6
+wait_stats 's["compiled"] == 3 and s["failed"] == 0 and s["active_jobs"] == 0'
+test "$(find "$cache" -maxdepth 1 -name '*.so' | wc -l)" -eq 3
 test "$(find "$cache" -maxdepth 1 -name '*.current' | wc -l)" -eq 3
 test -z "$(find "$cache/.tmp" -mindepth 1 -maxdepth 1 -print -quit)"
 stop_daemon
 
-profiles_before=$(find "$cache/.profiles" -type f -exec sha256sum {} + | \
+tbsets_before=$(find "$cache/.tbsets" -type f -exec sha256sum {} + | \
   LC_ALL=C sort | sha256sum | cut -d ' ' -f 1)
 LD_LIBRARY_PATH="$runtime_dir" LATC_TEST_ENV=works LATX_AOT=0 \
 LATX_AOT_V2_CACHE_DIR="$cache" LATX_AOT_V2_LATCD_SOCKET="$work/missing.sock" \
@@ -168,9 +170,9 @@ grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0 file_dispatch_misse
   "$phase/warm.stderr"
 grep -q 'compiler_submissions=0 compiler_submission_failures=0' \
   "$phase/warm.stderr"
-profiles_after=$(find "$cache/.profiles" -type f -exec sha256sum {} + | \
+tbsets_after=$(find "$cache/.tbsets" -type f -exec sha256sum {} + | \
   LC_ALL=C sort | sha256sum | cut -d ' ' -f 1)
-test "$profiles_before" = "$profiles_after"
+test "$tbsets_before" = "$tbsets_after"
 python3 - "$phase/warm.stats.json" <<'PY'
 import json
 import sys
