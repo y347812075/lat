@@ -26,7 +26,14 @@ cache_source=${LATC_COMPLEX_CACHE_SOURCE:-}
 warm_socket=${LATC_COMPLEX_WARM_SOCKET:-1}
 require_registered=${LATC_COMPLEX_REQUIRE_REGISTERED:-1}
 warm_report=${LATC_COMPLEX_WARM_REPORT:-0}
+min_aot_percent=${LATC_COMPLEX_MIN_AOT_PERCENT:-0}
+coverage_applications=${LATC_COMPLEX_COVERAGE_APPLICATIONS:-$applications}
+require_no_fork_jit=${LATC_COMPLEX_REQUIRE_NO_FORK_JIT:-0}
 min_git_aot_percent=${LATC_COMPLEX_MIN_GIT_AOT_PERCENT:-0}
+if [ "$min_aot_percent" = 0 ] && [ "$min_git_aot_percent" != 0 ]; then
+    min_aot_percent=$min_git_aot_percent
+    coverage_applications=git
+fi
 max_submissions=${LATC_COMPLEX_MAX_SUBMISSIONS:-1}
 daemon_pid=
 fault_daemon_pid=
@@ -543,31 +550,14 @@ run_phase()
             return 1
         }
     fi
-    if [ "$phase" = warm ] && [ "$min_git_aot_percent" != 0 ]; then
-        python3 - "$phase_root/git.stderr" "$phase_root/git-aot-coverage.json" \
-          "$min_git_aot_percent" <<'PY'
-import json
-import re
-import sys
-
-pattern = re.compile(
-    r"module=\w+ aot_lookups=(\d+) jit_fallbacks=(\d+)")
-aot = fallback = 0
-for match in pattern.finditer(open(sys.argv[1]).read()):
-    aot += int(match.group(1))
-    fallback += int(match.group(2))
-total = aot + fallback
-percent = 100.0 * aot / total if total else 0.0
-result = {
-    "aot_lookups": aot,
-    "jit_fallbacks": fallback,
-    "aot_percent": percent,
-    "required_percent": float(sys.argv[3]),
-}
-json.dump(result, open(sys.argv[2], "w"), sort_keys=True)
-print("git AOT coverage: %.6f%% (%d/%d)" % (percent, aot, total))
-assert total and percent >= float(sys.argv[3]), result
-PY
+    if [ "$phase" = warm ] && [ "$min_aot_percent" != 0 ]; then
+        no_fork_option=
+        if [ "$require_no_fork_jit" -eq 1 ]; then
+            no_fork_option=--require-no-fork-jit
+        fi
+        python3 "$script_dir/check-aot-v2-coverage.py" \
+          $no_fork_option "$phase_root" "$min_aot_percent" \
+          $coverage_applications
     fi
     python3 - "$phase_root/result.json" "$phase" "$iteration" \
       "$((phase_finished - phase_started))" "$phase_root/app-timings.tsv" \

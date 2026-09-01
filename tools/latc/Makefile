@@ -328,6 +328,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  tests/fake-latc-slow.sh tests/fake-latc-cpu.sh \
 	  tests/test-latcd-runner.sh tests/test-aot-v2-real-app.sh \
 	  tests/test-aot-v2-complex-apps.sh scripts/prepare-complex-rootfs.sh
+	python3 tests/test-check-aot-v2-coverage.py \
+	  tests/check-aot-v2-coverage.py
 	$(BUILD)/tests/test-fallback-loader \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
