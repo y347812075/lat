@@ -519,6 +519,97 @@ static inline void add_jcc_gen_bcc(IR2_OPND result,
     }
 }
 
+static bool translate_dec_jcc(IR1_INST *ir1)
+{
+    IR1_INST *curr = ir1;
+    IR1_INST *next = curr->instptn.next;
+    IR1_OPND *opnd0 = ir1_get_opnd(curr, 0);
+    int opnd0_size = ir1_opnd_size(opnd0);
+    IR2_OPND src0 = ra_alloc_itemp();
+    IR2_OPND dest;
+
+    load_ireg_from_ir1_2(src0, opnd0, UNKNOWN_EXTENSION, false);
+    if (opnd0_size >= 32) {
+        dest = convert_gpr_opnd(opnd0, UNKNOWN_EXTENSION);
+    } else {
+        dest = ra_alloc_itemp();
+    }
+
+    la_addi_d(dest, src0, -1);
+
+#ifdef TARGET_X86_64
+    if (!GHBR_ON(curr) && CODEIS64 && opnd0_size == 32) {
+        la_mov32_zx(dest, dest);
+    }
+#endif
+
+    if (opnd0_size < 32) {
+        store_ireg_to_ir1(dest, opnd0, false);
+    }
+
+    IR2_OPND branch_result;
+    if (opnd0_size == 64 ||
+        (opnd0_size == 32 && !GHBR_ON(curr))) {
+        branch_result = dest;
+    } else {
+        branch_result = load_opnd_from_opnd(
+            dest, ZERO_EXTENSION, opnd0_size);
+    }
+    IR2_OPND target_label_opnd = ra_alloc_label();
+
+#ifdef CONFIG_LATX_TU
+    TranslationBlock *tb = lsenv->tr_data->curr_tb;
+    if (judge_tu_eflag_gen(tb)) {
+        IR2_OPND tu_reset_label_opnd = ra_alloc_label();
+        TranslationBlock *tb_next =
+            tb->s_data->next_tb[TU_TB_INDEX_NEXT];
+        TranslationBlock *tb_target =
+            tb->s_data->next_tb[TU_TB_INDEX_TARGET];
+
+        if (tb_next->eflag_use && tb_target->eflag_use) {
+            generate_eflag_calculation(dest, src0, src0, curr, true);
+        }
+
+        la_label(tu_reset_label_opnd);
+        tb->tu_jmp[TU_TB_INDEX_TARGET] = tu_reset_label_opnd._label_id;
+        add_jcc_gen_bcc(branch_result, target_label_opnd, next);
+        tu_jcc_nop_gen(tb);
+
+        if (tb_next->eflag_use && !tb_target->eflag_use) {
+            generate_eflag_calculation(dest, src0, src0, curr, true);
+        }
+
+        if (tb->tu_jmp[TU_TB_INDEX_NEXT] !=
+            TB_JMP_RESET_OFFSET_INVALID) {
+            IR2_OPND translated_label_opnd = ra_alloc_label();
+            la_label(translated_label_opnd);
+            la_b(imm_zero_ir2_opnd);
+            la_nop();
+            tb->tu_jmp[TU_TB_INDEX_NEXT] =
+                translated_label_opnd._label_id;
+        }
+
+        IR2_OPND unlink_label_opnd = ra_alloc_label();
+        la_label(unlink_label_opnd);
+        tb->tu_unlink.stub_offset = unlink_label_opnd._label_id;
+        tb->tu_unlink.rel_num = 2;
+        set_use_tu_jmp(tb);
+    }
+#endif
+
+    add_jcc_gen_bcc(branch_result, target_label_opnd, next);
+
+    EFLAGS_CACULATE_RESULT(dest, src0, src0, curr, 0, true);
+    tr_generate_exit_tb(next, 0);
+
+    la_label(target_label_opnd);
+    EFLAGS_CACULATE_RESULT(dest, src0, src0, curr, 1, true);
+    tr_generate_exit_tb(next, 1);
+
+    EFLAGS_CACULATE_RESULT(dest, src0, src0, curr, EFLAG_BACKUP, true);
+    return true;
+}
+
 static bool translate_add_jcc(IR1_INST *ir1)
 {
     IR1_INST *curr = ir1;
@@ -3118,6 +3209,8 @@ static bool try_translate_instptn_impl(IR1_INST *pir1)
         return translate_or_jcc(pir1);
     case INSTPTN_OPC_XOR_JCC:
         return translate_xor_jcc(pir1);
+    case INSTPTN_OPC_DEC_JCC:
+        return translate_dec_jcc(pir1);
     case INSTPTN_OPC_OR_XX_JCC:
         return translate_or_xx_jcc(pir1);
     default:
