@@ -212,6 +212,7 @@ int main(void)
     gchar *metadata = NULL;
     if (!g_file_get_contents(metadata_path, &metadata, NULL, NULL) ||
         !strstr(metadata, "LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS") ||
+        strstr(metadata, "LAT_AOT_MODULE_THREE_LEVEL_GUEST_SLOTS") ||
         !strstr(metadata, "guest_slots,guest_slots+257") ||
         !strstr(metadata, "{0x1800,-16,0}")) {
         fprintf(stderr, "257-entry two-level guest table was not emitted\n");
@@ -225,18 +226,25 @@ int main(void)
     g_free(metadata);
     metadata = NULL;
     if (write_large_guest_table_fixture(
-            image_path, LAT_AOT_V2_GUEST_ADDRESS_LIMIT + 1) ||
-        !lat_aot_v2_emit_module_sources(image_path, directory,
-                                        error, sizeof(error)) ||
-        !strstr(error, "no TB supported")) {
-        fprintf(stderr, "guest address overflow was not rejected safely: %s\n",
-                error[0] ? error : "unexpected success");
+            image_path, LAT_AOT_V2_TWO_LEVEL_GUEST_ADDRESS_LIMIT + 1) ||
+        lat_aot_v2_emit_module_sources(image_path, directory,
+                                       error, sizeof(error)) ||
+        !g_file_get_contents(metadata_path, &metadata, NULL, NULL) ||
+        !strstr(metadata, "LAT_AOT_MODULE_THREE_LEVEL_GUEST_SLOTS") ||
+        strstr(metadata, "LAT_AOT_MODULE_PRECISE_PC_MAP|"
+                         "LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS") ||
+        !strstr(metadata, "guest_slots,guest_slots+65537") ||
+        !strstr(metadata, "{0x81000,-16,0}")) {
+        fprintf(stderr, "65537-entry three-level guest table failed: %s\n",
+                error[0] ? error : "invalid metadata");
+        g_free(metadata);
         g_free(text);
         g_free(text_path);
         g_free(metadata_path);
         g_free(image_path);
         return 1;
     }
+    g_free(metadata);
     const uint32_t *code = (const void *)text;
     if (code[0] != 0x18000044u ||
         (code[1] & 0xfc000000u) != 0x50000000u ||

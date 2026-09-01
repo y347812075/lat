@@ -1380,12 +1380,20 @@ static int register_module_instance(LatAotV2RuntimeModule *module,
     const LatAotModuleV2 *descriptor = module->loaded.descriptor;
     size_t address_count = descriptor->guest_slot_end -
                            descriptor->guest_slot_begin;
-    if (descriptor->module_flags & LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS) {
-        size_t page_count =
+    int two_level = !!(descriptor->module_flags &
+                       LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS);
+    int three_level = !!(descriptor->module_flags &
+                         LAT_AOT_MODULE_THREE_LEVEL_GUEST_SLOTS);
+    if (two_level || three_level) {
+        size_t leaf_page_count =
             (address_count + LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT - 1) /
             LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+        size_t root_count = three_level ?
+            (leaf_page_count + LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT - 1) /
+                LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT : 0;
         runtime_instance->guest_page_storage_count =
-            page_count * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+            (leaf_page_count + root_count) *
+            LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
         runtime_instance->guest_pages = g_new0(
             uint64_t, runtime_instance->guest_page_storage_count);
         if (runtime_instance->guest_page_storage_count &&
@@ -1927,7 +1935,8 @@ int latc_aot_v2_prepare(CPUArchState *env)
                                  NULL) ||
         run_lifecycle_stress(module) ||
         (!(module->loaded.descriptor->module_flags &
-           LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS) &&
+           (LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS |
+            LAT_AOT_MODULE_THREE_LEVEL_GUEST_SLOTS)) &&
          lat_aot_v2_context_apply_guest_slots(
              module->loaded.descriptor, guest_base,
              env->tb_jmp_cache_ptr))) {

@@ -14,8 +14,12 @@
 #define LAT_AOT_V2_RUNTIME_SYSCALL_SYMBOL "lat_aot_runtime_raise_syscall"
 #define LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT 256u
 #define LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT 256u
-#define LAT_AOT_V2_GUEST_ADDRESS_LIMIT \
+#define LAT_AOT_V2_TWO_LEVEL_GUEST_ADDRESS_LIMIT \
     (LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT)
+#define LAT_AOT_V2_GUEST_ADDRESS_LIMIT \
+    (LAT_AOT_V2_TWO_LEVEL_GUEST_ADDRESS_LIMIT * \
+     LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT)
+#define LAT_AOT_V2_PROFILE_RECORD_LIMIT 65536u
 #define LAT_AOT_RUNTIME_TARGET_COUNT 17u
 
 enum LatAotFeatureV2 {
@@ -33,6 +37,8 @@ enum LatAotModuleFlagV2 {
     LAT_AOT_MODULE_PRECISE_PC_MAP = 1u << 2,
     /* FP slots point at 256-entry pages; guest slot reserved is page offset. */
     LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS = 1u << 3,
+    /* FP slots point at pointer pages, which point at 256-address pages. */
+    LAT_AOT_MODULE_THREE_LEVEL_GUEST_SLOTS = 1u << 4,
 };
 
 #define LAT_AOT_MODULE_SYNTHETIC_FIXTURE (UINT64_C(1) << 63)

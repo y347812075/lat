@@ -15,6 +15,7 @@ work=$6
 metadata_dir=$(dirname "$rootfs")/metadata
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 phases=${LATC_COMPLEX_PHASES:-jit}
+applications=${LATC_COMPLEX_APPLICATIONS:-python git sqlite redis}
 timeout_seconds=${LATC_COMPLEX_TIMEOUT:-60}
 stress_seconds=${LATC_COMPLEX_STRESS_SECONDS:-0}
 stress_phases=${LATC_COMPLEX_STRESS_PHASES:-jit warm}
@@ -25,6 +26,8 @@ cache_source=${LATC_COMPLEX_CACHE_SOURCE:-}
 warm_socket=${LATC_COMPLEX_WARM_SOCKET:-1}
 require_registered=${LATC_COMPLEX_REQUIRE_REGISTERED:-1}
 warm_report=${LATC_COMPLEX_WARM_REPORT:-0}
+min_git_aot_percent=${LATC_COMPLEX_MIN_GIT_AOT_PERCENT:-0}
+max_submissions=${LATC_COMPLEX_MAX_SUBMISSIONS:-1}
 daemon_pid=
 fault_daemon_pid=
 redis_pid=
@@ -491,9 +494,9 @@ run_phase()
         ;;
       cold|warm)
         if [ "$phase" = cold ]; then
-            phase_environment="LATX_AOT=0 LATX_AOT_V2_CACHE_DIR= LATX_AOT_V2_MODULE= LATX_AOT_V2_LATCD_SOCKET=$socket LATX_AOT_V2_REPORT=1 LATX_AOT_V2_MAX_SUBMISSIONS=1"
+            phase_environment="LATX_AOT=0 LATX_AOT_V2_CACHE_DIR= LATX_AOT_V2_MODULE= LATX_AOT_V2_LATCD_SOCKET=$socket LATX_AOT_V2_REPORT=1 LATX_AOT_V2_MAX_SUBMISSIONS=$max_submissions"
         elif [ "$warm_socket" -eq 1 ]; then
-            phase_environment="LATX_AOT=0 LATX_AOT_V2_CACHE_DIR=$cache LATX_AOT_V2_LATCD_SOCKET=$socket LATX_AOT_V2_REPORT=1 LATX_AOT_V2_MAX_SUBMISSIONS=1"
+            phase_environment="LATX_AOT=0 LATX_AOT_V2_CACHE_DIR=$cache LATX_AOT_V2_LATCD_SOCKET=$socket LATX_AOT_V2_REPORT=1 LATX_AOT_V2_MAX_SUBMISSIONS=$max_submissions"
         else
             phase_environment="LATX_AOT=0 LATX_AOT_V2_CACHE_DIR=$cache"
             if [ "$warm_report" -eq 1 ]; then
@@ -514,7 +517,7 @@ run_phase()
             mkdir "$iteration_dir"
         fi
         : >"$iteration_dir/app-timings.tsv"
-        for application in python git sqlite redis; do
+        for application in $applications; do
             application_started=$(python3 "$script_dir/monotonic-ns.py")
             "run_$application" "$iteration_dir"
             application_finished=$(python3 "$script_dir/monotonic-ns.py")
@@ -540,8 +543,35 @@ run_phase()
             return 1
         }
     fi
+    if [ "$phase" = warm ] && [ "$min_git_aot_percent" != 0 ]; then
+        python3 - "$phase_root/git.stderr" "$phase_root/git-aot-coverage.json" \
+          "$min_git_aot_percent" <<'PY'
+import json
+import re
+import sys
+
+pattern = re.compile(
+    r"module=\w+ aot_lookups=(\d+) jit_fallbacks=(\d+)")
+aot = fallback = 0
+for match in pattern.finditer(open(sys.argv[1]).read()):
+    aot += int(match.group(1))
+    fallback += int(match.group(2))
+total = aot + fallback
+percent = 100.0 * aot / total if total else 0.0
+result = {
+    "aot_lookups": aot,
+    "jit_fallbacks": fallback,
+    "aot_percent": percent,
+    "required_percent": float(sys.argv[3]),
+}
+json.dump(result, open(sys.argv[2], "w"), sort_keys=True)
+print("git AOT coverage: %.6f%% (%d/%d)" % (percent, aot, total))
+assert total and percent >= float(sys.argv[3]), result
+PY
+    fi
     python3 - "$phase_root/result.json" "$phase" "$iteration" \
-      "$((phase_finished - phase_started))" "$phase_root/app-timings.tsv" <<'PY'
+      "$((phase_finished - phase_started))" "$phase_root/app-timings.tsv" \
+      "$applications" <<'PY'
 import json
 import sys
 
@@ -550,7 +580,7 @@ for line in open(sys.argv[5]):
     application, elapsed = line.rstrip().split("\t")
     timings[application] = int(elapsed)
 json.dump({
-    "applications": ["python", "git", "sqlite", "redis"],
+    "applications": sys.argv[6].split(),
     "application_elapsed_ns": timings,
     "application_total_ns": sum(timings.values()),
     "elapsed_seconds": int(sys.argv[4]),
