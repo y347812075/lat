@@ -96,12 +96,6 @@ PY
     round=$((round + 1))
 done
 
-if [ ! -s "$output" ] && [ "$module" -eq 1 ]; then
-    rm -f "$output"
-    LATC_NATIVE_IMAGE_OUT="$output" LATC_NATIVE_ALLOW_MISSING=1 \
-        "$(dirname "$0")/compile-aot.sh" "$latc" "$runner" "$guest" \
-        "$work/compatibility-bundle" "$supplements" >/dev/null || true
-fi
 if [ ! -s "$output" ]; then
     echo "latc: static supplement rounds exhausted" >&2
     exit 1

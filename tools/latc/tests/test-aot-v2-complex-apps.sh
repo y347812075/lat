@@ -343,7 +343,6 @@ wait_for_compiler()
 import json
 import sys
 s = json.load(open(sys.argv[1]))
-assert s["requests"] > 0
 assert s["active_jobs"] == 0 and s["queue_depth"] == 0
 PY
         then

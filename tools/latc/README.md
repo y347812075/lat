@@ -303,10 +303,17 @@ LATC_TBSET_V1 SOURCE_SHA256
 
 Each record contains an ELF-relative virtual address and semantic translation
 flags. It deliberately contains no execution count. Pass it with
-`--tbset FILE`. Missing CFG addresses inside executable ELF sections are added
-as supplemental TB starts. A wrong source digest, an address outside executable
-sections, an unsupported flag, or a malformed line fails compilation. No older
-profile format is accepted.
+`--tbset FILE`. TB-set compilation reads only the ELF program headers instead
+of decoding the whole executable first. During that same runner process it
+adds the direct branch targets required by selected TBs, so module creation
+does not need repeated whole-program translation rounds. A wrong source
+digest, an address outside executable sections, an unsupported flag, or a
+malformed line fails compilation. No older profile format is accepted.
+
+The module tables are emitted as binary data and included directly by the
+assembler. They are not formatted as a large C source file for the host C
+compiler to parse. `latcd` accepts a cached module as a TB-set hit only when
+every requested `(RVA, flags)` pair exists in that module.
 
 On LoongArch, validate a copied LAT runner and real x86 guest with:
 

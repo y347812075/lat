@@ -7,13 +7,75 @@
 #include "latc-build-id.h"
 
 #include <errno.h>
+#include <elf.h>
 #include <glib.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+static int tbset_program_init(const char *path, CfgProgram *program,
+                              char *error, size_t error_size)
+{
+    memset(program, 0, sizeof(*program));
+    FILE *file = fopen(path, "rb");
+    Elf64_Ehdr ehdr;
+    if (!file || fread(&ehdr, sizeof(ehdr), 1, file) != 1 ||
+        memcmp(ehdr.e_ident, ELFMAG, SELFMAG) ||
+        ehdr.e_ident[EI_CLASS] != ELFCLASS64 ||
+        ehdr.e_ident[EI_DATA] != ELFDATA2LSB ||
+        ehdr.e_machine != EM_X86_64 ||
+        ehdr.e_phentsize != sizeof(Elf64_Phdr) || !ehdr.e_phnum ||
+        ehdr.e_phoff > LONG_MAX ||
+        fseek(file, (long)ehdr.e_phoff, SEEK_SET)) {
+        if (error && error_size) {
+            snprintf(error, error_size, "cannot read x86-64 ELF program headers");
+        }
+        if (file) fclose(file);
+        return -1;
+    }
+    Elf64_Phdr *phdrs = calloc(ehdr.e_phnum, sizeof(*phdrs));
+    if (!phdrs || fread(phdrs, sizeof(*phdrs), ehdr.e_phnum, file) !=
+                  ehdr.e_phnum) {
+        if (error && error_size) {
+            snprintf(error, error_size, "cannot read x86-64 ELF program headers");
+        }
+        free(phdrs);
+        fclose(file);
+        return -1;
+    }
+    fclose(file);
+    for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
+        if (phdrs[i].p_type != PT_LOAD || !(phdrs[i].p_flags & PF_X) ||
+            !phdrs[i].p_memsz) {
+            continue;
+        }
+        CfgExecRange *ranges = realloc(
+            program->exec_ranges,
+            (program->exec_range_count + 1) * sizeof(*ranges));
+        if (!ranges) {
+            free(phdrs);
+            cfg_program_destroy(program);
+            if (error && error_size) snprintf(error, error_size, "out of memory");
+            return -1;
+        }
+        program->exec_ranges = ranges;
+        program->exec_ranges[program->exec_range_count++] = (CfgExecRange) {
+            .start = phdrs[i].p_vaddr,
+            .size = phdrs[i].p_memsz,
+        };
+    }
+    free(phdrs);
+    if (!program->exec_range_count) {
+        if (error && error_size) snprintf(error, error_size,
+                                          "x86-64 ELF has no executable range");
+        return -1;
+    }
+    return 0;
+}
 
 static void usage(const char *name)
 {
@@ -182,9 +244,12 @@ static int compile_bundle(const char *input, const char *output,
                           int tbset_ignore_outside_exec, const char *aot)
 {
     CfgProgram program;
-    CfgAnalyzeOptions options = { .resolve_jump_tables = true };
     char error[256] = {0};
-    if (cfg_analyze_elf(input, &options, &program, error, sizeof(error)) != 0) {
+    CfgAnalyzeOptions options = { .resolve_jump_tables = true };
+    int analyze_result = tbset ?
+        tbset_program_init(input, &program, error, sizeof(error)) :
+        cfg_analyze_elf(input, &options, &program, error, sizeof(error));
+    if (analyze_result != 0) {
         fprintf(stderr, "latc: %s\n", error); return 1;
     }
     if (tbset) {

@@ -22,7 +22,7 @@
 static int bundle_self_fd = -1;
 static LatcDiskFooter bundle_footer;
 static bool pretranslation_complete;
-static uint64_t stat_cfg_tbs, stat_profiled, stat_pretranslated, stat_failed;
+static uint64_t stat_cfg_tbs, stat_selected, stat_pretranslated, stat_failed;
 static uint64_t stat_continuation_tbs, stat_edge_target_tbs;
 static uint64_t stat_same_extent, stat_shorter_extent, stat_longer_extent;
 static uint64_t stat_runtime_tb_gen_calls, stat_runtime_first_pc;
@@ -71,7 +71,7 @@ static void write_stats(void)
         g_free(stats_path);
         return;
     }
-    fprintf(stats, "{\"pid\":%ld,\"cfg_tbs\":%llu,\"profiled_tbs\":%llu,"
+    fprintf(stats, "{\"pid\":%ld,\"cfg_tbs\":%llu,\"selected_tbs\":%llu,"
             "\"pretranslated\":%llu,\"continuation_tbs\":%llu,"
             "\"edge_target_tbs\":%llu,"
             "\"failed\":%llu,"
@@ -91,7 +91,7 @@ static void write_stats(void)
             "\"bundle_verify_ns\":%llu,\"guest_extract_ns\":%llu,"
             "\"aot_prepare_ns\":%llu}\n",
             (long)getpid(), (unsigned long long)stat_cfg_tbs,
-            (unsigned long long)stat_profiled,
+            (unsigned long long)stat_selected,
             (unsigned long long)stat_pretranslated,
             (unsigned long long)stat_continuation_tbs,
             (unsigned long long)stat_edge_target_tbs,
@@ -142,11 +142,49 @@ static bool runtime_stats_enabled(void)
            (bundle_self_fd < 0 && path && *path);
 }
 
-static uint32_t profile_cflags(uint32_t base, uint32_t semantic_flags)
+static uint32_t tbset_cflags(uint32_t base, uint32_t semantic_flags)
 {
     uint32_t result = base & ~CF_PARALLEL;
     if (semantic_flags & LAT_AOT_TB_PARALLEL) result |= CF_PARALLEL;
     return result;
+}
+
+typedef struct LatcPendingTb {
+    target_ulong pc;
+    uint32_t cflags;
+} LatcPendingTb;
+
+static void queue_pretranslate_target(GArray *pending, GHashTable *scheduled,
+                                      target_ulong pc, uint32_t cflags)
+{
+    gpointer key = (gpointer)(uintptr_t)pc;
+    if (!pc || !program_address(pc) || g_hash_table_contains(scheduled, key)) {
+        return;
+    }
+    LatcPendingTb item = { .pc = pc, .cflags = cflags };
+    g_hash_table_add(scheduled, key);
+    g_array_append_val(pending, item);
+}
+
+static void queue_pretranslate_successors(GArray *pending,
+                                          GHashTable *scheduled,
+                                          TranslationBlock *tb)
+{
+    if (tb->s_data) {
+        switch (tb->s_data->last_ir1_type) {
+        case IR1_TYPE_BRANCH:
+            queue_pretranslate_target(pending, scheduled,
+                                      tb->s_data->next_pc, tb->cflags);
+            /* fall through */
+        case IR1_TYPE_CALL:
+        case IR1_TYPE_JUMP:
+            queue_pretranslate_target(pending, scheduled,
+                                      tb->s_data->target_pc, tb->cflags);
+            break;
+        default:
+            break;
+        }
+    }
 }
 
 void latc_bundle_note_tb_attempt(uint64_t guest_pc, uint32_t cflags)
@@ -570,23 +608,24 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
     (void)current_pc;
     uint32_t cflags = curr_cflags(cpu);
     uint64_t translated = 0, continuations = 0, edge_targets = 0;
-    uint64_t failed = 0, profiled = 0;
+    uint64_t failed = 0, selected = 0;
     uint64_t same_extent = 0, shorter_extent = 0, longer_extent = 0;
     GHashTable *translated_pcs = g_hash_table_new(g_direct_hash,
                                                   g_direct_equal);
+    GHashTable *scheduled_pcs = g_hash_table_new(g_direct_hash,
+                                                 g_direct_equal);
+    GArray *pending = g_array_new(FALSE, FALSE, sizeof(LatcPendingTb));
 
-    /* Profiled TBs are translated first; an empty profile keeps old behavior. */
-    for (unsigned pass = 0; pass < 2; pass++) {
-        for (uint64_t i = 0; i < header.tb_count; i++) {
+    /* The TB set is authoritative.  Do not compile the rest of the static CFG. */
+    for (uint64_t i = 0; i < header.tb_count; i++) {
             LatcDiskTb disk_tb;
             if (read_cfg(&disk_tb, sizeof(disk_tb),
                          tb_offset + i * sizeof(disk_tb))) {
                 failed++;
                 continue;
             }
-            bool is_selected = disk_tb.selected != 0;
-            if ((pass == 0) != is_selected) continue;
-            profiled += pass == 0;
+            if (!disk_tb.selected) continue;
+            selected++;
             if (disk_tb.end < disk_tb.start ||
                 disk_tb.end > UINT64_MAX - load_bias) {
                 failed++;
@@ -595,14 +634,17 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
             uint64_t translated_start = disk_tb.start + load_bias;
             uint64_t translated_end = disk_tb.end + load_bias;
             target_ulong pc = translated_start;
-            uint32_t tb_cflags = profile_cflags(cflags,
-                                                disk_tb.semantic_flags);
+            uint32_t tb_cflags = tbset_cflags(cflags,
+                                              disk_tb.semantic_flags);
             bool first = true;
             while (pc < translated_end) {
                 mmap_lock();
                 TranslationBlock *tb = tb_gen_code(cpu, pc, cs_base,
                                                    flags, tb_cflags);
                 if (tb) {
+                    g_hash_table_add(scheduled_pcs,
+                                     (gpointer)(uintptr_t)pc);
+                    queue_pretranslate_successors(pending, scheduled_pcs, tb);
                     jrra_pre_translate((void **)&tb, 1, cpu, flags,
                                        tb_cflags);
                 }
@@ -641,22 +683,47 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
                 pc = tb_end;
                 continuations++;
             }
+    }
+    for (guint i = 0; i < pending->len; i++) {
+        LatcPendingTb item = g_array_index(pending, LatcPendingTb, i);
+        mmap_lock();
+        TranslationBlock *tb = tb_gen_code(cpu, item.pc, cs_base,
+                                           flags, item.cflags);
+        if (tb) {
+            queue_pretranslate_successors(pending, scheduled_pcs, tb);
+            jrra_pre_translate((void **)&tb, 1, cpu, flags, item.cflags);
         }
+        mmap_unlock();
+        if (!tb) {
+            failed++;
+            continue;
+        }
+        translated++;
+        edge_targets++;
+        g_hash_table_add(translated_pcs, (gpointer)(uintptr_t)item.pc);
     }
     uint64_t edge_offset = tb_offset +
         header.tb_count * sizeof(LatcDiskTb);
-    for (uint64_t i = 0; i < header.edge_count; i++) {
+    uint64_t previous_count;
+    do {
+        previous_count = g_hash_table_size(translated_pcs);
+        for (uint64_t i = 0; i < header.edge_count; i++) {
         LatcDiskEdge edge;
         if (read_cfg(&edge, sizeof(edge),
                      edge_offset + i * sizeof(edge))) {
             failed++;
             continue;
         }
-        if (!edge.to || edge.to > UINT64_MAX - load_bias) {
+        if (!edge.from || !edge.to ||
+            edge.from > UINT64_MAX - load_bias ||
+            edge.to > UINT64_MAX - load_bias) {
             continue;
         }
+        uint64_t source_pc = edge.from + load_bias;
         uint64_t edge_pc = edge.to + load_bias;
-        if (!program_address(edge_pc) ||
+        if (!g_hash_table_contains(translated_pcs,
+                                  (gpointer)(uintptr_t)source_pc) ||
+            !program_address(edge_pc) ||
             g_hash_table_contains(translated_pcs,
                                   (gpointer)(uintptr_t)edge_pc)) {
             continue;
@@ -676,10 +743,13 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
         translated++;
         edge_targets++;
         g_hash_table_add(translated_pcs, (gpointer)(uintptr_t)pc);
-    }
+        }
+    } while (g_hash_table_size(translated_pcs) != previous_count);
     g_hash_table_destroy(translated_pcs);
+    g_hash_table_destroy(scheduled_pcs);
+    g_array_free(pending, TRUE);
     stat_cfg_tbs = header.tb_count;
-    stat_profiled = profiled;
+    stat_selected = selected;
     stat_pretranslated = translated;
     stat_continuation_tbs = continuations;
     stat_edge_target_tbs = edge_targets;
