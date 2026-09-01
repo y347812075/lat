@@ -105,13 +105,28 @@ static int selected_tb_ranges_valid(const ModulePack *pack)
     return 1;
 }
 
-static int selected_pc_maps_complete(const ModulePack *pack)
+static int all_tb_ranges_valid(const ModulePack *pack)
 {
-    for (uint64_t i = 0; i < pack->header->tb_count; i++) {
-        if (!pack->supported[i]) {
+    uint64_t previous_end = 0;
+    int have_previous = 0;
+    for (guint i = 0; i < pack->code_order->len; i++) {
+        const LatNativeTbV1 *tb = g_array_index(
+            pack->code_order, const LatNativeTbV1 *, i);
+        if (!tb->code_size) {
             continue;
         }
-        uint64_t expected = pack->tbs[i].code_offset;
+        if (have_previous && tb->code_offset < previous_end) {
+            return 0;
+        }
+        previous_end = tb->code_offset + tb->code_size;
+        have_previous = 1;
+    }
+    return 1;
+}
+
+static int tb_pc_maps_complete(const ModulePack *pack, uint64_t index)
+{
+        uint64_t expected = pack->tbs[index].code_offset;
         uint64_t left = 0;
         uint64_t right = pack->header->pc_map_count;
         while (left < right) {
@@ -124,7 +139,7 @@ static int selected_pc_maps_complete(const ModulePack *pack)
         }
         for (uint64_t j = left; j < pack->header->pc_map_count; j++) {
             const LatNativePcMapV2 *map = &pack->pc_maps[j];
-            if (!pc_map_in_tb(map, &pack->tbs[i])) {
+            if (!pc_map_in_tb(map, &pack->tbs[index])) {
                 break;
             }
             if (map->guest_pc < pack->header->preferred_guest_base ||
@@ -135,7 +150,17 @@ static int selected_pc_maps_complete(const ModulePack *pack)
             }
             expected = map->host_offset_end;
         }
-        if (expected != pack->tbs[i].code_offset + pack->tbs[i].code_size) {
+        if (expected != pack->tbs[index].code_offset +
+                        pack->tbs[index].code_size) {
+            return 0;
+        }
+        return 1;
+}
+
+static int selected_pc_maps_complete(const ModulePack *pack)
+{
+    for (uint64_t i = 0; i < pack->header->tb_count; i++) {
+        if (pack->supported[i] && !tb_pc_maps_complete(pack, i)) {
             return 0;
         }
     }
@@ -219,6 +244,67 @@ static const char *runtime_entry(uint32_t symbol)
         return "lat_aot_runtime_pcmpistrm_xmm";
     case LAT_NATIVE_SYMBOL_EFLAGTF:
         return "lat_aot_runtime_eflagtf";
+    case LAT_NATIVE_SYMBOL_LOG2:
+        return "lat_aot_runtime_log2";
+    case LAT_NATIVE_SYMBOL_POW:
+        return "lat_aot_runtime_pow";
+    case LAT_NATIVE_SYMBOL_SIN:
+        return "lat_aot_runtime_sin";
+    case LAT_NATIVE_SYMBOL_COS:
+        return "lat_aot_runtime_cos";
+    case LAT_NATIVE_SYMBOL_ATAN2:
+        return "lat_aot_runtime_atan2";
+    case LAT_NATIVE_SYMBOL_LOGB:
+        return "lat_aot_runtime_logb";
+    case LAT_NATIVE_SYMBOL_SINCOS:
+        return "lat_aot_runtime_sincos";
+    case LAT_NATIVE_SYMBOL_FPATAN: return "lat_aot_runtime_fpatan";
+    case LAT_NATIVE_SYMBOL_FPTAN: return "lat_aot_runtime_fptan";
+    case LAT_NATIVE_SYMBOL_FPREM: return "lat_aot_runtime_fprem";
+    case LAT_NATIVE_SYMBOL_FPREM1: return "lat_aot_runtime_fprem1";
+    case LAT_NATIVE_SYMBOL_FRNDINT: return "lat_aot_runtime_frndint";
+    case LAT_NATIVE_SYMBOL_F2XM1: return "lat_aot_runtime_f2xm1";
+    case LAT_NATIVE_SYMBOL_FXTRACT: return "lat_aot_runtime_fxtract";
+    case LAT_NATIVE_SYMBOL_FYL2X: return "lat_aot_runtime_fyl2x";
+    case LAT_NATIVE_SYMBOL_FYL2XP1: return "lat_aot_runtime_fyl2xp1";
+    case LAT_NATIVE_SYMBOL_FSINCOS: return "lat_aot_runtime_fsincos";
+    case LAT_NATIVE_SYMBOL_FSIN: return "lat_aot_runtime_fsin";
+    case LAT_NATIVE_SYMBOL_FCOS: return "lat_aot_runtime_fcos";
+    case LAT_NATIVE_SYMBOL_FBLD_ST0: return "lat_aot_runtime_fbld_st0";
+    case LAT_NATIVE_SYMBOL_FBST_ST0: return "lat_aot_runtime_fbst_st0";
+    case LAT_NATIVE_SYMBOL_AESIMC_XMM:
+        return "lat_aot_runtime_aesimc_xmm";
+    case LAT_NATIVE_SYMBOL_AESKEYGENASSIST_XMM:
+        return "lat_aot_runtime_aeskeygenassist_xmm";
+    case LAT_NATIVE_SYMBOL_AESDEC_XMM:
+        return "lat_aot_runtime_aesdec_xmm";
+    case LAT_NATIVE_SYMBOL_AESDECLAST_XMM:
+        return "lat_aot_runtime_aesdeclast_xmm";
+    case LAT_NATIVE_SYMBOL_AESENC_XMM:
+        return "lat_aot_runtime_aesenc_xmm";
+    case LAT_NATIVE_SYMBOL_AESENCLAST_XMM:
+        return "lat_aot_runtime_aesenclast_xmm";
+    case LAT_NATIVE_SYMBOL_SHA1NEXTE: return "lat_aot_runtime_sha1nexte";
+    case LAT_NATIVE_SYMBOL_SHA1MSG1: return "lat_aot_runtime_sha1msg1";
+    case LAT_NATIVE_SYMBOL_SHA1MSG2: return "lat_aot_runtime_sha1msg2";
+    case LAT_NATIVE_SYMBOL_SHA256MSG1: return "lat_aot_runtime_sha256msg1";
+    case LAT_NATIVE_SYMBOL_SHA256MSG2: return "lat_aot_runtime_sha256msg2";
+    case LAT_NATIVE_SYMBOL_SHA1RNDS4_F0:
+        return "lat_aot_runtime_sha1rnds4_f0";
+    case LAT_NATIVE_SYMBOL_SHA1RNDS4_F1:
+        return "lat_aot_runtime_sha1rnds4_f1";
+    case LAT_NATIVE_SYMBOL_SHA1RNDS4_F2:
+        return "lat_aot_runtime_sha1rnds4_f2";
+    case LAT_NATIVE_SYMBOL_SHA1RNDS4_F3:
+        return "lat_aot_runtime_sha1rnds4_f3";
+    case LAT_NATIVE_SYMBOL_SHA256RNDS2_XMM0:
+        return "lat_aot_runtime_sha256rnds2_xmm0";
+    case LAT_NATIVE_SYMBOL_RAISE_INT: return "lat_aot_runtime_raise_int";
+    case LAT_NATIVE_SYMBOL_RAISE_TRAPOP:
+        return "lat_aot_runtime_raise_trapop";
+    case LAT_NATIVE_SYMBOL_RAISE_INTO: return "lat_aot_runtime_raise_into";
+    case LAT_NATIVE_SYMBOL_RAISE_BOUND: return "lat_aot_runtime_raise_bound";
+    case LAT_NATIVE_SYMBOL_XGETBV: return "lat_aot_runtime_xgetbv";
     default:
         return NULL;
     }
@@ -277,23 +363,47 @@ static int find_tb(const ModulePack *pack, uint64_t guest_pc, uint32_t flags)
 }
 
 static int guest_slot(ModulePack *pack, uint64_t guest_rva);
+static int patch_tb_target_pair(uint32_t *instructions,
+                                uint64_t patch, uint64_t target);
+static int patch_runtime_target(uint32_t *instructions, uint32_t slots,
+                                uint64_t patch, uint64_t target);
 
 static void select_supported_tbs(ModulePack *pack)
 {
     memset(pack->supported, 1, pack->header->tb_count);
     for (uint64_t i = 0; i < pack->header->tb_count; i++) {
-        if (pack->tbs[i].guest_pc < pack->header->preferred_guest_base) {
+        if (pack->tbs[i].guest_pc < pack->header->preferred_guest_base ||
+            !tb_pc_maps_complete(pack, i)) {
             pack->supported[i] = 0;
         }
     }
     for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
         const LatNativeRelocationV1 *relocation = &pack->relocations[i];
         int owner = find_code_tb(pack, relocation->code_offset);
-        if (owner >= 0 &&
-            ((relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL &&
-              !runtime_symbol_supported(relocation->target)) ||
-             relocation->kind == LAT_NATIVE_RELOC_JRRA_TARGET)) {
+        if (owner < 0) {
+            continue;
+        }
+        if ((relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL &&
+             !runtime_symbol_supported(relocation->target)) ||
+            relocation->kind == LAT_NATIVE_RELOC_JRRA_TARGET) {
             pack->supported[owner] = 0;
+            continue;
+        }
+        if (relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL) {
+            if (!relocation->slots || relocation->slots > 3) {
+                pack->supported[owner] = 0;
+                continue;
+            }
+            uint32_t instructions[3] = {0};
+            memcpy(instructions, pack->code + relocation->code_offset,
+                   relocation->slots * sizeof(*instructions));
+            uint64_t target = relocation->target == LAT_NATIVE_SYMBOL_PFTABLE ?
+                pack->pf_table : pack->runtime_trampolines +
+                relocation->target * sizeof(uint32_t);
+            if (patch_runtime_target(instructions, relocation->slots,
+                                     relocation->code_offset, target)) {
+                pack->supported[owner] = 0;
+            }
         }
     }
     int changed;
@@ -353,6 +463,29 @@ static void select_supported_tbs(ModulePack *pack)
             int target = find_tb(pack, (uint64_t)relocation->addend,
                                  relocation->target);
             if (target < 0 || !pack->supported[target]) {
+                pack->supported[owner] = 0;
+                changed = 1;
+                continue;
+            }
+            if (!relocation->slots || relocation->slots > 3) {
+                pack->supported[owner] = 0;
+                changed = 1;
+                continue;
+            }
+            uint32_t instructions[3] = {0};
+            memcpy(instructions, pack->code + relocation->code_offset,
+                   relocation->slots * sizeof(*instructions));
+            int direct_pair = relocation->slots == 2 &&
+                (instructions[0] & 0xfe00001fu) == 0x1e00000cu &&
+                (instructions[1] & 0xfc0003e0u) == 0x4c000180u;
+            int patchable = direct_pair ?
+                !patch_tb_target_pair(instructions,
+                    relocation->code_offset,
+                    pack->tbs[target].code_offset) :
+                !patch_runtime_target(instructions, relocation->slots,
+                    relocation->code_offset,
+                    pack->tbs[target].code_offset);
+            if (!patchable) {
                 pack->supported[owner] = 0;
                 changed = 1;
             }
@@ -858,6 +991,7 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
     }
     g_array_sort(pack.code_order, compare_tb_code);
     memcpy(pack.code, image + header->code_offset, header->code_size);
+    int all_ranges_valid = all_tb_ranges_valid(&pack);
     select_supported_tbs(&pack);
     size_t supported_count = 0;
     for (uint64_t i = 0; i < header->tb_count; i++) {
@@ -865,7 +999,10 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
     }
     int result = 0;
     size_t pc_map_count = selected_pc_map_count(&pack);
-    if (!supported_count) {
+    if (!all_ranges_valid) {
+        result = fail(error, error_size,
+                      "native image has overlapping TB host ranges");
+    } else if (!supported_count) {
         result = fail(error, error_size,
                       "native image has no TB supported by AOT v2 M1");
     } else if (!selected_tb_ranges_valid(&pack)) {

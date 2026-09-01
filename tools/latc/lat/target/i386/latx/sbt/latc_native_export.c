@@ -149,6 +149,52 @@ static int runtime_symbol(aot_rel_kind kind)
     case LOAD_HELPER_PCMPISTRM_XMM:
         return LAT_NATIVE_SYMBOL_PCMPISTRM_XMM;
     case LOAD_HELPER_EFLAGTF: return LAT_NATIVE_SYMBOL_EFLAGTF;
+    case LOAD_HOST_LOG2: return LAT_NATIVE_SYMBOL_LOG2;
+    case LOAD_HOST_POW: return LAT_NATIVE_SYMBOL_POW;
+    case LOAD_HOST_SIN: return LAT_NATIVE_SYMBOL_SIN;
+    case LOAD_HOST_COS: return LAT_NATIVE_SYMBOL_COS;
+    case LOAD_HOST_ATAN2: return LAT_NATIVE_SYMBOL_ATAN2;
+    case LOAD_HOST_LOGB: return LAT_NATIVE_SYMBOL_LOGB;
+    case LOAD_HOST_SINCOS: return LAT_NATIVE_SYMBOL_SINCOS;
+    case LOAD_HELPER_FPATAN: return LAT_NATIVE_SYMBOL_FPATAN;
+    case LOAD_HELPER_FPTAN: return LAT_NATIVE_SYMBOL_FPTAN;
+    case LOAD_HELPER_FPREM: return LAT_NATIVE_SYMBOL_FPREM;
+    case LOAD_HELPER_FPREM1: return LAT_NATIVE_SYMBOL_FPREM1;
+    case LOAD_HELPER_FRNDINT: return LAT_NATIVE_SYMBOL_FRNDINT;
+    case LOAD_HELPER_F2XM1: return LAT_NATIVE_SYMBOL_F2XM1;
+    case LOAD_HELPER_FXTRACT: return LAT_NATIVE_SYMBOL_FXTRACT;
+    case LOAD_HELPER_FYL2X: return LAT_NATIVE_SYMBOL_FYL2X;
+    case LOAD_HELPER_FYL2XP1: return LAT_NATIVE_SYMBOL_FYL2XP1;
+    case LOAD_HELPER_FSINCOS: return LAT_NATIVE_SYMBOL_FSINCOS;
+    case LOAD_HELPER_FSIN: return LAT_NATIVE_SYMBOL_FSIN;
+    case LOAD_HELPER_FCOS: return LAT_NATIVE_SYMBOL_FCOS;
+    case LOAD_HELPER_FBLD_ST0: return LAT_NATIVE_SYMBOL_FBLD_ST0;
+    case LOAD_HELPER_FBST_ST0: return LAT_NATIVE_SYMBOL_FBST_ST0;
+    case LOAD_HELPER_AESIMC_XMM: return LAT_NATIVE_SYMBOL_AESIMC_XMM;
+    case LOAD_HELPER_AESKEYGENASSIST_XMM:
+        return LAT_NATIVE_SYMBOL_AESKEYGENASSIST_XMM;
+    case LOAD_HELPER_AESDEC_XMM: return LAT_NATIVE_SYMBOL_AESDEC_XMM;
+    case LOAD_HELPER_AESDECLAST_XMM:
+        return LAT_NATIVE_SYMBOL_AESDECLAST_XMM;
+    case LOAD_HELPER_AESENC_XMM: return LAT_NATIVE_SYMBOL_AESENC_XMM;
+    case LOAD_HELPER_AESENCLAST_XMM:
+        return LAT_NATIVE_SYMBOL_AESENCLAST_XMM;
+    case LOAD_HELPER_SHA1NEXTE: return LAT_NATIVE_SYMBOL_SHA1NEXTE;
+    case LOAD_HELPER_SHA1MSG1: return LAT_NATIVE_SYMBOL_SHA1MSG1;
+    case LOAD_HELPER_SHA1MSG2: return LAT_NATIVE_SYMBOL_SHA1MSG2;
+    case LOAD_HELPER_SHA256MSG1: return LAT_NATIVE_SYMBOL_SHA256MSG1;
+    case LOAD_HELPER_SHA256MSG2: return LAT_NATIVE_SYMBOL_SHA256MSG2;
+    case LOAD_HELPER_SHA1RNDS4_F0: return LAT_NATIVE_SYMBOL_SHA1RNDS4_F0;
+    case LOAD_HELPER_SHA1RNDS4_F1: return LAT_NATIVE_SYMBOL_SHA1RNDS4_F1;
+    case LOAD_HELPER_SHA1RNDS4_F2: return LAT_NATIVE_SYMBOL_SHA1RNDS4_F2;
+    case LOAD_HELPER_SHA1RNDS4_F3: return LAT_NATIVE_SYMBOL_SHA1RNDS4_F3;
+    case LOAD_HELPER_SHA256RNDS2_XMM0:
+        return LAT_NATIVE_SYMBOL_SHA256RNDS2_XMM0;
+    case LOAD_HELPER_RAISE_INT: return LAT_NATIVE_SYMBOL_RAISE_INT;
+    case LOAD_HELPER_RAISE_TRAPOP: return LAT_NATIVE_SYMBOL_RAISE_TRAPOP;
+    case LOAD_HELPER_RAISE_INTO: return LAT_NATIVE_SYMBOL_RAISE_INTO;
+    case LOAD_HELPER_RAISE_BOUND: return LAT_NATIVE_SYMBOL_RAISE_BOUND;
+    case LOAD_HELPER_XGETBV: return LAT_NATIVE_SYMBOL_XGETBV;
     default: return LAT_NATIVE_SYMBOL_INVALID;
     }
 }
@@ -522,6 +568,7 @@ static int extract_native_pc_maps(GArray *output, const uint8_t *code,
                                   uint64_t aot_code_offset,
                                   uint64_t load_bias)
 {
+    size_t skipped = 0;
     for (size_t i = 0; i < tb_count;) {
         if (!tbs[i].is_first_tb ||
             tbs[i].tb_cache_offset < aot_code_offset) {
@@ -549,12 +596,19 @@ static int extract_native_pc_maps(GArray *output, const uint8_t *code,
                 return -1;
             }
             guest_pc -= load_bias;
+            guint first_map = output->len;
             if (append_tb_pc_map(output, code, code_size, &tbs[j],
                                  code_offset, guest_pc, tu_end)) {
-                return -1;
+                g_array_set_size(output, first_map);
+                skipped++;
             }
         }
         i = next;
+    }
+    if (skipped) {
+        fprintf(stderr,
+                "latc: skipped %zu native TBs without stable PC maps\n",
+                skipped);
     }
     g_array_sort(output, compare_native_pc_map);
     for (guint i = 1; i < output->len; i++) {
@@ -789,10 +843,16 @@ int latc_native_export(const char *path, const char *guest_path,
         fprintf(stderr, "latc: native image has %u missing TB targets; first pc=0x%llx\n",
                 missing_targets->len, (unsigned long long)
                 g_array_index(missing_targets, uint64_t, 0));
+        bool allow_missing = getenv("LATC_NATIVE_ALLOW_MISSING") != NULL;
         g_array_free(missing_targets, TRUE);
-        goto out;
+        if (!allow_missing) {
+            goto out;
+        }
+        fprintf(stderr,
+                "latc: preserving unresolved targets for module JIT fallback\n");
+    } else {
+        g_array_free(missing_targets, TRUE);
     }
-    g_array_free(missing_targets, TRUE);
 
     LatNativeImageHeaderV2 native_header = {0};
     memcpy(native_header.magic, LAT_NATIVE_IMAGE_MAGIC, 8);

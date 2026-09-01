@@ -5,8 +5,8 @@
 #include <string.h>
 #include <stdlib.h>
 
-static _Thread_local LatAotRuntimeSyscallCallbackV2 syscall_callback;
-static _Thread_local void *syscall_opaque;
+static LatAotRuntimeSyscallCallbackV2 syscall_callback;
+static void *syscall_opaque;
 __attribute__((visibility("hidden")))
 uintptr_t lat_aot_runtime_target_slots_v2[LAT_AOT_RUNTIME_TARGET_COUNT];
 

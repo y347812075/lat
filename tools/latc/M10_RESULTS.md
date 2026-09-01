@@ -219,3 +219,34 @@ Git 因部分 AOT 基本持平。额外离线统计运行中，Python 为 18,552
 4 次 JIT fallback；Git 为 6,484 次 AOT lookup、76,393 次 JIT fallback；SQLite、
 Redis server 和 Redis client 均注册模块并产生 AOT lookup。所有进程的
 `compiler_submissions=0`。
+
+### Python / SQLite / Redis 全依赖基本完全 AOT 终验
+
+前述低覆盖率问题已修复。运行器现在会继续提交已注册但仍有缺失 TB 的模块 profile；
+AOT 运行时补充了工作负载实际使用的数学、x87、AES、SHA、异常和 XGETBV 目标。
+无法生成稳定 PC map 或无法编码重定位的少数 TB 会单独留给 JIT，不再导致整个动态库
+编译失败。多线程进程 fork 后保留已经注册的只读 AOT 模块，清空继承自已消失线程的
+reader 计数和跳转缓存，不再让子进程整体切换到 JIT。Python 新线程还覆盖了 AOT
+syscall callback 的跨线程回归测试。
+
+2026-09-01 在同一台 `3a6000` 上使用全新源码、构建和安装目录完成终验。安装树为
+`/home/zenglu/latc-t319-final2-install`，build-id 为
+`15aef7777cb54a17e2448aa2b5af256befb572030ac47443768dba8990a50609`。
+安装一致性测试和多线程 fork 专项测试均退出 0；fork 子进程输出
+`FORK_CHILD_AOT_OK`，父、子进程各报告 7 次 AOT 直接命中。
+
+完整训练统计为 `requests=884`、`queued=68`、`deduplicated=816`、
+`compiled=68`、`failed=0`、`queue_depth=0`、`active_jobs=0`。随后关闭 latcd，
+使用稳定 cache 分别运行三个应用；验收线为每个应用 AOT 覆盖率至少 99.9%、
+`compiler submissions=0` 和 `fork_jit=0`：
+
+| 应用 | AOT lookup / 文件型 lookup | 覆盖率 | 编译提交 | fork JIT | 结果 |
+|---|---:|---:|---:|---:|---|
+| Python | 37153 / 37153 | 100.000000% | 0 | 0 | PASS |
+| SQLite | 22235 / 22249 | 99.937076% | 0 | 0 | PASS |
+| Redis | 47099 / 47099 | 100.000000% | 0 | 0 | PASS |
+
+同一构建和 cache 又执行 5 轮 JIT/暖 AOT 交替测试。三个应用合计暖/JIT 耗时比依次为
+0.630497、0.626050、0.615715、0.641914、0.566203，五轮均为暖 AOT 更快。
+按应用计算，Python、SQLite、Redis 各自也是 5/5 轮更快；暖/JIT 中位数分别为
+0.411389、0.473722、0.769163。性能测试没有启动编译服务，测试前后 cache 内容不变。

@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static int write_fixture(const char *path, int overlap)
+static int write_fixture(const char *path, int overlap, int incomplete_map)
 {
     unsigned char image[1024] = {0};
     LatNativeImageHeaderV2 *header = (void *)image;
@@ -79,7 +79,7 @@ static int write_fixture(const char *path, int overlap)
     maps[0] = (LatNativePcMapV2){
         .guest_pc = 0x401000,
         .host_offset_begin = 0,
-        .host_offset_end = 24,
+        .host_offset_end = incomplete_map ? 20 : 24,
         .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
     };
     maps[1] = (LatNativePcMapV2){
@@ -180,7 +180,7 @@ int main(void)
     }
     char *image_path = g_build_filename(directory, "fixture.latnative", NULL);
     char error[256] = {0};
-    if (write_fixture(image_path, 0) ||
+    if (write_fixture(image_path, 0, 0) ||
         lat_aot_v2_emit_module_sources(image_path, directory,
                                        error, sizeof(error))) {
         fprintf(stderr, "cannot emit test module: %s\n", error);
@@ -198,6 +198,30 @@ int main(void)
         g_free(image_path);
         return 1;
     }
+    char *assembly_path = g_build_filename(directory, "module.S", NULL);
+    gchar *assembly = NULL;
+    if (!g_file_get_contents(assembly_path, &assembly, NULL, NULL) ||
+        !strstr(assembly, "b lat_aot_runtime_log2") ||
+        !strstr(assembly, "b lat_aot_runtime_pow") ||
+        !strstr(assembly, "b lat_aot_runtime_sincos") ||
+        !strstr(assembly, "b lat_aot_runtime_fprem") ||
+        !strstr(assembly, "b lat_aot_runtime_fbst_st0") ||
+        !strstr(assembly, "b lat_aot_runtime_aesenc_xmm") ||
+        !strstr(assembly, "b lat_aot_runtime_aesenclast_xmm") ||
+        !strstr(assembly, "b lat_aot_runtime_sha1nexte") ||
+        !strstr(assembly, "b lat_aot_runtime_sha256rnds2_xmm0") ||
+        !strstr(assembly, "b lat_aot_runtime_raise_int") ||
+        !strstr(assembly, "b lat_aot_runtime_xgetbv")) {
+        fprintf(stderr, "host math AOT runtime trampolines were not emitted\n");
+        g_free(assembly);
+        g_free(assembly_path);
+        g_free(text);
+        g_free(text_path);
+        g_free(metadata_path);
+        g_free(image_path);
+        return 1;
+    }
+    g_free(assembly);
     if (write_large_guest_table_fixture(
             image_path, LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT + 1) ||
         lat_aot_v2_emit_module_sources(image_path, directory,
@@ -258,7 +282,25 @@ int main(void)
         return 1;
     }
     memset(error, 0, sizeof(error));
-    if (write_fixture(image_path, 1) ||
+    gchar *incomplete_metadata = NULL;
+    if (write_fixture(image_path, 0, 1) ||
+        lat_aot_v2_emit_module_sources(image_path, directory,
+                                       error, sizeof(error)) ||
+        !g_file_get_contents(metadata_path, &incomplete_metadata,
+                             NULL, NULL) ||
+        !strstr(incomplete_metadata, "tbs,tbs+1")) {
+        fprintf(stderr, "incomplete PC-map TB was not isolated: %s\n",
+                error);
+        g_free(incomplete_metadata);
+        g_free(text);
+        g_free(text_path);
+        g_free(metadata_path);
+        g_free(image_path);
+        return 1;
+    }
+    g_free(incomplete_metadata);
+    memset(error, 0, sizeof(error));
+    if (write_fixture(image_path, 1, 0) ||
         !lat_aot_v2_emit_module_sources(image_path, directory,
                                         error, sizeof(error)) ||
         !strstr(error, "overlap")) {
@@ -270,7 +312,6 @@ int main(void)
     }
     g_free(text);
     g_remove(text_path);
-    char *assembly_path = g_build_filename(directory, "module.S", NULL);
     g_remove(metadata_path);
     g_remove(assembly_path);
     g_remove(image_path);

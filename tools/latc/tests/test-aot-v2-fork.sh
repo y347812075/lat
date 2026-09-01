@@ -36,8 +36,10 @@ env HOME="$work/home" LD_LIBRARY_PATH="$runtime_dir" LATX_AOT=0 \
   timeout -k 2s 30s "$runner" -L "$rootfs" "$guest" \
   >"$work/run.stdout" 2>"$work/run.stderr"
 
-grep -q '^FORK_OK parent_aot_child_jit=1 ' "$work/run.stdout"
-grep -q '^latx: AOT v2 fork child switched to JIT$' "$work/run.stderr"
+grep -q '^FORK_OK parent_aot_child_aot=1 ' "$work/run.stdout"
+grep -q '^FORK_CHILD_AOT_OK$' "$work/run.stdout"
+grep -q '^latx: AOT v2 fork child retained AOT$' "$work/run.stderr"
+test "$(grep -c 'fork child switched to JIT' "$work/run.stderr" || true)" -eq 0
 grep -Eq "module stats source=$source_sha .*module=registered aot_lookups=[1-9]" \
   "$work/run.stderr"
 grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' \

@@ -32,7 +32,9 @@ else
 fi
 
 round=1
-max_rounds=${LATC_NATIVE_MAX_ROUNDS:-20}
+max_rounds=${LATC_NATIVE_MAX_ROUNDS:-64}
+best_missing=2147483647
+stagnant_rounds=0
 while [ "$round" -le "$max_rounds" ]; do
     missing="$work/missing-$round.profile"
     rm -f "$output" "$missing"
@@ -44,6 +46,28 @@ while [ "$round" -le "$max_rounds" ]; do
     if [ ! -s "$missing" ]; then
         echo "latc: native compilation failed without static missing targets" >&2
         exit 1
+    fi
+    missing_count=$(wc -l <"$missing")
+    if [ "$missing_count" -lt "$best_missing" ]; then
+        best_missing=$missing_count
+        stagnant_rounds=0
+    else
+        stagnant_rounds=$((stagnant_rounds + 1))
+    fi
+    if [ "$stagnant_rounds" -ge 3 ]; then
+        echo "latc: static missing target count stopped improving" >&2
+        break
+    fi
+    repeated=0
+    for seen in "$work"/missing-*.profile; do
+        if [ "$seen" != "$missing" ] && cmp -s "$seen" "$missing"; then
+            repeated=1
+            break
+        fi
+    done
+    if [ "$repeated" -eq 1 ]; then
+        echo "latc: static missing targets entered a cycle" >&2
+        break
     fi
     if head -n 1 "$supplements" | grep -q '^LATC_PROFILE_V2 '; then
         head -n 1 "$supplements" >"$work/supplements-next.profile"
@@ -81,6 +105,12 @@ PY
     round=$((round + 1))
 done
 
+if [ ! -s "$output" ] && [ "$module" -eq 1 ]; then
+    rm -f "$output"
+    LATC_NATIVE_IMAGE_OUT="$output" LATC_NATIVE_ALLOW_MISSING=1 \
+        "$(dirname "$0")/compile-aot.sh" "$latc" "$runner" "$guest" \
+        "$work/compatibility-bundle" "$supplements" >/dev/null || true
+fi
 if [ ! -s "$output" ]; then
     echo "latc: static supplement rounds exhausted" >&2
     exit 1

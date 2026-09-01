@@ -37,7 +37,11 @@ int main(void)
         return 3;
     }
     if (child == 0) {
-        _exit(fork_hot_value(42) == expected ? 0 : 4);
+        if (fork_hot_value(42) != expected) {
+            return 4;
+        }
+        puts("FORK_CHILD_AOT_OK");
+        return 0;
     }
 
     int status;
@@ -51,7 +55,7 @@ int main(void)
     }
     close(worker_stop[0]);
     close(worker_stop[1]);
-    printf("FORK_OK parent_aot_child_jit=1 value=%llu\n",
+    printf("FORK_OK parent_aot_child_aot=1 value=%llu\n",
            (unsigned long long)expected);
     return 0;
 }
