@@ -24,6 +24,14 @@ if 'x86_64-linux-user' in target_dirs
     ],
   }]
   latx_integration_tests += [{
+    'name': 'test-xor-jcc',
+    'runner': find_program('../../test-xor-jcc.sh'),
+    'args': [
+      emulators['latx-x86_64'],
+      files('../../xor-jcc.S'),
+    ],
+  }]
+  latx_integration_tests += [{
     'name': 'test-or-xx-jcc',
     'runner': find_program('../../test-or-xx-jcc.sh'),
     'args': [

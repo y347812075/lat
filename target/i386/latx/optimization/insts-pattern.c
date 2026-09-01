@@ -176,6 +176,9 @@ static bool instptn_opcode_to_option(InstPtnOpcode opcode,
     case INSTPTN_OPC_OR_JCC:
         *option = INSTPTN_OPT_OR_JCC;
         break;
+    case INSTPTN_OPC_XOR_JCC:
+        *option = INSTPTN_OPT_XOR_JCC;
+        break;
     case INSTPTN_OPC_OR_XX_JCC:
         *option = INSTPTN_OPT_OR_XX_JCC;
         break;
@@ -1083,6 +1086,43 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *pir1, int pir1_i
             return false;
         default:
             INSTPTN_REJECT_AND_RETURN(or_option,
+                                      INSTPTN_REJECT_UNSUPPORTED_CC, false);
+        }
+    case WRAP(XOR):
+        SCAN_CHECK(scan, 0);
+        ir1_jcc = SCAN_IR1(tb, scan, 0);
+        opnd0 = ir1_get_opnd(pir1, 0);
+        opnd1 = ir1_get_opnd(pir1, 1);
+        if ((!ir1_opnd_is_gpr(opnd0) && !ir1_opnd_is_mem(opnd0)) ||
+            (!ir1_opnd_is_gpr(opnd1) && !ir1_opnd_is_mem(opnd1) &&
+             !ir1_opnd_is_imm(opnd1))) {
+            INSTPTN_REJECT_AND_RETURN(
+                INSTPTN_OPT_XOR_JCC,
+                INSTPTN_REJECT_UNSUPPORTED_OPERAND, false);
+        }
+        if (ir1_is_prefix_lock(pir1)) {
+            INSTPTN_REJECT_AND_RETURN(
+                INSTPTN_OPT_XOR_JCC,
+                INSTPTN_REJECT_FAULT_OR_HELPER, false);
+        }
+        switch (ir1_opcode(ir1_jcc)) {
+        case WRAP(JE):
+        case WRAP(JNE):
+        case WRAP(JS):
+        case WRAP(JNS):
+            if (pir1_index + 1 == SCAN_IDX(scan, 0)) {
+                instptn_check_xor_jcc_0();
+                pir1->instptn.opc = INSTPTN_OPC_XOR_JCC;
+                pir1->instptn.next = ir1_jcc;
+                ir1_jcc->instptn.opc = INSTPTN_OPC_NOP;
+            } else {
+                instptn_stats_record_reject(
+                    INSTPTN_OPT_XOR_JCC,
+                    INSTPTN_REJECT_NON_ADJACENT);
+            }
+            return false;
+        default:
+            INSTPTN_REJECT_AND_RETURN(INSTPTN_OPT_XOR_JCC,
                                       INSTPTN_REJECT_UNSUPPORTED_CC, false);
         }
 #ifdef CONFIG_LATX_XCOMISX_OPT

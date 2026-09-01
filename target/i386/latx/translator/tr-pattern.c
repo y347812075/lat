@@ -775,6 +775,172 @@ static bool translate_or_jcc(IR1_INST *ir1)
     return true;
 }
 
+static void xor_jcc_generate_eflags(IR2_OPND result, int opnd_size)
+{
+    switch (opnd_size) {
+    case 8:
+        la_x86or_b(result, result);
+        break;
+    case 16:
+        la_x86or_h(result, result);
+        break;
+    case 32:
+        la_x86or_w(result, result);
+        break;
+    case 64:
+        la_x86or_d(result, result);
+        break;
+    default:
+        lsassert(0);
+        break;
+    }
+}
+
+static bool translate_xor_jcc(IR1_INST *ir1)
+{
+    IR1_INST *curr = ir1;
+    IR1_INST *next = curr->instptn.next;
+    IR1_OPND *opnd0 = ir1_get_opnd(curr, 0);
+    IR1_OPND *opnd1 = ir1_get_opnd(curr, 1);
+    IR2_OPND src0, src1, dest, mem_opnd;
+    int imm = 0;
+    int opnd0_size = ir1_opnd_size(opnd0);
+    bool same_reg = ir1_opnd_is_same_reg(opnd0, opnd1);
+    bool opt_imm = ir1_opnd_is_s2uimm12(opnd1);
+    bool eflags_calc = ir1_need_calculate_any_flag(curr);
+
+    if (ir1_is_prefix_lock(curr)) {
+        translate_xor(curr);
+        translate_jcc(next);
+        return true;
+    }
+
+    if (!same_reg) {
+        if (opt_imm) {
+            src1 = zero_ir2_opnd;
+        } else {
+            src1 = load_ireg_from_ir1(opnd1, UNKNOWN_EXTENSION, false);
+        }
+    }
+
+    if (ir1_opnd_is_gpr(opnd0)) {
+        src0 = convert_gpr_opnd(opnd0, UNKNOWN_EXTENSION);
+        if (opnd0_size >= 32) {
+            dest = src0;
+        } else {
+            dest = ra_alloc_itemp();
+        }
+    } else {
+        src0 = ra_alloc_itemp();
+        dest = src0;
+        mem_opnd = convert_mem(opnd0, &imm);
+        la_ld_by_op_size(src0, mem_opnd, imm, opnd0_size);
+    }
+
+    if (same_reg) {
+        src1 = src0;
+        la_mov64(dest, zero_ir2_opnd);
+    } else if (opt_imm) {
+        la_xori(dest, src0, ir1_opnd_s2uimm(opnd1));
+    } else {
+        la_xor(dest, src0, src1);
+    }
+
+#ifdef TARGET_X86_64
+    if (!GHBR_ON(curr) && CODEIS64 && ir1_opnd_is_gpr(opnd0) &&
+        opnd0_size == 32 && !same_reg) {
+        la_mov32_zx(dest, dest);
+    }
+#endif
+
+    if (ir1_opnd_is_gpr(opnd0)) {
+        if (opnd0_size < 32) {
+            store_ireg_to_ir1(dest, opnd0, false);
+        }
+    } else {
+        la_st_by_op_size(dest, mem_opnd, imm, opnd0_size);
+    }
+
+    if (eflags_calc) {
+        instptn_stats_record_eflags_fallback_opcode(curr->instptn.opc);
+        xor_jcc_generate_eflags(dest, opnd0_size);
+    }
+
+#ifdef CONFIG_LATX_TU
+    bool tu_target_eflags = false;
+#endif
+
+    bool zero_branch = ir1_opcode(next) == WRAP(JE) ||
+                       ir1_opcode(next) == WRAP(JNE);
+    IR2_OPND branch_result;
+    if (opnd0_size == 64 ||
+        (opnd0_size == 32 && zero_branch && !GHBR_ON(curr))) {
+        branch_result = dest;
+    } else {
+        branch_result = load_opnd_from_opnd(
+            dest, zero_branch ? ZERO_EXTENSION : SIGN_EXTENSION,
+            opnd0_size);
+    }
+
+    IR2_OPND target_label_opnd = ra_alloc_label();
+#ifdef CONFIG_LATX_TU
+    TranslationBlock *tb = lsenv->tr_data->curr_tb;
+    if (judge_tu_eflag_gen(tb)) {
+        IR2_OPND tu_reset_label_opnd = ra_alloc_label();
+        TranslationBlock *tb_next =
+            tb->s_data->next_tb[TU_TB_INDEX_NEXT];
+        TranslationBlock *tb_target =
+            tb->s_data->next_tb[TU_TB_INDEX_TARGET];
+
+        tu_target_eflags = !eflags_calc && !tb_next->eflag_use &&
+                           tb_target->eflag_use;
+
+        if (!eflags_calc && tb_next->eflag_use && tb_target->eflag_use) {
+            xor_jcc_generate_eflags(dest, opnd0_size);
+        }
+
+        la_label(tu_reset_label_opnd);
+        tb->tu_jmp[TU_TB_INDEX_TARGET] = tu_reset_label_opnd._label_id;
+        add_jcc_gen_bcc(branch_result, target_label_opnd, next);
+        tu_jcc_nop_gen(tb);
+
+        if (!eflags_calc && tb_next->eflag_use && !tb_target->eflag_use) {
+            xor_jcc_generate_eflags(dest, opnd0_size);
+        }
+
+        if (tb->tu_jmp[TU_TB_INDEX_NEXT] !=
+            TB_JMP_RESET_OFFSET_INVALID) {
+            IR2_OPND translated_label_opnd = ra_alloc_label();
+            la_label(translated_label_opnd);
+            la_b(imm_zero_ir2_opnd);
+            la_nop();
+            tb->tu_jmp[TU_TB_INDEX_NEXT] =
+                translated_label_opnd._label_id;
+        }
+
+        IR2_OPND unlink_label_opnd = ra_alloc_label();
+        la_label(unlink_label_opnd);
+        tb->tu_unlink.stub_offset = unlink_label_opnd._label_id;
+        tb->tu_unlink.rel_num = 2;
+        set_use_tu_jmp(tb);
+    }
+#endif
+
+    add_jcc_gen_bcc(branch_result, target_label_opnd, next);
+
+    tr_generate_exit_tb(next, 0);
+
+    la_label(target_label_opnd);
+#ifdef CONFIG_LATX_TU
+    if (tu_target_eflags) {
+        xor_jcc_generate_eflags(dest, opnd0_size);
+    }
+#endif
+    tr_generate_exit_tb(next, 1);
+
+    return true;
+}
+
 #ifdef CONFIG_LATX_XCOMISX_OPT
 static inline bool xcomisx_jcc(IR1_INST *ir1, bool is_double, bool qnan_exp)
 {
@@ -2950,6 +3116,8 @@ static bool try_translate_instptn_impl(IR1_INST *pir1)
         return translate_add_jcc(pir1);
     case INSTPTN_OPC_OR_JCC:
         return translate_or_jcc(pir1);
+    case INSTPTN_OPC_XOR_JCC:
+        return translate_xor_jcc(pir1);
     case INSTPTN_OPC_OR_XX_JCC:
         return translate_or_xx_jcc(pir1);
     default:
