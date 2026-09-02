@@ -187,6 +187,7 @@ kill -TERM "$kill_pid"
 wait "$kill_pid"
 
 start_service concurrent "$latc"
+wait_stats 's["requests"] == 0 and s["compiled"] == 0 and s["failed"] == 0 and s["active_jobs"] == 0 and s["queue_depth"] == 0'
 cp "$guest" "$work/same-bytes.elf"
 client_pids=
 n=1

@@ -2106,6 +2106,9 @@ static int run_service(const LatcdConfig *config)
         g_hash_table_destroy(service.negative);
         return 1;
     }
+    pthread_mutex_lock(&service.lock);
+    write_stats_locked(&service);
+    pthread_mutex_unlock(&service.lock);
     struct sigaction action = { .sa_handler = signal_stop };
     sigemptyset(&action.sa_mask);
     sigaction(SIGINT, &action, NULL);
