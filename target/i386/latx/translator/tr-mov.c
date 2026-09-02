@@ -404,10 +404,14 @@ static void translate_mov_from_gpr(IR1_OPND *opnd0, IR1_OPND *opnd1)
                 li_w(tmp, offset);
                 la_add_d(tmp, mem, tmp);
                 // save context
-                tr_save_registers_to_env(0xff, 0x0, 0x0, 0);
+                bool use_static_helper =
+                    tr_gen_call_to_static_helper_nofp_prologue(tmp);
+                if (!use_static_helper) {
+                    tr_save_registers_to_env(0xff, 0x0, 0x0, 0);
 #ifdef TARGET_X86_64
-                tr_save_x64_8_registers_to_env(0xff, 0x0);
+                    tr_save_x64_8_registers_to_env(0xff, 0x0);
 #endif
+                }
                 // call smc_store_helper
                 la_mov64(a0_ir2_opnd, env_ir2_opnd);
                 la_mov64(a1_ir2_opnd, tmp);
@@ -417,10 +421,14 @@ static void translate_mov_from_gpr(IR1_OPND *opnd0, IR1_OPND *opnd1)
                         LOAD_HELPER_SMC_ST, 0);
                 la_jirl(ra_ir2_opnd, tmp, 0);
                 // restore context
-                tr_load_registers_from_env(0xff, 0x0, 0x0, 0);
+                if (use_static_helper) {
+                    tr_gen_call_to_static_helper_nofp_epilogue();
+                } else {
+                    tr_load_registers_from_env(0xff, 0x0, 0x0, 0);
 #ifdef TARGET_X86_64
-                tr_load_x64_8_registers_from_env(0xff, 0x0);
+                    tr_load_x64_8_registers_from_env(0xff, 0x0);
 #endif
+                }
                 // beq a0, finish
                 la_beq(a0_ir2_opnd, zero_ir2_opnd, label_finish);
                 store_ireg_to_ir1(src, opnd0, false);

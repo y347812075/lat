@@ -1710,6 +1710,10 @@ void tr_generate_goto_tb(void);                          /* TODO */
 extern ADDR native_rotate_fpu_by;
 extern ADDR indirect_jmp_glue;
 extern ADDR parallel_indirect_jmp_glue;
+extern ADDR static_helper_prologue;
+extern ADDR static_helper_epilogue;
+extern ADDR static_helper_nofp_prologue;
+extern ADDR static_helper_nofp_epilogue;
 void rotate_fpu_to_top(int top);
 void rotate_fpu_by(int step);
 void rotate_fpu_to_bias(int bias);
@@ -1724,6 +1728,8 @@ void tr_gen_call_to_helper_cvttpd2pi(ADDR, int, int, enum aot_rel_kind);
 void tr_gen_call_to_helper_pclmulqdq(ADDR, int, int, int, int ,int,
         enum aot_rel_kind );
 void tr_gen_call_to_helper_aes(ADDR, int, int, int, enum aot_rel_kind);
+bool tr_gen_call_to_static_helper_nofp_prologue(IR2_OPND live_opnd);
+void tr_gen_call_to_static_helper_nofp_epilogue(void);
 void tr_load_top_from_env(void);
 void tr_gen_top_mode_init(void);
 

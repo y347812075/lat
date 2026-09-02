@@ -48,6 +48,22 @@ if 'x86_64-linux-user' in target_dirs
       files('../../push-pop-sp-file.S'),
     ],
   }]
+  latx_integration_tests += [{
+    'name': 'test-static-helper-stubs',
+    'runner': find_program('../../test-static-helper-stubs.sh'),
+    'args': [
+      emulators['latx-x86_64'],
+      files('../../static-helper-stubs.S'),
+    ],
+  }]
+  latx_integration_tests += [{
+    'name': 'test-static-helper-live-temp',
+    'runner': find_program('../../test-static-helper-live-temp.sh'),
+    'args': [
+      emulators['latx-x86_64'],
+      files('../../static-helper-live-temp.S'),
+    ],
+  }]
   if 'CONFIG_LATX_KZT' in config_host
     latx_integration_tests += [{
       'name': 'test-int3-sigtrap-rip',
