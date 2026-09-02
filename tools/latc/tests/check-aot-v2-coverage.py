@@ -18,13 +18,14 @@ module_pattern = re.compile(
     r"source=([0-9a-f]{64}).*module=(\w+) "
     r"aot_lookups=(\d+) jit_fallbacks=(\d+)")
 runtime_pattern = re.compile(
-    r"AOT v2 runtime stats .*compiler_submissions=(\d+) "
-    r"compiler_submission_failures=(\d+)")
+    r"AOT v2 runtime stats .*?\bfile_dispatch_misses=(\d+) .*"
+    r"compiler_submissions=(\d+) compiler_submission_failures=(\d+)")
 failed = []
 
 for application in args.applications:
     paths = sorted(args.phase_root.rglob(f"{application}*.stderr"))
     aot = fallback = submissions = submission_failures = 0
+    runtime_file_misses = runtime_reports = 0
     states = {}
     sources = {}
     fork_jit = 0
@@ -44,10 +45,14 @@ for application in args.applications:
             source_result["jit_fallbacks"] += int(misses)
             source_result["states"][state] = \
                 source_result["states"].get(state, 0) + 1
-        for submitted, compiler_failed in runtime_pattern.findall(text):
+        for file_misses, submitted, compiler_failed in \
+                runtime_pattern.findall(text):
+            runtime_file_misses += int(file_misses)
             submissions += int(submitted)
             submission_failures += int(compiler_failed)
-    total = aot + fallback
+            runtime_reports += 1
+    unattributed = max(0, runtime_file_misses - fallback)
+    total = aot + fallback + unattributed
     percent = 100.0 * aot / total if total else 0.0
     result = {
         "aot_lookups": aot,
@@ -59,9 +64,12 @@ for application in args.applications:
         "jit_fallbacks": fallback,
         "module_states": states,
         "required_percent": args.required_percent,
+        "runtime_file_dispatch_misses": runtime_file_misses,
+        "runtime_reports": runtime_reports,
         "sources": sources,
         "stderr_files": [str(path.relative_to(args.phase_root))
                          for path in paths],
+        "unattributed_file_dispatch_misses": unattributed,
     }
     output = args.phase_root / f"{application}-aot-coverage.json"
     output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
@@ -70,7 +78,11 @@ for application in args.applications:
     reasons = []
     if not paths or not total:
         reasons.append("no module statistics")
-    if percent < args.required_percent:
+    if not runtime_reports:
+        reasons.append("no runtime statistics")
+    if fallback > runtime_file_misses:
+        reasons.append("file dispatch accounting mismatch")
+    if percent + 1e-12 < args.required_percent:
         reasons.append("coverage below requirement")
     if submissions or submission_failures:
         reasons.append("warm run submitted compiler work")

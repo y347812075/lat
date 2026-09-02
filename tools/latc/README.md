@@ -420,6 +420,11 @@ it scans the existing JIT TB table once, groups entries by source ELF, and
 submits `LATC_TBSET_V1` files to latcd. latcd unions the address-and-flags sets;
 an unchanged set does not schedule another compile.
 
+Profile-module generation is single-pass. The compiler must include every
+requested TB and its required direct branch targets in that pass. A missing
+static target fails the job and is reported; the driver does not retry with
+supplemental TB sets.
+
 All twelve SPECint2000 integer programs pass the official test workloads with
 zero main-ELF runtime code generation. Ten pass full strict mode with no JIT at
 all. Perlbmk and vortex use two and four guest VDSO/signal-helper TBs
