@@ -39,6 +39,15 @@ if 'x86_64-linux-user' in target_dirs
       files('../../guest-fatal-signal-status.S'),
     ],
   }]
+  latx_integration_tests += [{
+    'name': 'test-push-pop-sp',
+    'runner': find_program('../../test-push-pop-sp.sh'),
+    'args': [
+      emulators['latx-x86_64'],
+      files('../../push-pop-sp.S'),
+      files('../../push-pop-sp-file.S'),
+    ],
+  }]
   if 'CONFIG_LATX_KZT' in config_host
     latx_integration_tests += [{
       'name': 'test-int3-sigtrap-rip',
@@ -52,6 +61,14 @@ if 'x86_64-linux-user' in target_dirs
 endif
 
 if 'i386-linux-user' in target_dirs
+  latx_integration_tests += [{
+    'name': 'test-push-pop-sp-i386',
+    'runner': find_program('../../test-push-pop-sp-i386.sh'),
+    'args': [
+      emulators['latx-i386'],
+      files('../../push-pop-sp-i386.S'),
+    ],
+  }]
   latx_integration_tests += [{
     'name': 'test-fd-transform-race-i386',
     'runner': find_program('../../test-fd-transform-race-i386.sh'),

@@ -107,6 +107,9 @@ void tr_init(void *tb)
               t->curr_tb);
     t->curr_tb = tb;
     t->curr_ir1_inst = NULL;
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+    t->sp_delta = 0;
+#endif
 
     /* register allocation init */
     ra_free_all();
@@ -147,6 +150,9 @@ void tr_fini(bool check_the_extension)
     /* set current tb and ir1 */
     t->curr_tb = NULL;
     t->curr_ir1_inst = NULL;
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+    t->sp_delta = 0;
+#endif
 
     /* reset ir2 array */
     t->ir2_inst_num_current = 0;
@@ -2198,12 +2204,22 @@ int tr_ir2_generate(struct TranslationBlock *tb)
     }
 #endif
     for (i = 0; i < ir1_nr; ++i) {
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+        if (!latx_sp_merge_can_delay(pir1)) {
+            latx_sp_merge_flush();
+        }
+#endif
         /*
          * handle segv scenario, store host pc to gen_insn_data and encode to a BYTE
          * at the end of TB translate cache.
          */
         tcg_ctx->gen_insn_data[i][0] = pir1->info->address;
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+        tcg_ctx->gen_insn_data[i][1] =
+            (target_ulong)(target_long)lsenv->tr_data->sp_delta;
+#else
         tcg_ctx->gen_insn_data[i][1] = 0;
+#endif
 
 #ifdef CONFIG_LATX_IMM_REG
         imm_cache->curr_ir1_index = i;
@@ -2260,6 +2276,9 @@ int tr_ir2_generate(struct TranslationBlock *tb)
 
         pir1++;
     }
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+    latx_sp_merge_flush();
+#endif
 #ifdef CONFIG_LATX_DEBUG
     if (option_dump_ir1) {
         pir1 = tb_ir1_inst(tb, 0);
