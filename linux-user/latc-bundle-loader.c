@@ -154,15 +154,42 @@ typedef struct LatcPendingTb {
     uint32_t cflags;
 } LatcPendingTb;
 
+static guint pending_tb_hash(gconstpointer pointer)
+{
+    const LatcPendingTb *tb = pointer;
+    return (guint)(tb->pc ^ (tb->pc >> 32) ^
+                   ((tb->cflags & CF_PARALLEL) ? 0x9e3779b9U : 0));
+}
+
+static gboolean pending_tb_equal(gconstpointer left, gconstpointer right)
+{
+    const LatcPendingTb *a = left;
+    const LatcPendingTb *b = right;
+    return a->pc == b->pc &&
+           (a->cflags & CF_PARALLEL) == (b->cflags & CF_PARALLEL);
+}
+
+static void mark_pretranslate_scheduled(GHashTable *scheduled,
+                                        target_ulong pc, uint32_t cflags)
+{
+    LatcPendingTb candidate = { .pc = pc, .cflags = cflags };
+    if (g_hash_table_contains(scheduled, &candidate)) {
+        return;
+    }
+    LatcPendingTb *key = g_new(LatcPendingTb, 1);
+    *key = candidate;
+    g_hash_table_add(scheduled, key);
+}
+
 static void queue_pretranslate_target(GArray *pending, GHashTable *scheduled,
                                       target_ulong pc, uint32_t cflags)
 {
-    gpointer key = (gpointer)(uintptr_t)pc;
-    if (!pc || !program_address(pc) || g_hash_table_contains(scheduled, key)) {
+    LatcPendingTb item = { .pc = pc, .cflags = cflags };
+    if (!pc || !program_address(pc) ||
+        g_hash_table_contains(scheduled, &item)) {
         return;
     }
-    LatcPendingTb item = { .pc = pc, .cflags = cflags };
-    g_hash_table_add(scheduled, key);
+    mark_pretranslate_scheduled(scheduled, pc, cflags);
     g_array_append_val(pending, item);
 }
 
@@ -612,9 +639,10 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
     uint64_t same_extent = 0, shorter_extent = 0, longer_extent = 0;
     GHashTable *translated_pcs = g_hash_table_new(g_direct_hash,
                                                   g_direct_equal);
-    GHashTable *scheduled_pcs = g_hash_table_new(g_direct_hash,
-                                                 g_direct_equal);
+    GHashTable *scheduled_pcs = g_hash_table_new_full(
+        pending_tb_hash, pending_tb_equal, g_free, NULL);
     GArray *pending = g_array_new(FALSE, FALSE, sizeof(LatcPendingTb));
+    uint64_t pretranslate_started = monotonic_ns();
 
     /* The TB set is authoritative.  Do not compile the rest of the static CFG. */
     for (uint64_t i = 0; i < header.tb_count; i++) {
@@ -642,8 +670,8 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
                 TranslationBlock *tb = tb_gen_code(cpu, pc, cs_base,
                                                    flags, tb_cflags);
                 if (tb) {
-                    g_hash_table_add(scheduled_pcs,
-                                     (gpointer)(uintptr_t)pc);
+                    mark_pretranslate_scheduled(scheduled_pcs, pc,
+                                                tb_cflags);
                     queue_pretranslate_successors(pending, scheduled_pcs, tb);
                     jrra_pre_translate((void **)&tb, 1, cpu, flags,
                                        tb_cflags);
@@ -745,6 +773,11 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
         g_hash_table_add(translated_pcs, (gpointer)(uintptr_t)pc);
         }
     } while (g_hash_table_size(translated_pcs) != previous_count);
+    if (getenv("LATC_COMPILE_TIMING")) {
+        fprintf(stderr, "latc: compile timing tb_translate_ms=%llu\n",
+                (unsigned long long)
+                ((monotonic_ns() - pretranslate_started) / 1000000));
+    }
     g_hash_table_destroy(translated_pcs);
     g_hash_table_destroy(scheduled_pcs);
     g_array_free(pending, TRUE);

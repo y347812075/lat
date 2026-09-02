@@ -23,6 +23,20 @@ cleanup()
 }
 trap cleanup EXIT HUP INT TERM
 
+timing=${LATC_COMPILE_TIMING:-0}
+if [ "$timing" -eq 1 ]; then
+    timing_start=$(date +%s%N)
+    timing_last=$timing_start
+fi
+
+report_timing()
+{
+    [ "$timing" -eq 1 ] || return 0
+    timing_now=$(date +%s%N)
+    echo "latc: compile timing $1_ms=$(((timing_now - timing_last) / 1000000))" >&2
+    timing_last=$timing_now
+}
+
 if [ -n "$tbset" ]; then
     "$latc" compile "$guest" -o "$work/stage1.la64" --runner "$runner" \
         --tbset "$tbset" --tbset-ignore-outside-exec >/dev/null
@@ -30,8 +44,21 @@ else
     "$latc" compile "$guest" -o "$work/stage1.la64" --runner "$runner" \
         >/dev/null
 fi
+report_timing stage1_bundle
 HOME="$work/home" LATX_AOT=1 LATC_EMIT_AOT=1 \
     LATC_NAMED_GUEST="$named_guest" "$work/stage1.la64"
+report_timing translate_export
+if [ -n "${LATC_NATIVE_IMAGE_OUT:-}" ]; then
+    if [ ! -s "$LATC_NATIVE_IMAGE_OUT" ]; then
+        echo "latc: LAT did not produce a native image" >&2
+        exit 1
+    fi
+    if [ "$timing" -eq 1 ]; then
+        timing_now=$(date +%s%N)
+        echo "latc: compile timing total_ms=$(((timing_now - timing_start) / 1000000))" >&2
+    fi
+    exit 0
+fi
 aot=$(find "$work/home/.cache/latx" -type f -name 'v2-*.aot2' \
     -size +0c -print -quit)
 if [ -z "$aot" ]; then
@@ -45,4 +72,10 @@ if [ -n "$tbset" ]; then
 else
     "$latc" compile "$guest" -o "$output" --runner "$runner" --aot "$aot"
 fi
+report_timing final_bundle
 "$latc" inspect --json "$output"
+report_timing inspect
+if [ "$timing" -eq 1 ]; then
+    timing_now=$(date +%s%N)
+    echo "latc: compile timing total_ms=$(((timing_now - timing_start) / 1000000))" >&2
+fi

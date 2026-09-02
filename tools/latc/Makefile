@@ -329,7 +329,9 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  tests/fake-latc-slow.sh tests/fake-latc-cpu.sh \
 	  tests/test-latcd-runner.sh tests/test-aot-v2-real-app.sh \
 	  tests/test-aot-v2-complex-apps.sh tests/test-compile-native-one-pass.sh \
+	  tests/test-compile-aot-native-direct.sh \
 	  scripts/prepare-complex-rootfs.sh
+	sh tests/test-compile-aot-native-direct.sh scripts/compile-aot.sh
 	sh tests/test-compile-native-one-pass.sh scripts/compile-native-image.sh
 	python3 tests/test-check-aot-v2-coverage.py \
 	  tests/check-aot-v2-coverage.py

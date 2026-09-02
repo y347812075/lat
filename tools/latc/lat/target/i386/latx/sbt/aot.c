@@ -61,6 +61,13 @@ static char curr_aot_file_name[PATH_MAX];
 uintptr_t table_end_addr;
 const char *aot_process_profile = "browser";
 
+static uint64_t latc_monotonic_ns(void)
+{
+    struct timespec ts;
+    return clock_gettime(CLOCK_MONOTONIC, &ts) ? 0 :
+        (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
 void aot_set_process_profile(int argc, char **argv)
 {
     bool gpu = false;
@@ -827,6 +834,7 @@ int do_generate_aot(int first_seg_in_lib, int end_seg_in_lib)
 {
     int lockfd = -1;
     int success;
+    uint64_t aot_started = latc_monotonic_ns();
 
     if (tb_num == 0) {
         return false;
@@ -896,13 +904,24 @@ int do_generate_aot(int first_seg_in_lib, int end_seg_in_lib)
     latc_write_relocation_stats(p_header, p_aot_tbs, tb_table_end,
             total_code_cache_size);
     const char *native_output = getenv("LATC_NATIVE_IMAGE_OUT");
-    if (native_output && *native_output &&
-        latc_native_export(native_output, curr_lib_name, p_header, p_segments,
+    if (native_output && *native_output) {
+        uint64_t export_started = latc_monotonic_ns();
+        int native_result = latc_native_export(
+                native_output, curr_lib_name, p_header, p_segments,
                 p_aot_tbs, tb_table_end, insn_buffer, total_code_cache_size,
-                (uintptr_t)p_insn - (uintptr_t)p_header)) {
+                (uintptr_t)p_insn - (uintptr_t)p_header);
+        if (getenv("LATC_COMPILE_TIMING")) {
+            uint64_t finished = latc_monotonic_ns();
+            fprintf(stderr,
+                    "latc: compile timing aot_prepare_ms=%llu native_export_ms=%llu\n",
+                    (unsigned long long)((export_started - aot_started) /
+                                         1000000),
+                    (unsigned long long)((finished - export_started) /
+                                         1000000));
+        }
         free(insn_buffer);
         free(p_header);
-        return false;
+        return native_result == 0;
     }
 
     /* fill ir1 buffer */
