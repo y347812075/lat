@@ -14,6 +14,9 @@
 #include "latx-disassemble-trace.h"
 #include "insts-pattern.h"
 #include "lsenv.h"
+#ifdef CONFIG_LATX_AOT
+#include "ts.h"
+#endif
 
 #if defined(CONFIG_LATX_KZT)
 #include "bridge.h"
@@ -334,6 +337,18 @@ static void __attribute__((__constructor__)) x86tomisp_ir1_init(void)
 #endif
 };
 
+bool ir1_static_export_rejected(const IR1_INST *ir1)
+{
+#ifdef CONFIG_LATX_AOT
+    return aot_parallel_translate && getenv("LATC_EMIT_AOT") &&
+        getenv("LATC_NATIVE_STATIC_CHECK") &&
+        getenv("LATC_NATIVE_ALLOW_MISSING") &&
+        ir1_static_vector_rejection(ir1->info, CODEIS64);
+#else
+    return false;
+#endif
+}
+
 ADDRX ir1_disasm(IR1_INST *ir1, uint8_t *addr, ADDRX t_pc, int ir1_num,
                  void *pir1_base)
 {
@@ -385,6 +400,24 @@ ADDRX ir1_disasm(IR1_INST *ir1, uint8_t *addr, ADDRX t_pc, int ir1_num,
         fprintf(stderr, "ERROR : disasm, ADDR : 0x%" PRIx64 "\n", (uint64_t)t_pc);
         exit(-1);
     }
+
+#ifdef CONFIG_LATX_AOT
+    if (aot_parallel_translate && getenv("LATC_EMIT_AOT") &&
+        getenv("LATC_NATIVE_STATIC_CHECK")) {
+        const char *reason = ir1_static_vector_rejection(info, CODEIS64);
+        if (reason) {
+            fprintf(stderr, "latc: unsupported static instruction pc=0x%"
+                    PRIx64 " reason=%s bytes=", (uint64_t)t_pc, reason);
+            for (unsigned int i = 0; i < info->size; i++) {
+                fprintf(stderr, "%02x", info->bytes[i]);
+            }
+            fprintf(stderr, "\n");
+            if (!getenv("LATC_NATIVE_ALLOW_MISSING")) {
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+#endif
 
     disassemble_trace_cmp(addr, 15, (uint64_t)t_pc, 1, info, CODEIS64);
 
