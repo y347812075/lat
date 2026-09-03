@@ -4,6 +4,7 @@
 #include "lat-aot-v2.h"
 #include "lat-native-image.h"
 #include "latc-build-id.h"
+#include "latc-bundle-loader.h"
 
 #include <elf.h>
 #include <glib.h>
@@ -32,24 +33,16 @@ static gint compare_native_tb(gconstpointer left, gconstpointer right)
     return 0;
 }
 
+static void sort_native_tbs(GArray *native_tbs)
+{
+    g_array_sort(native_tbs, compare_native_tb);
+}
+
 static gint compare_uint64(gconstpointer left, gconstpointer right)
 {
     uint64_t a = *(const uint64_t *)left;
     uint64_t b = *(const uint64_t *)right;
     return a < b ? -1 : a > b;
-}
-
-static gint compare_native_pc_map(gconstpointer left, gconstpointer right)
-{
-    const LatNativePcMapV2 *a = left;
-    const LatNativePcMapV2 *b = right;
-    if (a->host_offset_begin != b->host_offset_begin) {
-        return a->host_offset_begin < b->host_offset_begin ? -1 : 1;
-    }
-    if (a->host_offset_end != b->host_offset_end) {
-        return a->host_offset_end < b->host_offset_end ? -1 : 1;
-    }
-    return 0;
 }
 
 static bool native_tb_target_exists(const GArray *tbs, uint64_t guest_pc,
@@ -217,7 +210,8 @@ static const aot_segment *find_tb_segment(const aot_header *header,
 }
 
 static int copy_guest(const char *path, GByteArray **guest,
-        uint64_t *entry, uint64_t *base, uint8_t digest[32])
+        uint64_t *entry, uint64_t *base, uint8_t digest[32],
+        bool digest_verified)
 {
     gchar *data = NULL;
     gsize size = 0;
@@ -262,11 +256,13 @@ static int copy_guest(const char *path, GByteArray **guest,
         g_free(data);
         return -1;
     }
-    GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
-    g_checksum_update(sum, (const guchar *)data, size);
-    gsize digest_size = 32;
-    g_checksum_get_digest(sum, digest, &digest_size);
-    g_checksum_free(sum);
+    if (!digest_verified) {
+        GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
+        g_checksum_update(sum, (const guchar *)data, size);
+        gsize digest_size = 32;
+        g_checksum_get_digest(sum, digest, &digest_size);
+        g_checksum_free(sum);
+    }
     *entry = elf->e_entry;
     *guest = g_byte_array_new_take((guint8 *)data, size);
     return 0;
@@ -351,18 +347,35 @@ static bool direct_tb_target(const aot_tb *tb, const aot_segment *segment,
     return true;
 }
 
-static void append_native_relocation(GArray *output, GHashTable *offsets,
-        LatNativeRelocationV1 relocation)
+typedef struct RelocationOffsetSet {
+    uint8_t *bits;
+    uint64_t maximum;
+} RelocationOffsetSet;
+
+static bool relocation_offset_contains(const RelocationOffsetSet *offsets,
+                                       uint64_t code_offset)
 {
-    g_array_append_val(output, relocation);
-    if (!g_hash_table_contains(offsets, &relocation.code_offset)) {
-        uint64_t *code_offset = g_new(uint64_t, 1);
-        *code_offset = relocation.code_offset;
-        g_hash_table_add(offsets, code_offset);
+    return code_offset <= offsets->maximum &&
+        (offsets->bits[code_offset >> 3] & (1U << (code_offset & 7)));
+}
+
+static void relocation_offset_add(RelocationOffsetSet *offsets,
+                                  uint64_t code_offset)
+{
+    if (code_offset <= offsets->maximum) {
+        offsets->bits[code_offset >> 3] |= 1U << (code_offset & 7);
     }
 }
 
-static int append_relocation(GArray *output, GHashTable *offsets,
+static void append_native_relocation(GArray *output,
+        RelocationOffsetSet *offsets,
+        LatNativeRelocationV1 relocation)
+{
+    g_array_append_val(output, relocation);
+    relocation_offset_add(offsets, relocation.code_offset);
+}
+
+static int append_relocation(GArray *output, RelocationOffsetSet *offsets,
         const aot_rel *source,
         const aot_tb *tb, uint64_t tb_code_offset,
         const aot_segment *segment, uint64_t load_bias)
@@ -412,14 +425,14 @@ static int append_relocation(GArray *output, GHashTable *offsets,
     return 0;
 }
 
-static void append_tu_relocations(GArray *output, GHashTable *offsets,
+static void append_tu_relocations(GArray *output, RelocationOffsetSet *offsets,
         const aot_tb *tb, uint64_t tb_code_offset, uint64_t guest_pc)
 {
 #ifdef CONFIG_LATX_TU
     for (int edge = 0; edge < 2; edge++) {
         if (tb->tu_jmp[edge] == UINT16_MAX) continue;
         uint64_t code_offset = tb_code_offset + tb->tu_jmp[edge];
-        if (g_hash_table_contains(offsets, &code_offset)) continue;
+        if (relocation_offset_contains(offsets, code_offset)) continue;
         LatNativeRelocationV1 relocation = {
             .code_offset = code_offset,
             .addend = guest_pc + tb->lazypc[edge],
@@ -438,7 +451,8 @@ static void append_tu_relocations(GArray *output, GHashTable *offsets,
 #endif
 }
 
-static void append_jrra_relocation(GArray *output, GHashTable *offsets,
+static void append_jrra_relocation(GArray *output,
+        RelocationOffsetSet *offsets,
         const aot_tb *tb, uint64_t tb_code_offset, const aot_segment *segment,
         const GByteArray *guest, uint64_t load_bias)
 {
@@ -624,7 +638,9 @@ static int extract_native_pc_maps(GArray *output, const uint8_t *code,
                 "latc: skipped %zu native TBs without stable PC maps\n",
                 skipped);
     }
-    g_array_sort(output, compare_native_pc_map);
+    /* TB code is emitted in increasing host-offset order, and each TB's map
+     * decoder appends entries in instruction order.  Keep the linear check
+     * below as the invariant instead of sorting an already ordered table. */
     for (guint i = 1; i < output->len; i++) {
         const LatNativePcMapV2 *previous = &g_array_index(
             output, LatNativePcMapV2, i - 1);
@@ -691,7 +707,7 @@ int latc_native_export(const char *path, const char *guest_path,
     GByteArray *guest = NULL;
     GArray *native_tbs = NULL;
     GArray *native_relocations = NULL;
-    GHashTable *relocation_offsets = NULL;
+    RelocationOffsetSet relocation_offsets = {0};
     GArray *native_pc_maps = NULL;
     uint8_t *native_code = NULL;
     uint64_t guest_entry = 0;
@@ -706,8 +722,10 @@ int latc_native_export(const char *path, const char *guest_path,
         fprintf(stderr, "latc: invalid native export arguments\n");
         return -1;
     }
-    if (copy_guest(guest_path, &guest, &guest_entry, &guest_base,
-                   guest_digest)) {
+    int digest_verified = latc_bundle_verified_guest_digest(guest_digest);
+    if (digest_verified < 0 ||
+        copy_guest(guest_path, &guest, &guest_entry, &guest_base,
+                   guest_digest, digest_verified == 1)) {
         return -1;
     }
     if (find_guest_load_bias(guest, header, segments, &guest_load_bias)) {
@@ -717,8 +735,8 @@ int latc_native_export(const char *path, const char *guest_path,
     native_tbs = g_array_new(FALSE, FALSE, sizeof(LatNativeTbV1));
     native_relocations = g_array_new(FALSE, FALSE,
                                      sizeof(LatNativeRelocationV1));
-    relocation_offsets = g_hash_table_new_full(g_int64_hash, g_int64_equal,
-                                                g_free, NULL);
+    relocation_offsets.maximum = code_size;
+    relocation_offsets.bits = g_malloc0((code_size >> 3) + 1);
     native_pc_maps = g_array_new(FALSE, FALSE, sizeof(LatNativePcMapV2));
     size_t tb_count = (tb_table_end - (uintptr_t)tbs) / sizeof(*tbs);
     native_code = g_malloc(code_size);
@@ -758,10 +776,10 @@ int latc_native_export(const char *path, const char *guest_path,
         g_array_append_val(native_tbs, native_tb);
 
         if (tbs[i].rel_start_index == -1) {
-            append_tu_relocations(native_relocations, relocation_offsets,
+            append_tu_relocations(native_relocations, &relocation_offsets,
                                   &tbs[i], code_offset,
                                   pc - guest_load_bias);
-            append_jrra_relocation(native_relocations, relocation_offsets,
+            append_jrra_relocation(native_relocations, &relocation_offsets,
                                    &tbs[i], code_offset,
                                    segment, guest, guest_load_bias);
             continue;
@@ -774,22 +792,22 @@ int latc_native_export(const char *path, const char *guest_path,
         }
         for (int rel = tbs[i].rel_start_index;
              rel <= tbs[i].rel_end_index; rel++) {
-            if (append_relocation(native_relocations, relocation_offsets,
+            if (append_relocation(native_relocations, &relocation_offsets,
                                   &source_relocations[rel],
                                   &tbs[i], code_offset, segment,
                                   guest_load_bias)) {
                 goto out;
             }
         }
-        append_tu_relocations(native_relocations, relocation_offsets,
+        append_tu_relocations(native_relocations, &relocation_offsets,
                               &tbs[i], code_offset,
                               pc - guest_load_bias);
-        append_jrra_relocation(native_relocations, relocation_offsets,
+        append_jrra_relocation(native_relocations, &relocation_offsets,
                                &tbs[i], code_offset,
                                segment, guest, guest_load_bias);
     }
 
-    g_array_sort(native_tbs, compare_native_tb);
+    sort_native_tbs(native_tbs);
     for (guint i = 1; i < native_tbs->len; i++) {
         const LatNativeTbV1 *previous = &g_array_index(
             native_tbs, LatNativeTbV1, i - 1);
@@ -952,7 +970,7 @@ write_error_unclosed:
     unlink(path);
     fprintf(stderr, "latc: cannot write native image %s\n", path);
 out:
-    if (relocation_offsets) g_hash_table_destroy(relocation_offsets);
+    g_free(relocation_offsets.bits);
     if (native_tbs) g_array_free(native_tbs, TRUE);
     if (native_relocations) g_array_free(native_relocations, TRUE);
     if (native_pc_maps) g_array_free(native_pc_maps, TRUE);

@@ -9,6 +9,7 @@ int latc_bundle_inject_argv(int *argc, char ***argv);
 /* Return the identity of the guest already verified by bundle injection. */
 int latc_bundle_verified_guest(uint8_t digest[32], uint64_t *guest_begin,
                                uint64_t *guest_end);
+int latc_bundle_verified_guest_digest(uint8_t digest[32]);
 
 struct CPUState;
 void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry);

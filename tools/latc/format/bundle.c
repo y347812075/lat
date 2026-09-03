@@ -89,7 +89,7 @@ static int write_cfg(FILE *out, const CfgProgram *p, uint64_t *size_out)
 
 int latc_bundle_write(const char *runner_path, const char *guest_path,
                       const char *output_path, const char *aot_path,
-                      const CfgProgram *program,
+                      const CfgProgram *program, const uint8_t guest_digest[32],
                       char *error, size_t error_size)
 {
     FILE *runner = fopen(runner_path, "rb");
@@ -109,10 +109,17 @@ int latc_bundle_write(const char *runner_path, const char *guest_path,
     GChecksum *aot_sum = g_checksum_new(G_CHECKSUM_SHA256);
     int rc = -1;
     if (copy_stream(out, runner, NULL, &runner_size) ||
-        copy_stream(out, guest, sum, &guest_size)) goto out;
+        copy_stream(out, guest, guest_digest ? NULL : sum, &guest_size)) goto out;
     uint64_t cfg_offset = runner_size + guest_size;
     if (write_cfg(out, program, &cfg_size)) goto out;
     const char *digest = g_checksum_get_string(sum);
+    char digest_hex[65];
+    if (guest_digest) {
+        for (size_t i = 0; i < 32; i++) {
+            snprintf(digest_hex + i * 2, 3, "%02x", guest_digest[i]);
+        }
+        digest = digest_hex;
+    }
     uint64_t aot_offset = cfg_offset + cfg_size;
     if (aot && copy_stream(out, aot, aot_sum, &aot_size)) goto out;
     const char *aot_digest = g_checksum_get_string(aot_sum);
@@ -145,7 +152,8 @@ int latc_bundle_write(const char *runner_path, const char *guest_path,
         strcpy(footer.aot_name, name);
         g_free((void *)name);
     }
-    if (fwrite(&footer, sizeof(footer), 1, out) != 1 || fflush(out) || fsync(fileno(out))) goto out;
+    if (fwrite(&footer, sizeof(footer), 1, out) != 1 || fflush(out) ||
+        fsync(fileno(out))) goto out;
     if (fclose(out)) { out = NULL; goto out; }
     out = NULL;
     struct stat st;

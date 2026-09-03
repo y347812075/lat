@@ -27,7 +27,7 @@ typedef struct LatcBundleInfo {
 
 int latc_bundle_write(const char *runner_path, const char *guest_path,
                       const char *output_path, const char *aot_path,
-                      const CfgProgram *program,
+                      const CfgProgram *program, const uint8_t guest_digest[32],
                       char *error, size_t error_size);
 int latc_bundle_inspect(const char *path, LatcBundleInfo *info,
                         int verify_guest, char *error, size_t error_size);

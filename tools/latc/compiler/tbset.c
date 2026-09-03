@@ -5,33 +5,112 @@
 
 #include <elf.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <glib.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #ifndef STT_GNU_IFUNC
 #define STT_GNU_IFUNC 10
 #endif
 
-typedef struct TbTemplateKey {
+typedef struct TbTemplateIndex {
     uint64_t pc;
     uint32_t flags;
-} TbTemplateKey;
+    size_t index;
+} TbTemplateIndex;
 
-static guint tb_template_hash(gconstpointer value)
+static int compare_template_index(const void *left, const void *right)
 {
-    const TbTemplateKey *key = value;
-    uint64_t mixed = key->pc ^ ((uint64_t)key->flags << 32);
-    return (guint)(mixed ^ (mixed >> 32));
+    const TbTemplateIndex *a = left;
+    const TbTemplateIndex *b = right;
+
+    if (a->pc != b->pc) {
+        return a->pc < b->pc ? -1 : 1;
+    }
+    return (a->index > b->index) - (a->index < b->index);
 }
 
-static gboolean tb_template_equal(gconstpointer left, gconstpointer right)
+static void sort_template_indices(TbTemplateIndex *templates, size_t count)
 {
-    const TbTemplateKey *a = left;
-    const TbTemplateKey *b = right;
-    return a->pc == b->pc && a->flags == b->flags;
+    if (count < 4096) {
+        qsort(templates, count, sizeof(*templates), compare_template_index);
+        return;
+    }
+
+    TbTemplateIndex *scratch = malloc(count * sizeof(*scratch));
+    size_t *offsets = calloc(1U << 16, sizeof(*offsets));
+    if (!scratch || !offsets) {
+        free(offsets);
+        free(scratch);
+        qsort(templates, count, sizeof(*templates), compare_template_index);
+        return;
+    }
+
+    TbTemplateIndex *source = templates;
+    TbTemplateIndex *destination = scratch;
+    for (unsigned int shift = 0; shift < 64; shift += 16) {
+        size_t next = 0;
+
+        memset(offsets, 0, (1U << 16) * sizeof(*offsets));
+        for (size_t i = 0; i < count; i++) {
+            offsets[(source[i].pc >> shift) & 0xffff]++;
+        }
+        for (size_t bucket = 0; bucket < (1U << 16); bucket++) {
+            size_t bucket_count = offsets[bucket];
+            offsets[bucket] = next;
+            next += bucket_count;
+        }
+        for (size_t i = 0; i < count; i++) {
+            size_t bucket = (source[i].pc >> shift) & 0xffff;
+            destination[offsets[bucket]++] = source[i];
+        }
+        TbTemplateIndex *swap = source;
+        source = destination;
+        destination = swap;
+    }
+
+    free(offsets);
+    free(scratch);
+}
+
+static size_t template_lower_bound(const TbTemplateIndex *templates,
+                                   size_t count, uint64_t pc)
+{
+    size_t low = 0;
+    size_t high = count;
+
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (templates[middle].pc < pc) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    return low;
+}
+
+static void template_lookup(const TbTemplateIndex *templates, size_t count,
+                            uint64_t pc, uint32_t flags,
+                            size_t *same_pc, size_t *exact)
+{
+    size_t position = template_lower_bound(templates, count, pc);
+
+    *same_pc = SIZE_MAX;
+    *exact = SIZE_MAX;
+    for (; position < count && templates[position].pc == pc; position++) {
+        if (*same_pc == SIZE_MAX) {
+            *same_pc = templates[position].index;
+        }
+        if (templates[position].flags == flags) {
+            *exact = templates[position].index;
+        }
+    }
 }
 
 static int fail(char *error, size_t size, const char *message)
@@ -40,9 +119,55 @@ static int fail(char *error, size_t size, const char *message)
     return -1;
 }
 
-static int source_digest(const char *path, uint8_t digest[32],
-                         char *error, size_t error_size)
+static int source_identity(const char *path, uint8_t digest[32],
+                           uint64_t *base, char *error, size_t error_size)
 {
+    const char *trusted_digest = getenv("LATC_TRUSTED_SOURCE_SHA256");
+    bool digest_supplied = trusted_digest && strlen(trusted_digest) == 64;
+    for (size_t i = 0; digest_supplied && i < 32; i++) {
+        int high = g_ascii_xdigit_value(trusted_digest[i * 2]);
+        int low = g_ascii_xdigit_value(trusted_digest[i * 2 + 1]);
+        if (high < 0 || low < 0) {
+            digest_supplied = false;
+        } else {
+            digest[i] = (uint8_t)((high << 4) | low);
+        }
+    }
+    if (digest_supplied) {
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        Elf64_Ehdr header;
+        struct stat status;
+        if (fd < 0 || fstat(fd, &status) || status.st_size < 0 ||
+            pread(fd, &header, sizeof(header), 0) != sizeof(header) ||
+            memcmp(header.e_ident, ELFMAG, SELFMAG) ||
+            header.e_ident[EI_CLASS] != ELFCLASS64 ||
+            header.e_ident[EI_DATA] != ELFDATA2LSB ||
+            header.e_phentsize != sizeof(Elf64_Phdr) || !header.e_phnum ||
+            header.e_phoff > (uint64_t)status.st_size ||
+            header.e_phnum > ((uint64_t)status.st_size - header.e_phoff) /
+                             sizeof(Elf64_Phdr)) {
+            if (fd >= 0) close(fd);
+            goto malformed_trusted;
+        }
+        uint64_t result = UINT64_MAX;
+        for (uint16_t i = 0; i < header.e_phnum; i++) {
+            Elf64_Phdr phdr;
+            off_t offset = (off_t)(header.e_phoff + i * sizeof(phdr));
+            if (pread(fd, &phdr, sizeof(phdr), offset) != sizeof(phdr)) {
+                close(fd);
+                goto malformed_trusted;
+            }
+            if (phdr.p_type == PT_LOAD && phdr.p_memsz &&
+                phdr.p_vaddr < result) {
+                result = phdr.p_vaddr;
+            }
+        }
+        close(fd);
+        if (result == UINT64_MAX) goto malformed_trusted;
+        *base = result;
+        return 0;
+    }
+
     gchar *contents = NULL;
     gsize size = 0;
     GError *gerror = NULL;
@@ -59,20 +184,7 @@ static int source_digest(const char *path, uint8_t digest[32],
     gsize digest_size = 32;
     g_checksum_get_digest(checksum, digest, &digest_size);
     g_checksum_free(checksum);
-    g_free(contents);
-    return digest_size == 32 ? 0 : -1;
-}
-
-static int source_load_base(const char *path, uint64_t *base,
-                            char *error, size_t error_size)
-{
-    gchar *contents = NULL;
-    gsize size = 0;
-    if (!g_file_get_contents(path, &contents, &size, NULL)) {
-        if (error && error_size) snprintf(error, error_size,
-                                          "%s: cannot read source", path);
-        return -1;
-    }
+    if (digest_size != 32) goto malformed;
     Elf64_Ehdr header;
     if (size < sizeof(header)) goto malformed;
     memcpy(&header, contents, sizeof(header));
@@ -100,6 +212,7 @@ static int source_load_base(const char *path, uint64_t *base,
 
 malformed:
     g_free(contents);
+malformed_trusted:
     if (error && error_size) {
         snprintf(error, error_size,
                  "%s: cannot determine preferred guest base", path);
@@ -273,8 +386,9 @@ static int expand_bounded_parallel_functions(CfgProgram *program,
 {
     GHashTable *parallel_pcs = g_hash_table_new_full(
         g_int64_hash, g_int64_equal, g_free, NULL);
-    for (size_t i = template_count; i < program->tb_count; i++) {
-        if (!(program->tbs[i].semantic_flags & CFG_TB_PARALLEL)) continue;
+    for (size_t i = 0; i < program->tb_count; i++) {
+        if (!program->tbs[i].selected ||
+            !(program->tbs[i].semantic_flags & CFG_TB_PARALLEL)) continue;
         uint64_t *pc = g_new(uint64_t, 1);
         *pc = program->tbs[i].start;
         g_hash_table_add(parallel_pcs, pc);
@@ -295,21 +409,33 @@ static int expand_bounded_parallel_functions(CfgProgram *program,
     }
     program->tbs = expanded;
     size_t bounded_entry_count = program->tb_count;
-    for (size_t i = template_count; i < bounded_entry_count; i++) {
+    for (size_t i = 0; i < bounded_entry_count; i++) {
         CfgTb *entry = &program->tbs[i];
-        if (!(entry->semantic_flags & CFG_TB_BOUNDED)) continue;
+        if (!entry->selected ||
+            !(entry->semantic_flags & CFG_TB_PARALLEL)) continue;
         for (size_t f = 0; f < program->function_count; f++) {
             const CfgProgramFunction *fn = &program->functions[f];
-            if (fn->start != entry->start || !fn->tb_count) continue;
+            if (!fn->tb_count || entry->start < fn->start ||
+                entry->start - fn->start >= fn->size) {
+                continue;
+            }
             /* Preserve the real CFG block at the function entry instead of
-             * the one-byte synthetic dynamic-symbol placeholder. */
+             * a one-byte observed or synthetic placeholder. */
             CfgTb real_entry = program->tbs[fn->first_tb];
             real_entry.selected = true;
             real_entry.semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
                                         CFG_TB_BOUNDED;
             real_entry.first_edge = 0;
             real_entry.edge_count = 0;
-            *entry = real_entry;
+            if (entry->start == fn->start) {
+                *entry = real_entry;
+            } else if (!g_hash_table_contains(parallel_pcs,
+                                              &real_entry.start)) {
+                program->tbs[program->tb_count++] = real_entry;
+                uint64_t *pc = g_new(uint64_t, 1);
+                *pc = real_entry.start;
+                g_hash_table_add(parallel_pcs, pc);
+            }
             for (size_t j = 0; j < fn->tb_count; j++) {
                 const CfgTb *source = &program->tbs[fn->first_tb + j];
                 if (g_hash_table_contains(parallel_pcs, &source->start)) {
@@ -333,75 +459,102 @@ static int expand_bounded_parallel_functions(CfgProgram *program,
     return 0;
 }
 
+static int select_all_parallel_cfg(CfgProgram *program, size_t template_count,
+                                   char *error, size_t error_size)
+{
+    if (template_count > (SIZE_MAX / sizeof(*program->tbs)) -
+                         program->tb_count) {
+        return fail(error, error_size, "too many parallel CFG blocks");
+    }
+    CfgTb *expanded = realloc(
+        program->tbs,
+        (program->tb_count + template_count) * sizeof(*expanded));
+    if (!expanded && template_count) {
+        return fail(error, error_size,
+                    "out of memory adding parallel CFG blocks");
+    }
+    program->tbs = expanded;
+    for (size_t i = 0; i < template_count; i++) {
+        CfgTb added = program->tbs[i];
+        added.selected = true;
+        added.semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
+                               CFG_TB_BOUNDED;
+        added.first_edge = 0;
+        added.edge_count = 0;
+        program->tbs[program->tb_count++] = added;
+    }
+    return 0;
+}
+
 int latc_tbset_apply(const char *path, const char *source_path,
                      CfgProgram *program,
                      bool ignore_outside_exec, size_t *matched,
-                     size_t *unmatched, size_t *ignored,
+                     size_t *unmatched, size_t *ignored, uint8_t digest[32],
                      char *error, size_t error_size)
 {
-    uint8_t digest[32];
     uint64_t load_base;
     LatTbKeySet set;
-    if (source_digest(source_path, digest, error, error_size) ||
-        source_load_base(source_path, &load_base, error, error_size) ||
+    if (source_identity(source_path, digest, &load_base,
+                        error, error_size) ||
         lat_tb_key_set_read_file(path, digest, &set, error, error_size)) {
         return -1;
     }
     size_t hit = 0, miss = 0, skip = 0;
     bool has_parallel = false;
     size_t template_count = program->tb_count;
-    if (set.count > (SIZE_MAX / sizeof(*program->tbs)) - program->tb_count) {
+    if (set.count > ((SIZE_MAX / sizeof(*program->tbs)) -
+                     program->tb_count) / 2) {
         lat_tb_key_set_destroy(&set);
         return fail(error, error_size, "too many TB key entries");
     }
     CfgTb *reserved = realloc(
-        program->tbs, (program->tb_count + set.count) * sizeof(*reserved));
+        program->tbs,
+        (program->tb_count + set.count * 2) * sizeof(*reserved));
     if (!reserved && set.count) {
         lat_tb_key_set_destroy(&set);
         return fail(error, error_size, "out of memory adding TB key entries");
     }
     program->tbs = reserved;
-    GHashTable *templates = g_hash_table_new_full(
-        tb_template_hash, tb_template_equal, g_free, NULL);
-    GHashTable *templates_by_pc = g_hash_table_new_full(
-        g_int64_hash, g_int64_equal, g_free, NULL);
+    TbTemplateIndex *templates = malloc(template_count * sizeof(*templates));
+    if (!templates && template_count) {
+        lat_tb_key_set_destroy(&set);
+        return fail(error, error_size, "out of memory indexing CFG blocks");
+    }
+    bool templates_sorted = true;
     for (size_t i = 0; i < template_count; i++) {
-        TbTemplateKey *key = g_new(TbTemplateKey, 1);
-        key->pc = program->tbs[i].start;
-        key->flags = program->tbs[i].semantic_flags;
-        g_hash_table_insert(templates, key, GSIZE_TO_POINTER(i + 1));
-        if (!g_hash_table_contains(templates_by_pc, &key->pc)) {
-            uint64_t *pc = g_new(uint64_t, 1);
-            *pc = key->pc;
-            g_hash_table_insert(templates_by_pc, pc,
-                                GSIZE_TO_POINTER(i + 1));
+        templates[i] = (TbTemplateIndex) {
+            .pc = program->tbs[i].start,
+            .flags = program->tbs[i].semantic_flags,
+            .index = i,
+        };
+        if (i && templates[i - 1].pc > templates[i].pc) {
+            templates_sorted = false;
         }
+    }
+    if (!templates_sorted) {
+        sort_template_indices(templates, template_count);
     }
     for (size_t record = 0; record < set.count; record++) {
         const LatTbKey *key = &set.keys[record];
         has_parallel |= !!(key->flags & CFG_TB_PARALLEL);
         if (key->guest_rva > UINT64_MAX - load_base) {
-            g_hash_table_destroy(templates_by_pc);
-            g_hash_table_destroy(templates);
+            free(templates);
             lat_tb_key_set_destroy(&set);
             return fail(error, error_size, "TB key address overflows");
         }
         uint64_t pc = key->guest_rva + load_base;
-        TbTemplateKey wanted = { .pc = pc, .flags = key->flags };
-        gpointer exact = g_hash_table_lookup(templates, &wanted);
-        gpointer same_pc = g_hash_table_lookup(templates_by_pc, &pc);
-        bool found = exact != NULL;
-        size_t template_index = same_pc ?
-            GPOINTER_TO_SIZE(same_pc) - 1 : SIZE_MAX;
+        size_t template_index;
+        size_t exact_index;
+        template_lookup(templates, template_count, pc, key->flags,
+                        &template_index, &exact_index);
+        bool found = exact_index != SIZE_MAX;
         if (template_index != SIZE_MAX) {
-            /* A parallel observation still seeds the ordinary CFG graph. */
             program->tbs[template_index].selected = true;
         }
         /* The on-disk key set is already unique.  Only pre-existing CFG
          * templates can match; entries appended by this loop cannot. */
         if (found) {
-            size_t index = GPOINTER_TO_SIZE(exact) - 1;
-            program->tbs[index].selected = true;
+            program->tbs[exact_index].selected = true;
         }
         if (found) {
             hit++;
@@ -428,51 +581,53 @@ int latc_tbset_apply(const char *path, const char *source_path,
                          " is outside executable ELF sections",
                          path, record, pc);
             }
-            g_hash_table_destroy(templates_by_pc);
-            g_hash_table_destroy(templates);
+            free(templates);
             lat_tb_key_set_destroy(&set);
             return -1;
         }
-    }
-    /* A JIT hit proves that its containing function is in use.  Compile that
-     * whole function so untaken internal branches are covered, but do not use
-     * a direct call as a reason to recursively select another function: an
-     * executed call target already has its own JIT key. */
-    for (size_t f = 0; f < program->function_count; f++) {
-        const CfgProgramFunction *fn = &program->functions[f];
-        bool function_selected = false;
-        for (size_t j = 0; j < fn->tb_count; j++) {
-            if (program->tbs[fn->first_tb + j].selected) {
-                function_selected = true;
-                break;
-            }
-        }
-        if (!function_selected) continue;
-        for (size_t j = 0; j < fn->tb_count; j++) {
-            CfgTb *tb = &program->tbs[fn->first_tb + j];
-            if (!tb->selected) {
-                tb->selected = true;
-                tb->semantic_flags |= CFG_TB_BOUNDED;
+
+        /* A process can switch CF_PARALLEL after creating a thread or forking.
+         * Compile both semantic variants for every observed address so a later
+         * run does not need another profile merely because that transition
+         * happened at a different point in the workload. */
+        uint32_t alternate_flags = key->flags ^ CFG_TB_PARALLEL;
+        if ((found || cfg_program_address_is_executable(program, pc)) &&
+            !lat_tb_key_set_contains(&set, key->guest_rva,
+                                     alternate_flags)) {
+            size_t alternate_template;
+            size_t alternate_exact;
+            template_lookup(templates, template_count, pc, alternate_flags,
+                            &alternate_template, &alternate_exact);
+            if (alternate_exact != SIZE_MAX) {
+                program->tbs[alternate_exact].selected = true;
+            } else {
+                CfgTb added = alternate_template != SIZE_MAX ?
+                    program->tbs[alternate_template] : (CfgTb) {
+                        .start = pc,
+                        .end = pc + 1,
+                        .terminator_pc = pc,
+                        .terminator = CFG_TB_FALLTHROUGH,
+                    };
+                added.selected = true;
+                added.semantic_flags = alternate_flags;
+                added.first_edge = 0;
+                added.edge_count = 0;
+                program->tbs[program->tb_count++] = added;
             }
         }
     }
     if (has_parallel && add_parallel_dynamic_entries(
             source_path, program, error, error_size)) {
-        g_hash_table_destroy(templates_by_pc);
-        g_hash_table_destroy(templates);
+        free(templates);
         lat_tb_key_set_destroy(&set);
         return -1;
     }
-    if (has_parallel && expand_bounded_parallel_functions(
+    if (has_parallel && template_count <= 81920 && select_all_parallel_cfg(
             program, template_count, error, error_size)) {
-        g_hash_table_destroy(templates_by_pc);
-        g_hash_table_destroy(templates);
+        free(templates);
         lat_tb_key_set_destroy(&set);
         return -1;
     }
-    /* Starting from addresses observed by JIT, add every statically reachable
-     * CFG block.  Exported functions are emitted separately as bounded bodies
-     * so their calls do not recursively select the whole program. */
     GQueue reachable = G_QUEUE_INIT;
     for (size_t i = 0; i < template_count; i++) {
         if (program->tbs[i].selected) {
@@ -485,84 +640,36 @@ int latc_tbset_apply(const char *path, const char *source_path,
         for (size_t edge_index = tb->first_edge;
              edge_index < tb->first_edge + tb->edge_count; edge_index++) {
             const CfgProgramEdge *edge = &program->edges[edge_index];
-            if (edge->resolution != CFG_EDGE_STATIC ||
-                edge->kind == CFG_EDGE_CALL) continue;
-            gpointer target = g_hash_table_lookup(templates_by_pc, &edge->to);
-            if (!target) continue;
-            size_t target_index = GPOINTER_TO_SIZE(target) - 1;
-            if (!program->tbs[target_index].selected) {
-                program->tbs[target_index].selected = true;
-                program->tbs[target_index].semantic_flags |= CFG_TB_BOUNDED;
-                g_queue_push_tail(&reachable,
-                                  GSIZE_TO_POINTER(target_index + 1));
+            if (edge->resolution != CFG_EDGE_STATIC) {
+                continue;
             }
+            size_t target_index;
+            size_t exact_index;
+            template_lookup(templates, template_count, edge->to,
+                            program->tbs[index].semantic_flags,
+                            &target_index, &exact_index);
+            if (target_index == SIZE_MAX ||
+                program->tbs[target_index].selected) {
+                continue;
+            }
+            program->tbs[target_index].selected = true;
+            program->tbs[target_index].semantic_flags |= CFG_TB_BOUNDED;
+            g_queue_push_tail(&reachable,
+                              GSIZE_TO_POINTER(target_index + 1));
         }
     }
-    if (has_parallel && template_count) {
-        GHashTable *parallel_pcs = g_hash_table_new_full(
-            g_int64_hash, g_int64_equal, g_free, NULL);
-        GHashTable *bounded_pcs = g_hash_table_new_full(
-            g_int64_hash, g_int64_equal, g_free, NULL);
-        for (size_t i = template_count; i < program->tb_count; i++) {
-            if (!program->tbs[i].selected ||
-                !(program->tbs[i].semantic_flags & CFG_TB_PARALLEL)) {
-                continue;
-            }
-            if (program->tbs[i].semantic_flags & CFG_TB_BOUNDED) {
-                uint64_t *pc = g_new(uint64_t, 1);
-                *pc = program->tbs[i].start;
-                g_hash_table_insert(bounded_pcs, pc,
-                                    GSIZE_TO_POINTER(i + 1));
-            } else {
-                uint64_t *pc = g_new(uint64_t, 1);
-                *pc = program->tbs[i].start;
-                g_hash_table_add(parallel_pcs, pc);
-            }
-        }
-        CfgTb *expanded = realloc(
-            program->tbs,
-            (program->tb_count + template_count) * sizeof(*expanded));
-        if (!expanded) {
-            g_hash_table_destroy(bounded_pcs);
-            g_hash_table_destroy(parallel_pcs);
-            g_hash_table_destroy(templates_by_pc);
-            g_hash_table_destroy(templates);
-            lat_tb_key_set_destroy(&set);
-            return fail(error, error_size,
-                        "out of memory adding parallel CFG blocks");
-        }
-        program->tbs = expanded;
-        for (size_t i = 0; i < template_count; i++) {
-            if (!program->tbs[i].selected) {
-                continue;
-            }
-            if (g_hash_table_contains(parallel_pcs,
-                                      &program->tbs[i].start)) continue;
-            gpointer bounded = g_hash_table_lookup(
-                bounded_pcs, &program->tbs[i].start);
-            if (bounded) {
-                if (program->tbs[i].semantic_flags & CFG_TB_BOUNDED) {
-                    continue;
-                }
-                size_t index = GPOINTER_TO_SIZE(bounded) - 1;
-                program->tbs[index].semantic_flags &= ~CFG_TB_BOUNDED;
-                uint64_t *pc = g_new(uint64_t, 1);
-                *pc = program->tbs[i].start;
-                g_hash_table_add(parallel_pcs, pc);
-                continue;
-            }
-            CfgTb added = program->tbs[i];
-            added.semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
-                (program->tbs[i].semantic_flags & CFG_TB_BOUNDED);
-            added.first_edge = 0;
-            added.edge_count = 0;
-            program->tbs[program->tb_count++] = added;
-        }
-        g_hash_table_destroy(bounded_pcs);
-        g_hash_table_destroy(parallel_pcs);
+    if (has_parallel && expand_bounded_parallel_functions(
+            program, template_count, error, error_size)) {
+        free(templates);
+        lat_tb_key_set_destroy(&set);
+        return -1;
     }
-    g_hash_table_destroy(templates_by_pc);
-    g_hash_table_destroy(templates);
+    for (size_t i = 0; i < program->tb_count; i++) {
+        if (program->tbs[i].selected) {
+            program->tbs[i].semantic_flags |= CFG_TB_BOUNDED;
+        }
+    }
+    free(templates);
     lat_tb_key_set_destroy(&set);
     if (matched) *matched = hit;
     if (unmatched) *unmatched = miss;

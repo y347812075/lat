@@ -2359,6 +2359,36 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
     return tb;
 }
 
+#if defined(CONFIG_LATX) && defined(CONFIG_USER_ONLY) && \
+    defined(TARGET_X86_64)
+typedef struct LatcExistingTbRange {
+    target_ulong begin;
+    target_ulong end;
+} LatcExistingTbRange;
+
+static void latc_collect_existing_tb(void *opaque, uint32_t hash, void *userp)
+{
+    TranslationBlock *tb = opaque;
+    const LatcExistingTbRange *range = userp;
+    (void)hash;
+    if (tb->pc >= range->begin && tb->pc < range->end) {
+        latc_aot_v2_note_jit_key(tb->pc, tb_cflags(tb));
+    }
+}
+
+void latc_aot_v2_collect_existing_jit_tbs(target_ulong guest_begin,
+                                          target_ulong guest_end)
+{
+    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
+    const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
+    if (!socket || !*socket || (cache && *cache)) {
+        return;
+    }
+    LatcExistingTbRange range = { guest_begin, guest_end };
+    qht_iter(&tb_ctx.htable, latc_collect_existing_tb, &range);
+}
+#endif
+
 #ifdef CONFIG_LATX_AOT
 void aot_tb_register(TranslationBlock *tb)
 {

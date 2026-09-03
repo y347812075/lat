@@ -12,14 +12,11 @@ guest=$3
 output=$4
 tbset=${5:-}
 work=$(mktemp -d "${TMPDIR:-/tmp}/latc-aot.XXXXXX")
-guest_hash=$(sha256sum "$guest" | awk '{print $1}')
-guest_prefix=$(printf '%s' "$guest_hash" | cut -c1-16)
-named_guest="/tmp/latc-${guest_prefix}-x86-guest"
+named_guest="$work/x86-guest"
 
 cleanup()
 {
     rm -rf "$work"
-    rm -f "$named_guest"
 }
 trap cleanup EXIT HUP INT TERM
 
