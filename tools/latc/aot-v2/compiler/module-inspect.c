@@ -126,7 +126,15 @@ int lat_aot_v2_module_validate_tbset_file(const char *path,
                                           size_t error_size)
 {
     LatAotModuleInfoV2 info;
-    if (lat_aot_v2_module_inspect_file(path, &info, error, error_size)) {
+    return lat_aot_v2_module_inspect_and_validate_tbset_file(
+        path, tbset_path, &info, error, error_size);
+}
+
+int lat_aot_v2_module_inspect_and_validate_tbset_file(
+    const char *path, const char *tbset_path, LatAotModuleInfoV2 *info,
+    char *error, size_t error_size)
+{
+    if (lat_aot_v2_module_inspect_file(path, info, error, error_size)) {
         return -1;
     }
     gchar *contents = NULL;
@@ -149,17 +157,9 @@ int lat_aot_v2_module_validate_tbset_file(const char *path,
     }
     const LatAotTbV2 *tbs = (const void *)(file + section->sh_offset);
     size_t tb_count = section->sh_size / sizeof(*tbs);
-    GHashTable *keys = g_hash_table_new_full(g_str_hash, g_str_equal,
-                                              g_free, NULL);
-    for (size_t i = 0; i < tb_count; i++) {
-        char *key = g_strdup_printf("%016" PRIx64 ":%08x",
-                                    tbs[i].guest_rva, tbs[i].flags);
-        g_hash_table_add(keys, key);
-    }
     LatTbKeySet tbset;
-    if (lat_tb_key_set_read_file(tbset_path, info.note.source_sha256,
+    if (lat_tb_key_set_read_file(tbset_path, info->note.source_sha256,
                                  &tbset, error, error_size)) {
-        g_hash_table_destroy(keys);
         g_free(contents);
         return -1;
     }
@@ -167,13 +167,19 @@ int lat_aot_v2_module_validate_tbset_file(const char *path,
     size_t missing = 0;
     uint64_t first_missing_rva = 0;
     uint32_t first_missing_flags = 0;
+    size_t module_record = 0;
     for (size_t record = 0; record < tbset.count; record++) {
         uint64_t rva = tbset.keys[record].guest_rva;
         uint32_t flags = tbset.keys[record].flags;
-        char key[48];
-        snprintf(key, sizeof(key), "%016" PRIx64 ":%08x",
-                 rva, flags);
-        if (!g_hash_table_contains(keys, key)) {
+        while (module_record < tb_count &&
+               (tbs[module_record].guest_rva < rva ||
+                (tbs[module_record].guest_rva == rva &&
+                 tbs[module_record].flags < flags))) {
+            module_record++;
+        }
+        if (module_record == tb_count ||
+            tbs[module_record].guest_rva != rva ||
+            tbs[module_record].flags != flags) {
             if (!missing) {
                 first_missing_rva = rva;
                 first_missing_flags = flags;
@@ -190,7 +196,6 @@ int lat_aot_v2_module_validate_tbset_file(const char *path,
                       first_missing_flags);
     }
     lat_tb_key_set_destroy(&tbset);
-    g_hash_table_destroy(keys);
     g_free(contents);
     return result;
 }

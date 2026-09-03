@@ -944,7 +944,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     char *environment[] = {
         "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", library_path,
         temporary_path, aot_threads, trusted_digest, guest_prefix,
-        compile_timing, NULL,
+        compile_timing, "LATC_SKIP_FINAL_INSPECT=1", NULL,
     };
     pid_t child = fork();
     if (child == 0) {
@@ -1486,11 +1486,13 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     }
     uint8_t codegen_id[32];
     expected_codegen_id(codegen_id);
-    if (lat_aot_v2_module_inspect_file(module, &info, error, sizeof(error)) ||
-        memcmp(info.note.source_sha256, digest, 32) ||
-        memcmp(info.note.codegen_id, codegen_id, 32) ||
-        (tbset && lat_aot_v2_module_validate_tbset_file(
-            module, tbset, error, sizeof(error)))) {
+    int inspect_result = tbset ?
+        lat_aot_v2_module_inspect_and_validate_tbset_file(
+            module, tbset, &info, error, sizeof(error)) :
+        lat_aot_v2_module_inspect_file(module, &info,
+                                       error, sizeof(error));
+    if (inspect_result || memcmp(info.note.source_sha256, digest, 32) ||
+        memcmp(info.note.codegen_id, codegen_id, 32)) {
         if (!error[0]) {
             snprintf(error, sizeof(error),
                      "compiled module source or codegen identity mismatch");
@@ -1873,7 +1875,6 @@ static void *compiler_worker(void *opaque)
         write_stats_locked(service);
         job->compile_sequence = job->accepted_sequence;
         pthread_mutex_unlock(&service->lock);
-
         LatcdResponseV2 response = {
             .magic = LATCD_RESPONSE_MAGIC,
             .version = LATCD_PROTOCOL_VERSION,

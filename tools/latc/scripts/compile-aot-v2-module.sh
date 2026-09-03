@@ -28,4 +28,6 @@ else
 fi
 "$script_dir/link-aot-v2-module.sh" "$latc" "$work/module.latnative" \
     "$runtime_dir" "$output"
-"$latc" inspect-module --json "$output"
+if [ "${LATC_SKIP_FINAL_INSPECT:-0}" -ne 1 ]; then
+    "$latc" inspect-module --json "$output"
+fi
