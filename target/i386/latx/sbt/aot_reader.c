@@ -73,6 +73,14 @@ int aot_get_tb_num(char *lib_name, char *aot_file_name, CPUState *cpu)
         remove(aot_file_path);
         goto out;
     }
+    if (p_header->imm_complex !=
+        (option_imm_reg ? option_imm_complex : 0)) {
+        qemu_log_mask(LAT_LOG_AOT,
+                      "complex immediate cache mode changed, remove aot %s\n",
+                      aot_file_path);
+        remove(aot_file_path);
+        goto out;
+    }
 
     if ((p_header->aot_file_type & (ELF_AOT_FILE | PE_AOT_FILE))
             && (stat(lib_name, &statbuf)
@@ -169,6 +177,14 @@ lib_info *aot_load(char *lib_name, char *aot_file_name,
     if (p_header->imm_rip != !!(option_imm_reg && option_imm_rip)) {
         qemu_log_mask(LAT_LOG_AOT,
                       "RIP immediate cache mode changed, remove aot %s\n",
+                      aot_file_path);
+        remove_curr_aot_file(fd);
+        goto out;
+    }
+    if (p_header->imm_complex !=
+        (option_imm_reg ? option_imm_complex : 0)) {
+        qemu_log_mask(LAT_LOG_AOT,
+                      "complex immediate cache mode changed, remove aot %s\n",
                       aot_file_path);
         remove_curr_aot_file(fd);
         goto out;

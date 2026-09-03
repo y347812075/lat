@@ -2360,16 +2360,13 @@ int tr_ir2_generate(struct TranslationBlock *tb)
                         continue;
                     }
 #endif
-                    /* convert_mem_helper will put si12 offset into host_off */
-                    if (!si12_overflow(offset)) {
-                        continue;
-                    }
                     // record base and index
                     bool has_index = ir1_opnd_has_index(opnd);
                     bool has_base = ir1_opnd_has_base(opnd);
                     int base_op = -1;
                     int index_op = -1;
                     int scale = -1;
+                    int complex_kind = -1;
                     if (has_base) {
                         base_op = ir1_opnd_base_reg_num(opnd);
                     }
@@ -2380,6 +2377,38 @@ int tr_ir2_generate(struct TranslationBlock *tb)
                             scale != 8) {
                             scale = -1;
                         }
+                    }
+
+                    if (has_base && has_index) {
+                        complex_kind = IMM_CACHE_COMPLEX_BASE_INDEX_DISP;
+                    } else if (has_index) {
+                        complex_kind = IMM_CACHE_COMPLEX_INDEX_DISP;
+                    } else if (has_base && offset) {
+                        complex_kind = IMM_CACHE_COMPLEX_BASE_DISP;
+                    }
+
+                    if (complex_kind < 0 ||
+                        !(option_imm_complex & (1 << complex_kind)) ||
+#ifdef TARGET_X86_64
+                        !CODEIS64 ||
+#endif
+                        ir1_addr_size(t_pir1) != 64 ||
+                        ir1_opnd_has_seg(opnd) ||
+                        (has_index && scale < 0)) {
+                        continue;
+                    }
+
+                    /*
+                     * convert_mem_helper leaves a small displacement in the
+                     * host load/store. Only base+disp has no address cache
+                     * work left in that case. The other modes cache the
+                     * base/index expression at offset zero.
+                     */
+                    if (!si12_overflow(offset)) {
+                        if (complex_kind == IMM_CACHE_COMPLEX_BASE_DISP) {
+                            continue;
+                        }
+                        offset = 0;
                     }
 
                     if (base_op != -1 || index_op != -1) {
@@ -2458,6 +2487,7 @@ int tr_ir2_generate(struct TranslationBlock *tb)
 #ifdef CONFIG_LATX_IMM_REG
     if (option_imm_reg) {
         imm_cache_print_rip_stats(imm_cache, tb->pc);
+        imm_cache_print_complex_stats(imm_cache, tb->pc);
     }
 #endif
 #ifdef CONFIG_LATX_DEBUG

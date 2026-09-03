@@ -75,6 +75,41 @@ typedef struct {
     uint64_t helper_invalidations;
 } IMM_CACHE_RIP_STATS;
 
+typedef enum {
+    IMM_CACHE_COMPLEX_BASE_DISP,
+    IMM_CACHE_COMPLEX_INDEX_DISP,
+    IMM_CACHE_COMPLEX_BASE_INDEX_DISP,
+    IMM_CACHE_COMPLEX_KIND_COUNT,
+} IMM_CACHE_COMPLEX_KIND;
+
+typedef enum {
+    IMM_CACHE_COMPLEX_SKIP_DISABLED,
+    IMM_CACHE_COMPLEX_SKIP_NOT_CODE64,
+    IMM_CACHE_COMPLEX_SKIP_ADDR_SIZE,
+    IMM_CACHE_COMPLEX_SKIP_SEGMENT,
+    IMM_CACHE_COMPLEX_SKIP_UNSUPPORTED_FORM,
+    IMM_CACHE_COMPLEX_SKIP_INVALID_SCALE,
+    IMM_CACHE_COMPLEX_SKIP_NO_BENEFIT,
+    IMM_CACHE_COMPLEX_SKIP_INSTRUCTION,
+    IMM_CACHE_COMPLEX_SKIP_FIXED_DEST,
+    IMM_CACHE_COMPLEX_SKIP_COUNT,
+} IMM_CACHE_COMPLEX_SKIP_REASON;
+
+typedef struct {
+    uint64_t calls[IMM_CACHE_COMPLEX_KIND_COUNT];
+    uint64_t hits[IMM_CACHE_COMPLEX_KIND_COUNT];
+    uint64_t misses[IMM_CACHE_COMPLEX_KIND_COUNT];
+    uint64_t replacements[IMM_CACHE_COMPLEX_KIND_COUNT];
+    uint64_t itemp_conflicts[IMM_CACHE_COMPLEX_KIND_COUNT];
+    uint64_t direct_hits[IMM_CACHE_COMPLEX_KIND_COUNT];
+    uint64_t host_offset_hits[IMM_CACHE_COMPLEX_KIND_COUNT];
+    uint64_t addi_hits[IMM_CACHE_COMPLEX_KIND_COUNT];
+    uint64_t full_generations[IMM_CACHE_COMPLEX_KIND_COUNT];
+    uint64_t skips[IMM_CACHE_COMPLEX_SKIP_COUNT];
+    uint64_t base_index_invalidations;
+    uint64_t use_def_fallbacks;
+} IMM_CACHE_COMPLEX_STATS;
+
 /**
  * imm format:
  *   (offset can be 0)
@@ -108,6 +143,7 @@ typedef struct {
      */
     bool itemp_allocated;
     IMM_CACHE_RIP_STATS rip_stats;
+    IMM_CACHE_COMPLEX_STATS complex_stats;
 
     /**
      * for complex imm, we need to compare whether base/index reg has been
@@ -173,6 +209,7 @@ void imm_cache_free(IMM_CACHE *cache, int id);
 void imm_cache_free_all(IMM_CACHE *cache);
 void imm_cache_invalidate_for_helper(void);
 void imm_cache_print_rip_stats(IMM_CACHE *cache, uint64_t tb_pc);
+void imm_cache_print_complex_stats(IMM_CACHE *cache, uint64_t tb_pc);
 bool imm_cache_is_imm_itemp(int itemp_num);
 bool imm_cache_itemp_is_used(IR2_OPND opnd);
 void imm_cache_free_cache_use_target_reg(IR2_OPND opnd);
