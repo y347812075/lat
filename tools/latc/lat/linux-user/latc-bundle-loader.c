@@ -671,6 +671,8 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
         pending_tb_hash, pending_tb_equal, g_free, NULL);
     GArray *pending = g_array_new(FALSE, FALSE, sizeof(LatcPendingTb));
     uint64_t pretranslate_started = monotonic_ns();
+    bool exact_selection =
+        header.flags & LATC_CFG_FLAG_EXACT_SELECTION;
 
     /* The TB set is authoritative.  Do not compile the rest of the static CFG. */
     for (uint64_t i = 0; i < header.tb_count; i++) {
@@ -700,7 +702,10 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
                 if (tb) {
                     mark_pretranslate_scheduled(scheduled_pcs, pc,
                                                 tb_cflags);
-                    queue_pretranslate_successors(pending, scheduled_pcs, tb);
+                    if (!exact_selection) {
+                        queue_pretranslate_successors(pending, scheduled_pcs,
+                                                      tb);
+                    }
                     jrra_pre_translate((void **)&tb, 1, cpu, flags,
                                        tb_cflags);
                 }
@@ -761,7 +766,7 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
     uint64_t edge_offset = tb_offset +
         header.tb_count * sizeof(LatcDiskTb);
     uint64_t previous_count;
-    do {
+    if (!exact_selection) do {
         previous_count = g_hash_table_size(translated_pcs);
         for (uint64_t i = 0; i < header.edge_count; i++) {
         LatcDiskEdge edge;
