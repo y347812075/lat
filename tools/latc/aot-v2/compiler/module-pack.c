@@ -305,6 +305,8 @@ static const char *runtime_entry(uint32_t symbol)
     case LAT_NATIVE_SYMBOL_RAISE_INTO: return "lat_aot_runtime_raise_into";
     case LAT_NATIVE_SYMBOL_RAISE_BOUND: return "lat_aot_runtime_raise_bound";
     case LAT_NATIVE_SYMBOL_XGETBV: return "lat_aot_runtime_xgetbv";
+    case LAT_NATIVE_SYMBOL_KZT_GET_ALTERNATE:
+        return "lat_aot_runtime_kzt_get_alternate";
     default:
         return NULL;
     }
@@ -346,20 +348,7 @@ static int find_tb(const ModulePack *pack, uint64_t guest_pc, uint32_t flags)
         pack->tbs[left].flags == flags) {
         return (int)left;
     }
-    left = 0;
-    right = pack->header->tb_count;
-    while (left < right) {
-        uint64_t middle = left + (right - left) / 2;
-        if (pack->tbs[middle].guest_pc < guest_pc) {
-            left = middle + 1;
-        } else {
-            right = middle;
-        }
-    }
-    return left < pack->header->tb_count &&
-           pack->tbs[left].guest_pc == guest_pc &&
-           (left + 1 == pack->header->tb_count ||
-            pack->tbs[left + 1].guest_pc != guest_pc) ? (int)left : -1;
+    return -1;
 }
 
 static int guest_slot(ModulePack *pack, uint64_t guest_rva);

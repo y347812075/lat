@@ -120,6 +120,11 @@
       "reason": "roll back relocation and search state before retrying a TU"
     },
     {
+      "path": "lat/target/i386/latx/optimization/jrra.c",
+      "generated": true,
+      "reason": "avoid generating targets outside an exact AOT fragment while retaining links to targets already translated in the fragment"
+    },
+    {
       "path": "lat/accel/tcg/cpu-exec.c",
       "generated": true,
       "reason": "query the AOT v2 module registry after a normal TB lookup miss"

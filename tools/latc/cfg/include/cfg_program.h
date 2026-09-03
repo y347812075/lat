@@ -101,6 +101,10 @@ typedef struct {
 
 int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
                     CfgProgram *program, char *error, size_t error_size);
+int cfg_analyze_elf_reachable(const char *path,
+                              const uint64_t *leaders, size_t leader_count,
+                              CfgProgram *program,
+                              char *error, size_t error_size);
 void cfg_program_destroy(CfgProgram *program);
 bool cfg_program_address_is_executable(const CfgProgram *program,
                                        uint64_t address);

@@ -1181,6 +1181,13 @@ void latc_aot_v2_note_munmap(CPUState *cpu, uint64_t guest_start,
                                  LATC_AOT_V2_INVALIDATE_UNMAP);
 }
 
+#if !defined(CONFIG_LATX_KZT)
+static uintptr_t latc_aot_v2_identity_guest_pc(uintptr_t guest_pc)
+{
+    return guest_pc;
+}
+#endif
+
 static int bind_runtime_targets(void)
 {
     LatAotRuntimeTargetsV2 targets = {
@@ -1271,6 +1278,13 @@ static int bind_runtime_targets(void)
     targets.target[LAT_AOT_TARGET_RAISE_BOUND] =
         (uintptr_t)helper_raise_bound;
     targets.target[LAT_AOT_TARGET_XGETBV] = (uintptr_t)helper_xgetbv;
+#if defined(CONFIG_LATX_KZT)
+    targets.target[LAT_AOT_TARGET_KZT_GET_ALTERNATE] =
+        (uintptr_t)kzt_get_alternate_pc;
+#else
+    targets.target[LAT_AOT_TARGET_KZT_GET_ALTERNATE] =
+        (uintptr_t)latc_aot_v2_identity_guest_pc;
+#endif
     return lat_aot_runtime_bind_targets(&targets);
 }
 
