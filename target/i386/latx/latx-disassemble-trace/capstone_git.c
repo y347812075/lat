@@ -54,7 +54,7 @@ struct la_dt_insn *gitcapstone_get_from_insn(cs_insn *inputinfo,
     ret->x86.rex = inputinfo->detail->x86.rex;
     ret->x86.modrm = inputinfo->detail->x86.modrm;
     ret->x86.op_count = inputinfo->detail->x86.op_count;
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < ret->x86.op_count; i++) {
         int otype = inputinfo->detail->x86.operands[i].type; 
         ret->x86.operands[i].type = git_x86_insn_op_type[otype].id;
         if (otype == X86_OP_IMM) {

@@ -103,6 +103,10 @@ static bool in_func(const IjmpContext *ctx, uint64_t addr)
 
 static bool is_insn_addr(const IjmpContext *ctx, uint64_t addr)
 {
+    if (ctx->insn_bitmap && addr >= ctx->func_addr) {
+        uint64_t offset = addr - ctx->func_addr;
+        return offset < ctx->insn_bitmap_size && ctx->insn_bitmap[offset];
+    }
     size_t lo = 0;
     size_t hi = ctx->insn_count;
     while (lo < hi) {

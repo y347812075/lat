@@ -20,6 +20,8 @@ typedef struct ModulePack {
     const LatNativeTbV1 *tbs;
     const LatNativeRelocationV1 *relocations;
     const LatNativePcMapV2 *pc_maps;
+    int *relocation_owners;
+    int *pc_map_owners;
     unsigned char *code;
     unsigned char *supported;
     GArray *code_order;
@@ -76,7 +78,7 @@ static size_t selected_pc_map_count(const ModulePack *pack)
 {
     size_t count = 0;
     for (uint64_t i = 0; i < pack->header->pc_map_count; i++) {
-        int owner = find_code_tb(pack, pack->pc_maps[i].host_offset_begin);
+        int owner = pack->pc_map_owners[i];
         if (owner >= 0 && pack->supported[owner] &&
             pc_map_in_tb(&pack->pc_maps[i], &pack->tbs[owner])) {
             count++;
@@ -381,7 +383,7 @@ static void select_supported_tbs(ModulePack *pack)
     }
     for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
         const LatNativeRelocationV1 *relocation = &pack->relocations[i];
-        int owner = find_code_tb(pack, relocation->code_offset);
+        int owner = pack->relocation_owners[i];
         if (owner < 0) {
             continue;
         }
@@ -420,7 +422,7 @@ static void select_supported_tbs(ModulePack *pack)
                 if (relocation->kind != LAT_NATIVE_RELOC_GUEST_ADDRESS) {
                     continue;
                 }
-                int owner = find_code_tb(pack, relocation->code_offset);
+                int owner = pack->relocation_owners[i];
                 if (owner < 0 || !pack->supported[owner]) {
                     continue;
                 }
@@ -444,7 +446,7 @@ static void select_supported_tbs(ModulePack *pack)
                         relocation->slots >= 3) {
                         continue;
                     }
-                    int owner = find_code_tb(pack, relocation->code_offset);
+                    int owner = pack->relocation_owners[i];
                     if (owner >= 0 && pack->supported[owner]) {
                         pack->supported[owner] = 0;
                         changed = 1;
@@ -457,7 +459,7 @@ static void select_supported_tbs(ModulePack *pack)
             if (relocation->kind != LAT_NATIVE_RELOC_TB_TARGET) {
                 continue;
             }
-            int owner = find_code_tb(pack, relocation->code_offset);
+            int owner = pack->relocation_owners[i];
             if (owner < 0 || !pack->supported[owner]) {
                 continue;
             }
@@ -782,7 +784,7 @@ static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
     }
     for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
         const LatNativeRelocationV1 *relocation = &pack->relocations[i];
-        int owner = find_code_tb(pack, relocation->code_offset);
+        int owner = pack->relocation_owners[i];
         if (owner < 0 || !pack->supported[owner]) {
             continue;
         }
@@ -939,7 +941,7 @@ static int emit_tables(const char *directory, const ModulePack *pack,
         }
     }
     for (uint64_t i = 0; i < pack->header->pc_map_count; i++) {
-        int owner = find_code_tb(pack, pack->pc_maps[i].host_offset_begin);
+        int owner = pack->pc_map_owners[i];
         if (owner < 0 || !pack->supported[owner] ||
             !pc_map_in_tb(&pack->pc_maps[i], &pack->tbs[owner])) {
             continue;
@@ -1073,6 +1075,8 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
         .tbs = (const void *)(image + header->tb_table_offset),
         .relocations = (const void *)(image + header->relocation_offset),
         .pc_maps = (const void *)(image + header->pc_map_offset),
+        .relocation_owners = g_new(int, header->relocation_count),
+        .pc_map_owners = g_new(int, header->pc_map_count),
         .code = g_malloc(header->code_size),
         .supported = g_malloc0(header->tb_count),
         .code_order = g_array_sized_new(FALSE, FALSE,
@@ -1090,6 +1094,14 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
         g_array_append_val(pack.code_order, tb);
     }
     g_array_sort(pack.code_order, compare_tb_code);
+    for (uint64_t i = 0; i < header->relocation_count; i++) {
+        pack.relocation_owners[i] = find_code_tb(
+            &pack, pack.relocations[i].code_offset);
+    }
+    for (uint64_t i = 0; i < header->pc_map_count; i++) {
+        pack.pc_map_owners[i] = find_code_tb(
+            &pack, pack.pc_maps[i].host_offset_begin);
+    }
     memcpy(pack.code, image + header->code_offset, header->code_size);
     int all_ranges_valid = all_tb_ranges_valid(&pack);
     select_supported_tbs(&pack);
@@ -1131,6 +1143,8 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
     g_hash_table_destroy(pack.guest_rva_indexes);
     g_array_free(pack.guest_rvas, TRUE);
     g_array_free(pack.code_order, TRUE);
+    g_free(pack.pc_map_owners);
+    g_free(pack.relocation_owners);
     g_free(pack.supported);
     g_free(pack.code);
     g_free(image);

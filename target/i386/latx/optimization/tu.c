@@ -242,7 +242,8 @@ TranslationBlock* tb_create(CPUState *cpu, target_ulong pc,
         env->eip = pc;
         cpu_get_tb_cpu_state(env, &pc, &cs_base, &flags);
     }
-    tb->bool_flags |= (bool_flags & (IS_CODE64 | TBSMC_OPTED));
+    tb->bool_flags |= (bool_flags &
+                       (IS_CODE64 | TBSMC_OPTED | IS_AOT_BOUNDED));
 #ifdef CONFIG_LATX_SMC_OPT
     if (bool_flags & TBSMC_OPTED) {
         tb->smc_data = TBSMC_OPTED_MASK;

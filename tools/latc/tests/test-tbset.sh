@@ -29,7 +29,7 @@ case "$message" in
     *) echo "unexpected ignored TB set result: $message" >&2; exit 1 ;;
 esac
 "$latc" inspect --json "$bundle" | python3 -c \
-    'import json,sys; data=json.load(sys.stdin); assert data["selected_tbs"] == 2, data'
+    'import json,sys; data=json.load(sys.stdin); assert data["selected_tbs"] == 5, data'
 
 parallel="$bundle.parallel.tbset"
 python3 "$script_dir/tb_key_set.py" "$guest" "$parallel" 0x1000:0x1 0x1000:0x3
@@ -40,7 +40,7 @@ case "$message" in
     *) echo "unexpected parallel TB set result: $message" >&2; exit 1 ;;
 esac
 "$latc" inspect --json "$bundle.parallel" | python3 -c \
-    'import json,sys; data=json.load(sys.stdin); assert data["selected_tbs"] == 2, data'
+    'import json,sys; data=json.load(sys.stdin); assert data["selected_tbs"] == 8, data'
 
 wrong="$bundle.wrong-source.tbset"
 python3 "$script_dir/tb_key_set.py" "$guest" "$wrong" 0x1000:0x1

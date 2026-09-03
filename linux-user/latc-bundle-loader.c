@@ -692,7 +692,11 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
             }
             uint32_t tb_cflags = tbset_cflags(cflags,
                                               disk_tb.semantic_flags);
-            aot_compile_key_add(pc, tb_cflags, IS_CODE64);
+            uint16_t bool_flags = IS_CODE64;
+            if (disk_tb.semantic_flags & LATC_CFG_TB_BOUNDED) {
+                bool_flags |= IS_AOT_BOUNDED;
+            }
+            aot_compile_key_add(pc, tb_cflags, bool_flags);
         }
         stat_cfg_tbs = header.tb_count;
         stat_selected = selected;

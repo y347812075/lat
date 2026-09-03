@@ -42,6 +42,9 @@ typedef enum {
 enum CfgTbSemanticFlag {
     CFG_TB_CODE64 = 1u << 0,
     CFG_TB_PARALLEL = 1u << 1,
+    /* Internal compiler provenance.  This block was added to cover a whole
+     * indirect-entry function, not observed by JIT. */
+    CFG_TB_BOUNDED = 1u << 2,
 };
 
 typedef struct {

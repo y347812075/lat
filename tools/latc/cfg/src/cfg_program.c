@@ -254,12 +254,16 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
     size_t size = (size_t)fn->size;
     InsnVec insns = {0};
     AddrVec leaders = {0}, insn_addrs = {0};
+    uint8_t *insn_bitmap = calloc(size, 1);
     int rc = -1;
+
+    if (!insn_bitmap) goto done;
 
     for (size_t off = 0; off < size;) {
         Insn in = cfg_decode_insn(buf, size, fn->addr, off);
         if (!in.len) in.len = 1;
         if (!insn_push(&insns, in) || !addr_push(&insn_addrs, in.addr)) goto done;
+        insn_bitmap[off] = 1;
         off += in.len;
     }
 
@@ -267,6 +271,7 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
         .file = elf->data, .file_size = elf->size,
         .sections = sections, .section_count = section_count,
         .insn_addrs = insn_addrs.v, .insn_count = insn_addrs.n,
+        .insn_bitmap = insn_bitmap, .insn_bitmap_size = size,
         .program_insn_addrs = program_insns->v,
         .program_insn_count = program_insns->n,
         .direct_targets = direct_targets->v,
@@ -412,6 +417,7 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
     result->tb_count = out->tb_count - result->first_tb;
     rc = 0;
 done:
+    free(insn_bitmap);
     free(insns.v); free(leaders.v); free(insn_addrs.v);
     return rc;
 }

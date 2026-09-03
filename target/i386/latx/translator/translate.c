@@ -383,7 +383,8 @@ int label_dispose(TranslationBlock *tb, TRANSLATION_DATA *lat_ctx)
     int ir2_num = 0;
     IR2_INST *ir2_current = lat_ctx->first_ir2;
     while (ir2_current != NULL) {
-        if (ir2_opcode(ir2_current) == LISA_LABEL) {
+        IR2_OPCODE opcode = (IR2_OPCODE)ir2_current->_opcode;
+        if (opcode == LISA_LABEL) {
             int label_num = ir2_opnd_label_id(&ir2_current->_opnd[0]);
             lsassertm(ir2_label[label_num] == -1,
                       "label %d is in multiple positions\n", label_num);
@@ -399,14 +400,15 @@ int label_dispose(TranslationBlock *tb, TRANSLATION_DATA *lat_ctx)
             }
         } else
 #endif
-        if (ir2_opcode(ir2_current) > LISA_PSEUDO_END) {
+        if (opcode > LISA_PSEUDO_END) {
             ir2_num++;
         } else {
             /* we need do some relocate works */
             ir2_current =
                 ir2_relocate(lat_ctx, ir2_current, &ir2_num, ir2_label, ir2_data);
         }
-        ir2_current = ir2_next(ir2_current);
+        ir2_current = ir2_current->_next == -1 ? NULL :
+            lat_ctx->ir2_inst_array + ir2_current->_next;
     }
 
     /**
@@ -480,38 +482,39 @@ int label_dispose(TranslationBlock *tb, TRANSLATION_DATA *lat_ctx)
     ir2_num = 0;
     ir2_current = lat_ctx->first_ir2;
     while (ir2_current != NULL) {
-        IR2_OPCODE opcode = ir2_opcode(ir2_current);
-        if (ir2_opcode_is_branch(opcode) || ir2_opcode_is_f_branch(opcode)) {
+        IR2_OPCODE opcode = (IR2_OPCODE)ir2_current->_opcode;
+        bool is_branch = (opcode >= LISA_BEQZ && opcode <= LISA_BCNEZ) ||
+                         (opcode >= LISA_B && opcode <= LISA_BGEU) ||
+                         opcode == LISA_FAR_JUMP;
+        if (is_branch) {
             IR2_OPND *label_opnd = NULL;
-            if (ir2_opcode(ir2_current) == LISA_B ||
-                ir2_opcode(ir2_current) == LISA_BL) {
+            if (opcode == LISA_B || opcode == LISA_BL) {
                 label_opnd = &ir2_current->_opnd[0];
-            } else if (ir2_opcode_is_branch_with_3opnds(opcode)) {
+            } else if (opcode >= LISA_BEQ && opcode <= LISA_BGEU) {
                 label_opnd = &ir2_current->_opnd[2];
-            } else if (ir2_opcode_is_f_branch(opcode) ||
-                       ir2_opcode_is_branch_with_2opnds(opcode)) {
+            } else if (opcode == LISA_BCEQZ || opcode == LISA_BCNEZ ||
+                       opcode == LISA_BEQZ || opcode == LISA_BNEZ) {
                 label_opnd = &ir2_current->_opnd[1];
             }
-            if (label_opnd && ir2_opnd_is_label(label_opnd)) {
+            if (label_opnd && label_opnd->_type == IR2_OPND_LABEL) {
                 int label_num = label_opnd->_label_id;
                 lsassert(label_num >= 0 &&
                          label_num < lat_ctx->label_num);
                 lsassertm(ir2_label[label_num] != -1,
                           "label %d is not inserted\n", label_num);
                 int target_ir2_num = ir2_label[label_num] >> 2;
-                ir2_opnd_convert_label_to_imm(label_opnd,
-                                              target_ir2_num - ir2_num);
+                label_opnd->_type = IR2_OPND_IMM;
+                label_opnd->_imm32 = target_ir2_num - ir2_num;
             }
         }
 
-        if (ir2_opcode(ir2_current) != LISA_LABEL &&
-            ir2_opcode(ir2_current) != LISA_X86_INST &&
-            ir2_opcode(ir2_current) != LISA_PROFILE) {
+        if (opcode != LISA_LABEL && opcode != LISA_X86_INST &&
+            opcode != LISA_PROFILE) {
             ir2_num++;
-            lsassert(ir2_opcode(ir2_current) == LISA_CODE ||
-                     ir2_opcode(ir2_current) > LISA_PSEUDO_END);
+            lsassert(opcode == LISA_CODE || opcode > LISA_PSEUDO_END);
         }
-        ir2_current = ir2_next(ir2_current);
+        ir2_current = ir2_current->_next == -1 ? NULL :
+            lat_ctx->ir2_inst_array + ir2_current->_next;
     }
 
 #ifdef CONFIG_LATX_PROFILER
@@ -572,15 +575,15 @@ int tr_ir2_assemble(const void *code_start_addr, const IR2_INST *pir2)
 #endif
 
     while (pir2 != NULL) {
+        IR2_OPCODE opcode = (IR2_OPCODE)pir2->_opcode;
 #if defined(CONFIG_LATX_PROFILER) && defined(CONFIG_LATX_DEBUG)
-        if (ir2_opcode(pir2) == LISA_PROFILE) {
+        if (opcode == LISA_PROFILE) {
             ir2_id++;
             pir2 = ir2_next(pir2);
             continue;
         } else
 #endif
-        if (ir2_opcode(pir2) != LISA_LABEL &&
-            ir2_opcode(pir2) != LISA_X86_INST) {
+        if (opcode != LISA_LABEL && opcode != LISA_X86_INST) {
             uint32 result = ir2_assemble(pir2);
 
 #ifdef CONFIG_LATX_DEBUG
@@ -598,7 +601,8 @@ int tr_ir2_assemble(const void *code_start_addr, const IR2_INST *pir2)
 #ifdef CONFIG_LATX_DEBUG
         ir2_id++;
 #endif
-        pir2 = ir2_next(pir2);
+        pir2 = pir2->_next == -1 ? NULL :
+            lsenv->tr_data->ir2_inst_array + pir2->_next;
     }
 
     return code_nr;
