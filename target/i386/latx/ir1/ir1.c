@@ -130,6 +130,109 @@ void (*disassemble_trace_cmp)(const uint8_t *code, size_t code_size,
         uint64_t address,
         size_t count,
         struct la_dt_insn *inputinsn, int mode) = disassemble_trace_cmp_nop;
+
+#define IR1_DECODE_TEMPLATE_CACHE_SIZE 16384
+
+/*
+ * AOT workers decode the same position-independent instruction encodings many
+ * times while translating overlapping and successor TBs.  Keep exact decoded
+ * instructions as templates so common MOV, TEST, XOR, stack, and arithmetic
+ * forms bypass the decoder.  The cache is deliberately absent from normal JIT.
+ */
+typedef struct Ir1DecodeTemplate {
+    uint8_t mode;
+    uint8_t size;
+    uint8_t bytes[15];
+    struct la_dt_insn decoded;
+} Ir1DecodeTemplate;
+
+static __thread Ir1DecodeTemplate *ir1_decode_templates;
+static __thread uint8_t *ir1_decode_template_valid;
+static __thread int ir1_decode_templates_enabled = -1;
+
+static uint32_t ir1_decode_template_hash(const uint8_t *code, size_t size,
+                                         int mode)
+{
+    uint32_t hash = 2166136261u ^ (uint32_t)mode;
+    for (size_t i = 0; i < size; i++) {
+        hash = (hash ^ code[i]) * 16777619u;
+    }
+    return hash & (IR1_DECODE_TEMPLATE_CACHE_SIZE - 1);
+}
+
+static struct la_dt_insn *ir1_decode_template_output(int ir1_num,
+                                                     void *pir1_base)
+{
+    return (void *)((uintptr_t)pir1_base +
+                    ir1_num * sizeof(struct la_dt_insn));
+}
+
+static struct la_dt_insn *ir1_decode_template_lookup(const uint8_t *code,
+                                                     size_t code_size,
+                                                     uint64_t address,
+                                                     int ir1_num,
+                                                     void *pir1_base,
+                                                     int mode)
+{
+    if (!ir1_decode_templates || !pir1_base) {
+        return NULL;
+    }
+    size_t prefixes = MIN(code_size, 4);
+    for (size_t size = 1; size <= prefixes; size++) {
+        size_t index = ir1_decode_template_hash(code, size, mode);
+        Ir1DecodeTemplate *entry = &ir1_decode_templates[index];
+        if (ir1_decode_template_valid[index] && entry->mode == mode &&
+            entry->size <= code_size &&
+            !memcmp(entry->bytes, code, entry->size)) {
+            struct la_dt_insn *output = ir1_decode_template_output(
+                ir1_num, pir1_base);
+            memcpy(output, &entry->decoded, sizeof(*output));
+            output->address = address;
+            return output;
+        }
+    }
+    return NULL;
+}
+
+static bool ir1_decode_template_is_address_independent(
+        const struct la_dt_insn *info)
+{
+    /* Relative immediates and RIP-relative memory change with the guest PC. */
+    for (int i = 0; i < info->x86.op_count; i++) {
+        if (info->x86.operands[i].type == dt_X86_OP_IMM ||
+            (info->x86.operands[i].type == dt_X86_OP_MEM &&
+             (info->x86.operands[i].mem.base == dt_X86_REG_RIP ||
+              info->x86.operands[i].mem.index == dt_X86_REG_RIP))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void ir1_decode_template_insert(const uint8_t *code, size_t code_size,
+                                       int mode,
+                                       const struct la_dt_insn *info)
+{
+    if (!info->size || info->size > code_size || info->size > 15 ||
+        !ir1_decode_template_is_address_independent(info)) {
+        return;
+    }
+    if (!ir1_decode_templates) {
+        ir1_decode_templates = g_new(Ir1DecodeTemplate,
+                                     IR1_DECODE_TEMPLATE_CACHE_SIZE);
+        ir1_decode_template_valid = g_new0(uint8_t,
+                                           IR1_DECODE_TEMPLATE_CACHE_SIZE);
+    }
+    size_t prefix_size = MIN((size_t)info->size, 4);
+    size_t index = ir1_decode_template_hash(code, prefix_size, mode);
+    Ir1DecodeTemplate *entry = &ir1_decode_templates[index];
+    entry->mode = mode;
+    entry->size = info->size;
+    memcpy(entry->bytes, code, info->size);
+    memcpy(&entry->decoded, info, sizeof(entry->decoded));
+    ir1_decode_template_valid[index] = true;
+}
+
 static IR1_OPND ir1_opnd_new_static_reg(IR1_OPND_TYPE opnd_type, int size,
                                         dt_x86_reg reg)
 {
@@ -331,31 +434,43 @@ static void __attribute__((__constructor__)) x86tomisp_ir1_init(void)
 #endif
 };
 
-ADDRX ir1_disasm(IR1_INST *ir1, uint8_t *addr, ADDRX t_pc, int ir1_num, void *pir1_base)
+ADDRX ir1_disasm(IR1_INST *ir1, uint8_t *addr, ADDRX t_pc, int ir1_num,
+                 void *pir1_base)
 {
     struct la_dt_insn *info;
+    if (ir1_decode_templates_enabled < 0) {
+        ir1_decode_templates_enabled = getenv("LATC_EMIT_AOT") != NULL;
+    }
+    bool use_template = ir1_decode_templates_enabled;
+    bool original_code = true;
     uint32_t nop = 0x401f0f;
     uint64_t nop_5 = 0x441f0f;
     if (((*((uint32_t *)addr)) & 0xf8ffffff) == 0xc81e0ff3) {
         //repleace endbr32/rdsspd with 4 bytes nop, just a temporary solution
         addr = (uint8_t *)&nop;
+        original_code = false;
     }
 
     if (((*((uint64_t *)addr)) & 0xfffffaff) == 0x1e0f48f3) {
         /* repleace rdsspq with 5 bytes nop, just a temporary solution */
         addr = (uint8_t *)&nop_5;
+        original_code = false;
     }
 #ifdef CONFIG_LATX_AVX_OPT
     if (((*((uint64_t *)addr)) & 0xfffffaff) == 0xae0f48f3) {
         /* repleace incsspq with 5 bytes nop, just a temporary solution */
         addr = (uint8_t *)&nop_5;
+        original_code = false;
     }
 #endif
     /* FIXME:the count parameter in cs_disasm is 1, it means we translte 1 insn at a time,
      * there should be a performance improvement if we increase the number, but
      * for now there are some problems if we change it. It will be settled later.
      */
-    int count = la_disa_v1(addr, 15, (uint64_t)t_pc,
+    info = use_template && original_code ? ir1_decode_template_lookup(
+        addr, 15, t_pc, ir1_num, pir1_base, CODEIS64) : NULL;
+    bool template_hit = info != NULL;
+    int count = template_hit ? 1 : la_disa_v1(addr, 15, (uint64_t)t_pc,
         1, &info, ir1_num, pir1_base, CODEIS64);
 
     ir1->info = info;
@@ -387,6 +502,9 @@ ADDRX ir1_disasm(IR1_INST *ir1, uint8_t *addr, ADDRX t_pc, int ir1_num, void *pi
                 info->x86.operands[i].mem.segment = dt_X86_REG_INVALID;
             }
         }
+    }
+    if (use_template && original_code && !template_hit) {
+        ir1_decode_template_insert(addr, 15, CODEIS64, info);
     }
 #ifdef CONFIG_LATX_INSTS_PATTERN
     ir1->instptn.opc  = INSTPTN_OPC_NONE;
