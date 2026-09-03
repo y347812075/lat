@@ -20,7 +20,7 @@
     (LAT_AOT_V2_TWO_LEVEL_GUEST_ADDRESS_LIMIT * \
      LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT)
 #define LAT_AOT_V2_TBSET_RECORD_LIMIT 1048576u
-#define LAT_AOT_RUNTIME_TARGET_COUNT 59u
+#define LAT_AOT_RUNTIME_TARGET_COUNT 60u
 
 enum LatAotFeatureV2 {
     LAT_AOT_FEATURE_LBT = 1u << 0,
@@ -170,6 +170,7 @@ enum LatAotRuntimeTargetV2 {
     LAT_AOT_TARGET_RAISE_INTO,
     LAT_AOT_TARGET_RAISE_BOUND,
     LAT_AOT_TARGET_XGETBV,
+    LAT_AOT_TARGET_KZT_GET_ALTERNATE,
 };
 
 typedef struct LatAotRuntimeTargetsV2 {
@@ -209,7 +210,7 @@ _Static_assert(sizeof(LatAotGuestSlotV2) == 16,
                "AOT v2 guest slot ABI size changed");
 _Static_assert(sizeof(LatAotModuleV2) == 192,
                "AOT v2 module ABI size changed");
-_Static_assert(sizeof(LatAotRuntimeTargetsV2) == 480,
+_Static_assert(sizeof(LatAotRuntimeTargetsV2) == 488,
                "AOT v2 runtime target ABI size changed");
 
 #endif
