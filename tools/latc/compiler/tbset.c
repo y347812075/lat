@@ -622,7 +622,10 @@ int latc_tbset_apply(const char *path, const char *source_path,
         lat_tb_key_set_destroy(&set);
         return -1;
     }
-    if (has_parallel && template_count <= 81920 && select_all_parallel_cfg(
+    bool full_parallel_cfg = template_count <= 49152 ||
+        (template_count <= 81920 &&
+         program->resolved_jump_table_targets >= 1024);
+    if (has_parallel && full_parallel_cfg && select_all_parallel_cfg(
             program, template_count, error, error_size)) {
         free(templates);
         lat_tb_key_set_destroy(&set);
