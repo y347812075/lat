@@ -31,6 +31,7 @@ min_aot_percent=${LATC_COMPLEX_MIN_AOT_PERCENT:-0}
 coverage_applications=${LATC_COMPLEX_COVERAGE_APPLICATIONS:-$applications}
 require_no_fork_jit=${LATC_COMPLEX_REQUIRE_NO_FORK_JIT:-0}
 flush_only=${LATC_COMPLEX_FLUSH_ONLY:-0}
+max_flush_ms=${LATC_COMPLEX_MAX_FLUSH_MS:-0}
 sqlite_clients=${LATC_COMPLEX_SQLITE_CLIENTS:-4}
 min_git_aot_percent=${LATC_COMPLEX_MIN_GIT_AOT_PERCENT:-0}
 if [ "$min_aot_percent" = 0 ] && [ "$min_git_aot_percent" != 0 ]; then
@@ -634,10 +635,15 @@ for phase in $phases; do
         "$latcd" --flush-all --socket "$socket" \
           >"$work/$phase/flush-all.txt"
         flush_finished=$(python3 "$script_dir/monotonic-ns.py")
-        printf 'flush_all_ms=%s\n' \
-          "$(((flush_finished - flush_started) / 1000000))" \
+        flush_elapsed_ms=$(((flush_finished - flush_started) / 1000000))
+        printf 'flush_all_ms=%s\n' "$flush_elapsed_ms" \
           >>"$work/$phase/flush-all.txt"
         grep -q '^status=0$' "$work/$phase/flush-all.txt"
+        if [ "$max_flush_ms" -gt 0 ] &&
+           [ "$flush_elapsed_ms" -gt "$max_flush_ms" ]; then
+            echo "AOT flush ${flush_elapsed_ms}ms exceeds ${max_flush_ms}ms" >&2
+            exit 1
+        fi
         cp "$stats" "$work/$phase/latcd-after-flush.json"
         if [ "$require_compiler_success" -eq 1 ]; then
             python3 - "$stats" <<'PY'
