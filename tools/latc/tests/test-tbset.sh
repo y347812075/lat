@@ -11,7 +11,7 @@ python3 "$script_dir/tb_key_set.py" "$guest" "$tbset" 0x1000:0x1 0x1001:0x1
 message=$("$latc" compile "$guest" -o "$bundle" --runner "$guest" \
     --tbset "$tbset" 2>&1)
 case "$message" in
-    *"TB set matched=2 added=0 ignored=0"*) ;;
+    *"TB set matched=0 added=2 ignored=0"*) ;;
     *) echo "unexpected TB set result: $message" >&2; exit 1 ;;
 esac
 
@@ -29,19 +29,18 @@ case "$message" in
     *) echo "unexpected ignored TB set result: $message" >&2; exit 1 ;;
 esac
 "$latc" inspect --json "$bundle" | python3 -c \
-    'import json,sys; data=json.load(sys.stdin); assert data["selected_tbs"] >= 2, data'
+    'import json,sys; data=json.load(sys.stdin); assert data["selected_tbs"] == 2, data'
 
 parallel="$bundle.parallel.tbset"
 python3 "$script_dir/tb_key_set.py" "$guest" "$parallel" 0x1000:0x1 0x1000:0x3
 message=$("$latc" compile "$guest" -o "$bundle.parallel" --runner "$guest" \
     --tbset "$parallel" 2>&1)
 case "$message" in
-    *"TB set matched=1 added=1 ignored=0"*) ;;
+    *"TB set matched=0 added=2 ignored=0"*) ;;
     *) echo "unexpected parallel TB set result: $message" >&2; exit 1 ;;
 esac
 "$latc" inspect --json "$bundle.parallel" | python3 -c \
-    'import json,sys; data=json.load(sys.stdin); assert data["selected_tbs"] >= 2, data'
-
+    'import json,sys; data=json.load(sys.stdin); assert data["selected_tbs"] == 2, data'
 
 wrong="$bundle.wrong-source.tbset"
 python3 "$script_dir/tb_key_set.py" "$guest" "$wrong" 0x1000:0x1

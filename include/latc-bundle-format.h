@@ -6,8 +6,7 @@
 #define LATC_BUNDLE_MAGIC "LATCBND1"
 #define LATC_CFG_MAGIC "LATCCFG1"
 #define LATC_BUNDLE_VERSION 3u
-#define LATC_CFG_VERSION 6u
-#define LATC_CFG_FLAG_EXACT_SELECTION (1ull << 0)
+#define LATC_CFG_VERSION 5u
 
 typedef struct __attribute__((packed)) LatcDiskCfgHeader {
     char magic[8];
@@ -18,7 +17,6 @@ typedef struct __attribute__((packed)) LatcDiskCfgHeader {
     uint64_t edge_count;
     uint64_t exec_range_count;
     uint64_t string_size;
-    uint64_t flags;
 } LatcDiskCfgHeader;
 
 typedef struct __attribute__((packed)) LatcDiskFunction {

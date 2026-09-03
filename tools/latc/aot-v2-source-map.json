@@ -21,7 +21,6 @@
     {"source": "target/i386/latx/ir1/ir1.c", "target": "tools/latc/lat/target/i386/latx/ir1/ir1.c"},
     {"source": "target/i386/latx/optimization/hbr.c", "target": "tools/latc/lat/target/i386/latx/optimization/hbr.c"},
     {"source": "target/i386/latx/optimization/tu.c", "target": "tools/latc/lat/target/i386/latx/optimization/tu.c"},
-    {"source": "target/i386/latx/optimization/jrra.c", "target": "tools/latc/lat/target/i386/latx/optimization/jrra.c"},
     {"source": "accel/tcg/cpu-exec.c", "target": "tools/latc/lat/accel/tcg/cpu-exec.c"},
     {"source": "target/i386/latx/latx-config.c", "target": "tools/latc/lat/target/i386/latx/latx-config.c"},
     {"source": "include/exec/fasttb.h", "target": "tools/latc/lat/include/exec/fasttb.h"},

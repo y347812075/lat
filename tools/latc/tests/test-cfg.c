@@ -131,39 +131,11 @@ static void test_program(const char *path)
     cfg_program_destroy(&p);
 }
 
-static void test_extra_leader(const char *path)
-{
-    CfgProgram p;
-    CfgAnalyzeOptions options = { .resolve_jump_tables = true };
-    char error[256] = {0};
-    assert(cfg_analyze_elf(path, &options, &p, error, sizeof(error)) == 0);
-    uint64_t leader = 0;
-    for (size_t i = 0; i < p.function_count; i++) {
-        if (strcmp(p.functions[i].name, "jump_container") == 0) {
-            leader = p.functions[i].start + 1;
-            break;
-        }
-    }
-    assert(leader);
-    cfg_program_destroy(&p);
-
-    options.extra_leaders = &leader;
-    options.extra_leader_count = 1;
-    assert(cfg_analyze_elf(path, &options, &p, error, sizeof(error)) == 0);
-    int found = 0;
-    for (size_t i = 0; i < p.tb_count; i++) {
-        found |= p.tbs[i].start == leader;
-    }
-    assert(found);
-    cfg_program_destroy(&p);
-}
-
 int main(int argc, char **argv)
 {
     assert(argc == 2);
     test_decoder();
     test_program(argv[1]);
-    test_extra_leader(argv[1]);
     puts("test-cfg: PASS");
     return 0;
 }

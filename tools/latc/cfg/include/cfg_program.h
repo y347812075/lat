@@ -89,22 +89,14 @@ typedef struct {
     size_t error_function_count;
     size_t resolved_jump_tables;
     size_t resolved_jump_table_targets;
-    bool exact_selection;
 } CfgProgram;
 
 typedef struct {
     bool resolve_jump_tables;
-    /* Additional instruction addresses that must begin a CFG TB. */
-    const uint64_t *extra_leaders;
-    size_t extra_leader_count;
 } CfgAnalyzeOptions;
 
 int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
                     CfgProgram *program, char *error, size_t error_size);
-int cfg_analyze_elf_reachable(const char *path,
-                              const uint64_t *leaders, size_t leader_count,
-                              CfgProgram *program,
-                              char *error, size_t error_size);
 void cfg_program_destroy(CfgProgram *program);
 bool cfg_program_address_is_executable(const CfgProgram *program,
                                        uint64_t address);
