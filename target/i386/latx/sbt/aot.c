@@ -766,6 +766,7 @@ int do_generate_aot(int first_seg_in_lib, int end_seg_in_lib)
 
     p_header->aot_file_type =
         seg_info_vector[first_seg_in_lib]->aot_file_type;
+    p_header->static_helper = !!option_static_helper;
 
     if (p_header->aot_file_type & (ELF_AOT_FILE | PE_AOT_FILE)) {
         struct stat statbuf;
