@@ -19,6 +19,7 @@
 
 #define CACHE_DEFAULT_CAPACITY 4
 #define CACHE_MAX_CAPACITY 300
+#define IMM_CACHE_RIP_BASE (-100)
 
 #define imm_log(FMT, ...)                                   \
     do {                                                    \
@@ -61,6 +62,19 @@ typedef struct {
     int64 max_offset;
 } IMM_CACHE_BUCKET;
 
+typedef struct {
+    uint64_t calls;
+    uint64_t hits;
+    uint64_t misses;
+    uint64_t replacements;
+    uint64_t itemp_fallbacks;
+    uint64_t direct_hits;
+    uint64_t host_offset_hits;
+    uint64_t addi_hits;
+    uint64_t full_loads;
+    uint64_t helper_invalidations;
+} IMM_CACHE_RIP_STATS;
+
 /**
  * imm format:
  *   (offset can be 0)
@@ -93,6 +107,7 @@ typedef struct {
      * if we use cached itemp, ra_free_temp should skip
      */
     bool itemp_allocated;
+    IMM_CACHE_RIP_STATS rip_stats;
 
     /**
      * for complex imm, we need to compare whether base/index reg has been
@@ -156,6 +171,8 @@ void imm_cache_free_itemp(IMM_CACHE *cache, int itemp_num);
 void imm_cache_free_dead_cache(IMM_CACHE *cache);
 void imm_cache_free(IMM_CACHE *cache, int id);
 void imm_cache_free_all(IMM_CACHE *cache);
+void imm_cache_invalidate_for_helper(void);
+void imm_cache_print_rip_stats(IMM_CACHE *cache, uint64_t tb_pc);
 bool imm_cache_is_imm_itemp(int itemp_num);
 bool imm_cache_itemp_is_used(IR2_OPND opnd);
 void imm_cache_free_cache_use_target_reg(IR2_OPND opnd);

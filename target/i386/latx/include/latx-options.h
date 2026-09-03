@@ -118,6 +118,7 @@ extern int option_anonym;
 extern int option_imm_reg;
 extern int option_imm_precache;
 extern int option_imm_rip;
+extern int option_imm_rip_stats;
 extern int option_imm_complex;
 extern int option_debug_imm_reg;
 extern uint64_t imm_skip_pc;
@@ -160,6 +161,8 @@ extern unsigned long long counter_mips_tr;
     ENVFUN(SAVE_XMM, handle_arg_save_xmm) \
     ENVFUN(LATX_JRRA, handle_arg_latx_jrra) \
     ENVFUN(LATX_IMM_REG, handle_arg_latx_imm_reg) \
+    ENVFUN(LATX_IMM_RIP, handle_arg_latx_imm_rip) \
+    ENVFUN(LATX_IMM_RIP_STATS, handle_arg_latx_imm_rip_stats) \
     ENVFUN(LATX_MT, handle_arg_latx_mem_test) \
     ENVFUN(LATX_REAL_MAPS, handle_arg_latx_real_maps) \
     ENVFUN(LATX_MONITOR_SHARED_MEM, handle_arg_latx_monitor_shared_mem) \

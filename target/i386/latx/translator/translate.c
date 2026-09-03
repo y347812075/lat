@@ -135,7 +135,7 @@ void tr_init(void *tb)
     }
 
     if (t->imm_cache == NULL) {
-        t->imm_cache = (IMM_CACHE *)mm_malloc(sizeof(IMM_CACHE));
+        t->imm_cache = (IMM_CACHE *)mm_calloc(1, sizeof(IMM_CACHE));
         t->imm_cache->bucket = (IMM_CACHE_BUCKET *)mm_calloc(
             CACHE_MAX_CAPACITY, sizeof(IMM_CACHE_BUCKET));
     }
@@ -2455,6 +2455,11 @@ int tr_ir2_generate(struct TranslationBlock *tb)
 
         pir1++;
     }
+#ifdef CONFIG_LATX_IMM_REG
+    if (option_imm_reg) {
+        imm_cache_print_rip_stats(imm_cache, tb->pc);
+    }
+#endif
 #ifdef CONFIG_LATX_DEBUG
     if (option_dump_ir1) {
         pir1 = tb_ir1_inst(tb, 0);
@@ -4140,6 +4145,9 @@ void tr_load_x64_8_registers_from_env(uint8 gpr_to_load, uint8 xmm_to_load)
 
 void tr_gen_call_to_helper(ADDR func_addr, enum aot_rel_kind REL_KIND)
 {
+#ifdef CONFIG_LATX_IMM_REG
+    imm_cache_invalidate_for_helper();
+#endif
     IR2_OPND func_addr_opnd = ra_alloc_dbt_arg2();
     TranslationBlock *tb __attribute__((unused)) = NULL;
     if (option_aot) {
@@ -4178,6 +4186,9 @@ void convert_fpregs_x80_to_64(void)
 
 static void tr_gen_call_to_helper_prologue(int use_fp)
 {
+#ifdef CONFIG_LATX_IMM_REG
+    imm_cache_invalidate_for_helper();
+#endif
     tr_save_registers_to_env(0, FPR_USEDEF_TO_SAVE, XMM_USEDEF_TO_SAVE,
                              options_to_save());
 #ifdef TARGET_X86_64

@@ -81,6 +81,7 @@ int option_smc_reload;
 int option_debug_aot;
 int option_imm_reg;
 int option_imm_rip;
+int option_imm_rip_stats;
 int option_imm_precache;
 int option_imm_complex;
 int option_debug_imm_reg;
@@ -257,6 +258,7 @@ void options_init(void)
 #ifdef CONFIG_LATX_IMM_REG
     option_imm_reg = 0;
     option_imm_rip = 0;
+    option_imm_rip_stats = 0;
     // complex:base+index*scale
     option_imm_complex = 0;
     option_imm_precache = 0;

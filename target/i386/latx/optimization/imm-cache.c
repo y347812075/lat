@@ -174,6 +174,7 @@ void imm_cache_init(IMM_CACHE *imm_cache, int capacity)
     imm_cache->curr_ir2_index = 0;
     imm_cache->optimized_ir2 = false;
     imm_cache->itemp_allocated = false;
+    memset(&imm_cache->rip_stats, 0, sizeof(imm_cache->rip_stats));
     for (int i = 0; i < 16; i++) {
         imm_cache->ir1_reg_last_updated_index[i] = -1;
     }
@@ -478,7 +479,11 @@ IMM_CACHE_RES imm_cache_allocate(IMM_CACHE *cache, int base, int index,
             stop_opt = true;
         }
     }
-    const char *prefix = (base == -100) ? "rip" : "complex";
+    bool is_rip = base == IMM_CACHE_RIP_BASE;
+    const char *prefix = is_rip ? "rip" : "complex";
+    if (is_rip) {
+        cache->rip_stats.calls++;
+    }
     imm_log("[allocate %s]>>>>>>>>>> start >>>>>>>>>>>\n"
             "[allocate %s] b:%d\ti:%d\ts:%d\toffset:0x%lx\n",
             prefix, prefix, base, index, scale, offset);
@@ -489,8 +494,14 @@ IMM_CACHE_RES imm_cache_allocate(IMM_CACHE *cache, int base, int index,
     // dead cache auto free
     // imm_cache_free_dead_cache(cache);
 
-    IMM_CACHE_RES res;
-    res.pre_cache = false;
+    IMM_CACHE_RES res = {
+        .diff = 0,
+        .offset = offset,
+        .itemp_num = -1,
+        .cache_id = -1,
+        .pre_cache = false,
+        .cached = false,
+    };
     int cache_id = -1;
 
     if (likely(!stop_opt)) {
@@ -499,6 +510,12 @@ IMM_CACHE_RES imm_cache_allocate(IMM_CACHE *cache, int base, int index,
     if (cache_id == -1) {
         // a new cache
         imm_log("[new]\t\n");
+        if (is_rip) {
+            cache->rip_stats.misses++;
+            if (cache->free_count == 0) {
+                cache->rip_stats.replacements++;
+            }
+        }
         cache_id = imm_cache_put(cache, base, index, scale, offset);
         res.cached = false;
     } else {
@@ -518,6 +535,9 @@ IMM_CACHE_RES imm_cache_allocate(IMM_CACHE *cache, int base, int index,
             res.cached = true;
             cache->bucket[cache_id].use_count++;
             cache_hit++;
+            if (is_rip) {
+                cache->rip_stats.hits++;
+            }
         } else {
             // repace cache
             imm_log("[cache cannot use] replace cache_id:%d\n", cache_id);
@@ -526,6 +546,10 @@ IMM_CACHE_RES imm_cache_allocate(IMM_CACHE *cache, int base, int index,
                                      offset);
             res.offset = offset;
             res.cached = false;
+            if (is_rip) {
+                cache->rip_stats.misses++;
+                cache->rip_stats.replacements++;
+            }
 
             // imm_cache_sort(cache);
         }
@@ -663,10 +687,65 @@ void imm_cache_free(IMM_CACHE *cache, int id)
 
 void imm_cache_free_all(IMM_CACHE *cache)
 {
+    if (!cache) {
+        return;
+    }
     for (int i = 0; i < cache->cache_count; i++) {
-        imm_cache_free(cache, i);
+        if (!cache->bucket[i].free) {
+            imm_cache_free(cache, i);
+        }
     }
     cache->free_count = cache->cache_count;
+    cache->itemp_allocated = false;
+}
+
+void imm_cache_invalidate_for_helper(void)
+{
+    IMM_CACHE *cache;
+    bool has_rip = false;
+
+    if (!option_imm_reg || !lsenv || !lsenv->tr_data) {
+        return;
+    }
+    cache = lsenv->tr_data->imm_cache;
+    if (!cache) {
+        return;
+    }
+    for (int i = 0; i < cache->cache_count; i++) {
+        if (!cache->bucket[i].free &&
+            cache->bucket[i].base == IMM_CACHE_RIP_BASE) {
+            has_rip = true;
+            break;
+        }
+    }
+    if (has_rip) {
+        cache->rip_stats.helper_invalidations++;
+    }
+    imm_cache_free_all(cache);
+}
+
+void imm_cache_print_rip_stats(IMM_CACHE *cache, uint64_t tb_pc)
+{
+    IMM_CACHE_RIP_STATS *stats;
+
+    if (!option_imm_rip_stats || !cache) {
+        return;
+    }
+    stats = &cache->rip_stats;
+    if (!stats->calls) {
+        return;
+    }
+    fprintf(stderr,
+            "[LATX][imm-rip] tb=0x%" PRIx64
+            " calls=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64
+            " replacements=%" PRIu64 " itemp-fallbacks=%" PRIu64
+            " direct-hits=%" PRIu64 " host-offset-hits=%" PRIu64
+            " addi-hits=%" PRIu64 " full-loads=%" PRIu64
+            " helper-invalidations=%" PRIu64 "\n",
+            tb_pc, stats->calls, stats->hits, stats->misses,
+            stats->replacements, stats->itemp_fallbacks,
+            stats->direct_hits, stats->host_offset_hits, stats->addi_hits,
+            stats->full_loads, stats->helper_invalidations);
 }
 
 void imm_cache_print_bucket(IMM_CACHE_BUCKET *bucket, int index)

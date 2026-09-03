@@ -210,6 +210,7 @@ static IR2_OPND convert_mem_helper(IR1_OPND *opnd1, IR2_OPND *arg_dest_op,
 
     pir1 = lsenv->tr_data->curr_ir1_inst;
     lsassert(pir1 != NULL);
+    addr_size = ir1_addr_size(pir1);
     offset = ir1_opnd_simm(opnd1);
     TranslationBlock *tb __attribute__((unused)) = lsenv->tr_data->curr_tb;
 
@@ -228,14 +229,16 @@ static IR2_OPND convert_mem_helper(IR1_OPND *opnd1, IR2_OPND *arg_dest_op,
 
 #ifdef CONFIG_LATX_IMM_REG
         if (dest_need_itmp) {
-            if (!option_imm_reg || !option_imm_rip || cache_skip) {
+            if (!option_imm_reg || !option_imm_rip || cache_skip ||
+                addr_size != 64 || ir1_opnd_has_seg(opnd1)) {
                 dest_op = ra_alloc_itemp();
                 imm_cache->itemp_allocated = true;
             } else {
                 /* Determine if this RIP address can be optimized */
 
                 IMM_CACHE_RES res =
-                    imm_cache_allocate(imm_cache, -100, -1, -1, offset);
+                    imm_cache_allocate(imm_cache, IMM_CACHE_RIP_BASE,
+                                       -1, -1, offset);
                 dest_op = ra_alloc_imm_reg(res.itemp_num);
                 if (ir2_opnd_is_none(&dest_op)) {
                     // itemp is not available skip directly
@@ -243,6 +246,7 @@ static IR2_OPND convert_mem_helper(IR1_OPND *opnd1, IR2_OPND *arg_dest_op,
                     imm_log("[alloc none] %d\n", res.itemp_num);
                     free_imm_reg(res.itemp_num);
                     imm_cache->itemp_allocated = true;
+                    imm_cache->rip_stats.itemp_fallbacks++;
                 } else {
                     // 1. cached?
                     if (res.cached) {
@@ -273,11 +277,15 @@ static IR2_OPND convert_mem_helper(IR1_OPND *opnd1, IR2_OPND *arg_dest_op,
                         }
                         if (host_off) {
                             *host_off = res.diff;
+                            imm_cache->rip_stats.host_offset_hits++;
                         } else if (res.diff != 0) {
                             // cache imm offset should be updated at the sametime if no host_off
                             imm_cache_update_by_diff(imm_cache, res.cache_id,
                                                      res.diff);
                             la_addi_d(dest_op, dest_op, res.diff);
+                            imm_cache->rip_stats.addi_hits++;
+                        } else {
+                            imm_cache->rip_stats.direct_hits++;
                         } 
                         return dest_op;
                     }
@@ -292,6 +300,12 @@ static IR2_OPND convert_mem_helper(IR1_OPND *opnd1, IR2_OPND *arg_dest_op,
         target_ulong call_offset __attribute__((unused)) =
                 aot_get_call_offset(offset);
         aot_load_guest_addr(dest_op, offset, LOAD_CALL_TARGET, call_offset);
+#ifdef CONFIG_LATX_IMM_REG
+        if (option_imm_reg && option_imm_rip && addr_size == 64 &&
+            !ir1_opnd_has_seg(opnd1)) {
+            imm_cache->rip_stats.full_loads++;
+        }
+#endif
         if (host_off) {
             *host_off = 0;
         }
@@ -554,7 +568,6 @@ skip:
         lsassert(arg_dest_op);
     }
 
-    addr_size = ir1_addr_size(pir1);
     return adjust_dest(dest_op, arg_dest_op, dest_size, addr_size);
 }
 

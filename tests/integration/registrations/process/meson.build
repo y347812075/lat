@@ -73,6 +73,14 @@ if 'x86_64-linux-user' in target_dirs
       ],
     }]
   endif
+  latx_integration_tests += [{
+    'name': 'test-rip-imm-cache',
+    'runner': find_program('../../test-rip-imm-cache.sh'),
+    'args': [
+      emulators['latx-x86_64'],
+      files('../../rip-imm-cache.S'),
+    ],
+  }]
   if 'CONFIG_LATX_KZT' in config_host
     latx_integration_tests += [{
       'name': 'test-int3-sigtrap-rip',
