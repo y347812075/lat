@@ -72,17 +72,27 @@ bool latc_aot_v2_invalidate_range(CPUState *cpu, uint64_t guest_start,
     return false;
 }
 
+void latc_aot_v2_consume_environment(void)
+{
+}
+
+bool latc_aot_v2_strict_enabled(void)
+{
+    return false;
+}
+
 void latc_aot_v2_report_stats(void)
 {
 }
 
-void latc_aot_v2_snapshot_jit_tbs(void)
+void latc_aot_v2_flush_pending_keys(void)
 {
 }
 
-void latc_aot_v2_snapshot_jit_tb(TranslationBlock *tb)
+void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
 {
-    (void)tb;
+    (void)guest_pc;
+    (void)cflags;
 }
 
 bool latc_aot_v2_is_file_pc(target_ulong guest_pc)

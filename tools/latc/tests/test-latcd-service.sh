@@ -208,6 +208,30 @@ assert s["queued"] == 1, s
 assert s["compiled"] == 1 and s["failed"] == 0, s
 assert s["deduplicated"] + s["cache_hits"] == 19, s
 PY
+"$latcd" --flush-all --socket "$socket" >"$phase/flush-all.client"
+grep -q '^status=0$' "$phase/flush-all.client"
+python3 - "$phase/flush-all.client" <<'PY'
+import sys
+values = dict(line.rstrip().split("=", 1)
+              for line in open(sys.argv[1]) if "=" in line)
+assert int(values["accepted_sequence"]) > 0, values
+assert values["accepted_sequence"] == values["published_sequence"], values
+PY
+stop_service
+
+start_service flush-only "$latc" --flush-only
+submit_source "$socket" "$guest" "$phase/client"
+sleep 0.2
+python3 - "$stats" <<'PY'
+import json
+import sys
+s = json.load(open(sys.argv[1]))
+assert s["compiled"] == 0, s
+assert s["queue_depth"] == 1 and s["active_jobs"] == 1, s
+PY
+"$latcd" --flush-all --socket "$socket" >"$phase/flush-all.client"
+grep -q '^status=0$' "$phase/flush-all.client"
+wait_stats 's["compiled"] == 1 and s["active_jobs"] == 0'
 stop_service
 
 start_service workers "$script_dir/fake-latc-slow.sh" --workers 2
@@ -222,20 +246,31 @@ worker_client_b=$!
 wait "$worker_client_a"
 wait "$worker_client_b"
 wait_stats 's["active_jobs"] == 2 and s["queue_depth"] == 0 and s["workers"] == 2'
+"$latcd" --flush-all --socket "$socket" >"$phase/flush-all.client"
+grep -q '^status=0$' "$phase/flush-all.client"
+python3 - "$phase/flush-all.client" <<'PY'
+import sys
+values = dict(line.rstrip().split("=", 1) for line in open(sys.argv[1]) if "=" in line)
+assert int(values["published_sequence"]) >= int(values["accepted_sequence"]), values
+PY
 wait_stats 's["compiled"] == 2 and s["active_jobs"] == 0'
 stop_service
 
-start_service same-source-workers "$script_dir/fake-latc-slow.sh" --workers 2
-python3 - "$socket" "$guest" <<'PY'
+start_service same-source-workers "$script_dir/fake-latc-slow.sh" \
+  --workers 2 --max-shards 2
+python3 - "$socket" "$guest" "$script_dir" <<'PY'
 import array
 import hashlib
 import os
+from pathlib import Path
 import socket
 import struct
 import sys
 import tempfile
 
-socket_path, source_path = sys.argv[1:]
+socket_path, source_path, script_dir = sys.argv[1:]
+sys.path.insert(0, script_dir)
+from tb_key_set import write_key_set
 source_sha = hashlib.sha256(open(source_path, "rb").read()).hexdigest()
 with open(source_path, "rb") as source:
     source.seek(24)
@@ -254,23 +289,26 @@ with open(source_path, "rb") as source:
     entry_rva = entry - min(load_vaddrs)
 
 for request_id, flags in ((101, 1), (102, 3)):
-    tbset = tempfile.NamedTemporaryFile(mode="w", delete=False)
+    if request_id == 102:
+        import time
+        time.sleep(0.2)
+    tbset = tempfile.NamedTemporaryFile(delete=False)
     try:
-        tbset.write("LATC_TBSET_V1 %s\n" % source_sha)
-        tbset.write("0x%x 0x%x\n" % (entry_rva, flags))
         tbset.close()
+        write_key_set(Path(source_path), Path(tbset.name),
+                      [(entry_rva, flags)])
         source_fd = os.open(source_path, os.O_RDONLY)
         tbset_fd = os.open(tbset.name, os.O_RDONLY)
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         connection.connect(socket_path)
-        request = struct.pack("=IHHIIQ", 0x4c415444, 1, 24,
-                              100, 1, request_id)
+        request = struct.pack("=IHHIIQQ", 0x4c415444, 2, 32,
+                              1, 100, request_id, request_id)
         connection.sendmsg(
             [request],
             [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
               array.array("i", [source_fd, tbset_fd]))])
-        response = connection.recv(248)
-        assert len(response) == 248
+        response = connection.recv(264)
+        assert len(response) == 264
         assert struct.unpack_from("=i", response, 8)[0] == 0
         connection.close()
         os.close(source_fd)
@@ -281,8 +319,17 @@ for request_id, flags in ((101, 1), (102, 3)):
         except FileNotFoundError:
             pass
 PY
+"$latcd" --flush-source --socket "$socket" "$guest" \
+  >"$phase/flush-source.client"
+grep -q '^status=0$' "$phase/flush-source.client"
+python3 - "$phase/flush-source.client" <<'PY'
+import sys
+values = dict(line.rstrip().split("=", 1) for line in open(sys.argv[1]) if "=" in line)
+assert int(values["accepted_sequence"]) > 0, values
+assert values["accepted_sequence"] == values["published_sequence"], values
+PY
 wait_stats 's["compiled"] == 2 and s["active_jobs"] == 0 and s["running_sources"] == 0'
-python3 - "$cache" "$guest" <<'PY'
+python3 - "$cache" "$guest" "$script_dir" <<'PY'
 import hashlib
 import json
 from pathlib import Path
@@ -291,6 +338,8 @@ import sys
 
 cache = Path(sys.argv[1])
 source = Path(sys.argv[2])
+sys.path.insert(0, sys.argv[3])
+from tb_key_set import read_key_set
 source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
 with source.open("rb") as elf:
     elf.seek(24)
@@ -307,23 +356,132 @@ with source.open("rb") as elf:
             load_vaddrs.append(struct.unpack_from("<Q", phdr, 16)[0])
 entry_rva = entry - min(load_vaddrs)
 tbset = cache / ".tbsets" / f"{source_sha}.tbset"
-contents = tbset.read_text()
-assert contents.splitlines() == [
-    f"LATC_TBSET_V1 {source_sha}",
-    f"0x{entry_rva:x} 0x1",
-    f"0x{entry_rva:x} 0x3",
-], contents
-tbset_sha = hashlib.sha256(contents.encode()).hexdigest()
-module_name = f"{source_sha}-{tbset_sha}.so"
-assert (cache / module_name).is_file(), module_name
+digest, sequence, records = read_key_set(tbset)
+assert digest.hex() == source_sha, digest.hex()
+assert records == [(entry_rva, 1), (entry_rva, 3)], records
+assert sequence == 2, sequence
 assert not (cache / f"{source_sha}.so").exists()
 current = json.loads((cache / f"{source_sha}.current").read_text())
-assert current["module"] == module_name, current
-assert len(list(cache.glob(f"{source_sha}-*.so"))) == 1
+assert len(current["modules"]) == 2, current
+assert all((cache / name).is_file() for name in current["modules"]), current
+assert len(list(cache.glob(f"{source_sha}-*.so"))) == len(current["modules"])
 stats = json.loads((cache.parent / "stats.json").read_text())
 assert stats["requests"] == 2, stats
 assert stats["queued"] == 2 and stats["deduplicated"] == 1, stats
 assert stats["compiled"] == 2 and stats["failed"] == 0, stats
+PY
+set +e
+LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$cache" \
+LATX_AOT_V2_LATCD_SOCKET="$socket" LATX_AOT_V2_STRICT=1 \
+LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 LATC_STRICT_AOT=1 \
+LATC_STATS_OUT="$phase/two-shards.stats.json" \
+  "$runner" "$guest" >"$phase/two-shards.stdout" \
+  2>"$phase/two-shards.stderr"
+strict_status=$?
+set -e
+test "$strict_status" -eq 42
+python3 - "$phase/two-shards.stats.json" <<'PY'
+import json
+import sys
+stats = json.load(open(sys.argv[1]))
+assert stats["runtime_file_tb_gen_calls"] == 0, stats
+assert stats["runtime_file_tb_gen_attempts"] == 0, stats
+PY
+python3 - "$socket" "$guest" "$script_dir" <<'PY'
+import array
+import os
+from pathlib import Path
+import socket
+import struct
+import sys
+import tempfile
+
+socket_path, source_path, script_dir = sys.argv[1:]
+sys.path.insert(0, script_dir)
+from tb_key_set import write_key_set
+with open(source_path, "rb") as source:
+    source.seek(24)
+    entry = struct.unpack("<Q", source.read(8))[0]
+    source.seek(32)
+    phoff = struct.unpack("<Q", source.read(8))[0]
+    source.seek(54)
+    phentsize, phnum = struct.unpack("<HH", source.read(4))
+    bases = []
+    for index in range(phnum):
+        source.seek(phoff + index * phentsize)
+        phdr = source.read(phentsize)
+        if struct.unpack_from("<I", phdr)[0] == 1:
+            bases.append(struct.unpack_from("<Q", phdr, 16)[0])
+entry_rva = entry - min(bases)
+with tempfile.NamedTemporaryFile() as tbset:
+    write_key_set(Path(source_path), Path(tbset.name), [(entry_rva + 5, 1)])
+    source_fd = os.open(source_path, os.O_RDONLY)
+    tbset_fd = os.open(tbset.name, os.O_RDONLY)
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    connection.connect(socket_path)
+    request = struct.pack("=IHHIIQQ", 0x4c415444, 2, 32, 1, 100, 103, 103)
+    connection.sendmsg([request], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                    array.array("i", [source_fd, tbset_fd]))])
+    response = connection.recv(264)
+    assert len(response) == 264
+    assert struct.unpack_from("=i", response, 8)[0] == 0
+    connection.close()
+    os.close(source_fd)
+    os.close(tbset_fd)
+PY
+"$latcd" --flush-source --socket "$socket" "$guest" \
+  >"$phase/compact-flush.client"
+grep -q '^status=0$' "$phase/compact-flush.client"
+wait_stats 's["compiled"] == 3 and s["active_jobs"] == 0'
+python3 - "$cache" "$guest" "$script_dir" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import struct
+import sys
+
+cache, source = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, sys.argv[3])
+from tb_key_set import read_key_set
+source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+with source.open("rb") as elf:
+    elf.seek(24)
+    entry = struct.unpack("<Q", elf.read(8))[0]
+    elf.seek(32)
+    phoff = struct.unpack("<Q", elf.read(8))[0]
+    elf.seek(54)
+    phentsize, phnum = struct.unpack("<HH", elf.read(4))
+    bases = []
+    for index in range(phnum):
+        elf.seek(phoff + index * phentsize)
+        phdr = elf.read(phentsize)
+        if struct.unpack_from("<I", phdr)[0] == 1:
+            bases.append(struct.unpack_from("<Q", phdr, 16)[0])
+entry_rva = entry - min(bases)
+_, sequence, records = read_key_set(cache / ".published" /
+                                    f"{source_sha}.tbset")
+assert sequence == 3, sequence
+assert records == [(entry_rva, 1), (entry_rva, 3), (entry_rva + 5, 1)], records
+current = json.loads((cache / f"{source_sha}.current").read_text())
+assert len(current["modules"]) == 1, current
+assert len(list(cache.glob(f"{source_sha}-*.so"))) == 1
+PY
+set +e
+LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$cache" \
+LATX_AOT_V2_LATCD_SOCKET="$socket" LATX_AOT_V2_STRICT=1 \
+LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 LATC_STRICT_AOT=1 \
+LATC_STATS_OUT="$phase/compacted.stats.json" \
+  "$runner" "$guest" >"$phase/compacted.stdout" \
+  2>"$phase/compacted.stderr"
+strict_status=$?
+set -e
+test "$strict_status" -eq 42
+python3 - "$phase/compacted.stats.json" <<'PY'
+import json
+import sys
+stats = json.load(open(sys.argv[1]))
+assert stats["runtime_file_tb_gen_calls"] == 0, stats
+assert stats["runtime_file_tb_gen_attempts"] == 0, stats
 PY
 stop_service
 
@@ -337,8 +495,8 @@ import time
 connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 connection.connect(sys.argv[1])
 time.sleep(1.2)
-response = connection.recv(248)
-assert len(response) == 248
+response = connection.recv(264)
+assert len(response) == 264
 assert struct.unpack_from("=i", response, 8)[0] == 1
 connection.close()
 PY
@@ -387,8 +545,8 @@ import os
 from pathlib import Path
 import sys
 cache = Path(sys.argv[1])
-b = json.loads((cache / f"{sys.argv[2]}.current").read_text())["module"]
-c = json.loads((cache / f"{sys.argv[3]}.current").read_text())["module"]
+b = json.loads((cache / f"{sys.argv[2]}.current").read_text())["modules"][-1]
+c = json.loads((cache / f"{sys.argv[3]}.current").read_text())["modules"][-1]
 assert os.stat(cache / c).st_mtime_ns < os.stat(cache / b).st_mtime_ns
 PY
 wait_stats 's["queue_full"] == 1 and s["compiled"] == 3'

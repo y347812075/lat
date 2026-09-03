@@ -95,7 +95,6 @@ void do_tb_flush(CPUState *cpu, run_on_cpu_data tb_flush_count)
 
 #if defined(CONFIG_USER_ONLY) && defined(CONFIG_LATX) && \
     defined(TARGET_X86_64)
-    latc_aot_v2_snapshot_jit_tbs();
 #endif
     qht_reset_size(&tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
     tb_flush_remove_all();

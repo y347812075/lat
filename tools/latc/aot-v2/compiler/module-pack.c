@@ -462,7 +462,7 @@ static void select_supported_tbs(ModulePack *pack)
             }
             int target = find_tb(pack, (uint64_t)relocation->addend,
                                  relocation->target);
-            if (target < 0 || !pack->supported[target]) {
+            if (target >= 0 && !pack->supported[target]) {
                 pack->supported[owner] = 0;
                 changed = 1;
                 continue;
@@ -475,16 +475,25 @@ static void select_supported_tbs(ModulePack *pack)
             uint32_t instructions[3] = {0};
             memcpy(instructions, pack->code + relocation->code_offset,
                    relocation->slots * sizeof(*instructions));
-            int direct_pair = relocation->slots == 2 &&
-                (instructions[0] & 0xfe00001fu) == 0x1e00000cu &&
-                (instructions[1] & 0xfc0003e0u) == 0x4c000180u;
-            int patchable = direct_pair ?
-                !patch_tb_target_pair(instructions,
-                    relocation->code_offset,
-                    pack->tbs[target].code_offset) :
-                !patch_runtime_target(instructions, relocation->slots,
-                    relocation->code_offset,
-                    pack->tbs[target].code_offset);
+            int patchable;
+            if (target < 0) {
+                patchable = runtime_entry(relocation->reserved) &&
+                    !patch_runtime_target(
+                        instructions, relocation->slots,
+                        relocation->code_offset,
+                        pack->runtime_trampolines + relocation->reserved * 4);
+            } else {
+                int direct_pair = relocation->slots == 2 &&
+                    (instructions[0] & 0xfe00001fu) == 0x1e00000cu &&
+                    (instructions[1] & 0xfc0003e0u) == 0x4c000180u;
+                patchable = direct_pair ?
+                    !patch_tb_target_pair(instructions,
+                        relocation->code_offset,
+                        pack->tbs[target].code_offset) :
+                    !patch_runtime_target(instructions, relocation->slots,
+                        relocation->code_offset,
+                        pack->tbs[target].code_offset);
+            }
             if (!patchable) {
                 pack->supported[owner] = 0;
                 changed = 1;
@@ -768,6 +777,11 @@ static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
                         instructions, relocation->slots,
                         relocation->code_offset,
                         pack->tbs[target].code_offset);
+            } else if (target < 0 && runtime_entry(relocation->reserved)) {
+                result = patch_runtime_target(
+                    instructions, relocation->slots,
+                    relocation->code_offset,
+                    pack->runtime_trampolines + relocation->reserved * 4);
             }
         }
         if (result) {

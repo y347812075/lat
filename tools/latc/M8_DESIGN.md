@@ -7,12 +7,13 @@
 `cflags` 直接写入永久文件格式。运行时在 AOT 查找前完成映射；编译器在生成
 native image 时对 TB 及 TB target relocation 使用相同映射。
 
-TB 集合首行为 `LATC_TBSET_V1 <source-sha256>`，后续记录为
-`RVA FLAGS`。记录按 `(RVA, FLAGS)` 排序并做集合合并，不记录执行次数。
-编译器只接受这一种格式。
+TB 集合是固定结构的二进制 `LATTBKS` 文件。文件头包含 source SHA-256、记录数
+和序号，每条记录包含 `RVA`、`FLAGS` 和必须为零的保留字段。记录按
+`(RVA, FLAGS)` 排序并做集合合并，不记录执行次数。编译器只接受这一种格式。
 
-运行时不在 AOT 查找或 JIT 生成路径写记录。进程正常退出或全局清空 TB 前，
-它扫描已有 JIT TB 表，用已验证的 ELF 映射把 PC 转换为 source SHA 和 RVA。
+运行时不在 AOT 查找或 TB 执行路径计数。每个文件 TB 完成 JIT 翻译时，把已经
+知道的 PC 和 flags 转换为 source SHA、RVA 和 semantic flags，并加入进程内集合。
+进程正常退出时提交集合，不扫描全局 JIT TB 表。
 
 ## 两级和三级 guest 地址表
 

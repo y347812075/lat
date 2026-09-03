@@ -1395,6 +1395,9 @@ int main(int argc, char **argv, char **envp)
         return 0;
     }
 
+#ifdef CONFIG_LATX
+    latc_aot_v2_consume_environment();
+#endif
     int latc_bundle = latc_bundle_inject_argv(&argc, &argv);
     if (latc_bundle < 0) {
         fprintf(stderr, "latc: invalid embedded guest: %s\n", strerror(errno));
@@ -1439,6 +1442,26 @@ int main(int argc, char **argv, char **envp)
     for (wrk = environ; *wrk != NULL; wrk++) {
         (void) envlist_setenv(envlist, *wrk);
     }
+
+#ifdef CONFIG_LATX
+    static const char *const lat_internal_environment[] = {
+        "LATC_COMPILE_TIMING", "LATC_DEBUG_CFG",
+        "LATC_DISABLE_PRETRANSLATE", "LATC_EMIT_AOT",
+        "LATC_NAMED_GUEST", "LATC_PROFILE_OUT", "LATC_STATS_OUT",
+        "LATC_STRICT_AOT", "LATC_STRICT_FILE_AOT",
+        "LATC_STRICT_PROGRAM_AOT",
+        "LATX_AOT_V2_CACHE_DIR", "LATX_AOT_V2_LATCD_SOCKET",
+        "LATX_AOT_V2_MAX_SUBMISSIONS", "LATX_AOT_V2_MODULE",
+        "LATX_AOT_V2_REPORT", "LATX_AOT_V2_SOURCE",
+        "LATX_AOT_V2_STRICT", "LATX_AOT_V2_TEST_HWCAP",
+        "LATX_AOT_V2_TEST_LIFECYCLE_ROUNDS",
+        "LATX_AOT_V2_TEST_SIGNAL_INVALIDATION_RACE",
+        "LATX_AOT_V2_TRACE_MISSES", NULL,
+    };
+    for (i = 0; lat_internal_environment[i]; i++) {
+        (void)envlist_unsetenv(envlist, lat_internal_environment[i]);
+    }
+#endif
 
 #ifdef TARGET_I386
     {
@@ -1889,7 +1912,7 @@ int main(int argc, char **argv, char **envp)
     target_cpu_copy_regs(env, regs);
 
 #ifdef CONFIG_LATX
-    if (latc_aot_v2_prepare(env) && getenv("LATX_AOT_V2_STRICT")) {
+    if (latc_aot_v2_prepare(env) && latc_aot_v2_strict_enabled()) {
         exit(EXIT_FAILURE);
     }
 #endif

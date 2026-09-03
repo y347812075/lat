@@ -56,6 +56,15 @@ static int tb_target_valid(const LatNativeTbV1 *tbs, uint64_t count,
         (left + 1 == count || tbs[left + 1].guest_pc != guest_pc);
 }
 
+static int tb_fallback_symbol_valid(uint32_t symbol)
+{
+    return symbol == LAT_NATIVE_SYMBOL_EPILOGUE_RET_ID_1 ||
+           symbol == LAT_NATIVE_SYMBOL_EPILOGUE_RET_ID_0 ||
+           symbol == LAT_NATIVE_SYMBOL_JIRL_EPILOGUE_RET_ID_1 ||
+           symbol == LAT_NATIVE_SYMBOL_JIRL_EPILOGUE_RET_ID_0 ||
+           symbol == LAT_NATIVE_SYMBOL_EPILOGUE_RET_0;
+}
+
 int lat_native_image_validate(const void *data, size_t size,
                               char *error, size_t error_size)
 {
@@ -186,7 +195,10 @@ int lat_native_image_validate(const void *data, size_t size,
              relocations[i].kind == LAT_NATIVE_RELOC_JRRA_TARGET) &&
             !tb_target_valid(tbs, header->tb_count,
                              (uint64_t)relocations[i].addend,
-                             relocations[i].target)) {
+                             relocations[i].target) &&
+            (!(header->flags & LAT_NATIVE_IMAGE_CROSS_MODULE_TARGETS) ||
+             relocations[i].kind != LAT_NATIVE_RELOC_TB_TARGET ||
+             !tb_fallback_symbol_valid(relocations[i].reserved))) {
             return invalid(error, error_size,
                            "native relocation %llu targets a missing TB",
                            (unsigned long long)i);

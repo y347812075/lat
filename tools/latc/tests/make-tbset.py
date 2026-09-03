@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Write a minimal TBSET containing an ELF entry point."""
 
-import hashlib
 from pathlib import Path
 import struct
 import sys
+
+from tb_key_set import write_key_set
 
 
 def main() -> int:
@@ -26,10 +27,8 @@ def main() -> int:
     if not load_bases or entry < min(load_bases):
         print(f"{source}: invalid ELF entry point", file=sys.stderr)
         return 1
-    digest = hashlib.sha256(data).hexdigest()
-    Path(sys.argv[2]).write_text(
-        f"LATC_TBSET_V1 {digest}\n0x{entry - min(load_bases):x} 0x1\n"
-    )
+    write_key_set(source, Path(sys.argv[2]),
+                  [(entry - min(load_bases), 1)])
     return 0
 
 

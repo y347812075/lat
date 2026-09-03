@@ -207,7 +207,7 @@ source_sha=$(sha256sum "$guest" | cut -d ' ' -f 1)
 module_name=$(python3 - "$cache/$source_sha.current" <<'PY'
 import json
 import sys
-print(json.load(open(sys.argv[1]))["module"])
+print(json.load(open(sys.argv[1]))["modules"][-1])
 PY
 )
 stale_module=$cache/$module_name

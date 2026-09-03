@@ -14586,6 +14586,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
 #ifdef TARGET_NR_execveat
     case TARGET_NR_execveat:
+        latc_aot_v2_flush_pending_keys();
         {
             char **argp, **envp, **exec_envp = NULL;
             char **exec_argp = NULL;
@@ -14838,6 +14839,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return ret;
 #endif
     case TARGET_NR_execve:
+        latc_aot_v2_flush_pending_keys();
         {
             char **argp, **envp, **exec_envp = NULL;
             char **exec_argp = NULL;

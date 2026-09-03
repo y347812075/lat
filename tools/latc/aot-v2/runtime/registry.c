@@ -7,6 +7,7 @@
 struct LatAotRegistrySnapshotV2 {
     size_t count;
     LatAotModuleInstanceV2 **instances;
+    uint64_t *prefix_max_end;
     LatAotRegistrySnapshotV2 *retired_next;
 };
 
@@ -30,7 +31,11 @@ static LatAotRegistrySnapshotV2 *snapshot_new(size_t count)
     }
     if (count) {
         snapshot->instances = calloc(count, sizeof(*snapshot->instances));
-        if (!snapshot->instances) {
+        snapshot->prefix_max_end = calloc(count,
+                                          sizeof(*snapshot->prefix_max_end));
+        if (!snapshot->instances || !snapshot->prefix_max_end) {
+            free(snapshot->prefix_max_end);
+            free(snapshot->instances);
             free(snapshot);
             return NULL;
         }
@@ -39,12 +44,58 @@ static LatAotRegistrySnapshotV2 *snapshot_new(size_t count)
     return snapshot;
 }
 
+static void snapshot_build_range_index(LatAotRegistrySnapshotV2 *snapshot)
+{
+    uint64_t maximum = 0;
+    for (size_t i = 0; i < snapshot->count; i++) {
+        if (snapshot->instances[i]->guest_end > maximum) {
+            maximum = snapshot->instances[i]->guest_end;
+        }
+        snapshot->prefix_max_end[i] = maximum;
+    }
+}
+
+static const LatAotTbV2 *instance_find_tb(
+    const LatAotModuleInstanceV2 *instance, uint64_t guest_pc, uint32_t flags)
+{
+    if (guest_pc < instance->guest_load_bias) {
+        return NULL;
+    }
+    uint64_t guest_rva = guest_pc - instance->guest_load_bias;
+    const LatAotModuleV2 *module = instance->module->descriptor;
+retry:
+    size_t left = 0;
+    size_t right = (size_t)(module->tb_end - module->tb_begin);
+    while (left < right) {
+        size_t middle = left + (right - left) / 2;
+        const LatAotTbV2 *tb = &module->tb_begin[middle];
+        if (tb->guest_rva < guest_rva ||
+            (tb->guest_rva == guest_rva && tb->flags < flags)) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+    if (left < (size_t)(module->tb_end - module->tb_begin)) {
+        const LatAotTbV2 *tb = &module->tb_begin[left];
+        if (tb->guest_rva == guest_rva && tb->flags == flags) {
+            return tb;
+        }
+    }
+    if (flags == LAT_AOT_TB_CODE64) {
+        flags |= LAT_AOT_TB_PARALLEL;
+        goto retry;
+    }
+    return NULL;
+}
+
 static void snapshot_free(LatAotRegistrySnapshotV2 *snapshot)
 {
     if (!snapshot) {
         return;
     }
     free(snapshot->instances);
+    free(snapshot->prefix_max_end);
     free(snapshot);
 }
 
@@ -150,15 +201,7 @@ int lat_aot_v2_registry_register(LatAotRegistryV2 *registry,
     replacement->instances[old->count] = instance;
     qsort(replacement->instances, replacement->count,
           sizeof(*replacement->instances), compare_instance);
-    for (size_t i = 1; i < replacement->count; i++) {
-        if (replacement->instances[i - 1]->guest_end >
-            replacement->instances[i]->guest_begin) {
-            snapshot_free(replacement);
-            pthread_mutex_unlock(&registry->write_lock);
-            errno = EEXIST;
-            return -1;
-        }
-    }
+    snapshot_build_range_index(replacement);
     atomic_store_explicit(&instance->active, 1, memory_order_release);
     if (!atomic_load_explicit(&instance->generation, memory_order_relaxed)) {
         atomic_store_explicit(&instance->generation, 1, memory_order_relaxed);
@@ -197,6 +240,7 @@ int lat_aot_v2_registry_deactivate(LatAotRegistryV2 *registry,
             replacement->instances[output++] = old->instances[i];
         }
     }
+    snapshot_build_range_index(replacement);
     atomic_store_explicit(&instance->active, 0, memory_order_release);
     atomic_fetch_add_explicit(&instance->generation, 1, memory_order_acq_rel);
     publish_snapshot(registry, replacement);
@@ -260,35 +304,13 @@ int lat_aot_v2_registry_deactivate_range(LatAotRegistryV2 *registry,
             replacement->instances[output++] = instance;
         }
     }
+    snapshot_build_range_index(replacement);
     publish_snapshot(registry, replacement);
     if (deactivated) {
         *deactivated = removed;
     }
     pthread_mutex_unlock(&registry->write_lock);
     return 0;
-}
-
-static const LatAotTbV2 *find_tb(const LatAotModuleV2 *module,
-                                 uint64_t guest_rva, uint32_t flags)
-{
-    size_t count = (size_t)(module->tb_end - module->tb_begin);
-    size_t left = 0;
-    size_t right = count;
-    while (left < right) {
-        size_t middle = left + (right - left) / 2;
-        const LatAotTbV2 *tb = &module->tb_begin[middle];
-        if (tb->guest_rva < guest_rva ||
-            (tb->guest_rva == guest_rva && tb->flags < flags)) {
-            left = middle + 1;
-        } else {
-            right = middle;
-        }
-    }
-    if (left < count && module->tb_begin[left].guest_rva == guest_rva &&
-        module->tb_begin[left].flags == flags) {
-        return &module->tb_begin[left];
-    }
-    return NULL;
 }
 
 int lat_aot_v2_registry_lookup(LatAotRegistryV2 *registry,
@@ -319,40 +341,39 @@ int lat_aot_v2_registry_lookup(LatAotRegistryV2 *registry,
             right = middle;
         }
     }
-    if (!left) {
-        errno = ENOENT;
-        goto fail;
+    while (left) {
+        size_t index = --left;
+        LatAotModuleInstanceV2 *instance = snapshot->instances[index];
+        if (guest_pc < instance->guest_end &&
+            atomic_load_explicit(&instance->active, memory_order_acquire)) {
+            const LatAotTbV2 *tb = instance_find_tb(instance, guest_pc, flags);
+            if (tb) {
+                atomic_fetch_add_explicit(&instance->readers, 1,
+                                          memory_order_seq_cst);
+                if (!atomic_load_explicit(&instance->active,
+                                          memory_order_acquire)) {
+                    atomic_fetch_sub_explicit(&instance->readers, 1,
+                                              memory_order_seq_cst);
+                } else {
+                    target->host_address =
+                        instance->module->descriptor->text_begin +
+                        tb->host_offset;
+                    target->instance = instance;
+                    target->generation = atomic_load_explicit(
+                        &instance->generation, memory_order_acquire);
+                    atomic_fetch_sub_explicit(&registry->readers, 1,
+                                              memory_order_seq_cst);
+                    return 0;
+                }
+            }
+        }
+        if (!index || snapshot->prefix_max_end[index - 1] <= guest_pc) {
+            break;
+        }
     }
-    LatAotModuleInstanceV2 *instance = snapshot->instances[left - 1];
-    atomic_fetch_add_explicit(&instance->readers, 1,
-                              memory_order_seq_cst);
-    if (guest_pc >= instance->guest_end ||
-        !atomic_load_explicit(&instance->active, memory_order_acquire)) {
-        atomic_fetch_sub_explicit(&instance->readers, 1,
-                                  memory_order_seq_cst);
-        errno = ENOENT;
-        goto fail;
-    }
-    const LatAotModuleV2 *module = instance->module->descriptor;
-    const LatAotTbV2 *tb = find_tb(module,
-        guest_pc - instance->guest_load_bias, flags);
-    if (!tb) {
-        atomic_fetch_sub_explicit(&instance->readers, 1,
-                                  memory_order_seq_cst);
-        errno = ENOENT;
-        goto fail;
-    }
-    target->host_address = module->text_begin + tb->host_offset;
-    target->instance = instance;
-    target->generation = atomic_load_explicit(&instance->generation,
-                                               memory_order_acquire);
     atomic_fetch_sub_explicit(&registry->readers, 1,
                               memory_order_seq_cst);
-    return 0;
-
-fail:
-    atomic_fetch_sub_explicit(&registry->readers, 1,
-                              memory_order_seq_cst);
+    errno = ENOENT;
     return -1;
 }
 

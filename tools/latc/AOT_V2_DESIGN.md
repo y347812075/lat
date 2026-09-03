@@ -369,11 +369,11 @@ The implementation should reuse:
 - the current runtime's x86 state ABI, syscall handling, and dispatch code;
 - LAT's existing executable mmap discovery and per-segment AOT recovery timing.
 
-`FILE` must use `LATC_TBSET_V1 SOURCE_SHA256`, followed only by ELF-relative
-`RVA FLAGS` records. It contains no execution count, and no older profile
-format is accepted. The runtime builds this set by scanning its existing JIT
-TB table at exit or before a global TB flush; normal dispatch and TB creation
-do not update an AOT counter or set.
+`FILE` is the binary `LATTBKS` format. Its header binds the set to one source
+SHA-256 and its fixed records contain only ELF-relative `RVA` and semantic
+flags. It contains no execution count and has no compatibility parser. The
+runtime records a key when a file-backed JIT TB is created, then submits the
+deduplicated set at exit. It does not scan the global JIT TB table.
 
 The static native-image container remains a test vehicle during migration. The
 new ELF writer should consume a versioned module intermediate representation,
@@ -599,8 +599,9 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
 
 - The original x86 ELF is the only user-visible launch target. `binfmt_misc`
   or explicit `latx` starts LAT; AOT modules are internal cache artifacts.
-- One source x86 ELF produces one AOT v2 ELF. Artifacts may have partial TB
-  coverage; missing variants use JIT and update a merged profile.
+- One source x86 ELF has one exact merged TB-key set and one atomic manifest.
+  The manifest may name immutable incremental shards; missing keys use JIT and
+  are added to the same set.
 - AOT and JIT use the same register and CPU-state ABI. Dispatch may return
   either kind of TB and validates cached targets with module or TCG generation.
 - A TB key contains guest RVA, x86 code mode, parallel-safe variant, and stable
@@ -626,18 +627,16 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
   PC-map lookup, closes the inherited compiler-service connection, and runs
   JIT-only until `execve()`. `execve()` replaces the host process and therefore
   starts with a newly initialized registry.
-- Profile updates are merged by source. A cold process submits profiles only
-  for sources whose base-module request succeeded. One pending profile job
-  consumes the latest merged data after the base job; updates received during
-  compilation mark it dirty and schedule one follow-up job. The compiler uses
-  an immutable profile snapshot, and artifacts are selected through an atomic
-  `current` index.
-- The per-user compiler defaults to one low-priority job. It prioritizes the
-  main executable, interpreter, startup libraries, and later plugins, with
-  configurable concurrency and resource limits.
+- TB-key updates are merged by source. `--flush-only` separates collection
+  from compilation: `FLUSH_ALL` snapshots the final union and queues each ELF
+  once. Default incremental mode uses a 100 ms quiet period and a 500 ms
+  maximum wait before compiling newly added keys.
+- The per-user compiler defaults to the online logical CPU count capped at
+  eight workers. Different source ELFs compile in parallel; one source has at
+  most one active compiler job.
 - Cache cleanup uses a capacity limit and LRU policy, preserves the current and
   previous artifact for each variant, and keeps merged profiles independently.
-- Given identical source, codegen, CPU variant, options, and profile digest,
+- Given identical source, codegen, CPU variant, options, and TB-key-set digest,
   compilation must produce a byte-identical ELF without timestamps, temporary
   paths, process addresses, or random build IDs.
 
@@ -645,13 +644,12 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
 
 - **source** is the complete x86 ELF identified by SHA-256. A pathname is only
   diagnostic and never identifies cached code.
-- **module** is one immutable AOT ELF for a source, codegen identity and optional
-  merged profile. Host module text stays mapped until process exit. A profile
-  module may omit requested TB variants when a hard module resource limit makes
-  them unsupported; missing variants use JIT. A profile module that covers none
-  of its requested variants is rejected before publication. Complex-application
-  acceptance counts every executed file-backed ELF, including missing modules,
-  and requires at least 99.9% AOT lookup coverage for each selected application.
+- **module** is one immutable AOT ELF shard for a source, codegen identity and
+  exact TB-key-set digest. Host module text stays mapped until process exit.
+  A module that omits a requested TB variant is rejected before publication.
+  Complex-application acceptance counts every executed file-backed ELF,
+  including missing modules, and requires 100% AOT lookup coverage for each
+  selected application.
   Coverage and end-to-end performance are separate gates: partial AOT cannot
   pass only because it happens to improve elapsed time.
 - **instance** is one guest mapping of a module at a specific load bias. It owns
@@ -661,9 +659,10 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
   the instance from the published range snapshot, clears `active`, increments
   generation, and invalidates dispatch entries. A cached target is usable only
   while its saved instance, generation and translation flags still match.
-- **profile** is a per-source set of observed guest targets. `latcd` serializes
-  merges for one source, compiles from an immutable snapshot, and uses that
-  snapshot's digest in a versioned module name.
+- **TB-key set** is the per-source set of observed guest RVA and semantic flag
+  pairs. It contains no execution count. `latcd` serializes merges for one
+  source, compiles an immutable snapshot, and uses its digest in the module
+  name.
 - **current** is `<source-sha>.current`, a small JSON index naming one immutable
   module and its source/codegen identity. `latcd` writes it to a private
   temporary file, changes it to read-only, calls `fsync()`, atomically renames

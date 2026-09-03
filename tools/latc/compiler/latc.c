@@ -32,7 +32,8 @@ static int tbset_program_init(const char *path, CfgProgram *program,
         ehdr.e_phoff > LONG_MAX ||
         fseek(file, (long)ehdr.e_phoff, SEEK_SET)) {
         if (error && error_size) {
-            snprintf(error, error_size, "cannot read x86-64 ELF program headers");
+            snprintf(error, error_size,
+                     "cannot read x86-64 ELF program headers");
         }
         if (file) fclose(file);
         return -1;
@@ -41,7 +42,8 @@ static int tbset_program_init(const char *path, CfgProgram *program,
     if (!phdrs || fread(phdrs, sizeof(*phdrs), ehdr.e_phnum, file) !=
                   ehdr.e_phnum) {
         if (error && error_size) {
-            snprintf(error, error_size, "cannot read x86-64 ELF program headers");
+            snprintf(error, error_size,
+                     "cannot read x86-64 ELF program headers");
         }
         free(phdrs);
         fclose(file);
@@ -50,16 +52,15 @@ static int tbset_program_init(const char *path, CfgProgram *program,
     fclose(file);
     for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
         if (phdrs[i].p_type != PT_LOAD || !(phdrs[i].p_flags & PF_X) ||
-            !phdrs[i].p_memsz) {
-            continue;
-        }
+            !phdrs[i].p_memsz) continue;
         CfgExecRange *ranges = realloc(
             program->exec_ranges,
             (program->exec_range_count + 1) * sizeof(*ranges));
         if (!ranges) {
             free(phdrs);
             cfg_program_destroy(program);
-            if (error && error_size) snprintf(error, error_size, "out of memory");
+            if (error && error_size) snprintf(error, error_size,
+                                               "out of memory");
             return -1;
         }
         program->exec_ranges = ranges;

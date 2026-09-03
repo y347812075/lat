@@ -3,6 +3,7 @@
 #include "module-inspect.h"
 
 #include "elf-validate.h"
+#include "lat-tb-key-set.h"
 
 #include <elf.h>
 #include <errno.h>
@@ -155,35 +156,22 @@ int lat_aot_v2_module_validate_tbset_file(const char *path,
                                     tbs[i].guest_rva, tbs[i].flags);
         g_hash_table_add(keys, key);
     }
-    FILE *tbset = fopen(tbset_path, "r");
-    if (!tbset) {
+    LatTbKeySet tbset;
+    if (lat_tb_key_set_read_file(tbset_path, info.note.source_sha256,
+                                 &tbset, error, error_size)) {
         g_hash_table_destroy(keys);
         g_free(contents);
-        return fail(error, error_size, "cannot read compiled TB set: %s",
-                    strerror(errno));
+        return -1;
     }
-    char *line = NULL;
-    size_t capacity = 0;
     int result = 0;
-    if (getline(&line, &capacity, tbset) < 0) {
-        result = fail(error, error_size, "compiled TB set is empty");
-    }
-    size_t record = 0;
     size_t missing = 0;
     uint64_t first_missing_rva = 0;
-    uint64_t first_missing_flags = 0;
-    while (!result && getline(&line, &capacity, tbset) >= 0) {
-        uint64_t rva, flags;
-        char extra;
-        record++;
-        if (sscanf(line, "%" SCNx64 " %" SCNx64 " %c",
-                   &rva, &flags, &extra) != 2) {
-            result = fail(error, error_size,
-                          "compiled TB set record %zu is invalid", record);
-            break;
-        }
+    uint32_t first_missing_flags = 0;
+    for (size_t record = 0; record < tbset.count; record++) {
+        uint64_t rva = tbset.keys[record].guest_rva;
+        uint32_t flags = tbset.keys[record].flags;
         char key[48];
-        snprintf(key, sizeof(key), "%016" PRIx64 ":%08" PRIx64,
+        snprintf(key, sizeof(key), "%016" PRIx64 ":%08x",
                  rva, flags);
         if (!g_hash_table_contains(keys, key)) {
             if (!missing) {
@@ -193,19 +181,15 @@ int lat_aot_v2_module_validate_tbset_file(const char *path,
             missing++;
         }
     }
-    if (!result && ferror(tbset)) {
-        result = fail(error, error_size, "cannot read compiled TB set");
-    }
-    size_t covered = record - missing;
+    size_t covered = tbset.count - missing;
     if (!result && missing) {
         result = fail(error, error_size,
                       "TB set is not fully covered: covered=%zu total=%zu "
-                      "first_missing_rva=0x%" PRIx64 " flags=0x%" PRIx64,
-                      covered, record, first_missing_rva,
+                      "first_missing_rva=0x%" PRIx64 " flags=0x%x",
+                      covered, tbset.count, first_missing_rva,
                       first_missing_flags);
     }
-    free(line);
-    fclose(tbset);
+    lat_tb_key_set_destroy(&tbset);
     g_hash_table_destroy(keys);
     g_free(contents);
     return result;

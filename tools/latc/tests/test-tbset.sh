@@ -4,13 +4,9 @@ set -eu
 latc=$1
 guest=$2
 bundle=$3
-source_sha=$(sha256sum "$guest" | awk '{print $1}')
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 tbset="$bundle.input.tbset"
-{
-    printf 'LATC_TBSET_V1 %s\n' "$source_sha"
-    printf '0x1000 0x1\n'
-    printf '0x1001 0x1\n'
-} >"$tbset"
+python3 "$script_dir/tb_key_set.py" "$guest" "$tbset" 0x1000:0x1 0x1001:0x1
 
 message=$("$latc" compile "$guest" -o "$bundle" --runner "$guest" \
     --tbset "$tbset" 2>&1)
@@ -20,10 +16,7 @@ case "$message" in
 esac
 
 outside="$bundle.outside.tbset"
-{
-    printf 'LATC_TBSET_V1 %s\n' "$source_sha"
-    printf '0x5508004504 0x1\n'
-} >"$outside"
+python3 "$script_dir/tb_key_set.py" "$guest" "$outside" 0x5508004504:0x1
 if "$latc" compile "$guest" -o "$bundle.outside" --runner "$guest" \
     --tbset "$outside" >/dev/null 2>&1; then
     echo "outside TB set address was accepted without opt-in" >&2
@@ -39,11 +32,7 @@ esac
     'import json,sys; data=json.load(sys.stdin); assert data["selected_tbs"] == 2, data'
 
 parallel="$bundle.parallel.tbset"
-{
-    printf 'LATC_TBSET_V1 %s\n' "$source_sha"
-    printf '0x1000 0x1\n'
-    printf '0x1000 0x3\n'
-} >"$parallel"
+python3 "$script_dir/tb_key_set.py" "$guest" "$parallel" 0x1000:0x1 0x1000:0x3
 message=$("$latc" compile "$guest" -o "$bundle.parallel" --runner "$guest" \
     --tbset "$parallel" 2>&1)
 case "$message" in
@@ -54,10 +43,15 @@ esac
     'import json,sys; data=json.load(sys.stdin); assert data["selected_tbs"] == 2, data'
 
 wrong="$bundle.wrong-source.tbset"
-{
-    printf 'LATC_TBSET_V1 %064d\n' 0
-    printf '0x1000 0x1\n'
-} >"$wrong"
+python3 "$script_dir/tb_key_set.py" "$guest" "$wrong" 0x1000:0x1
+python3 - "$wrong" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+d = bytearray(p.read_bytes())
+d[16:48] = bytes(32)
+p.write_bytes(d)
+PY
 if "$latc" compile "$guest" -o "$bundle.wrong-source" --runner "$guest" \
     --tbset "$wrong" >/dev/null 2>&1; then
     echo "TB set with wrong source digest was accepted" >&2

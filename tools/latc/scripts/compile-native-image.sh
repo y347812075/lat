@@ -26,6 +26,11 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 
 missing="$work/missing.tbset"
 rm -f "$output" "$missing"
+if [ "$module" -eq 1 ]; then
+    export LATC_NATIVE_ALLOW_MISSING=1
+else
+    unset LATC_NATIVE_ALLOW_MISSING
+fi
 if ! LATC_NATIVE_IMAGE_OUT="$output" LATC_NATIVE_MISSING_OUT="$missing" \
     "$(dirname "$0")/compile-aot.sh" "$latc" "$runner" "$guest" \
     "$work/compile-bundle" "$tbset" >/dev/null; then

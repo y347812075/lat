@@ -6,7 +6,7 @@
 
 #define LATCD_REQUEST_MAGIC UINT32_C(0x4c415444)
 #define LATCD_RESPONSE_MAGIC UINT32_C(0x4c415452)
-#define LATCD_PROTOCOL_VERSION 1u
+#define LATCD_PROTOCOL_VERSION 2u
 #define LATCD_RESPONSE_MESSAGE_SIZE 192u
 
 enum LatcdPriority {
@@ -15,8 +15,10 @@ enum LatcdPriority {
     LATCD_PRIORITY_STARTUP = 200,
 };
 
-enum LatcdRequestFlag {
-    LATCD_REQUEST_HAS_TBSET = 1u << 0,
+enum LatcdOperation {
+    LATCD_OP_SUBMIT_KEYS = 1,
+    LATCD_OP_FLUSH_SOURCE = 2,
+    LATCD_OP_FLUSH_ALL = 3,
 };
 
 enum LatcdStatus {
@@ -30,40 +32,43 @@ enum LatcdStatus {
     LATCD_STATUS_NEGATIVE_CACHE = 7,
 };
 
-typedef struct LatcdRequestV1 {
+typedef struct LatcdRequestV2 {
     uint32_t magic;
     uint16_t version;
     uint16_t size;
+    uint32_t operation;
     uint32_t priority;
-    uint32_t flags;
     uint64_t request_id;
-} LatcdRequestV1;
+    uint64_t sequence;
+} LatcdRequestV2;
 
-typedef struct LatcdResponseV1 {
+typedef struct LatcdResponseV2 {
     uint32_t magic;
     uint16_t version;
     uint16_t size;
     int32_t status;
     uint32_t reserved;
     uint64_t request_id;
+    uint64_t accepted_sequence;
+    uint64_t published_sequence;
     uint8_t source_sha256[32];
     char message[LATCD_RESPONSE_MESSAGE_SIZE];
-} LatcdResponseV1;
+} LatcdResponseV2;
 
-int latcd_send_request(int socket_fd, int source_fd, int tbset_fd,
-                       const LatcdRequestV1 *request,
+int latcd_send_request(int socket_fd, int source_fd, int keys_fd,
+                       const LatcdRequestV2 *request,
                        char *error, size_t error_size);
-int latcd_receive_request(int socket_fd, LatcdRequestV1 *request,
-                          int *source_fd, int *tbset_fd,
+int latcd_receive_request(int socket_fd, LatcdRequestV2 *request,
+                          int *source_fd, int *keys_fd,
                           char *error, size_t error_size);
-int latcd_send_response(int socket_fd, const LatcdResponseV1 *response,
+int latcd_send_response(int socket_fd, const LatcdResponseV2 *response,
                         char *error, size_t error_size);
-int latcd_receive_response(int socket_fd, LatcdResponseV1 *response,
+int latcd_receive_response(int socket_fd, LatcdResponseV2 *response,
                            char *error, size_t error_size);
 
-_Static_assert(sizeof(LatcdRequestV1) == 24,
+_Static_assert(sizeof(LatcdRequestV2) == 32,
                "latcd request ABI size changed");
-_Static_assert(sizeof(LatcdResponseV1) == 248,
+_Static_assert(sizeof(LatcdResponseV2) == 264,
                "latcd response ABI size changed");
 
 #endif

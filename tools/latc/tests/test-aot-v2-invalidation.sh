@@ -22,17 +22,9 @@ interp=$(readlink -f "$rootfs/lib64/ld-linux-x86-64.so.2")
 libc=$(readlink -f "$rootfs/lib/x86_64-linux-gnu/libc.so.6")
 test -f "$interp" -a -f "$libc"
 
-value_pc=$(nm -D "$plugin" | awk \
-  '$3 == "latc_invalidation_value" { print "0x" $1; exit }')
-cross_pc=$(nm -D "$plugin" | awk \
-  '$3 == "latc_invalidation_cross_page" { print "0x" $1; exit }')
-entry_pc=$(nm -D "$plugin" | awk \
-  '$3 == "latc_invalidation_entry" { print "0x" $1; exit }')
-test -n "$value_pc" -a -n "$cross_pc" -a -n "$entry_pc"
-{
-  printf 'LATC_TBSET_V1 %s\n' "$(sha256sum "$plugin" | awk '{print $1}')"
-  printf '%s 0x1\n%s 0x1\n%s 0x1\n' "$value_pc" "$cross_pc" "$entry_pc"
-} >"$work/plugin.tbset"
+python3 "$script_dir/make-symbol-tbset.py" "$plugin" \
+  '^(latc_invalidation_value|latc_invalidation_cross_page|latc_invalidation_entry)$' \
+  "$work/plugin.tbset"
 
 LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 LAT_LD_PREFIX="$rootfs" \
