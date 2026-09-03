@@ -33,6 +33,9 @@ typedef struct {
     /* Valid branch targets for the current function. */
     const uint64_t *insn_addrs;
     size_t insn_count;
+    /* One byte per function byte for constant-time local target checks. */
+    const uint8_t *insn_bitmap;
+    size_t insn_bitmap_size;
 
     /*
      * Whole-program instruction boundaries. GCC may place cold partitions in

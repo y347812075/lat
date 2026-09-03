@@ -133,6 +133,19 @@ static inline int compare_imm_cache(const void *a, const void *b)
 // sort by use frequency, range: cache_count
 inline void imm_cache_sort(IMM_CACHE *cache)
 {
+    if (cache->cache_count <= 16) {
+        for (int i = 1; i < cache->cache_count; i++) {
+            IMM_CACHE_BUCKET value = cache->bucket[i];
+            int j = i;
+            while (j > 0 &&
+                   cache->bucket[j - 1].use_count < value.use_count) {
+                cache->bucket[j] = cache->bucket[j - 1];
+                j--;
+            }
+            cache->bucket[j] = value;
+        }
+        return;
+    }
     qsort(cache->bucket, cache->cache_count, sizeof(IMM_CACHE_BUCKET),
           compare_imm_cache);
 }

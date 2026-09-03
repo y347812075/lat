@@ -186,7 +186,8 @@ static int add_parallel_dynamic_entries(const char *path, CfgProgram *program,
                 .end = pc + 1,
                 .terminator_pc = pc,
                 .selected = true,
-                .semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL,
+                .semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
+                                  CFG_TB_BOUNDED,
                 .terminator = CFG_TB_FALLTHROUGH,
             };
             uint64_t *key = g_new(uint64_t, 1);
@@ -251,7 +252,8 @@ static int add_parallel_dynamic_entries(const char *path, CfgProgram *program,
                     .end = pc + 1,
                     .terminator_pc = pc,
                     .selected = true,
-                    .semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL,
+                    .semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
+                                      CFG_TB_BOUNDED,
                     .terminator = CFG_TB_FALLTHROUGH,
                 };
                 uint64_t *key = g_new(uint64_t, 1);
@@ -262,6 +264,72 @@ static int add_parallel_dynamic_entries(const char *path, CfgProgram *program,
     }
     g_hash_table_destroy(parallel_pcs);
     g_free(contents);
+    return 0;
+}
+
+static int expand_bounded_parallel_functions(CfgProgram *program,
+                                             size_t template_count,
+                                             char *error, size_t error_size)
+{
+    GHashTable *parallel_pcs = g_hash_table_new_full(
+        g_int64_hash, g_int64_equal, g_free, NULL);
+    for (size_t i = template_count; i < program->tb_count; i++) {
+        if (!(program->tbs[i].semantic_flags & CFG_TB_PARALLEL)) continue;
+        uint64_t *pc = g_new(uint64_t, 1);
+        *pc = program->tbs[i].start;
+        g_hash_table_add(parallel_pcs, pc);
+    }
+    if (template_count > (SIZE_MAX / sizeof(*program->tbs)) -
+                         program->tb_count) {
+        g_hash_table_destroy(parallel_pcs);
+        return fail(error, error_size,
+                    "too many bounded parallel CFG blocks");
+    }
+    CfgTb *expanded = realloc(
+        program->tbs,
+        (program->tb_count + template_count) * sizeof(*expanded));
+    if (!expanded && template_count) {
+        g_hash_table_destroy(parallel_pcs);
+        return fail(error, error_size,
+                    "out of memory adding bounded parallel CFG blocks");
+    }
+    program->tbs = expanded;
+    size_t bounded_entry_count = program->tb_count;
+    for (size_t i = template_count; i < bounded_entry_count; i++) {
+        CfgTb *entry = &program->tbs[i];
+        if (!(entry->semantic_flags & CFG_TB_BOUNDED)) continue;
+        for (size_t f = 0; f < program->function_count; f++) {
+            const CfgProgramFunction *fn = &program->functions[f];
+            if (fn->start != entry->start || !fn->tb_count) continue;
+            /* Preserve the real CFG block at the function entry instead of
+             * the one-byte synthetic dynamic-symbol placeholder. */
+            CfgTb real_entry = program->tbs[fn->first_tb];
+            real_entry.selected = true;
+            real_entry.semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
+                                        CFG_TB_BOUNDED;
+            real_entry.first_edge = 0;
+            real_entry.edge_count = 0;
+            *entry = real_entry;
+            for (size_t j = 0; j < fn->tb_count; j++) {
+                const CfgTb *source = &program->tbs[fn->first_tb + j];
+                if (g_hash_table_contains(parallel_pcs, &source->start)) {
+                    continue;
+                }
+                CfgTb added = *source;
+                added.selected = true;
+                added.semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
+                                       CFG_TB_BOUNDED;
+                added.first_edge = 0;
+                added.edge_count = 0;
+                program->tbs[program->tb_count++] = added;
+                uint64_t *pc = g_new(uint64_t, 1);
+                *pc = source->start;
+                g_hash_table_add(parallel_pcs, pc);
+            }
+            break;
+        }
+    }
+    g_hash_table_destroy(parallel_pcs);
     return 0;
 }
 
@@ -366,6 +434,28 @@ int latc_tbset_apply(const char *path, const char *source_path,
             return -1;
         }
     }
+    /* A JIT hit proves that its containing function is in use.  Compile that
+     * whole function so untaken internal branches are covered, but do not use
+     * a direct call as a reason to recursively select another function: an
+     * executed call target already has its own JIT key. */
+    for (size_t f = 0; f < program->function_count; f++) {
+        const CfgProgramFunction *fn = &program->functions[f];
+        bool function_selected = false;
+        for (size_t j = 0; j < fn->tb_count; j++) {
+            if (program->tbs[fn->first_tb + j].selected) {
+                function_selected = true;
+                break;
+            }
+        }
+        if (!function_selected) continue;
+        for (size_t j = 0; j < fn->tb_count; j++) {
+            CfgTb *tb = &program->tbs[fn->first_tb + j];
+            if (!tb->selected) {
+                tb->selected = true;
+                tb->semantic_flags |= CFG_TB_BOUNDED;
+            }
+        }
+    }
     if (has_parallel && add_parallel_dynamic_entries(
             source_path, program, error, error_size)) {
         g_hash_table_destroy(templates_by_pc);
@@ -373,22 +463,16 @@ int latc_tbset_apply(const char *path, const char *source_path,
         lat_tb_key_set_destroy(&set);
         return -1;
     }
-    /* Exported function entries may be reached by runtime symbol lookup.
-     * Seed their ordinary CFG form before traversing direct edges. */
-    for (size_t i = template_count; i < program->tb_count; i++) {
-        if (program->tbs[i].semantic_flags !=
-            (CFG_TB_CODE64 | CFG_TB_PARALLEL)) {
-            continue;
-        }
-        gpointer entry = g_hash_table_lookup(
-            templates_by_pc, &program->tbs[i].start);
-        if (entry) {
-            program->tbs[GPOINTER_TO_SIZE(entry) - 1].selected = true;
-        }
+    if (has_parallel && expand_bounded_parallel_functions(
+            program, template_count, error, error_size)) {
+        g_hash_table_destroy(templates_by_pc);
+        g_hash_table_destroy(templates);
+        lat_tb_key_set_destroy(&set);
+        return -1;
     }
-    /* Starting from addresses observed by JIT and exported entries, add every statically reachable
-     * CFG block.  This covers untaken direct branches without compiling
-     * unrelated decoder false positives elsewhere in the ELF. */
+    /* Starting from addresses observed by JIT, add every statically reachable
+     * CFG block.  Exported functions are emitted separately as bounded bodies
+     * so their calls do not recursively select the whole program. */
     GQueue reachable = G_QUEUE_INIT;
     for (size_t i = 0; i < template_count; i++) {
         if (program->tbs[i].selected) {
@@ -401,12 +485,14 @@ int latc_tbset_apply(const char *path, const char *source_path,
         for (size_t edge_index = tb->first_edge;
              edge_index < tb->first_edge + tb->edge_count; edge_index++) {
             const CfgProgramEdge *edge = &program->edges[edge_index];
-            if (edge->resolution != CFG_EDGE_STATIC) continue;
+            if (edge->resolution != CFG_EDGE_STATIC ||
+                edge->kind == CFG_EDGE_CALL) continue;
             gpointer target = g_hash_table_lookup(templates_by_pc, &edge->to);
             if (!target) continue;
             size_t target_index = GPOINTER_TO_SIZE(target) - 1;
             if (!program->tbs[target_index].selected) {
                 program->tbs[target_index].selected = true;
+                program->tbs[target_index].semantic_flags |= CFG_TB_BOUNDED;
                 g_queue_push_tail(&reachable,
                                   GSIZE_TO_POINTER(target_index + 1));
             }
@@ -415,10 +501,19 @@ int latc_tbset_apply(const char *path, const char *source_path,
     if (has_parallel && template_count) {
         GHashTable *parallel_pcs = g_hash_table_new_full(
             g_int64_hash, g_int64_equal, g_free, NULL);
+        GHashTable *bounded_pcs = g_hash_table_new_full(
+            g_int64_hash, g_int64_equal, g_free, NULL);
         for (size_t i = template_count; i < program->tb_count; i++) {
-            if (program->tbs[i].selected &&
-                program->tbs[i].semantic_flags ==
-                    (CFG_TB_CODE64 | CFG_TB_PARALLEL)) {
+            if (!program->tbs[i].selected ||
+                !(program->tbs[i].semantic_flags & CFG_TB_PARALLEL)) {
+                continue;
+            }
+            if (program->tbs[i].semantic_flags & CFG_TB_BOUNDED) {
+                uint64_t *pc = g_new(uint64_t, 1);
+                *pc = program->tbs[i].start;
+                g_hash_table_insert(bounded_pcs, pc,
+                                    GSIZE_TO_POINTER(i + 1));
+            } else {
                 uint64_t *pc = g_new(uint64_t, 1);
                 *pc = program->tbs[i].start;
                 g_hash_table_add(parallel_pcs, pc);
@@ -428,6 +523,7 @@ int latc_tbset_apply(const char *path, const char *source_path,
             program->tbs,
             (program->tb_count + template_count) * sizeof(*expanded));
         if (!expanded) {
+            g_hash_table_destroy(bounded_pcs);
             g_hash_table_destroy(parallel_pcs);
             g_hash_table_destroy(templates_by_pc);
             g_hash_table_destroy(templates);
@@ -437,17 +533,32 @@ int latc_tbset_apply(const char *path, const char *source_path,
         }
         program->tbs = expanded;
         for (size_t i = 0; i < template_count; i++) {
-            if (!program->tbs[i].selected ||
-                g_hash_table_contains(parallel_pcs,
-                                      &program->tbs[i].start)) {
+            if (!program->tbs[i].selected) {
+                continue;
+            }
+            if (g_hash_table_contains(parallel_pcs,
+                                      &program->tbs[i].start)) continue;
+            gpointer bounded = g_hash_table_lookup(
+                bounded_pcs, &program->tbs[i].start);
+            if (bounded) {
+                if (program->tbs[i].semantic_flags & CFG_TB_BOUNDED) {
+                    continue;
+                }
+                size_t index = GPOINTER_TO_SIZE(bounded) - 1;
+                program->tbs[index].semantic_flags &= ~CFG_TB_BOUNDED;
+                uint64_t *pc = g_new(uint64_t, 1);
+                *pc = program->tbs[i].start;
+                g_hash_table_add(parallel_pcs, pc);
                 continue;
             }
             CfgTb added = program->tbs[i];
-            added.semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL;
+            added.semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
+                (program->tbs[i].semantic_flags & CFG_TB_BOUNDED);
             added.first_edge = 0;
             added.edge_count = 0;
             program->tbs[program->tb_count++] = added;
         }
+        g_hash_table_destroy(bounded_pcs);
         g_hash_table_destroy(parallel_pcs);
     }
     g_hash_table_destroy(templates_by_pc);

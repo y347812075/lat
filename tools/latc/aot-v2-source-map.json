@@ -25,9 +25,11 @@
     {"source": "accel/tcg/cpu-exec.c", "target": "tools/latc/lat/accel/tcg/cpu-exec.c"},
     {"source": "target/i386/latx/latx-config.c", "target": "tools/latc/lat/target/i386/latx/latx-config.c"},
     {"source": "include/exec/fasttb.h", "target": "tools/latc/lat/include/exec/fasttb.h"},
+    {"source": "include/exec/exec-all.h", "target": "tools/latc/lat/include/exec/exec-all.h"},
     {"source": "target/i386/cpu.h", "target": "tools/latc/lat/target/i386/cpu.h"},
     {"source": "target/i386/latx/include/lsenv.h", "target": "tools/latc/lat/target/i386/latx/include/lsenv.h"},
     {"source": "target/i386/latx/translator/translate.c", "target": "tools/latc/lat/target/i386/latx/translator/translate.c"},
+    {"source": "target/i386/latx/ir2/ir2-assemble.c", "target": "tools/latc/lat/target/i386/latx/ir2/ir2-assemble.c"},
 
     {"source": "tools/latc/aot-v2/include/lat-aot-v2.h", "target": "include/lat-aot-v2.h"},
     {"source": "tools/latc/aot-v2/include/latcd-protocol.h", "target": "include/latcd-protocol.h"},

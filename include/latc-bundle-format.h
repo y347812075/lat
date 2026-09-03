@@ -5,8 +5,11 @@
 
 #define LATC_BUNDLE_MAGIC "LATCBND1"
 #define LATC_CFG_MAGIC "LATCCFG1"
-#define LATC_BUNDLE_VERSION 3u
+#define LATC_BUNDLE_VERSION 4u
 #define LATC_CFG_VERSION 5u
+
+/* Compiler-only provenance carried from CFG selection into translation. */
+#define LATC_CFG_TB_BOUNDED (1u << 2)
 
 typedef struct __attribute__((packed)) LatcDiskCfgHeader {
     char magic[8];

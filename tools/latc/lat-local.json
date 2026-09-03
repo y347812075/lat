@@ -92,7 +92,7 @@
     {
       "path": "lat/target/i386/latx/sbt/aot.c",
       "generated": true,
-      "reason": "provide opt-in diagnostics for static AOT coverage and transactional relocation retry state"
+      "reason": "provide AOT coverage diagnostics, parallel translation, bounded CFG bodies, and indexed successor completion without repeated full-TB scans"
     },
     {
       "path": "lat/target/i386/latx/include/aot.h",
@@ -117,7 +117,7 @@
     {
       "path": "lat/target/i386/latx/optimization/tu.c",
       "generated": true,
-      "reason": "roll back relocation and search state before retrying a TU"
+      "reason": "roll back relocation and search state before retrying a TU, and preserve bounded AOT selection provenance"
     },
     {
       "path": "lat/accel/tcg/cpu-exec.c",
@@ -135,6 +135,11 @@
       "reason": "define generation-checked AOT v2 fast jump entries alongside the original LAT cache"
     },
     {
+      "path": "lat/include/exec/exec-all.h",
+      "generated": true,
+      "reason": "mark compiler-added function-body TBs so AOT translation does not recursively follow their call graph"
+    },
+    {
       "path": "lat/target/i386/cpu.h",
       "generated": true,
       "reason": "hold the per-thread AOT v2 fast cache and active module context"
@@ -147,7 +152,12 @@
     {
       "path": "lat/target/i386/latx/translator/translate.c",
       "generated": true,
-      "reason": "check module context and generation before an AOT v2 indirect fast jump and allocate per-thread AOT translation scratch buffers"
+      "reason": "check module context and generation before an AOT v2 indirect fast jump, allocate per-thread AOT translation scratch buffers, and avoid accessor calls in the AOT translation hot loop"
+    },
+    {
+      "path": "lat/target/i386/latx/ir2/ir2-assemble.c",
+      "generated": true,
+      "reason": "avoid repeated opcode accessor calls while assembling AOT native instructions"
     },
     {
       "path": "lat/target/i386/latx/include/capstone_git.h",
@@ -167,11 +177,11 @@
     },
     {
       "path": "lat/target/i386/latx/latx-disassemble-trace/capstone_git.c",
-      "reason": "give each AOT translation thread independent Capstone handles"
+      "reason": "give each AOT translation thread independent Capstone handles and convert only decoded operands"
     },
     {
       "path": "lat/target/i386/latx/optimization/imm-cache.c",
-      "reason": "make immediate-cache translation scratch state thread-local"
+      "reason": "make immediate-cache translation scratch state thread-local and use insertion sort for its usual small cache"
     },
     {
       "path": "lat/target/i386/latx/optimization/ts.c",
