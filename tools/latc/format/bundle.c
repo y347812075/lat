@@ -45,6 +45,7 @@ static int write_cfg(FILE *out, const CfgProgram *p, uint64_t *size_out)
         .edge_count = p->edge_count,
         .exec_range_count = p->exec_range_count,
         .string_size = string_size,
+        .flags = p->exact_selection ? LATC_CFG_FLAG_EXACT_SELECTION : 0,
     };
     if (fwrite(&h, sizeof(h), 1, out) != 1) return -1;
     uint64_t name_offset = 0;

@@ -88,6 +88,38 @@ malformed:
     return -1;
 }
 
+int latc_tbset_read_leaders(const char *path, const char *source_path,
+                            uint64_t **leaders, size_t *leader_count,
+                            char *error, size_t error_size)
+{
+    uint8_t digest[32];
+    uint64_t load_base;
+    LatTbKeySet set;
+    if (!leaders || !leader_count ||
+        source_digest(source_path, digest, error, error_size) ||
+        source_load_base(source_path, &load_base, error, error_size) ||
+        lat_tb_key_set_read_file(path, digest, &set, error, error_size)) {
+        return -1;
+    }
+    uint64_t *result = calloc(set.count, sizeof(*result));
+    if (!result && set.count) {
+        lat_tb_key_set_destroy(&set);
+        return fail(error, error_size, "out of memory reading TB leaders");
+    }
+    for (size_t i = 0; i < set.count; i++) {
+        if (set.keys[i].guest_rva > UINT64_MAX - load_base) {
+            free(result);
+            lat_tb_key_set_destroy(&set);
+            return fail(error, error_size, "TB key address overflows");
+        }
+        result[i] = set.keys[i].guest_rva + load_base;
+    }
+    *leaders = result;
+    *leader_count = set.count;
+    lat_tb_key_set_destroy(&set);
+    return 0;
+}
+
 static int add_parallel_dynamic_entries(const char *path, CfgProgram *program,
                                         char *error, size_t error_size)
 {
@@ -153,7 +185,7 @@ static int add_parallel_dynamic_entries(const char *path, CfgProgram *program,
             if (g_hash_table_contains(parallel_pcs, &pc)) {
                 continue;
             }
-            program->tbs[program->tb_count++] = (CfgTb) {
+            CfgTb added = {
                 .start = pc,
                 .end = pc + 1,
                 .terminator_pc = pc,
@@ -161,6 +193,15 @@ static int add_parallel_dynamic_entries(const char *path, CfgProgram *program,
                 .semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL,
                 .terminator = CFG_TB_FALLTHROUGH,
             };
+            for (size_t j = 0; j < program->tb_count; j++) {
+                if (program->tbs[j].start == pc) {
+                    added = program->tbs[j];
+                    added.selected = true;
+                    added.semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL;
+                    break;
+                }
+            }
+            program->tbs[program->tb_count++] = added;
             uint64_t *key = g_new(uint64_t, 1);
             *key = pc;
             g_hash_table_add(parallel_pcs, key);
@@ -232,8 +273,6 @@ int latc_tbset_apply(const char *path, const char *source_path,
                 };
             added.selected = true;
             added.semantic_flags = key->flags;
-            added.first_edge = 0;
-            added.edge_count = 0;
             program->tbs[program->tb_count++] = added;
             miss++;
         } else if (ignore_outside_exec) {
@@ -258,5 +297,110 @@ int latc_tbset_apply(const char *path, const char *source_path,
     if (matched) *matched = hit;
     if (unmatched) *unmatched = miss;
     if (ignored) *ignored = skip;
+    return 0;
+}
+
+typedef struct TbIdentity {
+    uint64_t pc;
+    uint32_t flags;
+} TbIdentity;
+
+static guint tb_identity_hash(gconstpointer opaque)
+{
+    const TbIdentity *key = opaque;
+    return (guint)(key->pc ^ (key->pc >> 32) ^ key->flags);
+}
+
+static gboolean tb_identity_equal(gconstpointer left, gconstpointer right)
+{
+    const TbIdentity *a = left, *b = right;
+    return a->pc == b->pc && a->flags == b->flags;
+}
+
+static size_t tb_map_find(GHashTable *map, uint64_t pc, uint32_t flags)
+{
+    TbIdentity key = { .pc = pc, .flags = flags };
+    gpointer value = g_hash_table_lookup(map, &key);
+    return value ? (size_t)(uintptr_t)value - 1 : SIZE_MAX;
+}
+
+static void tb_map_insert(GHashTable *map, const CfgTb *tb, size_t index)
+{
+    TbIdentity *key = g_new(TbIdentity, 1);
+    *key = (TbIdentity) { .pc = tb->start, .flags = tb->semantic_flags };
+    g_hash_table_replace(map, key, (gpointer)(uintptr_t)(index + 1));
+}
+
+int latc_tbset_expand_cfg(CfgProgram *program,
+                          char *error, size_t error_size)
+{
+    size_t queue_count = 0, queue_pos = 0;
+    size_t queue_cap = program->tb_count ? program->tb_count : 1;
+    size_t *queue = malloc(queue_cap * sizeof(*queue));
+    if (!queue) return fail(error, error_size,
+                            "out of memory expanding TB CFG");
+    GHashTable *map = g_hash_table_new_full(tb_identity_hash,
+                                            tb_identity_equal, g_free, NULL);
+    for (size_t i = 0; i < program->tb_count; i++) {
+        tb_map_insert(map, &program->tbs[i], i);
+        if (program->tbs[i].selected) queue[queue_count++] = i;
+    }
+    while (queue_pos < queue_count) {
+        size_t source_index = queue[queue_pos++];
+        CfgTb source = program->tbs[source_index];
+        for (size_t e = source.first_edge;
+             e < source.first_edge + source.edge_count; e++) {
+            if (e >= program->edge_count) {
+                free(queue);
+                g_hash_table_destroy(map);
+                return fail(error, error_size, "invalid TB CFG edge range");
+            }
+            const CfgProgramEdge *edge = &program->edges[e];
+            if (!edge->to || edge->resolution != CFG_EDGE_STATIC) continue;
+            size_t target = tb_map_find(map, edge->to,
+                                        source.semantic_flags);
+            if (target == SIZE_MAX) {
+                size_t template = tb_map_find(map, edge->to, CFG_TB_CODE64);
+                if (template == SIZE_MAX) continue;
+                if (program->tb_count == SIZE_MAX / sizeof(*program->tbs)) {
+                    free(queue);
+                    g_hash_table_destroy(map);
+                    return fail(error, error_size, "too many expanded TBs");
+                }
+                CfgTb *next = realloc(program->tbs,
+                    (program->tb_count + 1) * sizeof(*next));
+                if (!next) {
+                    free(queue);
+                    g_hash_table_destroy(map);
+                    return fail(error, error_size,
+                                "out of memory expanding TB CFG");
+                }
+                program->tbs = next;
+                target = program->tb_count++;
+                program->tbs[target] = program->tbs[template];
+                program->tbs[target].selected = false;
+                program->tbs[target].semantic_flags = source.semantic_flags;
+                tb_map_insert(map, &program->tbs[target], target);
+            }
+            if (program->tbs[target].selected) continue;
+            program->tbs[target].selected = true;
+            if (queue_count == queue_cap) {
+                size_t next_cap = queue_cap * 2;
+                size_t *next = realloc(queue, next_cap * sizeof(*next));
+                if (!next) {
+                    free(queue);
+                    g_hash_table_destroy(map);
+                    return fail(error, error_size,
+                                "out of memory expanding TB CFG");
+                }
+                queue = next;
+                queue_cap = next_cap;
+            }
+            queue[queue_count++] = target;
+        }
+    }
+    free(queue);
+    g_hash_table_destroy(map);
+    program->exact_selection = true;
     return 0;
 }

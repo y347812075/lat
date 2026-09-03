@@ -56,6 +56,16 @@ static int cmp_addr(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
+static size_t addr_lower_bound(const AddrVec *v, uint64_t addr)
+{
+    size_t lo = 0, hi = v->n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (v->v[mid] < addr) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+}
+
 static void sort_unique(AddrVec *v)
 {
     if (!v->n) {
@@ -225,8 +235,9 @@ static void extend_symbol_fallthroughs(const ElfFile *elf, FuncVec *funcs)
 static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
                             const IjmpSection *sections, size_t section_count,
                             const AddrVec *program_insns,
-                            const AddrVec *direct_targets, const FuncSym *fn,
-                            bool resolve_jt, CfgProgram *out,
+                            const AddrVec *direct_targets,
+                            const AddrVec *extra_leaders, const FuncSym *fn,
+                            const CfgAnalyzeOptions *options, CfgProgram *out,
                             size_t *tb_cap, size_t *edge_cap,
                             CfgProgramFunction *result)
 {
@@ -261,6 +272,15 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
     };
 
     if (!addr_push(&leaders, fn->addr)) goto done;
+    if (extra_leaders) {
+        size_t i = addr_lower_bound(extra_leaders, fn->addr);
+        for (; i < extra_leaders->n &&
+               addr_in_function(extra_leaders->v[i], fn); i++) {
+            if (!addr_push(&leaders, extra_leaders->v[i])) {
+                goto done;
+            }
+        }
+    }
     for (size_t i = 0; i < direct_targets->n; i++) {
         if (addr_in_function(direct_targets->v[i], fn) &&
             !addr_push(&leaders, direct_targets->v[i])) {
@@ -274,7 +294,8 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
             !addr_push(&leaders, in->target)) goto done;
         if (in->kind != INSN_NORMAL && next < fn->addr + fn->size &&
             !addr_push(&leaders, next)) goto done;
-        if (resolve_jt && (in->kind == INSN_IJMP ||
+        if ((!options || options->resolve_jump_tables) &&
+            (in->kind == INSN_IJMP ||
                            in->kind == INSN_ICALL)) {
             IjmpResult jt;
             if (ijmp_resolve_jump_table(&ijmp, buf, size, in->off, &jt)) {
@@ -329,7 +350,7 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
         case INSN_ICALL:
         {
             IjmpResult jt;
-            bool found = resolve_jt &&
+            bool found = (!options || options->resolve_jump_tables) &&
                 ijmp_resolve_jump_table(&ijmp, buf, size, last->off, &jt);
             if (found) {
                 for (size_t j = 0; j < jt.count; j++) {
@@ -353,7 +374,7 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
             break;
         case INSN_IJMP: {
             IjmpResult jt;
-            bool found = resolve_jt &&
+            bool found = (!options || options->resolve_jump_tables) &&
                 ijmp_resolve_jump_table(&ijmp, buf, size, last->off, &jt);
             if (found) {
                 out->resolved_jump_tables++;
@@ -398,7 +419,7 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     memset(program, 0, sizeof(*program));
     ElfFile elf = {0};
     FuncVec funcs = {0};
-    AddrVec program_insns = {0}, direct_targets = {0};
+    AddrVec program_insns = {0}, direct_targets = {0}, extra_leaders = {0};
     IjmpSection *sections = NULL;
     const char *source = NULL;
     size_t function_cap = 0, tb_cap = 0, edge_cap = 0;
@@ -411,6 +432,14 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     funcs_load_all(&elf, &funcs, &source);
     (void)source;
     extend_symbol_fallthroughs(&elf, &funcs);
+    if (options) {
+        for (size_t i = 0; i < options->extra_leader_count; i++) {
+            if (!addr_push(&extra_leaders, options->extra_leaders[i])) {
+                goto out;
+            }
+        }
+        sort_unique(&extra_leaders);
+    }
     if (collect_program_insns_and_direct_targets(
             &elf, &funcs, &program_insns, &direct_targets)) goto out;
     size_t section_count = 0;
@@ -436,8 +465,9 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
         };
         if (!fn.name) goto out;
         int ar = analyze_function(&elf, &funcs, sections, section_count,
-                                  &program_insns, &direct_targets, &funcs.v[i],
-                                  !options || options->resolve_jump_tables,
+                                  &program_insns, &direct_targets,
+                                  &extra_leaders, &funcs.v[i],
+                                  options,
                                   program, &tb_cap, &edge_cap, &fn);
         if (ar < 0) { free(fn.name); goto out; }
         if (ar > 0) { free(fn.name); continue; }
@@ -449,6 +479,7 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
 out:
     free(program_insns.v);
     free(direct_targets.v);
+    free(extra_leaders.v);
     free(sections);
     funcs_free(&funcs);
     elf_free(&elf);
