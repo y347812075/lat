@@ -20,6 +20,8 @@
 #include "latx-smc.h"
 #include "jrra.h"
 #include "latx-native-asm.h"
+#include "qemu.h"
+#include "ts.h"
 
 extern void *helper_tb_lookup_ptr(CPUArchState *);
 static int ss_generate_match_fail_native_code(void* code_buf);
@@ -168,31 +170,42 @@ void tr_fini(bool check_the_extension)
 /* func to access QEMU's data */
 static inline uint8_t cpu_read_code_via_qemu(void *cpu, ADDRX pc)
 {
+    if (aot_parallel_translate) {
+        return *(const uint8_t *)g2h_untagged(pc);
+    }
     return cpu_ldub_code((CPUX86State *)cpu, (target_ulong)pc);
 }
 
 #ifdef CONFIG_LATX_TU
-static char insn_info[MAX_IR1_IN_TU * IR1_INST_SIZE] = {0};
-static IR1_INST ir1_list_rel[MAX_IR1_IN_TU];
+/*
+ * These buffers are tens of MiB.  Keeping them in static TLS leaves newly
+ * created AOT compiler threads with almost no usable stack on LoongArch.
+ */
+static __thread char *insn_info;
+static __thread IR1_INST *ir1_list_rel;
 #else
 /* we creat an array to fill all 255 ir1's info. */
 #ifdef CONFIG_LATX_TU
-static char insn_info[MAX_TB_IN_TU * MAX_IR1_NUM_PER_TB * IR1_INST_SIZE] = {0};
+static __thread char insn_info[MAX_TB_IN_TU * MAX_IR1_NUM_PER_TB * IR1_INST_SIZE];
 #else
-static char insn_info[MAX_IR1_NUM_PER_TB * IR1_INST_SIZE] = {0};
+static __thread char insn_info[MAX_IR1_NUM_PER_TB * IR1_INST_SIZE];
 #endif
-static IR1_INST ir1_list[MAX_IR1_NUM_PER_TB];
+static __thread IR1_INST ir1_list[MAX_IR1_NUM_PER_TB];
 #endif
 
 IR1_INST *get_ir1_list(struct TranslationBlock *tb, ADDRX pc, int max_insns)
 {
-    static uint8_t inst_cache[TCG_MAX_INSNS];
+    static __thread uint8_t inst_cache[TCG_MAX_INSNS];
     uint8_t  *pins = inst_cache;
     IR1_INST *pir1 = NULL;
     void *pir1_base = insn_info;
     ADDRX start_pc = pc;
 
 #ifdef CONFIG_LATX_TU
+    if (unlikely(insn_info == NULL)) {
+        insn_info = g_malloc(MAX_IR1_IN_TU * IR1_INST_SIZE);
+        ir1_list_rel = g_new(IR1_INST, MAX_IR1_IN_TU);
+    }
     uint32_t *ir1_num_in_tu = &(tu_data->ir1_num_in_tu);
     if (tb->s_data->tu_tb_mode == TB_GEN_CODE) {
         *ir1_num_in_tu = 0;

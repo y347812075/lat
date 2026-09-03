@@ -6,6 +6,7 @@
 
 #include "accel/tcg/internal.h"
 #include "exec/exec-all.h"
+#include "aot.h"
 #include "jrra.h"
 #include "tcg/tcg.h"
 
@@ -671,6 +672,36 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
         pending_tb_hash, pending_tb_equal, g_free, NULL);
     GArray *pending = g_array_new(FALSE, FALSE, sizeof(LatcPendingTb));
     uint64_t pretranslate_started = monotonic_ns();
+
+    if (getenv("LATC_EMIT_AOT")) {
+        for (uint64_t i = 0; i < header.tb_count; i++) {
+            LatcDiskTb disk_tb;
+            if (read_cfg(&disk_tb, sizeof(disk_tb),
+                         tb_offset + i * sizeof(disk_tb))) {
+                failed++;
+                continue;
+            }
+            if (!disk_tb.selected) {
+                continue;
+            }
+            selected++;
+            uint64_t pc = disk_tb.start + load_bias;
+            if (pc < disk_tb.start || !program_address(pc)) {
+                failed++;
+                continue;
+            }
+            uint32_t tb_cflags = tbset_cflags(cflags,
+                                              disk_tb.semantic_flags);
+            aot_compile_key_add(pc, tb_cflags, IS_CODE64);
+        }
+        stat_cfg_tbs = header.tb_count;
+        stat_selected = selected;
+        stat_pretranslated = selected;
+        stat_failed = failed;
+        pretranslation_complete = true;
+        write_stats();
+        return;
+    }
 
     /* The TB set is authoritative.  Do not compile the rest of the static CFG. */
     for (uint64_t i = 0; i < header.tb_count; i++) {

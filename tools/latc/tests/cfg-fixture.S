@@ -73,6 +73,27 @@ jump_table_cold_case5:
     ret
 .size jump_table_cold, .-jump_table_cold
 
+.type computed_stride_source,@function
+computed_stride_source:
+    and $3, %edi
+    shl $4, %rdi
+    lea computed_stride_case0(%rip), %rax
+    add %rax, %rdi
+    jmp *%rdi
+    .p2align 4
+computed_stride_case0:
+    ret
+    .p2align 4
+computed_stride_case1:
+    ret
+    .p2align 4
+computed_stride_case2:
+    ret
+    .p2align 4
+computed_stride_case3:
+    ret
+.size computed_stride_source, .-computed_stride_source
+
 .section .rodata
 .align 4
 jump_table:

@@ -74,8 +74,7 @@ static uint32_t default_worker_count(void)
     if (online < 1) {
         return 1;
     }
-    return online > LATCD_AUTO_WORKERS_MAX ?
-           LATCD_AUTO_WORKERS_MAX : (uint32_t)online;
+    return MIN((uint32_t)online, LATCD_AUTO_WORKERS_MAX);
 }
 
 typedef struct LatcdJob {
@@ -912,13 +911,20 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     }
     char *library_path = g_strdup_printf("LD_LIBRARY_PATH=%s",
                                          config->runtime_dir);
+    char *temporary_path = g_strdup_printf("TMPDIR=%s/.tmp",
+                                            config->cache_dir);
     char *guest_prefix = config->x86_rootfs ?
         g_strdup_printf("LAT_LD_PREFIX=%s", config->x86_rootfs) : NULL;
     char *compile_timing = getenv("LATCD_COMPILE_TIMING") ?
         "LATC_COMPILE_TIMING=1" : NULL;
+    long online = sysconf(_SC_NPROCESSORS_ONLN);
+    uint32_t aot_thread_count = online > 0 ?
+        MAX(1u, MIN(8u, (uint32_t)online / config->workers)) : 1u;
+    char *aot_threads = g_strdup_printf("LATC_AOT_THREADS=%u",
+                                         aot_thread_count);
     char *environment[] = {
         "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", library_path,
-        guest_prefix, compile_timing, NULL,
+        temporary_path, aot_threads, guest_prefix, compile_timing, NULL,
     };
     pid_t child = fork();
     if (child == 0) {
@@ -944,7 +950,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     }
     if (child < 0) {
         g_free(library_path);
+        g_free(temporary_path);
         g_free(guest_prefix);
+        g_free(aot_threads);
         return fail(error, error_size, "cannot start compiler: %s",
                     strerror(errno));
     }
@@ -972,7 +980,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     }
     compiler_process_groups[worker_index] = 0;
     g_free(library_path);
+    g_free(temporary_path);
     g_free(guest_prefix);
+    g_free(aot_threads);
     if (waited < 0) {
         return fail(error, error_size, "cannot wait for compiler: %s",
                     strerror(errno));

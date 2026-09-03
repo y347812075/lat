@@ -112,7 +112,7 @@ extern int GPR_USEDEF_TO_SAVE;
 extern int FPR_USEDEF_TO_SAVE;
 extern int XMM_USEDEF_TO_SAVE;
 #endif
-csh handle[2];
+__thread csh handle[2];
 
 #ifdef CONFIG_LATX_CAPSTONE_GIT
 int (*la_disa_v1)(const uint8_t *code, size_t code_size,

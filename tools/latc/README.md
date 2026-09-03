@@ -303,13 +303,22 @@ output. Its fixed header contains `LATTBKS`, the format version, source
 SHA-256, record count, and sequence. Each fixed-size record contains an
 ELF-relative virtual address and semantic translation flags. It deliberately
 contains no execution count. Pass it with
-`--tbset FILE`. TB-set compilation reads only the ELF program headers instead
-of decoding the whole executable first. During that same runner process it
-adds the direct branch targets required by selected TBs, so module creation
-does not need repeated whole-program translation rounds. A wrong source
+`--tbset FILE`. TB-set compilation decodes and translates the ELF control-flow
+graph once. The observed `(RVA, flags)` entries add dynamic targets and
+translation variants that static decoding cannot derive. This includes CFG
+paths that were not executed during collection, x86-64 lazy PLT binding
+entries, and validated fixed-stride code-table targets. It avoids repeated
+whole-program translation rounds. A wrong source
 digest, an address outside executable sections, an unsupported flag, or a
 malformed header or record fails compilation. There is no text profile format
 or compatibility parser.
+
+The native translation stage partitions the final TB set at page/TU boundaries
+and translates the partitions concurrently. `LATC_AOT_THREADS=N` selects 1 to
+32 translation threads; when unset, direct compilation uses up to 8 online
+CPUs. `latcd` runs up to 8 ELF compile jobs concurrently by default and divides
+the online CPUs among those jobs, so module-level and within-module parallelism
+share one CPU budget. Explicit thread counts are honored, including 1 and 2.
 
 The module tables are emitted as binary data and included directly by the
 assembler. They are not formatted as a large C source file for the host C

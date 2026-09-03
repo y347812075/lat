@@ -990,7 +990,9 @@ static void page_lock_pair(PageDesc **ret_p1, tb_page_addr_t phys1,
     tb_page_addr_t page1;
     tb_page_addr_t page2;
 
-    assert_memory_lock();
+    if (!aot_parallel_translate) {
+        assert_memory_lock();
+    }
     g_assert(phys1 != -1);
 
     page1 = phys1 >> TARGET_PAGE_BITS;
@@ -2205,7 +2207,8 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
      * but the paired page cross 16K boundary is still not protected.
      */
     int p_flags = page_get_flags(pc);
-    if ((p_flags & PAGE_WRITE) && !page_is_shadow_not_shmm(pc)) {
+    if (!aot_parallel_translate && (p_flags & PAGE_WRITE) &&
+        !page_is_shadow_not_shmm(pc)) {
         mprotect((void*)(pc & qemu_host_page_mask), qemu_host_page_size, PROT_READ);
     }
 

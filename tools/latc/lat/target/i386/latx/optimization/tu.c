@@ -687,7 +687,7 @@ uint bcc_ins_convert(uint convert_insn)
     return fix_insn;
 }
 
-static bool bcc_jmp_fail;
+static __thread bool bcc_jmp_fail;
 
 int tu_relocat_target_branch(TranslationBlock * tb)
 {

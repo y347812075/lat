@@ -34,6 +34,21 @@ static __thread uint64 ts_vector_capacity;
 __thread TranslationBlock **ts_vector;
 __thread seg_info *curr_seg;
 __thread int in_pre_translate;
+__thread bool aot_parallel_translate;
+
+static inline void aot_translation_lock(void)
+{
+    if (!aot_parallel_translate) {
+        mmap_trylock();
+    }
+}
+
+static inline void aot_translation_unlock(void)
+{
+    if (!aot_parallel_translate) {
+        mmap_unlock();
+    }
+}
 
 /* Get tb id in dynamic_tb_message_vector. */
 static int get_tb_id(ADDRX pc, int cflags)
@@ -150,6 +165,60 @@ void get_dynamic_message(TranslationBlock **tb_list, int tb_num,
 #endif
 	dynamic_tb_num++;
     }
+}
+
+tb_tmp_message *aot_dynamic_tb_messages(void)
+{
+    return dynamic_tb_message_vector;
+}
+
+static int tb_message_pc_cmp(const void *left, const void *right)
+{
+    const tb_tmp_message *a = left;
+    const tb_tmp_message *b = right;
+    if (a->pc != b->pc) {
+        return a->pc < b->pc ? -1 : 1;
+    }
+    uint32_t a_parallel = a->cflags & CF_PARALLEL;
+    uint32_t b_parallel = b->cflags & CF_PARALLEL;
+    return a_parallel < b_parallel ? -1 : a_parallel > b_parallel;
+}
+
+int aot_set_dynamic_tb_messages(const tb_tmp_message *messages, int count,
+        seg_info **segments, int segment_count)
+{
+    free(dynamic_tb_message_vector);
+    dynamic_tb_message_vector = g_new(tb_tmp_message, count);
+    memcpy(dynamic_tb_message_vector, messages,
+           count * sizeof(*dynamic_tb_message_vector));
+    qsort(dynamic_tb_message_vector, count,
+          sizeof(*dynamic_tb_message_vector), tb_message_pc_cmp);
+    dynamic_tb_num = 0;
+    int segment = 0;
+    for (int i = 0; i < count; i++) {
+        tb_tmp_message *message = &dynamic_tb_message_vector[i];
+        if (i && message->pc == dynamic_tb_message_vector[i - 1].pc &&
+            ((message->cflags ^ dynamic_tb_message_vector[i - 1].cflags) &
+             CF_PARALLEL) == 0) {
+            continue;
+        }
+        while (segment < segment_count &&
+               segments[segment]->seg_end <= message->pc) {
+            segment++;
+        }
+        if (segment >= segment_count ||
+            segments[segment]->seg_begin > message->pc) {
+            continue;
+        }
+        dynamic_tb_message_vector[dynamic_tb_num] = *message;
+        dynamic_tb_message_vector[dynamic_tb_num].tb = NULL;
+        if (segments[segment]->first_tb_id == -1) {
+            segments[segment]->first_tb_id = dynamic_tb_num;
+        }
+        segments[segment]->last_tb_id = dynamic_tb_num;
+        dynamic_tb_num++;
+    }
+    return dynamic_tb_num;
 }
 
 char is_pe(char *file_name)
@@ -340,16 +409,16 @@ static inline void create_dynamic_tb(seg_info *seg, CPUState *cpu,
 {
     TranslationBlock *tb;
     for (int i = seg->first_tb_id; i <= seg->last_tb_id; i++) {
-        target_ulong pc = dynamic_tb_message_vector[i].pc;
-        int cflags = dynamic_tb_message_vector[i].cflags;
+        target_ulong pc = curr_tb_message_vector[i].pc;
+        int cflags = curr_tb_message_vector[i].cflags;
         cpu->tcg_cflags = cflags;
         assert(pc >= seg->seg_begin && pc < seg->seg_end);
         if (aot_tb_lookup(pc, cflags)) {
             continue;
         }
-        mmap_trylock();
+        aot_translation_lock();
         tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
-        mmap_unlock();
+        aot_translation_unlock();
         if (is_bad_tb(tb)) {
             continue;
         }
@@ -363,9 +432,9 @@ static inline int translate_static_tb(seg_info *seg, CPUState *cpu,
     TranslationBlock *tb;
     if (pc >= seg->seg_begin && pc < seg->seg_end
             && !aot_tb_lookup(pc, cflags)) {
-        mmap_trylock();
+        aot_translation_lock();
         tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
-        mmap_unlock();
+        aot_translation_unlock();
         if (is_bad_tb(tb)) {
             return -1;
         }
@@ -577,7 +646,7 @@ static inline void get_target_tb(TranslationBlock *curr_tb, CPUState *cpu,
     curr_tb->s_data->next_tb[TU_TB_INDEX_TARGET] = target_tb;
 }
 
-static int untr_tb_id;
+static __thread int untr_tb_id;
 
 static inline void get_ts_queue(CPUState *cpu, target_ulong cs_base,
         uint32_t flags, int cflags, int max_insns, target_ulong curr_page)
@@ -616,10 +685,6 @@ static inline void get_ts_queue(CPUState *cpu, target_ulong cs_base,
             }
             switch (tb->s_data->last_ir1_type) {
                 case IR1_TYPE_BRANCH:
-                    if (get_tb_id(tb->s_data->target_pc, cflags) < 0 ||
-                            get_tb_id(tb->s_data->next_pc, cflags) < 0) {
-                        break;
-                    }
                     get_next_tb(tb, cpu, cs_base, flags, cflags, max_insns);
                     get_target_tb(tb, cpu, cs_base, flags, cflags, max_insns);
                     break;
@@ -650,6 +715,44 @@ static inline void get_ts_queue(CPUState *cpu, target_ulong cs_base,
 static void delet_static_tb(TranslationBlock **tb_list, uint32_t *tb_num_in_tu)
 {
     TranslationBlock *tb, *target_tb, *next_tb;
+#ifdef CONFIG_LATX_AOT
+    /* During offline AOT these same-page successors are part of the final
+     * closure, not disposable TU analysis helpers.  Keeping them avoids a
+     * second compiler pass just to discover translation-created TB starts. */
+    if (option_aot && in_pre_translate) {
+        for (int i = 0; i < *tb_num_in_tu; i++) {
+            tb = tb_list[i];
+            if (!is_bad_tb(tb) &&
+                tb->s_data->tu_tb_mode == TU_TB_MODE_STATIC) {
+                tb->s_data->tu_tb_mode = TU_TB_MODE_NONE;
+            }
+        }
+        for (int i = 0; i < *tb_num_in_tu; i++) {
+            tb = tb_list[i];
+            target_tb = tb->s_data->next_tb[TU_TB_INDEX_TARGET];
+            next_tb = tb->s_data->next_tb[TU_TB_INDEX_NEXT];
+            if (next_tb && is_bad_tb(next_tb)) {
+                tb->s_data->next_tb[TU_TB_INDEX_NEXT] = NULL;
+            }
+            if (target_tb && is_bad_tb(target_tb)) {
+                tb->s_data->next_tb[TU_TB_INDEX_TARGET] = NULL;
+            }
+        }
+        int kept = 0;
+        for (int i = 0; i < *tb_num_in_tu; i++) {
+            tb = tb_list[i];
+            if (is_bad_tb(tb)) {
+                /* Static lookup caches may still reference this rejected TB.
+                 * Leave its short-lived analysis storage owned by the
+                 * compiler process, but do not emit it. */
+            } else {
+                tb_list[kept++] = tb;
+            }
+        }
+        *tb_num_in_tu = kept;
+        return;
+    }
+#endif
     /* Make next_tb or target_tb do not point to static tb. */
     for (int i = 0; i < *tb_num_in_tu; i++) {
         tb = tb_list[i];
@@ -757,6 +860,9 @@ static inline bool need_flush(void)
     if (unlikely((tcg_ctx->code_gen_ptr + MAX_TU_SIZE >= tcg_ctx->code_gen_highwater)
                 || (tcg_ctx->tb_gen_ptr + MAX_TB_IN_CACHE * sizeof(TranslationBlock)
                     >= tcg_ctx->tb_gen_highwater))) {
+        if (aot_parallel_translate && !tcg_region_alloc_aot(tcg_ctx)) {
+            return false;
+        }
         qemu_log_mask(LAT_LOG_AOT, "WARNING need flush in_pre_translate\n");
         return true;
     }
@@ -788,14 +894,14 @@ static void translate_by_tu(CPUState *cpu,
     /* sort with cflags and pc in seg*/
     qsort(curr_tb_message_vector + curr_seg->first_tb_id, tb_num_in_seg,
             sizeof(tb_tmp_message), tmp_message_sort_cmp);
-    mmap_trylock();
+    aot_translation_lock();
     while (untr_tb_id <= curr_seg->last_tb_id) {
 	if (need_flush()) {
     	    break;
     	}
         gen_tu(cpu, cs_base, flags, cflags);
     }
-    mmap_unlock();
+    aot_translation_unlock();
 }
 #endif
 
@@ -824,14 +930,14 @@ uint64 translate_lib(seg_info **seg_info_vector, int begin_id,
     int cflags;
     uint32_t flags;
     target_ulong cs_base;
+    assert(in_pre_translate == 0);
+    in_pre_translate = 1;
     translate_init(cpu, &cs_base, &flags, &cflags);
     if (tb_message_vector) {
     	curr_tb_message_vector = tb_message_vector;
     } else {
     	curr_tb_message_vector = dynamic_tb_message_vector;
     }
-    assert(in_pre_translate == 0);
-    in_pre_translate = 1;
     for(int i = begin_id; i < end_id; i++) {
         curr_seg = seg_info_vector[i];
         if (curr_seg->first_tb_id == -1) {
@@ -842,4 +948,3 @@ uint64 translate_lib(seg_info **seg_info_vector, int begin_id,
     in_pre_translate = 0;
     return tb_num_in_ts;
 }
-
