@@ -670,6 +670,7 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
     GHashTable *scheduled_pcs = g_hash_table_new_full(
         pending_tb_hash, pending_tb_equal, g_free, NULL);
     GArray *pending = g_array_new(FALSE, FALSE, sizeof(LatcPendingTb));
+    GPtrArray *exact_tbs = g_ptr_array_new();
     uint64_t pretranslate_started = monotonic_ns();
     bool exact_selection =
         header.flags & LATC_CFG_FLAG_EXACT_SELECTION;
@@ -702,12 +703,14 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
                 if (tb) {
                     mark_pretranslate_scheduled(scheduled_pcs, pc,
                                                 tb_cflags);
-                    if (!exact_selection) {
+                    if (exact_selection) {
+                        g_ptr_array_add(exact_tbs, tb);
+                    } else {
                         queue_pretranslate_successors(pending, scheduled_pcs,
                                                       tb);
+                        jrra_pre_translate((void **)&tb, 1, cpu, flags,
+                                           tb_cflags);
                     }
-                    jrra_pre_translate((void **)&tb, 1, cpu, flags,
-                                       tb_cflags);
                 }
                 mmap_unlock();
                 if (!tb) {
@@ -744,6 +747,12 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
                 pc = tb_end;
                 continuations++;
             }
+    }
+    if (exact_selection) {
+        for (guint i = 0; i < exact_tbs->len; i++) {
+            TranslationBlock *tb = g_ptr_array_index(exact_tbs, i);
+            jrra_pre_translate((void **)&tb, 1, cpu, flags, tb->cflags);
+        }
     }
     for (guint i = 0; i < pending->len; i++) {
         LatcPendingTb item = g_array_index(pending, LatcPendingTb, i);
@@ -814,6 +823,7 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
     g_hash_table_destroy(translated_pcs);
     g_hash_table_destroy(scheduled_pcs);
     g_array_free(pending, TRUE);
+    g_ptr_array_free(exact_tbs, TRUE);
     stat_cfg_tbs = header.tb_count;
     stat_selected = selected;
     stat_pretranslated = translated;

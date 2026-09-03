@@ -9,7 +9,6 @@
 #include <errno.h>
 #include <glib.h>
 #include <inttypes.h>
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +24,7 @@ static void usage(const char *name)
             "  %s inspect [--json] BUNDLE\n", name, name, name);
     fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
+    fprintf(stderr, "  %s merge-native OUTPUT FRAGMENT...\n", name);
     fprintf(stderr, "  %s emit-aot-v2 NATIVE_IMAGE OUTPUT_DIRECTORY\n",
             name);
     fprintf(stderr,
@@ -33,6 +33,14 @@ static void usage(const char *name)
             name);
     fprintf(stderr, "  %s inspect-module [--json] MODULE\n", name);
     fprintf(stderr, "  %s build-id\n", name);
+}
+
+static int compare_cfg_tb_address(const void *left, const void *right)
+{
+    const CfgTb *a = left, *b = right;
+    if (a->start != b->start) return a->start < b->start ? -1 : 1;
+    return (a->semantic_flags > b->semantic_flags) -
+           (a->semantic_flags < b->semantic_flags);
 }
 
 static int inspect_native(const char *path, int json)
@@ -193,10 +201,10 @@ static int compile_bundle(const char *input, const char *output,
         fprintf(stderr, "latc: %s\n", error);
         return 1;
     }
-    options.extra_leaders = leaders;
-    options.extra_leader_count = leader_count;
-    int analyze_result = cfg_analyze_elf(input, &options, &program,
-                                         error, sizeof(error));
+    int analyze_result = tbset ?
+        cfg_analyze_elf_reachable(input, leaders, leader_count, &program,
+                                  error, sizeof(error)) :
+        cfg_analyze_elf(input, &options, &program, error, sizeof(error));
     free(leaders);
     if (analyze_result != 0) {
         fprintf(stderr, "latc: %s\n", error); return 1;
@@ -218,6 +226,34 @@ static int compile_bundle(const char *input, const char *output,
             cfg_program_destroy(&program);
             return 1;
         }
+        const char *shard_count_text = getenv("LATC_TBSET_SHARD_COUNT");
+        const char *shard_index_text = getenv("LATC_TBSET_SHARD_INDEX");
+        if (shard_count_text || shard_index_text) {
+            char *count_end = NULL, *index_end = NULL;
+            unsigned long count = strtoul(shard_count_text ? shard_count_text : "", &count_end, 10);
+            unsigned long index = strtoul(shard_index_text ? shard_index_text : "", &index_end, 10);
+            if (!shard_count_text || !shard_index_text || !*shard_count_text ||
+                !*shard_index_text || *count_end || *index_end || !count ||
+                count > 8 || index >= count) {
+                fprintf(stderr, "latc: invalid TB shard selection\n");
+                cfg_program_destroy(&program);
+                return 1;
+            }
+            qsort(program.tbs, program.tb_count, sizeof(*program.tbs),
+                  compare_cfg_tb_address);
+            size_t begin = program.tb_count * index / count;
+            size_t end = program.tb_count * (index + 1) / count;
+            while (begin && begin < program.tb_count &&
+                   program.tbs[begin - 1].start == program.tbs[begin].start) begin++;
+            while (end && end < program.tb_count &&
+                   program.tbs[end - 1].start == program.tbs[end].start) end++;
+            for (size_t i = 0; i < program.tb_count; i++) {
+                program.tbs[i].selected = i >= begin && i < end;
+            }
+            fprintf(stderr, "latc: TB shard %lu/%lu selected=%zu total=%zu\n",
+                    index + 1, count, end - begin, program.tb_count);
+        }
+        program.exact_selection = true;
     }
     int rc = latc_bundle_write(runner, input, output, aot, &program,
                                error, sizeof(error));
@@ -400,6 +436,17 @@ int main(int argc, char **argv)
         if (argc != 3) { usage(argv[0]); return 2; }
         if (lat_native_image_mark_x86_static_file(argv[2], error,
                                                   sizeof(error))) {
+            fprintf(stderr, "latc: %s\n", error);
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(argv[1], "merge-native") == 0) {
+        char error[256] = {0};
+        if (argc < 5) { usage(argv[0]); return 2; }
+        if (lat_native_image_merge_files((const char *const *)&argv[3],
+                                         (size_t)argc - 3, argv[2],
+                                         error, sizeof(error))) {
             fprintf(stderr, "latc: %s\n", error);
             return 1;
         }

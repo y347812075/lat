@@ -10,8 +10,9 @@ CPPFLAGS += -DLATC_BUILD_ID=\"$(AOT_V2_BUILD_ID)\"
 CPPFLAGS += -Iformat -Ilat/include -Inative/include -Inative/format \
 	-Inative/runtime -Iaot-v2/include -Iaot-v2/runtime \
 	-Iaot-v2/compiler -Iaot-v2/common \
-	$(shell pkg-config --cflags glib-2.0)
-LDLIBS += $(shell pkg-config --libs glib-2.0)
+	$(shell pkg-config --cflags glib-2.0) \
+	$(shell pkg-config --cflags capstone)
+LDLIBS += $(shell pkg-config --libs glib-2.0 capstone)
 
 BUILD := build
 CFG_SRC := \
@@ -271,7 +272,7 @@ $(BUILD)/tests/x86-semantics-main: tests/x86-semantics-main.c \
 
 $(BUILD)/tests/test-cfg: tests/test-cfg.c $(BUILD)/liblatc_cfg.a
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-fallback-loader $(BUILD)/tests/test-native-format \

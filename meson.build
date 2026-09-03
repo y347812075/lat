@@ -562,7 +562,7 @@ if 'CONFIG_LATX' in config_host
       'tools/latc/cfg/src/cfg_program.c',
     ),
     include_directories: latc_inc,
-    dependencies: [glib],
+    dependencies: [glib, dependency('capstone', required: true)],
     c_args: [
       '-DLATC_INSTALLED_SCRIPT_DIR="' + latc_helper_dir / 'scripts' + '"',
     ],

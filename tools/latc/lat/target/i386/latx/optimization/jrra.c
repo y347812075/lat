@@ -52,6 +52,9 @@ static TranslationBlock *get_next_tb(TranslationBlock *tb, CPUState *cpu,
 #else
     n = tb_lookup(cpu, tb->next_86_pc, 0, flags, cflags);
 #endif
+    if (!n && getenv("LATC_EXACT_TB_SELECTION")) {
+        return NULL;
+    }
     if (!n) {
         n = tb_gen_code(cpu, tb->next_86_pc, 0, flags, cflags);
     }
