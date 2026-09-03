@@ -380,30 +380,135 @@ static int add_parallel_dynamic_entries(const char *path, CfgProgram *program,
     return 0;
 }
 
+typedef struct PcSet {
+    uint64_t *keys;
+    unsigned char *used;
+    size_t mask;
+} PcSet;
+
+static size_t pc_set_slot(uint64_t pc, size_t mask)
+{
+    pc ^= pc >> 30;
+    pc *= UINT64_C(0xbf58476d1ce4e5b9);
+    pc ^= pc >> 27;
+    pc *= UINT64_C(0x94d049bb133111eb);
+    pc ^= pc >> 31;
+    return pc & mask;
+}
+
+static int pc_set_init(PcSet *set, size_t expected)
+{
+    size_t capacity = 1;
+    while (capacity < expected * 2) {
+        capacity <<= 1;
+    }
+    set->keys = malloc(capacity * sizeof(*set->keys));
+    set->used = calloc(capacity, 1);
+    set->mask = capacity - 1;
+    return set->keys && set->used ? 0 : -1;
+}
+
+static void pc_set_destroy(PcSet *set)
+{
+    free(set->used);
+    free(set->keys);
+}
+
+static int pc_set_contains(const PcSet *set, uint64_t pc)
+{
+    size_t slot = pc_set_slot(pc, set->mask);
+    while (set->used[slot]) {
+        if (set->keys[slot] == pc) {
+            return 1;
+        }
+        slot = (slot + 1) & set->mask;
+    }
+    return 0;
+}
+
+static void pc_set_add(PcSet *set, uint64_t pc)
+{
+    size_t slot = pc_set_slot(pc, set->mask);
+    while (set->used[slot] && set->keys[slot] != pc) {
+        slot = (slot + 1) & set->mask;
+    }
+    set->keys[slot] = pc;
+    set->used[slot] = 1;
+}
+
+static size_t first_containing_function(const CfgProgram *program,
+                                        const uint64_t *prefix_end,
+                                        uint64_t address)
+{
+    size_t low = 0;
+    size_t high = program->function_count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (program->functions[middle].start <= address) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    size_t limit = low;
+    low = 0;
+    high = limit;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (prefix_end[middle] <= address) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    return low < limit ? low : SIZE_MAX;
+}
+
 static int expand_bounded_parallel_functions(CfgProgram *program,
                                              size_t template_count,
                                              char *error, size_t error_size)
 {
-    GHashTable *parallel_pcs = g_hash_table_new_full(
-        g_int64_hash, g_int64_equal, g_free, NULL);
+    if (template_count > (SIZE_MAX / sizeof(*program->tbs)) -
+                         program->tb_count ||
+        program->tb_count > SIZE_MAX - template_count) {
+        return fail(error, error_size,
+                    "too many bounded parallel CFG blocks");
+    }
+    PcSet parallel_pcs = {0};
+    if (pc_set_init(&parallel_pcs, program->tb_count + template_count)) {
+        pc_set_destroy(&parallel_pcs);
+        return fail(error, error_size,
+                    "out of memory indexing parallel CFG blocks");
+    }
+    uint64_t *function_prefix_end = malloc(
+        program->function_count * sizeof(*function_prefix_end));
+    if (!function_prefix_end && program->function_count) {
+        pc_set_destroy(&parallel_pcs);
+        return fail(error, error_size,
+                    "out of memory indexing CFG functions");
+    }
+    uint64_t maximum_end = 0;
+    for (size_t i = 0; i < program->function_count; i++) {
+        const CfgProgramFunction *fn = &program->functions[i];
+        uint64_t end = !fn->tb_count ? 0 :
+            (fn->size > UINT64_MAX - fn->start ?
+             UINT64_MAX : fn->start + fn->size);
+        if (end > maximum_end) {
+            maximum_end = end;
+        }
+        function_prefix_end[i] = maximum_end;
+    }
     for (size_t i = 0; i < program->tb_count; i++) {
         if (!program->tbs[i].selected ||
             !(program->tbs[i].semantic_flags & CFG_TB_PARALLEL)) continue;
-        uint64_t *pc = g_new(uint64_t, 1);
-        *pc = program->tbs[i].start;
-        g_hash_table_add(parallel_pcs, pc);
-    }
-    if (template_count > (SIZE_MAX / sizeof(*program->tbs)) -
-                         program->tb_count) {
-        g_hash_table_destroy(parallel_pcs);
-        return fail(error, error_size,
-                    "too many bounded parallel CFG blocks");
+        pc_set_add(&parallel_pcs, program->tbs[i].start);
     }
     CfgTb *expanded = realloc(
         program->tbs,
         (program->tb_count + template_count) * sizeof(*expanded));
     if (!expanded && template_count) {
-        g_hash_table_destroy(parallel_pcs);
+        free(function_prefix_end);
+        pc_set_destroy(&parallel_pcs);
         return fail(error, error_size,
                     "out of memory adding bounded parallel CFG blocks");
     }
@@ -413,12 +518,10 @@ static int expand_bounded_parallel_functions(CfgProgram *program,
         CfgTb *entry = &program->tbs[i];
         if (!entry->selected ||
             !(entry->semantic_flags & CFG_TB_PARALLEL)) continue;
-        for (size_t f = 0; f < program->function_count; f++) {
+        size_t f = first_containing_function(
+            program, function_prefix_end, entry->start);
+        if (f != SIZE_MAX) {
             const CfgProgramFunction *fn = &program->functions[f];
-            if (!fn->tb_count || entry->start < fn->start ||
-                entry->start - fn->start >= fn->size) {
-                continue;
-            }
             /* Preserve the real CFG block at the function entry instead of
              * a one-byte observed or synthetic placeholder. */
             CfgTb real_entry = program->tbs[fn->first_tb];
@@ -429,16 +532,13 @@ static int expand_bounded_parallel_functions(CfgProgram *program,
             real_entry.edge_count = 0;
             if (entry->start == fn->start) {
                 *entry = real_entry;
-            } else if (!g_hash_table_contains(parallel_pcs,
-                                              &real_entry.start)) {
+            } else if (!pc_set_contains(&parallel_pcs, real_entry.start)) {
                 program->tbs[program->tb_count++] = real_entry;
-                uint64_t *pc = g_new(uint64_t, 1);
-                *pc = real_entry.start;
-                g_hash_table_add(parallel_pcs, pc);
+                pc_set_add(&parallel_pcs, real_entry.start);
             }
             for (size_t j = 0; j < fn->tb_count; j++) {
                 const CfgTb *source = &program->tbs[fn->first_tb + j];
-                if (g_hash_table_contains(parallel_pcs, &source->start)) {
+                if (pc_set_contains(&parallel_pcs, source->start)) {
                     continue;
                 }
                 CfgTb added = *source;
@@ -448,14 +548,12 @@ static int expand_bounded_parallel_functions(CfgProgram *program,
                 added.first_edge = 0;
                 added.edge_count = 0;
                 program->tbs[program->tb_count++] = added;
-                uint64_t *pc = g_new(uint64_t, 1);
-                *pc = source->start;
-                g_hash_table_add(parallel_pcs, pc);
+                pc_set_add(&parallel_pcs, source->start);
             }
-            break;
         }
     }
-    g_hash_table_destroy(parallel_pcs);
+    free(function_prefix_end);
+    pc_set_destroy(&parallel_pcs);
     return 0;
 }
 
