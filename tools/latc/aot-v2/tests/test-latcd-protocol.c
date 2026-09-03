@@ -14,7 +14,7 @@ static int fail(const char *message)
     return 1;
 }
 
-static int send_raw_request(int socket_fd, const LatcdRequestV1 *request,
+static int send_raw_request(int socket_fd, const LatcdRequestV2 *request,
                             const int *fds, size_t fd_count)
 {
     struct iovec iov = {
@@ -48,12 +48,12 @@ int main(void)
         return fail("socketpair failed");
     }
     int source = open("/dev/null", O_RDONLY | O_CLOEXEC);
-    LatcdRequestV1 sent = {
+    LatcdRequestV2 sent = {
         .magic = LATCD_REQUEST_MAGIC,
         .version = LATCD_PROTOCOL_VERSION,
         .size = sizeof(sent),
         .priority = LATCD_PRIORITY_STARTUP,
-        .flags = LATCD_REQUEST_HAS_TBSET,
+        .operation = LATCD_OP_SUBMIT_KEYS,
         .request_id = 42,
     };
     char error[128] = {0};
@@ -61,7 +61,7 @@ int main(void)
                                          error, sizeof(error))) {
         return fail(error);
     }
-    LatcdRequestV1 received;
+    LatcdRequestV2 received;
     int received_fd = -1;
     int received_tbset = -1;
     if (latcd_receive_request(sockets[1], &received, &received_fd,
@@ -69,26 +69,36 @@ int main(void)
                               error, sizeof(error)) ||
         received.request_id != sent.request_id || received_fd < 0 ||
         received_tbset < 0 ||
-        !(received.flags & LATCD_REQUEST_HAS_TBSET)) {
+        received.operation != LATCD_OP_SUBMIT_KEYS) {
         return fail(error[0] ? error : "valid request changed in transit");
     }
     close(received_fd);
     close(received_tbset);
 
-    sent.flags = 0;
+    sent.operation = LATCD_OP_FLUSH_ALL;
 
     if (send_raw_request(sockets[0], &sent, NULL, 0)) {
-        return fail("cannot send request without descriptor");
+        return fail("cannot send flush-all request");
     }
     error[0] = '\0';
-    if (!latcd_receive_request(sockets[1], &received, &received_fd,
-                               &received_tbset,
-                               error, sizeof(error)) ||
-        !strstr(error, "descriptor count")) {
-        return fail("request without descriptor was accepted");
+    if (latcd_receive_request(sockets[1], &received, &received_fd,
+                              &received_tbset, error, sizeof(error)) ||
+        received_fd >= 0 || received_tbset >= 0) {
+        return fail("valid flush-all request was rejected");
     }
 
     int two_fds[2] = { source, source };
+    sent.operation = LATCD_OP_FLUSH_SOURCE;
+    if (send_raw_request(sockets[0], &sent, &source, 1)) {
+        return fail("cannot send flush-source request");
+    }
+    if (latcd_receive_request(sockets[1], &received, &received_fd,
+                              &received_tbset, error, sizeof(error)) ||
+        received_fd < 0 || received_tbset >= 0) {
+        return fail("valid flush-source request was rejected");
+    }
+    close(received_fd);
+
     if (send_raw_request(sockets[0], &sent, two_fds, 2)) {
         return fail("cannot send request with two descriptors");
     }
@@ -97,7 +107,7 @@ int main(void)
                                &received_tbset,
                                error, sizeof(error)) ||
         !strstr(error, "descriptor count")) {
-        return fail("request without TB set flag was accepted");
+        return fail("flush-source with two descriptors was accepted");
     }
 
     int many_fds[5] = { source, source, source, source, source };
@@ -108,10 +118,11 @@ int main(void)
     if (!latcd_receive_request(sockets[1], &received, &received_fd,
                                &received_tbset,
                                error, sizeof(error)) ||
-        !strstr(error, "invalid latcd request packet")) {
+        !strstr(error, "header or descriptor")) {
         return fail("truncated descriptor set was accepted");
     }
 
+    sent.operation = 99;
     sent.magic ^= 1;
     if (send_raw_request(sockets[0], &sent, &source, 1)) {
         return fail("cannot send request with invalid header");

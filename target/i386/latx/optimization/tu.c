@@ -55,6 +55,8 @@ void get_last_info(TranslationBlock *tb, IR1_INST* pir1)
     } else if (ir1_opcode(pir1) == dt_X86_INS_JMP &&
         ir1_is_indirect_jmp(pir1)) {
         tb->s_data->last_ir1_type = (int8)IR1_TYPE_JUMPIN;
+    } else if (ir1_is_syscall(pir1)) {
+        tb->s_data->last_ir1_type = (int8)IR1_TYPE_SYSCALL;
     } else {
         tb->s_data->last_ir1_type = (int8)IR1_TYPE_NORMAL;
     }

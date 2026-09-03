@@ -6,7 +6,6 @@
 #include "latcd-protocol.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <poll.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -26,14 +25,15 @@ static int fail(char *error, size_t error_size, const char *format, ...)
     return -1;
 }
 
-static int submit(const char *socket_path, int source_fd, int tbset_fd,
-                  uint32_t priority, uint64_t request_id,
-                  char *error, size_t error_size)
+static int exchange(const char *socket_path, int source_fd, int keys_fd,
+                    uint32_t operation, uint32_t priority,
+                    uint64_t request_id, uint64_t sequence,
+                    char *error, size_t error_size)
 {
-    if (!socket_path || !*socket_path || source_fd < 0 ||
+    if (!socket_path || !*socket_path ||
         strlen(socket_path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
         errno = EINVAL;
-        return fail(error, error_size, "invalid latcd submission arguments");
+        return fail(error, error_size, "invalid latcd client arguments");
     }
     int socket_fd = socket(AF_UNIX,
                            SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
@@ -50,82 +50,42 @@ static int submit(const char *socket_path, int source_fd, int tbset_fd,
         return fail(error, error_size, "cannot connect to latcd: %s",
                     strerror(saved));
     }
-    LatcdRequestV1 request = {
+    LatcdRequestV2 request = {
         .magic = LATCD_REQUEST_MAGIC,
         .version = LATCD_PROTOCOL_VERSION,
         .size = sizeof(request),
+        .operation = operation,
         .priority = priority,
-        .flags = LATCD_REQUEST_HAS_TBSET,
         .request_id = request_id,
+        .sequence = sequence,
     };
-    struct iovec iov = {
-        .iov_base = &request,
-        .iov_len = sizeof(request),
-    };
-    union {
-        struct cmsghdr align;
-        unsigned char bytes[CMSG_SPACE(sizeof(int) * 2)];
-    } control = {0};
-    struct msghdr message = {
-        .msg_iov = &iov,
-        .msg_iovlen = 1,
-        .msg_control = control.bytes,
-        .msg_controllen = sizeof(control.bytes),
-    };
-    struct cmsghdr *header = CMSG_FIRSTHDR(&message);
-    header->cmsg_level = SOL_SOCKET;
-    header->cmsg_type = SCM_RIGHTS;
-    int descriptors[2] = { source_fd, tbset_fd };
-    size_t descriptor_count = 2;
-    header->cmsg_len = CMSG_LEN(sizeof(int) * descriptor_count);
-    memcpy(CMSG_DATA(header), descriptors,
-           sizeof(int) * descriptor_count);
-    message.msg_controllen = CMSG_SPACE(sizeof(int) * descriptor_count);
-    ssize_t sent = sendmsg(socket_fd, &message,
-                           MSG_DONTWAIT | MSG_NOSIGNAL);
-    int saved = errno;
-    if (sent != sizeof(request)) {
+    if (latcd_send_request(socket_fd, source_fd, keys_fd, &request,
+                           error, error_size)) {
         close(socket_fd);
-        errno = sent < 0 ? saved : EIO;
-        return fail(error, error_size, "cannot submit ELF to latcd: %s",
-                    sent < 0 ? strerror(saved) : "short packet");
+        return -1;
     }
-    struct pollfd response_event = {
-        .fd = socket_fd,
-        .events = POLLIN,
-    };
+    struct pollfd event = { .fd = socket_fd, .events = POLLIN };
+    int timeout = operation == LATCD_OP_SUBMIT_KEYS ? 1000 : 120000;
     int ready;
     do {
-        ready = poll(&response_event, 1, 1000);
+        ready = poll(&event, 1, timeout);
     } while (ready < 0 && errno == EINTR);
-    if (ready <= 0 || !(response_event.revents & POLLIN)) {
-        saved = ready == 0 ? ETIMEDOUT :
-                (ready < 0 ? errno : ECONNRESET);
+    if (ready <= 0 || !(event.revents & POLLIN)) {
+        int saved = ready == 0 ? ETIMEDOUT :
+                    (ready < 0 ? errno : ECONNRESET);
         close(socket_fd);
         errno = saved;
-        return fail(error, error_size, "latcd did not acknowledge request: %s",
-                    strerror(errno));
+        return fail(error, error_size, "latcd did not finish request: %s",
+                    strerror(saved));
     }
-    LatcdResponseV1 response;
-    ssize_t received;
-    do {
-        received = recv(socket_fd, &response, sizeof(response), 0);
-    } while (received < 0 && errno == EINTR);
-    if (received != sizeof(response) ||
-        response.magic != LATCD_RESPONSE_MAGIC ||
-        response.version != LATCD_PROTOCOL_VERSION ||
-        response.size != sizeof(response)) {
-        saved = received < 0 ? errno : EPROTO;
-        close(socket_fd);
-        errno = saved;
-        return fail(error, error_size, "invalid latcd response packet");
-    }
+    LatcdResponseV2 response;
+    int result = latcd_receive_response(socket_fd, &response,
+                                        error, error_size);
     close(socket_fd);
-    response.message[sizeof(response.message) - 1] = '\0';
+    if (result) return -1;
     if (response.request_id != request_id) {
         errno = EPROTO;
-        return fail(error, error_size,
-                    "latcd response request id does not match");
+        return fail(error, error_size, "latcd response id does not match");
     }
     if (response.status != LATCD_STATUS_OK) {
         errno = EIO;
@@ -135,15 +95,28 @@ static int submit(const char *socket_path, int source_fd, int tbset_fd,
     return 0;
 }
 
-int latcd_client_submit_tbset_fd(const char *socket_path, int source_fd,
-                                 int tbset_fd, uint32_t priority,
-                                 uint64_t request_id,
-                                 char *error, size_t error_size)
+int latcd_client_submit_keys_fd(const char *socket_path, int source_fd,
+                                int keys_fd, uint32_t priority,
+                                uint64_t request_id, uint64_t sequence,
+                                char *error, size_t error_size)
 {
-    if (tbset_fd < 0) {
-        errno = EINVAL;
-        return fail(error, error_size, "invalid latcd TB set descriptor");
-    }
-    return submit(socket_path, source_fd, tbset_fd, priority, request_id,
-                  error, error_size);
+    return exchange(socket_path, source_fd, keys_fd, LATCD_OP_SUBMIT_KEYS,
+                    priority, request_id, sequence, error, error_size);
+}
+
+int latcd_client_flush_source(const char *socket_path, int source_fd,
+                              uint64_t request_id,
+                              char *error, size_t error_size)
+{
+    return exchange(socket_path, source_fd, -1, LATCD_OP_FLUSH_SOURCE,
+                    LATCD_PRIORITY_STARTUP, request_id, 0,
+                    error, error_size);
+}
+
+int latcd_client_flush_all(const char *socket_path, uint64_t request_id,
+                           char *error, size_t error_size)
+{
+    return exchange(socket_path, -1, -1, LATCD_OP_FLUSH_ALL,
+                    LATCD_PRIORITY_STARTUP, request_id, 0,
+                    error, error_size);
 }

@@ -36,6 +36,10 @@ static uint64_t stat_runtime_nonfile_tb_gen_calls;
 static uint64_t stat_runtime_file_tb_gen_attempts;
 static uint64_t stat_runtime_nonfile_tb_gen_attempts;
 static uint32_t stat_runtime_first_cflags;
+static bool strict_aot;
+static bool strict_program_aot;
+static bool strict_file_aot;
+static char *stats_output_pattern;
 
 bool latc_aot_v2_is_file_pc(target_ulong guest_pc);
 static bool stat_pretranslation_disabled;
@@ -63,7 +67,7 @@ static char *expand_pid_path(const char *pattern)
 
 static void write_stats(void)
 {
-    const char *stats_pattern = getenv("LATC_STATS_OUT");
+    const char *stats_pattern = stats_output_pattern;
     if (!stats_pattern || !*stats_pattern) return;
     char *stats_path = expand_pid_path(stats_pattern);
     FILE *stats = fopen(stats_path, "w");
@@ -137,7 +141,7 @@ static bool program_address(uint64_t guest_pc)
 
 static bool runtime_stats_enabled(void)
 {
-    const char *path = getenv("LATC_STATS_OUT");
+    const char *path = stats_output_pattern;
     return (bundle_self_fd >= 0 && pretranslation_complete) ||
            (bundle_self_fd < 0 && path && *path);
 }
@@ -204,9 +208,20 @@ static void queue_pretranslate_successors(GArray *pending,
                                       tb->s_data->next_pc, tb->cflags);
             /* fall through */
         case IR1_TYPE_CALL:
+            if (tb->s_data->last_ir1_type == IR1_TYPE_CALL) {
+                queue_pretranslate_target(pending, scheduled,
+                                          tb->s_data->next_pc, tb->cflags);
+            }
+            /* fall through */
         case IR1_TYPE_JUMP:
             queue_pretranslate_target(pending, scheduled,
                                       tb->s_data->target_pc, tb->cflags);
+            break;
+        case IR1_TYPE_CALLIN:
+        case IR1_TYPE_JUMPIN:
+        case IR1_TYPE_SYSCALL:
+            queue_pretranslate_target(pending, scheduled,
+                                      tb->s_data->next_pc, tb->cflags);
             break;
         default:
             break;
@@ -216,8 +231,17 @@ static void queue_pretranslate_successors(GArray *pending,
 
 void latc_bundle_note_tb_attempt(uint64_t guest_pc, uint32_t cflags)
 {
-    if (!runtime_stats_enabled()) return;
     bool program_pc = program_address(guest_pc);
+    bool file_pc = latc_aot_v2_is_file_pc(guest_pc);
+    if (strict_aot || (program_pc && strict_program_aot) ||
+        (file_pc && strict_file_aot)) {
+        fprintf(stderr,
+                "latc: strict AOT rejected runtime TB generation at 0x%llx "
+                "cflags=0x%x file=%d program=%d\n",
+                (unsigned long long)guest_pc, cflags, file_pc, program_pc);
+        _exit(125);
+    }
+    if (!runtime_stats_enabled()) return;
     if (!stat_runtime_tb_gen_attempts) {
         stat_runtime_first_pc = guest_pc;
         stat_runtime_first_cflags = cflags;
@@ -237,12 +261,6 @@ void latc_bundle_note_tb_attempt(uint64_t guest_pc, uint32_t cflags)
     }
     /* Keep the evidence valid even when the guest terminates via _exit. */
     write_stats();
-    if (getenv("LATC_STRICT_AOT") ||
-        (program_pc && getenv("LATC_STRICT_PROGRAM_AOT"))) {
-        fprintf(stderr, "latc: strict AOT rejected runtime TB generation at 0x%llx\n",
-                (unsigned long long)guest_pc);
-        _exit(125);
-    }
 }
 
 void latc_bundle_note_tb_generated(uint64_t guest_pc, uint32_t cflags)
@@ -381,6 +399,16 @@ out:
 
 int latc_bundle_inject_argv(int *argc, char ***argv)
 {
+    strict_aot = getenv("LATC_STRICT_AOT") != NULL;
+    strict_program_aot = getenv("LATC_STRICT_PROGRAM_AOT") != NULL;
+    strict_file_aot = getenv("LATC_STRICT_FILE_AOT") != NULL;
+    const char *stats = getenv("LATC_STATS_OUT");
+    stats_output_pattern = stats && *stats ? g_strdup(stats) : NULL;
+    unsetenv("LATC_STRICT_AOT");
+    unsetenv("LATC_STRICT_PROGRAM_AOT");
+    unsetenv("LATC_STRICT_FILE_AOT");
+    unsetenv("LATC_STATS_OUT");
+
     int self = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
     if (self < 0) return 0;
     struct stat st;

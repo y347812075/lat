@@ -54,6 +54,19 @@ int main(void)
     static const LatAotLoadedModuleV2 module = {
         .descriptor = &descriptor,
     };
+    static const LatAotTbV2 shard_tbs[] = {
+        { .guest_rva = 0x2000, .host_offset = 12, .host_size = 4,
+          .flags = LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL },
+    };
+    static const LatAotModuleV2 shard_descriptor = {
+        .text_begin = text,
+        .text_end = text + sizeof(text),
+        .tb_begin = shard_tbs,
+        .tb_end = shard_tbs + 1,
+    };
+    static const LatAotLoadedModuleV2 shard_module = {
+        .descriptor = &shard_descriptor,
+    };
     LatAotModuleInstanceV2 first = {
         .module = &module,
         .guest_load_bias = 0x400000,
@@ -72,8 +85,17 @@ int main(void)
     };
     LatAotModuleInstanceV2 overlap = {
         .module = &module,
+        .guest_load_bias = 0x400000,
         .guest_begin = 0x480000,
         .guest_end = 0x580000,
+    };
+    LatAotModuleInstanceV2 shard = {
+        .module = &shard_module,
+        .guest_load_bias = 0x400000,
+        .guest_begin = 0x400000,
+        .guest_end = 0x500000,
+        .exec_range_count = 1,
+        .exec_ranges = { { .begin = 0x401000, .end = 0x410000 } },
     };
     LatAotRegistryV2 registry;
     if (lat_aot_v2_registry_init(&registry) ||
@@ -90,6 +112,18 @@ int main(void)
         return 1;
     }
     lat_aot_v2_registry_target_release(&target);
+    if (lat_aot_v2_registry_register(&registry, &shard) ||
+        lat_aot_v2_registry_lookup(&registry, 0x402000,
+                                   LAT_AOT_TB_CODE64, &target) ||
+        target.host_address != text + 12 || target.instance != &shard) {
+        fprintf(stderr, "registry combined shard lookup failed\n");
+        return 1;
+    }
+    lat_aot_v2_registry_target_release(&target);
+    if (lat_aot_v2_registry_deactivate(&registry, &shard)) {
+        fprintf(stderr, "registry shard deactivation failed\n");
+        return 1;
+    }
     if (lat_aot_v2_registry_lookup(&registry, 0x701000,
                                    LAT_AOT_TB_CODE64 |
                                    LAT_AOT_TB_PARALLEL, &target) ||
@@ -189,10 +223,12 @@ int main(void)
     }
     free(pages);
     free(large_slots);
-    errno = 0;
-    if (lat_aot_v2_registry_register(&registry, &overlap) == 0 ||
-        errno != EEXIST) {
-        fprintf(stderr, "overlapping instance was accepted\n");
+    if (lat_aot_v2_registry_register(&registry, &overlap)) {
+        fprintf(stderr, "overlapping shard instance was rejected\n");
+        return 1;
+    }
+    if (lat_aot_v2_registry_deactivate(&registry, &overlap)) {
+        fprintf(stderr, "overlapping shard deactivation failed\n");
         return 1;
     }
     uint64_t generation = atomic_load(&first.generation);

@@ -32,10 +32,7 @@ make_tbset()
     source=$1
     output=$2
     pattern=$3
-    printf 'LATC_TBSET_V1 %s\n' "$(sha256sum "$source" | awk '{print $1}')" >"$output"
-    nm "$source" | awk -v pattern="$pattern" \
-      '$2 ~ /^[TtIi]$/ && $3 ~ pattern { print "0x" $1, "0x1" }' >>"$output"
-    test -s "$output"
+    python3 "$script_dir/make-symbol-tbset.py" "$source" "$pattern" "$output"
 }
 
 compile_module()

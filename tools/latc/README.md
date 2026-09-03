@@ -285,6 +285,11 @@ Set `LATC_STRICT_AOT=1` when testing the output. The runner exits with status
 125 before decoding if the runtime translator is entered after embedded AOT
 loading.
 
+For dependency-coverage acceptance, use `LATC_STRICT_FILE_AOT=1`. It rejects
+JIT generation for code backed by an ELF file while allowing non-file mappings
+such as the vDSO. `LATC_STRICT_AOT=1` remains the stronger diagnostic mode that
+rejects every runtime translation attempt.
+
 Embedded AOT is installed into `$HOME/.cache/latx` on first use. Later runs
 reuse it only when a read-only cache file and its latc marker still match the
 recorded SHA-256 digest, inode, size, and modification time. Runtime statistics
@@ -293,22 +298,18 @@ include `aot_cache_hit`, `bundle_verify_ns`, `guest_extract_ns`, and
 `runtime_tb_gen_attempts` is counted at translator entry; strict mode rejects
 the attempt before decoding or generating host code.
 
-An optional TB set selects the translated blocks that belong in the output:
-
-```text
-LATC_TBSET_V1 SOURCE_SHA256
-0x1000 0x1
-0x1038 0x1
-```
-
-Each record contains an ELF-relative virtual address and semantic translation
-flags. It deliberately contains no execution count. Pass it with
+An optional binary TB key set selects the translated blocks that belong in the
+output. Its fixed header contains `LATTBKS`, the format version, source
+SHA-256, record count, and sequence. Each fixed-size record contains an
+ELF-relative virtual address and semantic translation flags. It deliberately
+contains no execution count. Pass it with
 `--tbset FILE`. TB-set compilation reads only the ELF program headers instead
 of decoding the whole executable first. During that same runner process it
 adds the direct branch targets required by selected TBs, so module creation
 does not need repeated whole-program translation rounds. A wrong source
 digest, an address outside executable sections, an unsupported flag, or a
-malformed line fails compilation. No older profile format is accepted.
+malformed header or record fails compilation. There is no text profile format
+or compatibility parser.
 
 The module tables are emitted as binary data and included directly by the
 assembler. They are not formatted as a large C source file for the host C
@@ -414,11 +415,15 @@ splits. `edge_target_tbs` counts executable static-edge targets not represented
 by a standalone CFG block. Jump-table case targets must be CFG TB leaders; the
 runner does not scan past alignment NOPs to compensate for missing targets.
 
-For AOT v2, the runtime does not increment counters or append records while a
-TB executes. At normal process exit and immediately before a global TB flush,
-it scans the existing JIT TB table once, groups entries by source ELF, and
-submits `LATC_TBSET_V1` files to latcd. latcd unions the address-and-flags sets;
-an unchanged set does not schedule another compile.
+For AOT v2, the runtime does not increment counters while a TB executes. It
+records the exact `(RVA, semantic flags)` key once when a file-backed TB is
+created. A background thread submits pending per-source sets every 100 ms;
+normal exit and pre-`execve` handling submit any remainder. It never scans the
+global JIT TB table. latcd unions keys from all processes; an unchanged set
+does not schedule another compile. In `--flush-only` mode it performs no
+compilation until `FLUSH_SOURCE` or `FLUSH_ALL`, then compiles each final source
+set once. The flush waits until every previously accepted set is published or
+an explicit compile error is returned.
 
 Profile-module generation is single-pass. The compiler must include every
 requested TB and its required direct branch targets in that pass. A missing

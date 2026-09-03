@@ -8,28 +8,30 @@
 #include <stdio.h>
 #include <string.h>
 
-static int write_fixture(const char *path, int overlap, int incomplete_map)
+static int write_fixture(const char *path, int overlap, int incomplete_map,
+                         int missing_target)
 {
     unsigned char image[1024] = {0};
     LatNativeImageHeaderV2 *header = (void *)image;
     memcpy(header->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
     header->version = LAT_NATIVE_IMAGE_VERSION;
     header->header_size = sizeof(*header);
-    header->flags = LAT_NATIVE_IMAGE_X86_STATIC_EXEC;
+    header->flags = LAT_NATIVE_IMAGE_X86_STATIC_EXEC |
+        (missing_target ? LAT_NATIVE_IMAGE_CROSS_MODULE_TARGETS : 0);
     header->guest_entry = 0x401000;
     header->preferred_guest_base = 0x400000;
     header->guest_image_offset = sizeof(*header);
     header->guest_image_size = 1;
     header->code_offset = header->guest_image_offset + 8;
-    header->code_size = 28;
+    header->code_size = missing_target ? 24 : 28;
     header->tb_table_offset = header->code_offset + header->code_size;
-    header->tb_count = 2;
+    header->tb_count = missing_target ? 1 : 2;
     header->relocation_offset = header->tb_table_offset +
-                                2 * sizeof(LatNativeTbV1);
+                                header->tb_count * sizeof(LatNativeTbV1);
     header->relocation_count = 3;
     header->pc_map_offset = header->relocation_offset +
                             3 * sizeof(LatNativeRelocationV1);
-    header->pc_map_count = 2;
+    header->pc_map_count = missing_target ? 1 : 2;
     strcpy(header->lat_build_id, "aot-v2-module-pack-test-v1");
 
     uint32_t *code = (void *)(image + header->code_offset);
@@ -45,11 +47,13 @@ static int write_fixture(const char *path, int overlap, int incomplete_map)
     tbs[0] = (LatNativeTbV1){
         .guest_pc = 0x401000, .code_offset = 0, .code_size = 24,
     };
-    tbs[1] = (LatNativeTbV1){
-        .guest_pc = 0x402000,
-        .code_offset = overlap ? 20 : 24,
-        .code_size = overlap ? 8 : 4,
-    };
+    if (!missing_target) {
+        tbs[1] = (LatNativeTbV1){
+            .guest_pc = 0x402000,
+            .code_offset = overlap ? 20 : 24,
+            .code_size = overlap ? 8 : 4,
+        };
+    }
 
     LatNativeRelocationV1 *relocations =
         (void *)(image + header->relocation_offset);
@@ -82,12 +86,14 @@ static int write_fixture(const char *path, int overlap, int incomplete_map)
         .host_offset_end = incomplete_map ? 20 : 24,
         .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
     };
-    maps[1] = (LatNativePcMapV2){
-        .guest_pc = 0x402000,
-        .host_offset_begin = 24,
-        .host_offset_end = 28,
-        .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
-    };
+    if (!missing_target) {
+        maps[1] = (LatNativePcMapV2){
+            .guest_pc = 0x402000,
+            .host_offset_begin = 24,
+            .host_offset_end = 28,
+            .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+        };
+    }
 
     size_t size = header->pc_map_offset +
                   header->pc_map_count * sizeof(LatNativePcMapV2);
@@ -180,7 +186,7 @@ int main(void)
     }
     char *image_path = g_build_filename(directory, "fixture.latnative", NULL);
     char error[256] = {0};
-    if (write_fixture(image_path, 0, 0) ||
+    if (write_fixture(image_path, 0, 0, 0) ||
         lat_aot_v2_emit_module_sources(image_path, directory,
                                        error, sizeof(error))) {
         fprintf(stderr, "cannot emit test module: %s\n", error);
@@ -225,6 +231,25 @@ int main(void)
         return 1;
     }
     g_free(assembly);
+    gchar *missing_text = NULL;
+    gsize missing_text_size = 0;
+    if (write_fixture(image_path, 0, 0, 1) ||
+        lat_aot_v2_emit_module_sources(image_path, directory,
+                                       error, sizeof(error)) ||
+        !g_file_get_contents(text_path, &missing_text,
+                             &missing_text_size, NULL) ||
+        missing_text_size != 24) {
+        fprintf(stderr, "cross-shard fallback TB was not emitted: %s\n",
+                error);
+        g_free(missing_text);
+        g_free(text);
+        g_free(assembly_path);
+        g_free(text_path);
+        g_free(metadata_path);
+        g_free(image_path);
+        return 1;
+    }
+    g_free(missing_text);
     if (write_large_guest_table_fixture(
             image_path, LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT + 1) ||
         lat_aot_v2_emit_module_sources(image_path, directory,
@@ -301,7 +326,7 @@ int main(void)
     gchar *incomplete_metadata = NULL;
     gchar *incomplete_tbs = NULL;
     gsize incomplete_tbs_size = 0;
-    if (write_fixture(image_path, 0, 1) ||
+    if (write_fixture(image_path, 0, 1, 0) ||
         lat_aot_v2_emit_module_sources(image_path, directory,
                                        error, sizeof(error)) ||
         !g_file_get_contents(metadata_path, &incomplete_metadata,
@@ -322,7 +347,7 @@ int main(void)
     g_free(incomplete_tbs);
     g_free(incomplete_metadata);
     memset(error, 0, sizeof(error));
-    if (write_fixture(image_path, 1, 0) ||
+    if (write_fixture(image_path, 1, 0, 0) ||
         !lat_aot_v2_emit_module_sources(image_path, directory,
                                         error, sizeof(error)) ||
         !strstr(error, "overlap")) {

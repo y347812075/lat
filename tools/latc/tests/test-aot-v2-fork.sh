@@ -17,12 +17,8 @@ script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 rm -rf "$work"
 mkdir -p "$work/cache"
 source_sha=$(sha256sum "$guest" | awk '{print $1}')
-hot_rva=$(nm -n "$guest" | awk '$3 == "fork_hot_value" { print "0x" $1; exit }')
-test -n "$hot_rva"
-{
-    printf 'LATC_TBSET_V1 %s\n' "$source_sha"
-    printf '%s 0x3\n' "$hot_rva"
-} >"$work/fork.tbset"
+python3 "$script_dir/make-symbol-tbset.py" "$guest" \
+  '^fork_hot_value$' "$work/fork.tbset"
 
 LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 LAT_LD_PREFIX="$rootfs" \

@@ -18,6 +18,7 @@ rm -rf "$build_dir" "$staging_dir"
 mkdir -p "$staging_dir"
 rsync -a --delete --exclude 'build*' "$source_dir/" "$staging_dir/"
 touch "$staging_dir/.latc-staging"
+printf '%s\n' "$build_id" >"$staging_dir/.latc-build-id"
 python3 "$script_dir/prepare-runner-source.py" "$staging_dir"
 mkdir -p "$build_dir"
 

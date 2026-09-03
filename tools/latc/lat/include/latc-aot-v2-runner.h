@@ -34,6 +34,8 @@ typedef enum LatcAotV2InvalidationReason {
 } LatcAotV2InvalidationReason;
 
 /* Serialize AOT state across fork and retain registered modules in the child. */
+void latc_aot_v2_consume_environment(void);
+bool latc_aot_v2_strict_enabled(void);
 void latc_aot_v2_fork_start(void);
 void latc_aot_v2_fork_end(CPUState *cpu, bool child);
 bool latc_aot_v2_mapping_enabled(void);
@@ -52,9 +54,10 @@ bool latc_aot_v2_note_mremap(CPUState *cpu, uint64_t old_start,
                              uint64_t old_size, uint64_t new_start,
                              uint64_t new_size, bool keep_old);
 void latc_aot_v2_report_stats(void);
-/* Snapshot existing JIT TBs outside the dispatch and translation hot paths. */
-void latc_aot_v2_snapshot_jit_tbs(void);
-void latc_aot_v2_snapshot_jit_tb(TranslationBlock *tb);
+/* Preserve pending JIT keys before exec replaces the current process image. */
+void latc_aot_v2_flush_pending_keys(void);
+/* Record a file-backed JIT translation request without execution counters. */
+void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags);
 bool latc_aot_v2_is_file_pc(target_ulong guest_pc);
 int latc_aot_v2_prepare(CPUArchState *env);
 bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,

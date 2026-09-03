@@ -12,18 +12,20 @@ compile result while holding an mmap lock or executing guest code.
 
 ## Request protocol
 
-The local transport is `AF_UNIX` with `SOCK_SEQPACKET`. Each version 1 request
-contains a fixed-size header and exactly one file descriptor passed with
-`SCM_RIGHTS`.
+The local transport is `AF_UNIX` with `SOCK_SEQPACKET`. The only protocol is
+version 2. Every request has a fixed-size header. `SUBMIT_KEYS` carries source
+and key-set descriptors, `FLUSH_SOURCE` carries one source descriptor, and
+`FLUSH_ALL` carries no descriptor.
 
 ```c
-struct LatcdRequestV1 {
+struct LatcdRequestV2 {
     uint32_t magic;
     uint16_t version;
     uint16_t size;
+    uint32_t operation;
     uint32_t priority;
-    uint32_t flags;
     uint64_t request_id;
+    uint64_t sequence;
 };
 ```
 
@@ -129,7 +131,7 @@ runtime directory, and a minimal environment.
 
 ## Implementation status
 
-`WI-2273` implements the version 1 packet, `SCM_RIGHTS` transfer, stable source
+The implementation uses only the version 2 packet, `SCM_RIGHTS` transfer, stable source
 snapshot and SHA-256 calculation, x86 ELF checks, existing-cache validation,
 compiler invocation, output inspection, source-digest comparison, read-only
 artifact mode, `fsync`, atomic rename, and temporary-file cleanup. The

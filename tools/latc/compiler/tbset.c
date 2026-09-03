@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 
 #include "tbset.h"
-#include "lat-aot-v2.h"
+#include "lat-tb-key-set.h"
 
 #include <elf.h>
 #include <errno.h>
@@ -11,13 +11,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef STT_GNU_IFUNC
+#define STT_GNU_IFUNC 10
+#endif
+
 static int fail(char *error, size_t size, const char *message)
 {
     if (error && size) snprintf(error, size, "%s", message);
     return -1;
 }
 
-static int source_digest(const char *path, char digest[65],
+static int source_digest(const char *path, uint8_t digest[32],
                          char *error, size_t error_size)
 {
     gchar *contents = NULL;
@@ -33,10 +37,11 @@ static int source_digest(const char *path, char digest[65],
     }
     GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
     g_checksum_update(checksum, (const guchar *)contents, size);
-    g_strlcpy(digest, g_checksum_get_string(checksum), 65);
+    gsize digest_size = 32;
+    g_checksum_get_digest(checksum, digest, &digest_size);
     g_checksum_free(checksum);
     g_free(contents);
-    return 0;
+    return digest_size == 32 ? 0 : -1;
 }
 
 static int source_load_base(const char *path, uint64_t *base,
@@ -44,13 +49,9 @@ static int source_load_base(const char *path, uint64_t *base,
 {
     gchar *contents = NULL;
     gsize size = 0;
-    GError *gerror = NULL;
-    if (!g_file_get_contents(path, &contents, &size, &gerror)) {
-        if (error && error_size) {
-            snprintf(error, error_size, "%s: %s", path,
-                     gerror ? gerror->message : "cannot read source");
-        }
-        g_clear_error(&gerror);
+    if (!g_file_get_contents(path, &contents, &size, NULL)) {
+        if (error && error_size) snprintf(error, error_size,
+                                          "%s: cannot read source", path);
         return -1;
     }
     Elf64_Ehdr header;
@@ -69,8 +70,7 @@ static int source_load_base(const char *path, uint64_t *base,
         Elf64_Phdr phdr;
         memcpy(&phdr, contents + header.e_phoff + i * sizeof(phdr),
                sizeof(phdr));
-        if (phdr.p_type == PT_LOAD && phdr.p_memsz &&
-            phdr.p_vaddr < result) {
+        if (phdr.p_type == PT_LOAD && phdr.p_memsz && phdr.p_vaddr < result) {
             result = phdr.p_vaddr;
         }
     }
@@ -88,35 +88,86 @@ malformed:
     return -1;
 }
 
-static int parse_tbset_header(const char *path, size_t line_no, char *p,
-                              const char *source_path,
-                              char *error, size_t error_size)
+static int add_parallel_dynamic_entries(const char *path, CfgProgram *program,
+                                        char *error, size_t error_size)
 {
-    static const char prefix[] = "LATC_TBSET_V1";
-    p += sizeof(prefix) - 1;
-    while (*p == ' ' || *p == '\t') p++;
-    char expected[65];
-    size_t length = 0;
-    while (g_ascii_isxdigit(p[length])) length++;
-    char *end = p + length;
-    while (*end == ' ' || *end == '\t' || *end == '\r') end++;
-    if (length != 64 || (*end && *end != '\n' && *end != '#')) {
-        if (error && error_size) {
-            snprintf(error, error_size,
-                     "%s:%zu: expected LATC_TBSET_V1 SOURCE_SHA256",
-                     path, line_no);
-        }
-        return -1;
+    gchar *contents = NULL;
+    gsize size = 0;
+    if (!g_file_get_contents(path, &contents, &size, NULL) ||
+        size < sizeof(Elf64_Ehdr)) {
+        g_free(contents);
+        return fail(error, error_size, "cannot read ELF dynamic symbols");
     }
-    if (source_digest(source_path, expected, error, error_size)) return -1;
-    if (g_ascii_strncasecmp(p, expected, 64)) {
-        if (error && error_size) {
-            snprintf(error, error_size,
-                     "%s:%zu: TB set source SHA-256 does not match %s",
-                     path, line_no, source_path);
-        }
-        return -1;
+    const unsigned char *file = (const void *)contents;
+    const Elf64_Ehdr *header = (const void *)file;
+    if (header->e_shentsize != sizeof(Elf64_Shdr) ||
+        header->e_shoff > size ||
+        header->e_shnum > (size - header->e_shoff) / sizeof(Elf64_Shdr)) {
+        g_free(contents);
+        return fail(error, error_size, "invalid ELF section table");
     }
+    const Elf64_Shdr *sections = (const void *)(file + header->e_shoff);
+    GHashTable *parallel_pcs = g_hash_table_new_full(
+        g_int64_hash, g_int64_equal, g_free, NULL);
+    for (size_t i = 0; i < program->tb_count; i++) {
+        if (program->tbs[i].semantic_flags !=
+            (CFG_TB_CODE64 | CFG_TB_PARALLEL)) {
+            continue;
+        }
+        uint64_t *key = g_new(uint64_t, 1);
+        *key = program->tbs[i].start;
+        g_hash_table_add(parallel_pcs, key);
+    }
+    for (uint16_t section = 0; section < header->e_shnum; section++) {
+        const Elf64_Shdr *symbols = &sections[section];
+        if (symbols->sh_type != SHT_DYNSYM ||
+            symbols->sh_entsize != sizeof(Elf64_Sym) ||
+            symbols->sh_offset > size ||
+            symbols->sh_size > size - symbols->sh_offset) {
+            continue;
+        }
+        size_t count = symbols->sh_size / sizeof(Elf64_Sym);
+        const Elf64_Sym *entries = (const void *)(file + symbols->sh_offset);
+        if (count > (SIZE_MAX / sizeof(*program->tbs)) - program->tb_count) {
+            g_hash_table_destroy(parallel_pcs);
+            g_free(contents);
+            return fail(error, error_size,
+                        "too many dynamic function entries");
+        }
+        CfgTb *next = realloc(program->tbs,
+                              (program->tb_count + count) * sizeof(*next));
+        if (!next && count) {
+            g_hash_table_destroy(parallel_pcs);
+            g_free(contents);
+            return fail(error, error_size,
+                        "out of memory adding dynamic function entry");
+        }
+        program->tbs = next;
+        for (size_t i = 0; i < count; i++) {
+            unsigned int type = ELF64_ST_TYPE(entries[i].st_info);
+            uint64_t pc = entries[i].st_value;
+            if ((type != STT_FUNC && type != STT_GNU_IFUNC) || !pc ||
+                !cfg_program_address_is_executable(program, pc)) {
+                continue;
+            }
+            if (g_hash_table_contains(parallel_pcs, &pc)) {
+                continue;
+            }
+            program->tbs[program->tb_count++] = (CfgTb) {
+                .start = pc,
+                .end = pc + 1,
+                .terminator_pc = pc,
+                .selected = true,
+                .semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL,
+                .terminator = CFG_TB_FALLTHROUGH,
+            };
+            uint64_t *key = g_new(uint64_t, 1);
+            *key = pc;
+            g_hash_table_add(parallel_pcs, key);
+        }
+    }
+    g_hash_table_destroy(parallel_pcs);
+    g_free(contents);
     return 0;
 }
 
@@ -126,63 +177,44 @@ int latc_tbset_apply(const char *path, const char *source_path,
                      size_t *unmatched, size_t *ignored,
                      char *error, size_t error_size)
 {
-    FILE *fp = fopen(path, "r");
-    if (!fp) {
-        if (error && error_size)
-            snprintf(error, error_size, "%s: %s", path, strerror(errno));
+    uint8_t digest[32];
+    uint64_t load_base;
+    LatTbKeySet set;
+    if (source_digest(source_path, digest, error, error_size) ||
+        source_load_base(source_path, &load_base, error, error_size) ||
+        lat_tb_key_set_read_file(path, digest, &set, error, error_size)) {
         return -1;
     }
-    size_t hit = 0, miss = 0, skip = 0, line_no = 0, records = 0;
-    bool saw_header = false;
-    uint64_t load_base = 0;
-    char *line = NULL;
-    size_t cap = 0;
-    while (getline(&line, &cap, fp) >= 0) {
-        line_no++;
-        char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
-        if (!*p || *p == '\n' || *p == '#') continue;
-        if (!saw_header) {
-            if (strncmp(p, "LATC_TBSET_V1", sizeof("LATC_TBSET_V1") - 1) ||
-                parse_tbset_header(path, line_no, p, source_path,
-                                   error, error_size)) {
-                if (error && error_size && !error[0]) {
-                    snprintf(error, error_size,
-                             "%s:%zu: expected LATC_TBSET_V1 SOURCE_SHA256",
-                             path, line_no);
-                }
-                free(line); fclose(fp); return -1;
-            }
-            if (source_load_base(source_path, &load_base,
-                                 error, error_size)) {
-                free(line); fclose(fp); return -1;
-            }
-            saw_header = true;
-            continue;
+    size_t hit = 0, miss = 0, skip = 0;
+    bool has_parallel = false;
+    size_t template_count = program->tb_count;
+    if (set.count > (SIZE_MAX / sizeof(*program->tbs)) - program->tb_count) {
+        lat_tb_key_set_destroy(&set);
+        return fail(error, error_size, "too many TB key entries");
+    }
+    CfgTb *reserved = realloc(
+        program->tbs, (program->tb_count + set.count) * sizeof(*reserved));
+    if (!reserved && set.count) {
+        lat_tb_key_set_destroy(&set);
+        return fail(error, error_size, "out of memory adding TB key entries");
+    }
+    program->tbs = reserved;
+    for (size_t record = 0; record < set.count; record++) {
+        const LatTbKey *key = &set.keys[record];
+        has_parallel |= !!(key->flags & CFG_TB_PARALLEL);
+        if (key->guest_rva > UINT64_MAX - load_base) {
+            lat_tb_key_set_destroy(&set);
+            return fail(error, error_size, "TB key address overflows");
         }
-        errno = 0;
-        char *end = NULL;
-        if (++records > LAT_AOT_V2_TBSET_RECORD_LIMIT) goto malformed;
-        uint64_t pc = strtoull(p, &end, 0);
-        if (errno || end == p) goto malformed;
-        if (pc > UINT64_MAX - load_base) goto malformed;
-        pc += load_base;
-        p = end;
-        errno = 0;
-        uint64_t raw_flags = strtoull(p, &end, 0);
-        if (errno || end == p || raw_flags > UINT32_MAX ||
-            !(raw_flags & CFG_TB_CODE64) ||
-            (raw_flags & ~(CFG_TB_CODE64 | CFG_TB_PARALLEL))) {
-            goto malformed;
-        }
-        while (*end == ' ' || *end == '\t' || *end == '\r') end++;
-        if (*end && *end != '\n' && *end != '#') goto malformed;
+        uint64_t pc = key->guest_rva + load_base;
         bool found = false;
         size_t template_index = SIZE_MAX;
-        for (size_t i = 0; i < program->tb_count; i++) {
+        /* The on-disk key set is already unique.  Only pre-existing CFG
+         * templates can match; entries appended by this loop cannot. */
+        for (size_t i = 0; i < template_count; i++) {
             if (program->tbs[i].start != pc) continue;
             if (template_index == SIZE_MAX) template_index = i;
-            if (program->tbs[i].semantic_flags == (uint32_t)raw_flags) {
+            if (program->tbs[i].semantic_flags == key->flags) {
                 program->tbs[i].selected = true;
                 found = true;
                 break;
@@ -191,13 +223,6 @@ int latc_tbset_apply(const char *path, const char *source_path,
         if (found) {
             hit++;
         } else if (cfg_program_address_is_executable(program, pc)) {
-            CfgTb *next = realloc(program->tbs,
-                                  (program->tb_count + 1) * sizeof(*next));
-            if (!next) {
-                free(line); fclose(fp);
-                return fail(error, error_size, "out of memory adding TB set entry");
-            }
-            program->tbs = next;
             CfgTb added = template_index != SIZE_MAX ?
                 program->tbs[template_index] : (CfgTb) {
                     .start = pc,
@@ -206,7 +231,7 @@ int latc_tbset_apply(const char *path, const char *source_path,
                     .terminator = CFG_TB_FALLTHROUGH,
                 };
             added.selected = true;
-            added.semantic_flags = (uint32_t)raw_flags;
+            added.semantic_flags = key->flags;
             added.first_edge = 0;
             added.edge_count = 0;
             program->tbs[program->tb_count++] = added;
@@ -214,32 +239,22 @@ int latc_tbset_apply(const char *path, const char *source_path,
         } else if (ignore_outside_exec) {
             skip++;
         } else {
-            free(line); fclose(fp);
-            if (error && error_size)
+            if (error && error_size) {
                 snprintf(error, error_size,
-                         "%s:%zu: address 0x%" PRIx64
+                         "%s: key %zu address 0x%" PRIx64
                          " is outside executable ELF sections",
-                         path, line_no, pc);
+                         path, record, pc);
+            }
+            lat_tb_key_set_destroy(&set);
             return -1;
         }
-        continue;
-malformed:
-        free(line);
-        fclose(fp);
-        if (error && error_size)
-            snprintf(error, error_size,
-                     "%s:%zu: expected RVA FLAGS", path, line_no);
+    }
+    if (has_parallel && add_parallel_dynamic_entries(
+            source_path, program, error, error_size)) {
+        lat_tb_key_set_destroy(&set);
         return -1;
     }
-    free(line);
-    if (ferror(fp)) {
-        fclose(fp);
-        return fail(error, error_size, "failed to read TB set");
-    }
-    fclose(fp);
-    if (!saw_header) {
-        return fail(error, error_size, "TB set header is missing");
-    }
+    lat_tb_key_set_destroy(&set);
     if (matched) *matched = hit;
     if (unmatched) *unmatched = miss;
     if (ignored) *ignored = skip;

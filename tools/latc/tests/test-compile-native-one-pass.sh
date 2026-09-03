@@ -2,15 +2,13 @@
 set -eu
 
 script=$1
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/latc-one-pass-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
 printf guest >"$work/guest"
-guest_sha=$(sha256sum "$work/guest" | awk '{print $1}')
-{
-    printf 'LATC_TBSET_V1 %s\n' "$guest_sha"
-    printf '0x1000 0x1\n'
-} >"$work/input.tbset"
+python3 "$script_dir/tb_key_set.py" "$work/guest" \
+    "$work/input.tbset" 0x1000:0x1
 
 cat >"$work/stage1" <<'EOF'
 #!/bin/sh

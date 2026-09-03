@@ -12,6 +12,7 @@
 #include "latc-build-id.h"
 #include "latcd-client.h"
 #include "latcd-protocol.h"
+#include "lat-tb-key-set.h"
 #include "guest-elf-map.h"
 #include "module-loader.h"
 #include "qemu-def.h"
@@ -57,6 +58,7 @@ typedef struct LatAotV2ModuleStats {
     _Atomic size_t live_instances;
     int source_fd;
     GHashTable *jit_tbset;
+    GHashTable *pending_tbset;
     struct LatAotV2ModuleStats *next;
 } LatAotV2ModuleStats;
 
@@ -119,6 +121,11 @@ static bool runtime_bound;
 static LatGuestElfTrackerV2 *elf_tracker;
 static pthread_mutex_t elf_tracker_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t tbset_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t submission_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t submission_control_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t submission_control_cond = PTHREAD_COND_INITIALIZER;
+static uint64_t submission_generation;
+static bool submission_thread_started;
 typedef struct LatAotV2PendingMapping {
     int fd;
     uint64_t guest_start;
@@ -149,6 +156,18 @@ static _Atomic uint64_t compiler_submission_failures;
 static _Atomic uint64_t compiler_submission_duplicates;
 static _Atomic uint64_t compiler_submission_throttled;
 static _Atomic uint64_t compiler_request_sequence;
+static bool aot_v2_strict;
+
+void latc_aot_v2_consume_environment(void)
+{
+    aot_v2_strict = getenv("LATX_AOT_V2_STRICT") != NULL;
+    unsetenv("LATX_AOT_V2_STRICT");
+}
+
+bool latc_aot_v2_strict_enabled(void)
+{
+    return aot_v2_strict;
+}
 
 static uint32_t aot_v2_semantic_flags(uint32_t cflags)
 {
@@ -161,6 +180,7 @@ static _Atomic uint64_t revalidated_instances;
 static _Atomic uint64_t revalidation_failures;
 
 static void submit_runtime_tbsets(void);
+static void schedule_runtime_tbset_submission(void);
 
 static bool next_compiler_request_id(uint64_t *request_id)
 {
@@ -198,6 +218,8 @@ static uint64_t discovered_elfs;
 void latc_aot_v2_fork_start(void)
 {
     pthread_mutex_lock(&elf_tracker_lock);
+    pthread_mutex_lock(&submission_control_lock);
+    pthread_mutex_lock(&submission_lock);
     pthread_mutex_lock(&tbset_lock);
 }
 
@@ -205,6 +227,8 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
 {
     if (!child) {
         pthread_mutex_unlock(&tbset_lock);
+        pthread_mutex_unlock(&submission_lock);
+        pthread_mutex_unlock(&submission_control_lock);
         pthread_mutex_unlock(&elf_tracker_lock);
         return;
     }
@@ -239,6 +263,7 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
     aot_v2_current_instance = NULL;
     aot_v2_current_generation = 0;
     aot_v2_target_cache = NULL;
+    submission_thread_started = false;
 #ifdef CONFIG_LATX_FAST_JMPCACHE
     if (cpu) {
         latx_aot_v2_fast_jmp_cache_set_context(cpu, NULL);
@@ -249,6 +274,8 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
 #endif
 
     pthread_mutex_unlock(&tbset_lock);
+    pthread_mutex_unlock(&submission_lock);
+    pthread_mutex_unlock(&submission_control_lock);
     pthread_mutex_unlock(&elf_tracker_lock);
 }
 
@@ -539,6 +566,11 @@ void latc_aot_v2_report_stats(void)
     }
 }
 
+void latc_aot_v2_flush_pending_keys(void)
+{
+    submit_runtime_tbsets();
+}
+
 static guint tbset_entry_hash(gconstpointer value)
 {
     const LatAotV2TbsetEntry *entry = value;
@@ -585,6 +617,9 @@ static LatAotV2ModuleStats *add_module_stats(
     stats->jit_tbset = g_hash_table_new_full(tbset_entry_hash,
                                              tbset_entry_equal,
                                              g_free, NULL);
+    stats->pending_tbset = g_hash_table_new_full(tbset_entry_hash,
+                                                 tbset_entry_equal,
+                                                 g_free, NULL);
     memcpy(stats->source_sha256, info->source_sha256,
            sizeof(stats->source_sha256));
     atomic_store_explicit(&stats->guest_begin, info->guest_begin,
@@ -670,64 +705,55 @@ bool latc_aot_v2_mapping_enabled(void)
     return (cache && *cache) || (module && *module) || (socket && *socket);
 }
 
-static void snapshot_jit_tb_locked(TranslationBlock *tb)
+static bool note_jit_key_locked(target_ulong guest_pc, uint32_t cflags)
 {
-    uint32_t cflags = qatomic_read(&tb->cflags);
     if (cflags & CF_INVALID) {
-        return;
+        return false;
     }
-    LatAotV2ModuleStats *stats = module_stats_for_pc(tb->pc);
+    LatAotV2ModuleStats *stats = module_stats_for_pc(guest_pc);
     if (!stats || !stats->jit_tbset ||
         g_hash_table_size(stats->jit_tbset) >= LAT_AOT_V2_TBSET_RECORD_LIMIT) {
-        return;
+        return false;
     }
     uint64_t source_base = atomic_load_explicit(&stats->source_base,
                                                 memory_order_acquire);
-    if (tb->pc < source_base) {
-        return;
+    if (guest_pc < source_base) {
+        return false;
     }
     LatAotV2TbsetEntry candidate = {
-        .rva = tb->pc - source_base,
+        .rva = guest_pc - source_base,
         .flags = aot_v2_semantic_flags(cflags),
     };
     if (g_hash_table_contains(stats->jit_tbset, &candidate)) {
-        return;
+        return false;
     }
     LatAotV2TbsetEntry *entry = g_new(LatAotV2TbsetEntry, 1);
     if (!entry) {
-        return;
+        return false;
     }
     *entry = candidate;
     g_hash_table_add(stats->jit_tbset, entry);
-}
-
-static void snapshot_jit_tb(void *value, uint32_t hash, void *opaque)
-{
-    (void)hash;
-    (void)opaque;
-    snapshot_jit_tb_locked(value);
-}
-
-void latc_aot_v2_snapshot_jit_tb(TranslationBlock *tb)
-{
-    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
-    if (!socket || !*socket || !tb) {
-        return;
+    LatAotV2TbsetEntry *pending = g_new(LatAotV2TbsetEntry, 1);
+    if (!pending) {
+        return false;
     }
-    pthread_mutex_lock(&tbset_lock);
-    snapshot_jit_tb_locked(tb);
-    pthread_mutex_unlock(&tbset_lock);
+    *pending = candidate;
+    g_hash_table_add(stats->pending_tbset, pending);
+    return true;
 }
 
-void latc_aot_v2_snapshot_jit_tbs(void)
+void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
 {
     const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
     if (!socket || !*socket) {
         return;
     }
     pthread_mutex_lock(&tbset_lock);
-    qht_iter(&tb_ctx.htable, snapshot_jit_tb, NULL);
+    bool added = note_jit_key_locked(guest_pc, cflags);
     pthread_mutex_unlock(&tbset_lock);
+    if (added) {
+        schedule_runtime_tbset_submission();
+    }
 }
 
 static int tbset_entry_compare(gconstpointer left, gconstpointer right)
@@ -743,19 +769,19 @@ static void submit_runtime_tbsets(void)
 {
     const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
     if (!socket || !*socket) return;
-    latc_aot_v2_snapshot_jit_tbs();
+    pthread_mutex_lock(&submission_lock);
     for (LatAotV2ModuleStats *stats = atomic_load_explicit(
              &module_stats, memory_order_acquire); stats;
          stats = stats->next) {
         pthread_mutex_lock(&tbset_lock);
-        guint count = stats->jit_tbset ?
-                      g_hash_table_size(stats->jit_tbset) : 0;
+        guint count = stats->pending_tbset ?
+                      g_hash_table_size(stats->pending_tbset) : 0;
         GArray *entries = count ? g_array_sized_new(
             FALSE, FALSE, sizeof(LatAotV2TbsetEntry), count) : NULL;
         if (entries) {
             GHashTableIter iterator;
             gpointer key;
-            g_hash_table_iter_init(&iterator, stats->jit_tbset);
+            g_hash_table_iter_init(&iterator, stats->pending_tbset);
             while (g_hash_table_iter_next(&iterator, &key, NULL)) {
                 g_array_append_val(entries, *(LatAotV2TbsetEntry *)key);
             }
@@ -771,21 +797,23 @@ static void submit_runtime_tbsets(void)
         gchar *path = NULL;
         GError *gerror = NULL;
         int output_fd = g_file_open_tmp("latc-tbset-XXXXXX", &path, &gerror);
-        FILE *output = output_fd >= 0 ? fdopen(output_fd, "w") : NULL;
-        int failed = !output;
-        if (output) {
-            fprintf(output, "LATC_TBSET_V1 %s\n", source);
-            for (guint i = 0; i < entries->len; i++) {
-                const LatAotV2TbsetEntry *entry = &g_array_index(
-                    entries, LatAotV2TbsetEntry, i);
-                fprintf(output, "0x%llx 0x%x\n",
-                        (unsigned long long)entry->rva, entry->flags);
-            }
-            failed = fflush(output) || fsync(fileno(output));
-            if (fclose(output)) failed = 1;
-        } else if (output_fd >= 0) {
-            close(output_fd);
+        LatTbKeySet key_set = { .count = entries->len };
+        memcpy(key_set.source_sha256, stats->source_sha256, 32);
+        key_set.keys = g_new0(LatTbKey, key_set.count);
+        for (guint i = 0; i < entries->len; i++) {
+            const LatAotV2TbsetEntry *entry = &g_array_index(
+                entries, LatAotV2TbsetEntry, i);
+            key_set.keys[i].guest_rva = entry->rva;
+            key_set.keys[i].flags = entry->flags;
         }
+        int failed = output_fd < 0 || !key_set.keys;
+        if (!failed && (lat_tb_key_set_write_fd(
+                            output_fd, &key_set, NULL, 0) ||
+                        fsync(output_fd))) {
+            failed = 1;
+        }
+        if (output_fd >= 0 && close(output_fd)) failed = 1;
+        g_free(key_set.keys);
         int tbset_fd = !failed ? open(path, O_RDONLY | O_CLOEXEC) : -1;
         if (tbset_fd >= 0) unlink(path);
         uint64_t request_id;
@@ -800,9 +828,9 @@ static void submit_runtime_tbsets(void)
             continue;
         }
         char error[256] = {0};
-        if (tbset_fd < 0 || latcd_client_submit_tbset_fd(
+        if (tbset_fd < 0 || latcd_client_submit_keys_fd(
                 socket, stats->source_fd, tbset_fd,
-                LATCD_PRIORITY_LIBRARY, request_id,
+                LATCD_PRIORITY_LIBRARY, request_id, request_id,
                 error, sizeof(error))) {
             atomic_fetch_add(&compiler_submission_failures, 1);
             if (getenv("LATX_AOT_V2_REPORT")) {
@@ -812,6 +840,12 @@ static void submit_runtime_tbsets(void)
             }
         } else {
             atomic_fetch_add(&compiler_submissions, 1);
+            pthread_mutex_lock(&tbset_lock);
+            for (guint i = 0; i < entries->len; i++) {
+                g_hash_table_remove(stats->pending_tbset, &g_array_index(
+                    entries, LatAotV2TbsetEntry, i));
+            }
+            pthread_mutex_unlock(&tbset_lock);
             if (getenv("LATX_AOT_V2_REPORT")) {
                 fprintf(stderr,
                         "latx: AOT v2 TB set submitted source=%s keys=%u\n",
@@ -826,6 +860,54 @@ static void submit_runtime_tbsets(void)
         g_clear_error(&gerror);
         g_array_free(entries, TRUE);
     }
+    pthread_mutex_unlock(&submission_lock);
+}
+
+static void *runtime_tbset_submission_thread(void *opaque)
+{
+    (void)opaque;
+    uint64_t handled = 0;
+    pthread_mutex_lock(&submission_control_lock);
+    for (;;) {
+        while (submission_generation == handled) {
+            pthread_cond_wait(&submission_control_cond,
+                              &submission_control_lock);
+        }
+        uint64_t target = submission_generation;
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_nsec += 100 * 1000 * 1000;
+        if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000 * 1000 * 1000;
+        }
+        while (pthread_cond_timedwait(&submission_control_cond,
+                                      &submission_control_lock,
+                                      &deadline) != ETIMEDOUT) {
+            target = submission_generation;
+        }
+        pthread_mutex_unlock(&submission_control_lock);
+        submit_runtime_tbsets();
+        handled = target;
+        pthread_mutex_lock(&submission_control_lock);
+    }
+    return NULL;
+}
+
+static void schedule_runtime_tbset_submission(void)
+{
+    pthread_mutex_lock(&submission_control_lock);
+    submission_generation++;
+    if (!submission_thread_started) {
+        pthread_t thread;
+        if (!pthread_create(&thread, NULL,
+                            runtime_tbset_submission_thread, NULL)) {
+            submission_thread_started = true;
+            pthread_detach(thread);
+        }
+    }
+    pthread_cond_signal(&submission_control_cond);
+    pthread_mutex_unlock(&submission_control_lock);
 }
 
 static void drain_mappings(void)
@@ -1293,6 +1375,99 @@ static LatAotV2RuntimeModule *find_runtime_module(const uint8_t digest[32])
     return NULL;
 }
 
+static char *read_owned_manifest(const char *path, size_t *size)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        return NULL;
+    }
+    struct stat status;
+    if (fstat(fd, &status) || !S_ISREG(status.st_mode) ||
+        status.st_uid != geteuid() || status.st_nlink != 1 ||
+        (status.st_mode & 0222) || status.st_size <= 0 ||
+        status.st_size >= 4096) {
+        close(fd);
+        errno = ENOEXEC;
+        return NULL;
+    }
+    char *contents = g_malloc((size_t)status.st_size + 1);
+    size_t done = 0;
+    while (contents && done < (size_t)status.st_size) {
+        ssize_t count = read(fd, contents + done,
+                             (size_t)status.st_size - done);
+        if (count > 0) {
+            done += (size_t)count;
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else {
+            g_free(contents);
+            contents = NULL;
+            errno = count == 0 ? ENOEXEC : errno;
+            break;
+        }
+    }
+    close(fd);
+    if (!contents) {
+        return NULL;
+    }
+    contents[done] = '\0';
+    *size = done;
+    return contents;
+}
+
+static GPtrArray *read_module_manifest(const char *cache,
+                                       const char source_hex[65],
+                                       char *error, size_t error_size)
+{
+    char *index_name = g_strdup_printf("%s.current", source_hex);
+    char *index_path = g_build_filename(cache, index_name, NULL);
+    g_free(index_name);
+    size_t size = 0;
+    char *contents = read_owned_manifest(index_path, &size);
+    if (!contents) {
+        g_free(index_path);
+        return NULL;
+    }
+    g_free(index_path);
+    if (!size || size >= 4096 || !strstr(contents, "\"version\":1")) {
+        snprintf(error, error_size, "AOT v2 module manifest is invalid");
+        g_free(contents);
+        errno = ENOEXEC;
+        return NULL;
+    }
+    char *cursor = strstr(contents, "\"modules\":[");
+    if (!cursor) {
+        snprintf(error, error_size, "AOT v2 module manifest has no modules");
+        g_free(contents);
+        errno = ENOEXEC;
+        return NULL;
+    }
+    cursor += strlen("\"modules\":[");
+    GPtrArray *modules = g_ptr_array_new_with_free_func(g_free);
+    while (*cursor && *cursor != ']') {
+        while (*cursor == ' ' || *cursor == '\t' || *cursor == ',') cursor++;
+        if (*cursor != '\"') break;
+        char *end = strchr(++cursor, '\"');
+        if (!end || end == cursor || end - cursor >= 192 ||
+            memchr(cursor, '/', end - cursor) || end - cursor <= 3 ||
+            memcmp(end - 3, ".so", 3) ||
+            strncmp(cursor, source_hex, 64)) {
+            break;
+        }
+        g_ptr_array_add(modules, g_strndup(cursor, end - cursor));
+        if (modules->len > 8) break;
+        cursor = end + 1;
+    }
+    g_free(contents);
+    if (!modules->len || modules->len > 8 || *cursor != ']') {
+        snprintf(error, error_size, "AOT v2 module manifest list is invalid");
+        g_ptr_array_free(modules, TRUE);
+        errno = ENOEXEC;
+        return NULL;
+    }
+    return modules;
+}
+
 static void recycle_retired_instances_locked(void)
 {
     if (registry_initialized) {
@@ -1552,41 +1727,11 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
     if (!module) {
         char source_hex[65];
         digest_hex(info->source_sha256, source_hex);
-        char *basename = NULL;
-        char *index_name = g_strdup_printf("%s.current", source_hex);
-        char *index_path = g_build_filename(cache, index_name, NULL);
-        g_free(index_name);
-        int index_fd = open(index_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-        struct stat index_status;
-        if (index_fd >= 0 && !fstat(index_fd, &index_status) &&
-            S_ISREG(index_status.st_mode) &&
-            index_status.st_uid == geteuid() &&
-            index_status.st_size > 0 && index_status.st_size < 1024) {
-            char contents[1024] = {0};
-            ssize_t count = read(index_fd, contents, index_status.st_size);
-            if (count == index_status.st_size) {
-                char *start = strstr(contents, "\"module\":\"");
-                if (start) {
-                    start += strlen("\"module\":\"");
-                    char *end = strchr(start, '\"');
-                    if (end && end > start && end - start < 192 &&
-                        !memchr(start, '/', end - start) &&
-                        end - start > 3 && !memcmp(end - 3, ".so", 3)) {
-                        basename = g_strndup(start, end - start);
-                    }
-                }
-            }
-        }
-        if (index_fd >= 0) close(index_fd);
-        g_free(index_path);
-        if (!basename) {
+        GPtrArray *basenames = read_module_manifest(
+            cache, source_hex, error, error_size);
+        if (!basenames) {
+            if (errno == ENOENT) error[0] = '\0';
             return 0;
-        }
-        char *path = g_build_filename(cache, basename, NULL);
-        g_free(basename);
-        if (!path) {
-            errno = ENOMEM;
-            return -1;
         }
         LatAotExpectedV2 expected = {0};
         memcpy(expected.source_sha256, info->source_sha256,
@@ -1594,50 +1739,62 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
         digest_bytes(LATC_BUILD_ID, strlen(LATC_BUILD_ID),
                      expected.codegen_id);
         expected.available_features = available_aot_features();
-        module = g_new0(LatAotV2RuntimeModule, 1);
-        if (!module) {
-            g_free(path);
-            errno = ENOMEM;
-            return -1;
-        }
-        errno = 0;
-        if (lat_aot_v2_module_open(path, &expected, &module->loaded,
-                                   error, error_size)) {
-            int saved_errno = errno;
-            g_free(module);
-            g_free(path);
-            if (saved_errno == ENOENT) {
-                error[0] = '\0';
-                return 0;
+        for (guint i = 0; i < basenames->len; i++) {
+            const char *basename = g_ptr_array_index(basenames, i);
+            char *path = g_build_filename(cache, basename, NULL);
+            module = g_new0(LatAotV2RuntimeModule, 1);
+            if (!path || !module) {
+                g_free(module);
+                g_free(path);
+                g_ptr_array_free(basenames, TRUE);
+                errno = ENOMEM;
+                return -1;
             }
-            errno = saved_errno;
-            return -1;
+            errno = 0;
+            if (lat_aot_v2_module_open(path, &expected, &module->loaded,
+                                       error, error_size) ||
+                register_host_module(module)) {
+                int saved_errno = errno;
+                if (!error[0]) {
+                    snprintf(error, error_size,
+                             "cannot index AOT v2 host module: %s",
+                             strerror(saved_errno));
+                }
+                g_free(module);
+                g_free(path);
+                g_ptr_array_free(basenames, TRUE);
+                errno = saved_errno;
+                return -1;
+            }
+            module->path = path;
+            module->next = runtime_modules;
+            runtime_modules = module;
         }
-        if (register_host_module(module)) {
-            snprintf(error, error_size,
-                     "cannot index AOT v2 host module: %s", strerror(errno));
-            g_free(path);
-            return -1;
-        }
-        module->path = path;
-        module->next = runtime_modules;
-        runtime_modules = module;
+        g_ptr_array_free(basenames, TRUE);
     }
     if (info->load_bias > UINT64_MAX - info->preferred_base) {
         snprintf(error, error_size, "AOT v2 descriptor load bias overflows");
         errno = EOVERFLOW;
         return -1;
     }
-    if (register_module_instance(module,
-                                 info->load_bias + info->preferred_base,
-                                 info->guest_begin, info->guest_end,
-                                 info->exec_ranges, info->exec_range_count,
-                                 instance)) {
-        snprintf(error, error_size, "cannot register AOT v2 instance: %s",
-                 strerror(errno));
-        return -1;
+    int registered = 0;
+    for (module = runtime_modules; module; module = module->next) {
+        if (memcmp(module->loaded.note.source_sha256,
+                   info->source_sha256, 32)) continue;
+        LatAotV2RuntimeInstance *current = NULL;
+        if (register_module_instance(module,
+                                     info->load_bias + info->preferred_base,
+                                     info->guest_begin, info->guest_end,
+                                     info->exec_ranges,
+                                     info->exec_range_count, &current)) {
+            snprintf(error, error_size, "cannot register AOT v2 instance: %s",
+                     strerror(errno));
+            return -1;
+        }
+        if (!registered && instance) *instance = current;
+        registered++;
     }
-    return 1;
+    return registered ? 1 : 0;
 }
 
 static int mapped_exec_bytes_match(int fd, const LatGuestElfInfoV2 *info)
@@ -1922,7 +2079,7 @@ int latc_aot_v2_prepare(CPUArchState *env)
 {
     const char *module_path = getenv("LATX_AOT_V2_MODULE");
     const char *source_path = getenv("LATX_AOT_V2_SOURCE");
-    bool strict = getenv("LATX_AOT_V2_STRICT") != NULL;
+    bool strict = aot_v2_strict;
     signal_invalidation_test =
         getenv("LATX_AOT_V2_TEST_SIGNAL_INVALIDATION_RACE") != NULL;
     if (latc_aot_v2_mapping_enabled() &&
@@ -2031,6 +2188,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
         if (track) {
             note_dispatch_miss(stats, guest_pc, cflags);
         }
+        latc_aot_v2_note_jit_key(guest_pc, cflags);
         return false;
     }
     LatAotV2ModuleStats *stats = NULL;
@@ -2039,6 +2197,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
                                      LAT_AOT_V2_TARGET_CACHE_SIZE);
         if (!aot_v2_target_cache) {
             note_dispatch_miss(stats, guest_pc, cflags);
+            latc_aot_v2_note_jit_key(guest_pc, cflags);
             return false;
         }
     }
@@ -2084,6 +2243,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
             if (track) {
                 note_dispatch_miss(stats, guest_pc, cflags);
             }
+            latc_aot_v2_note_jit_key(guest_pc, cflags);
             return false;
         }
         entry->guest_pc = guest_pc;
@@ -2113,6 +2273,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
                                       memory_order_seq_cst);
         }
         note_dispatch_miss(stats, guest_pc, cflags);
+        latc_aot_v2_note_jit_key(guest_pc, cflags);
         return false;
     }
     if (target_held) {

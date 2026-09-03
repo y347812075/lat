@@ -91,11 +91,11 @@ connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 connection.connect(sys.argv[1])
 source = os.open(sys.argv[2], os.O_RDWR)
 tbset = os.open(sys.argv[3], os.O_RDONLY)
-request = struct.pack("=IHHIIQ", 0x4c415444, 1, 24, 100, 1, 42)
+request = struct.pack("=IHHIIQQ", 0x4c415444, 2, 32, 1, 100, 42, 42)
 connection.sendmsg([request], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
                                array.array("i", [source, tbset]))])
-response = connection.recv(248)
-assert len(response) == 248
+response = connection.recv(264)
+assert len(response) == 264
 assert struct.unpack_from("=i", response, 8)[0] == 2
 os.close(source)
 os.close(tbset)

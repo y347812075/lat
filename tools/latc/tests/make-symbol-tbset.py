@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Write a TBSET containing ELF symbols selected by a regular expression."""
 
-import hashlib
 from pathlib import Path
 import re
 import struct
 import subprocess
 import sys
+
+from tb_key_set import write_key_set
 
 
 def main() -> int:
@@ -39,9 +40,7 @@ def main() -> int:
     if not records:
         print(f"{source}: no symbols matched {pattern.pattern!r}", file=sys.stderr)
         return 1
-    lines = [f"LATC_TBSET_V1 {hashlib.sha256(data).hexdigest()}"]
-    lines.extend(f"0x{rva:x} 0x{flags:x}" for rva, flags in sorted(records))
-    Path(sys.argv[3]).write_text("\n".join(lines) + "\n")
+    write_key_set(source, Path(sys.argv[3]), records)
     return 0
 
 

@@ -30,6 +30,7 @@
 
     {"source": "tools/latc/aot-v2/include/lat-aot-v2.h", "target": "include/lat-aot-v2.h"},
     {"source": "tools/latc/aot-v2/include/latcd-protocol.h", "target": "include/latcd-protocol.h"},
+    {"source": "tools/latc/aot-v2/include/lat-tb-key-set.h", "target": "include/lat-tb-key-set.h"},
     {"source": "tools/latc/aot-v2/include/latc-build-id.h", "target": "include/latc-build-id.h"},
     {"source": "tools/latc/aot-v2/runtime/registry.h", "target": "include/registry.h"},
     {"source": "tools/latc/aot-v2/runtime/module-loader.h", "target": "include/module-loader.h"},
@@ -37,6 +38,8 @@
     {"source": "tools/latc/aot-v2/runtime/guest-elf-map.h", "target": "linux-user/guest-elf-map.h"},
     {"source": "tools/latc/aot-v2/runtime/latcd-client.c", "target": "linux-user/latcd-client.c"},
     {"source": "tools/latc/aot-v2/runtime/latcd-client.h", "target": "linux-user/latcd-client.h"},
+    {"source": "tools/latc/latcd/protocol.c", "target": "linux-user/latcd-protocol.c"},
+    {"source": "tools/latc/aot-v2/common/tb-key-set.c", "target": "linux-user/tb-key-set.c"},
 
     {"source": "tools/latc/native/include/lat-native-image.h", "target": "lat-native-image.h"},
     {"source": "tools/latc/native/include/lat-native-image.h", "target": "include/lat-native-image.h"},

@@ -1736,11 +1736,6 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
 
     assert_memory_lock();
 
-#if defined(CONFIG_USER_ONLY) && defined(CONFIG_LATX) && \
-    defined(TARGET_X86_64)
-    latc_aot_v2_snapshot_jit_tb(tb);
-#endif
-
     /* make sure no further incoming jumps will be chained to this TB */
     qemu_spin_lock(&tb->jmp_lock);
     qatomic_set(&tb->cflags, tb->cflags | CF_INVALID);
@@ -1929,6 +1924,9 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
     qemu_thread_jit_write();
 #ifdef CONFIG_LATX
     latc_bundle_note_tb_attempt(pc, cflags);
+#if defined(CONFIG_USER_ONLY) && defined(TARGET_X86_64)
+    latc_aot_v2_note_jit_key(pc, cflags);
+#endif
 #endif
 
     phys_pc = get_page_addr_code_hostp(env, pc, &host_pc);

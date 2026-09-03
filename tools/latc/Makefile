@@ -9,7 +9,7 @@ CPPFLAGS += -Icfg/include
 CPPFLAGS += -DLATC_BUILD_ID=\"$(AOT_V2_BUILD_ID)\"
 CPPFLAGS += -Iformat -Ilat/include -Inative/include -Inative/format \
 	-Inative/runtime -Iaot-v2/include -Iaot-v2/runtime \
-	-Iaot-v2/compiler \
+	-Iaot-v2/compiler -Iaot-v2/common \
 	$(shell pkg-config --cflags glib-2.0)
 LDLIBS += $(shell pkg-config --libs glib-2.0)
 
@@ -48,6 +48,7 @@ $(BUILD)/liblatc_cfg.a: $(CFG_OBJ)
 	$(AR) rcs $@ $^
 
 $(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/tbset.o \
+		$(BUILD)/aot-v2/common/tb-key-set.o \
 		$(BUILD)/aot-v2/compiler/module-pack.o \
 		$(BUILD)/aot-v2/compiler/module-inspect.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o \
@@ -55,6 +56,7 @@ $(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/tbset.o \
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD)/latcd/latcd: $(BUILD)/latcd/main.o $(BUILD)/latcd/protocol.o \
+		$(BUILD)/aot-v2/common/tb-key-set.o \
 		$(BUILD)/aot-v2/compiler/module-inspect.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread -ldl
@@ -433,7 +435,7 @@ $(BUILD)/tests/test-latcd-protocol: \
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 
 $(BUILD)/tests/test-latcd-client: aot-v2/tests/test-latcd-client.c \
-		aot-v2/runtime/latcd-client.c
+		aot-v2/runtime/latcd-client.c $(BUILD)/latcd/protocol.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 

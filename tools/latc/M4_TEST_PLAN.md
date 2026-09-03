@@ -2,7 +2,8 @@
 
 ## Protocol and snapshot tests
 
-- Accept one version 1 packet carrying one read-only regular-file FD.
+- Accept version 2 `SUBMIT_KEYS`, `FLUSH_SOURCE`, and `FLUSH_ALL` packets with
+  exactly two, one, and zero read-only regular-file descriptors respectively.
 - Reject bad magic/version/size, truncated packets, no FD, multiple FDs,
   writable FD, directory, pipe, oversized source, and non-x86 ELF.
 - Prove the digest is computed from the copied bytes, not a submitted path.

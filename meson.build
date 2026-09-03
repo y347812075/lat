@@ -37,12 +37,18 @@ genh = []
 target_dirs = config_host['TARGET_DIRS'].split()
 
 python = import('python').find_installation()
-latc_build_id = run_command(
-  python,
-  meson.current_source_dir() / 'tools/latc/scripts/compute-aot-v2-build-id.py',
-  meson.current_source_dir(),
-  check: true,
-).stdout().strip()
+latc_staged_build_id = meson.current_source_dir() / '.latc-build-id'
+if fs.exists(latc_staged_build_id)
+  latc_build_id = run_command('cat', latc_staged_build_id,
+                              check: true).stdout().strip()
+else
+  latc_build_id = run_command(
+    python,
+    meson.current_source_dir() / 'tools/latc/scripts/compute-aot-v2-build-id.py',
+    meson.current_source_dir(),
+    check: true,
+  ).stdout().strip()
+endif
 add_project_arguments(
   '-DLATC_BUILD_ID="' + latc_build_id + '"',
   language: ['c', 'cpp', 'objc'],
@@ -534,6 +540,7 @@ if 'CONFIG_LATX' in config_host
     'tools/latc/aot-v2/include',
     'tools/latc/aot-v2/runtime',
     'tools/latc/aot-v2/compiler',
+    'tools/latc/aot-v2/common',
   )
   latc_helper_dir = get_option('prefix') / get_option('libexecdir') / 'latc'
   latc = executable(
@@ -541,6 +548,7 @@ if 'CONFIG_LATX' in config_host
     files(
       'tools/latc/compiler/latc.c',
       'tools/latc/compiler/tbset.c',
+      'tools/latc/aot-v2/common/tb-key-set.c',
       'tools/latc/aot-v2/compiler/module-pack.c',
       'tools/latc/aot-v2/compiler/module-inspect.c',
       'tools/latc/aot-v2/runtime/elf-validate.c',
@@ -582,12 +590,14 @@ if 'CONFIG_LATX' in config_host
     'tools/latc/aot-v2/include',
     'tools/latc/aot-v2/compiler',
     'tools/latc/aot-v2/runtime',
+    'tools/latc/aot-v2/common',
   )
   latcd = executable(
     'latcd',
     files(
       'tools/latc/latcd/main.c',
       'tools/latc/latcd/protocol.c',
+      'tools/latc/aot-v2/common/tb-key-set.c',
       'tools/latc/aot-v2/compiler/module-inspect.c',
       'tools/latc/aot-v2/runtime/elf-validate.c',
     ),

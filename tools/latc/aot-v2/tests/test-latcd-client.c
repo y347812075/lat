@@ -33,7 +33,8 @@ int main(void)
     snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
     if (server < 0 || bind(server, (const void *)&address, sizeof(address)) ||
         listen(server, 1)) {
-        return fail("cannot create test listener");
+        perror("test-latcd-client: cannot create test listener");
+        return 1;
     }
     int source = open("/dev/null", O_RDONLY | O_CLOEXEC);
     if (source < 0) {
@@ -45,13 +46,13 @@ int main(void)
     }
     if (!submitter) {
         char error[128] = {0};
-        int result = latcd_client_submit_tbset_fd(path, source, source,
-            LATCD_PRIORITY_STARTUP, 42, error, sizeof(error));
+        int result = latcd_client_submit_keys_fd(path, source, source,
+            LATCD_PRIORITY_STARTUP, 42, 7, error, sizeof(error));
         if (result) fprintf(stderr, "test-latcd-client: %s\n", error);
         _exit(result ? 1 : 0);
     }
     int client = accept4(server, NULL, NULL, SOCK_CLOEXEC);
-    LatcdRequestV1 request;
+    LatcdRequestV2 request;
     char control[CMSG_SPACE(sizeof(int) * 2)] = {0};
     struct iovec iov = { .iov_base = &request, .iov_len = sizeof(request) };
     struct msghdr message = {
@@ -63,7 +64,8 @@ int main(void)
     if (client < 0 || recvmsg(client, &message, MSG_CMSG_CLOEXEC) !=
                       sizeof(request) ||
         request.magic != LATCD_REQUEST_MAGIC || request.request_id != 42 ||
-        request.priority != LATCD_PRIORITY_STARTUP) {
+        request.priority != LATCD_PRIORITY_STARTUP ||
+        request.operation != LATCD_OP_SUBMIT_KEYS || request.sequence != 7) {
         return fail("received request does not match submission");
     }
     struct cmsghdr *header = CMSG_FIRSTHDR(&message);
@@ -77,7 +79,7 @@ int main(void)
         fcntl(received_fds[1], F_GETFL) < 0) {
         return fail("received FDs are invalid");
     }
-    LatcdResponseV1 response = {
+    LatcdResponseV2 response = {
         .magic = LATCD_RESPONSE_MAGIC,
         .version = LATCD_PROTOCOL_VERSION,
         .size = sizeof(response),
@@ -103,9 +105,9 @@ int main(void)
 
     char error[128] = {0};
     errno = 0;
-    if (!latcd_client_submit_tbset_fd(path, STDIN_FILENO, STDIN_FILENO,
-                                      LATCD_PRIORITY_LIBRARY,
-                                      43, error, sizeof(error)) ||
+    if (!latcd_client_submit_keys_fd(path, STDIN_FILENO, STDIN_FILENO,
+                                     LATCD_PRIORITY_LIBRARY,
+                                     43, 8, error, sizeof(error)) ||
         (errno != ENOENT && errno != ECONNREFUSED)) {
         return fail("missing daemon was not reported immediately");
     }

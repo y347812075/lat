@@ -20,6 +20,7 @@ timeout_seconds=${LATC_COMPLEX_TIMEOUT:-60}
 stress_seconds=${LATC_COMPLEX_STRESS_SECONDS:-0}
 stress_phases=${LATC_COMPLEX_STRESS_PHASES:-jit warm}
 latcd_cpu_seconds=${LATC_COMPLEX_LATCD_CPU_SECONDS:-60}
+latcd_workers=${LATC_COMPLEX_LATCD_WORKERS:-0}
 compiler_wait_seconds=${LATC_COMPLEX_COMPILER_WAIT_SECONDS:-1200}
 require_compiler_success=${LATC_COMPLEX_REQUIRE_COMPILER_SUCCESS:-0}
 cache_source=${LATC_COMPLEX_CACHE_SOURCE:-}
@@ -29,6 +30,8 @@ warm_report=${LATC_COMPLEX_WARM_REPORT:-0}
 min_aot_percent=${LATC_COMPLEX_MIN_AOT_PERCENT:-0}
 coverage_applications=${LATC_COMPLEX_COVERAGE_APPLICATIONS:-$applications}
 require_no_fork_jit=${LATC_COMPLEX_REQUIRE_NO_FORK_JIT:-0}
+flush_only=${LATC_COMPLEX_FLUSH_ONLY:-0}
+sqlite_clients=${LATC_COMPLEX_SQLITE_CLIENTS:-4}
 min_git_aot_percent=${LATC_COMPLEX_MIN_GIT_AOT_PERCENT:-0}
 if [ "$min_aot_percent" = 0 ] && [ "$min_git_aot_percent" != 0 ]; then
     min_aot_percent=$min_git_aot_percent
@@ -93,6 +96,7 @@ test -f "$metadata_dir/source.json" || {
 rm -rf "$work"
 mkdir -m 700 -p "$work"
 mkdir -m 700 "$work/cache"
+mkdir -m 700 "$work/home"
 cache=$work/cache
 if [ -n "$cache_source" ]; then
     test -d "$cache_source"
@@ -184,9 +188,12 @@ run_sqlite()
 
     sqlite_pids=
     client=0
-    while [ "$client" -lt 4 ]; do
-        begin=$((client * 250 + 1))
-        end=$((begin + 249))
+    test "$sqlite_clients" -gt 0
+    test $((1000 % sqlite_clients)) -eq 0
+    rows_per_client=$((1000 / sqlite_clients))
+    while [ "$client" -lt "$sqlite_clients" ]; do
+        begin=$((client * rows_per_client + 1))
+        end=$((begin + rows_per_client - 1))
         {
             echo '.timeout 30000'
             echo 'BEGIN IMMEDIATE;'
@@ -485,22 +492,29 @@ PY
 run_phase()
 {
     phase=$1
-    phase_root=$work/$phase
-    mkdir "$phase_root"
     if [ "$phase" = faults ]; then
-        rmdir "$phase_root"
         run_faults
         return
     fi
-    phase_home=$phase_root/home
-    mkdir -m 700 "$phase_home"
+    case "$phase" in
+      jit) phase_storage=$work/phase-jit000 ;;
+      cold) phase_storage=$work/phase-cold00 ;;
+      warm) phase_storage=$work/phase-warm00 ;;
+      strict) phase_storage=$work/phase-strict ;;
+    esac
+    mkdir "$phase_storage"
+    ln -s "$(basename "$phase_storage")" "$work/$phase"
+    phase_root=$phase_storage
+    phase_home=$work/home
     case "$phase" in
       jit)
         phase_environment='LATX_AOT=0'
         ;;
-      cold|warm)
+      cold|warm|strict)
         if [ "$phase" = cold ]; then
             phase_environment="LATX_AOT=0 LATX_AOT_V2_CACHE_DIR= LATX_AOT_V2_MODULE= LATX_AOT_V2_LATCD_SOCKET=$socket LATX_AOT_V2_REPORT=1 LATX_AOT_V2_MAX_SUBMISSIONS=$max_submissions"
+        elif [ "$phase" = strict ]; then
+            phase_environment="LATX_AOT=0 LATX_AOT_V2_CACHE_DIR=$cache LATX_AOT_V2_LATCD_SOCKET=$socket LATX_AOT_V2_REPORT=1 LATX_AOT_V2_MAX_SUBMISSIONS=$max_submissions LATX_AOT_V2_STRICT=1 LATC_STRICT_FILE_AOT=1"
         elif [ "$warm_socket" -eq 1 ]; then
             phase_environment="LATX_AOT=0 LATX_AOT_V2_CACHE_DIR=$cache LATX_AOT_V2_LATCD_SOCKET=$socket LATX_AOT_V2_REPORT=1 LATX_AOT_V2_MAX_SUBMISSIONS=$max_submissions"
         else
@@ -543,13 +557,20 @@ run_phase()
     phase_finished=$(date +%s)
     printf 'iterations=%s elapsed_seconds=%s\n' "$iteration" \
       "$((phase_finished - phase_started))" >"$phase_root/stress-result.txt"
-    if [ "$phase" = warm ] && [ "$require_registered" -eq 1 ]; then
+    if { [ "$phase" = warm ] || [ "$phase" = strict ]; } &&
+       [ "$require_registered" -eq 1 ]; then
         grep -Rqs 'module=registered' "$phase_root"/*.stderr || {
             echo "warm phase registered no AOT module" >&2
             return 1
         }
     fi
-    if [ "$phase" = warm ] && [ "$min_aot_percent" != 0 ]; then
+    check_coverage=0
+    if [ "$phase" = strict ]; then
+        check_coverage=1
+    elif [ "$phase" = warm ]; then
+        case " $phases " in *' strict '*) ;; *) check_coverage=1;; esac
+    fi
+    if [ "$check_coverage" -eq 1 ] && [ "$min_aot_percent" != 0 ]; then
         no_fork_option=
         if [ "$require_no_fork_jit" -eq 1 ]; then
             no_fork_option=--require-no-fork-jit
@@ -583,11 +604,16 @@ PY
 }
 
 case " $phases $warm_socket " in
-  *' cold '*|*' warm 1 '*)
+  *' cold '*|*' warm 1 '*|*' strict '*)
+    flush_option=
+    if [ "$flush_only" -eq 1 ]; then
+        flush_option=--flush-only
+    fi
     "$latcd" --serve --socket "$socket" --cache-dir "$cache" \
       --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
       --x86-rootfs "$rootfs" --stats "$stats" \
-      --cpu-seconds "$latcd_cpu_seconds" \
+      --cpu-seconds "$latcd_cpu_seconds" --workers "$latcd_workers" \
+      $flush_option \
       >"$work/latcd.stdout" 2>"$work/latcd.stderr" &
     daemon_pid=$!
     n=0
@@ -603,8 +629,25 @@ esac
 for phase in $phases; do
     run_phase "$phase"
     if [ "$phase" = cold ] ||
-       { [ "$phase" = warm ] && [ "$warm_socket" -eq 1 ]; }; then
-        wait_for_compiler
+       [ "$phase" = warm ]; then
+        flush_started=$(python3 "$script_dir/monotonic-ns.py")
+        "$latcd" --flush-all --socket "$socket" \
+          >"$work/$phase/flush-all.txt"
+        flush_finished=$(python3 "$script_dir/monotonic-ns.py")
+        printf 'flush_all_ms=%s\n' \
+          "$(((flush_finished - flush_started) / 1000000))" \
+          >>"$work/$phase/flush-all.txt"
+        grep -q '^status=0$' "$work/$phase/flush-all.txt"
+        cp "$stats" "$work/$phase/latcd-after-flush.json"
+        if [ "$require_compiler_success" -eq 1 ]; then
+            python3 - "$stats" <<'PY'
+import json
+import sys
+stats = json.load(open(sys.argv[1]))
+assert stats["failed"] == 0, stats
+assert stats["active_jobs"] == 0 and stats["queue_depth"] == 0, stats
+PY
+        fi
     fi
 done
 
