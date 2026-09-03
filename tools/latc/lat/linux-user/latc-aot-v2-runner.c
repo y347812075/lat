@@ -157,10 +157,12 @@ static _Atomic uint64_t compiler_submission_duplicates;
 static _Atomic uint64_t compiler_submission_throttled;
 static _Atomic uint64_t compiler_request_sequence;
 static bool aot_v2_strict;
+static bool aot_v2_reject_miss;
 
 void latc_aot_v2_consume_environment(void)
 {
     aot_v2_strict = getenv("LATX_AOT_V2_STRICT") != NULL;
+    aot_v2_reject_miss = getenv("LATC_STRICT_AOT") != NULL;
     unsetenv("LATX_AOT_V2_STRICT");
 }
 
@@ -2175,6 +2177,14 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
                              uint32_t cflags, LatcAotV2Target *result)
 {
     if (!registry_initialized || !result) {
+        if (aot_v2_reject_miss) {
+            fprintf(stderr,
+                    "latc: strict AOT rejected runtime TB generation at "
+                    "0x%llx cflags=0x%x file=%d program=0\n",
+                    (unsigned long long)guest_pc, cflags,
+                    latc_aot_v2_is_file_pc(guest_pc));
+            _exit(125);
+        }
         return false;
     }
     uint64_t inactive_generation = atomic_load_explicit(
@@ -2188,6 +2198,14 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
         if (track) {
             note_dispatch_miss(stats, guest_pc, cflags);
         }
+        if (aot_v2_reject_miss) {
+            fprintf(stderr,
+                    "latc: strict AOT rejected runtime TB generation at "
+                    "0x%llx cflags=0x%x file=%d program=0\n",
+                    (unsigned long long)guest_pc, cflags,
+                    latc_aot_v2_is_file_pc(guest_pc));
+            _exit(125);
+        }
         latc_aot_v2_note_jit_key(guest_pc, cflags);
         return false;
     }
@@ -2197,6 +2215,14 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
                                      LAT_AOT_V2_TARGET_CACHE_SIZE);
         if (!aot_v2_target_cache) {
             note_dispatch_miss(stats, guest_pc, cflags);
+            if (aot_v2_reject_miss) {
+                fprintf(stderr,
+                        "latc: strict AOT rejected runtime TB generation at "
+                        "0x%llx cflags=0x%x file=%d program=0\n",
+                        (unsigned long long)guest_pc, cflags,
+                        latc_aot_v2_is_file_pc(guest_pc));
+                _exit(125);
+            }
             latc_aot_v2_note_jit_key(guest_pc, cflags);
             return false;
         }
@@ -2243,6 +2269,14 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
             if (track) {
                 note_dispatch_miss(stats, guest_pc, cflags);
             }
+            if (aot_v2_reject_miss) {
+                fprintf(stderr,
+                        "latc: strict AOT rejected runtime TB generation at "
+                        "0x%llx cflags=0x%x file=%d program=0\n",
+                        (unsigned long long)guest_pc, cflags,
+                        latc_aot_v2_is_file_pc(guest_pc));
+                _exit(125);
+            }
             latc_aot_v2_note_jit_key(guest_pc, cflags);
             return false;
         }
@@ -2273,6 +2307,14 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
                                       memory_order_seq_cst);
         }
         note_dispatch_miss(stats, guest_pc, cflags);
+        if (aot_v2_reject_miss) {
+            fprintf(stderr,
+                    "latc: strict AOT rejected runtime TB generation at "
+                    "0x%llx cflags=0x%x file=%d program=0\n",
+                    (unsigned long long)guest_pc, cflags,
+                    latc_aot_v2_is_file_pc(guest_pc));
+            _exit(125);
+        }
         latc_aot_v2_note_jit_key(guest_pc, cflags);
         return false;
     }
