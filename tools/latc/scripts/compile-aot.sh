@@ -14,8 +14,7 @@ tbset=${5:-}
 work=$(mktemp -d "${TMPDIR:-/tmp}/latc-aot.XXXXXX")
 guest_hash=$(sha256sum "$guest" | awk '{print $1}')
 guest_prefix=$(printf '%s' "$guest_hash" | cut -c1-16)
-shard_suffix=${LATC_TBSET_SHARD_INDEX:+-$LATC_TBSET_SHARD_INDEX}
-named_guest="/tmp/latc-${guest_prefix}${shard_suffix}-x86-guest"
+named_guest="/tmp/latc-${guest_prefix}-x86-guest"
 
 cleanup()
 {
@@ -46,14 +45,8 @@ else
         >/dev/null
 fi
 report_timing stage1_bundle
-if [ -n "$tbset" ]; then
-    HOME="$work/home" LATX_AOT=1 LATC_EMIT_AOT=1 \
-        LATC_EXACT_TB_SELECTION=1 LATC_NAMED_GUEST="$named_guest" \
-        "$work/stage1.la64"
-else
-    HOME="$work/home" LATX_AOT=1 LATC_EMIT_AOT=1 \
-        LATC_NAMED_GUEST="$named_guest" "$work/stage1.la64"
-fi
+HOME="$work/home" LATX_AOT=1 LATC_EMIT_AOT=1 \
+    LATC_NAMED_GUEST="$named_guest" "$work/stage1.la64"
 report_timing translate_export
 if [ -n "${LATC_NATIVE_IMAGE_OUT:-}" ]; then
     if [ ! -s "$LATC_NATIVE_IMAGE_OUT" ]; then

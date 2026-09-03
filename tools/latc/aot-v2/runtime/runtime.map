@@ -64,7 +64,6 @@ LAT_AOT_RUNTIME_2.0 {
         lat_aot_runtime_raise_into;
         lat_aot_runtime_raise_bound;
         lat_aot_runtime_xgetbv;
-        lat_aot_runtime_kzt_get_alternate;
         lat_aot_v2_context_apply_guest_slots;
         lat_aot_v2_context_apply_guest_table;
         lat_aot_v2_module_open;

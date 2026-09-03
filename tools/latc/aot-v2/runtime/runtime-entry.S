@@ -73,6 +73,5 @@ LAT_AOT_RUNTIME_ENTRY lat_aot_runtime_raise_trapop, 55
 LAT_AOT_RUNTIME_ENTRY lat_aot_runtime_raise_into, 56
 LAT_AOT_RUNTIME_ENTRY lat_aot_runtime_raise_bound, 57
 LAT_AOT_RUNTIME_ENTRY lat_aot_runtime_xgetbv, 58
-LAT_AOT_RUNTIME_ENTRY lat_aot_runtime_kzt_get_alternate, 59
 
 .section .note.GNU-stack,"",@progbits

@@ -7,9 +7,7 @@
 #include "function_symbols.h"
 #include "ijmp_resolve.h"
 
-#include <capstone/capstone.h>
 #include <errno.h>
-#include <glib.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,16 +54,6 @@ static int cmp_addr(const void *a, const void *b)
     uint64_t x = *(const uint64_t *)a;
     uint64_t y = *(const uint64_t *)b;
     return (x > y) - (x < y);
-}
-
-static size_t addr_lower_bound(const AddrVec *v, uint64_t addr)
-{
-    size_t lo = 0, hi = v->n;
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        if (v->v[mid] < addr) lo = mid + 1; else hi = mid;
-    }
-    return lo;
 }
 
 static void sort_unique(AddrVec *v)
@@ -142,240 +130,6 @@ static bool push_edge(CfgProgram *p, size_t *cap, CfgProgramEdge value)
     if (!grow((void **)&p->edges, cap, p->edge_count, sizeof(*p->edges))) return false;
     p->edges[p->edge_count++] = value;
     return true;
-}
-
-static CfgTbTerm term_from_insn(InsnKind kind);
-
-static const Elf64_Shdr *find_exec_section(const ElfFile *elf,
-                                            uint64_t address)
-{
-    for (unsigned i = 0; i < elf->eh->e_shnum; i++) {
-        const Elf64_Shdr *section = &elf->sh[i];
-        if (!elf_executable_section(elf, i) ||
-            section->sh_type == SHT_NOBITS || !section->sh_size) {
-            continue;
-        }
-        if (address >= section->sh_addr &&
-            address - section->sh_addr < section->sh_size) {
-            return section;
-        }
-    }
-    return NULL;
-}
-
-static bool schedule_reachable(GArray *queue, GHashTable *scheduled,
-                               const ElfFile *elf, uint64_t address)
-{
-    if (!address || !find_exec_section(elf, address) ||
-        g_hash_table_contains(scheduled, &address)) {
-        return true;
-    }
-    uint64_t *stored = g_new(uint64_t, 1);
-    *stored = address;
-    g_hash_table_add(scheduled, stored);
-    g_array_append_val(queue, address);
-    return true;
-}
-
-static Insn capstone_decode(csh handle, cs_insn *decoded,
-                            const uint8_t *bytes, size_t size,
-                            uint64_t address)
-{
-    Insn result = { .addr = address };
-    const uint8_t *cursor = bytes;
-    size_t remaining = size;
-    uint64_t pc = address;
-    if (!cs_disasm_iter(handle, &cursor, &remaining, &pc, decoded)) {
-        return result;
-    }
-    result.len = decoded->size;
-    const cs_x86 *x86 = &decoded->detail->x86;
-    bool direct = x86->op_count && x86->operands[0].type == X86_OP_IMM;
-    if (decoded->id == X86_INS_CALL) {
-        result.kind = direct ? INSN_CALL : INSN_ICALL;
-    } else if (decoded->id == X86_INS_JMP) {
-        result.kind = direct ? INSN_JMP : INSN_IJMP;
-    } else if (cs_insn_group(handle, decoded, CS_GRP_JUMP)) {
-        result.kind = INSN_JCC;
-    } else if (cs_insn_group(handle, decoded, CS_GRP_RET) ||
-               cs_insn_group(handle, decoded, CS_GRP_IRET)) {
-        result.kind = INSN_RET;
-    } else if (decoded->id == X86_INS_SYSCALL ||
-               decoded->id == X86_INS_SYSENTER) {
-        result.kind = INSN_SYSCALL;
-    } else if (cs_insn_group(handle, decoded, CS_GRP_INT) ||
-               decoded->id == X86_INS_HLT || decoded->id == X86_INS_UD2) {
-        result.kind = INSN_STOP;
-    } else {
-        result.kind = INSN_NORMAL;
-    }
-    if (direct && (result.kind == INSN_CALL || result.kind == INSN_JMP ||
-                   result.kind == INSN_JCC)) {
-        result.has_target = true;
-        result.target = (uint64_t)x86->operands[0].imm;
-    }
-    return result;
-}
-
-static int analyze_reachable_tb(csh handle, cs_insn *decoded,
-                                const ElfFile *elf, uint64_t start,
-                                GArray *queue, GHashTable *scheduled,
-                                CfgProgram *program,
-                                size_t *tb_cap, size_t *edge_cap)
-{
-    const Elf64_Shdr *section = find_exec_section(elf, start);
-    if (!section) return 0;
-    uint64_t relative = start - section->sh_addr;
-    if (section->sh_offset > elf->size ||
-        relative > section->sh_size ||
-        relative > elf->size - section->sh_offset ||
-        section->sh_size - relative >
-            elf->size - section->sh_offset - relative) {
-        return -1;
-    }
-    const uint8_t *bytes = elf->data + section->sh_offset + relative;
-    size_t size = (size_t)(section->sh_size - relative);
-    size_t off = 0;
-    Insn last = {0};
-    CfgTb tb = {
-        .start = start,
-        .semantic_flags = CFG_TB_CODE64,
-        .first_edge = program->edge_count,
-    };
-    while (off < size) {
-        last = capstone_decode(handle, decoded, bytes + off, size - off,
-                               start + off);
-        if (!last.len) {
-            /* The runtime translator remains authoritative for instruction
-             * support.  Keep a JIT-observed entry, but do not invent static
-             * successors when Capstone cannot decode it. */
-            last.len = 1;
-            last.kind = INSN_IJMP;
-        }
-        last.off = off;
-        off += last.len;
-        uint64_t next = start + off;
-        if (last.kind != INSN_NORMAL ||
-            (next != start && g_hash_table_contains(scheduled, &next)) ||
-            (next & 0xfff) == 0) {
-            break;
-        }
-    }
-    if (!off) return 0;
-    tb.end = start + off;
-    tb.terminator_pc = last.addr;
-    tb.terminator = term_from_insn(last.kind);
-#define REACHABLE_EDGE(K, T) do { \
-        uint64_t target_ = (T); \
-        if (!push_edge(program, edge_cap, (CfgProgramEdge) { \
-                .from = start, .to = target_, .kind = (K), \
-                .resolution = CFG_EDGE_STATIC })) return -1; \
-        schedule_reachable(queue, scheduled, elf, target_); \
-    } while (0)
-    uint64_t next = tb.end;
-    switch (last.kind) {
-    case INSN_CALL:
-        if (last.has_target) REACHABLE_EDGE(CFG_EDGE_CALL, last.target);
-        REACHABLE_EDGE(CFG_EDGE_CALL_RETURN, next);
-        break;
-    case INSN_ICALL:
-        REACHABLE_EDGE(CFG_EDGE_CALL_RETURN, next);
-        break;
-    case INSN_JCC:
-        if (last.has_target) REACHABLE_EDGE(CFG_EDGE_TRUE, last.target);
-        REACHABLE_EDGE(CFG_EDGE_FALSE, next);
-        break;
-    case INSN_JMP:
-        if (last.has_target) REACHABLE_EDGE(CFG_EDGE_JUMP, last.target);
-        break;
-    case INSN_SYSCALL:
-        REACHABLE_EDGE(CFG_EDGE_FALLTHROUGH, next);
-        break;
-    case INSN_NORMAL:
-        REACHABLE_EDGE(CFG_EDGE_FALLTHROUGH, next);
-        break;
-    default:
-        break;
-    }
-#undef REACHABLE_EDGE
-    tb.edge_count = program->edge_count - tb.first_edge;
-    return push_tb(program, tb_cap, tb) ? 0 : -1;
-}
-
-int cfg_analyze_elf_reachable(const char *path,
-                              const uint64_t *leaders, size_t leader_count,
-                              CfgProgram *program,
-                              char *error, size_t error_size)
-{
-    if (!path || !program || (leader_count && !leaders)) return -1;
-    memset(program, 0, sizeof(*program));
-    ElfFile elf = {0};
-    elf_load(path, &elf);
-    program->exec_ranges = calloc(elf.eh->e_shnum,
-                                  sizeof(*program->exec_ranges));
-    if (!program->exec_ranges) goto fail;
-    for (unsigned i = 0; i < elf.eh->e_shnum; i++) {
-        const Elf64_Shdr *section = &elf.sh[i];
-        if (!elf_executable_section(&elf, i) || !section->sh_size ||
-            section->sh_type == SHT_NOBITS) continue;
-        program->exec_ranges[program->exec_range_count++] = (CfgExecRange) {
-            .start = section->sh_addr, .size = section->sh_size,
-        };
-    }
-    GArray *queue = g_array_new(FALSE, FALSE, sizeof(uint64_t));
-    GHashTable *scheduled = g_hash_table_new_full(g_int64_hash,
-                                                  g_int64_equal,
-                                                  g_free, NULL);
-    for (size_t i = 0; i < leader_count; i++) {
-        schedule_reachable(queue, scheduled, &elf, leaders[i]);
-    }
-    csh handle;
-    if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK) {
-        g_array_free(queue, TRUE);
-        g_hash_table_destroy(scheduled);
-        goto fail;
-    }
-    if (cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON) != CS_ERR_OK) {
-        cs_close(&handle);
-        g_array_free(queue, TRUE);
-        g_hash_table_destroy(scheduled);
-        goto fail;
-    }
-    cs_insn *decoded = cs_malloc(handle);
-    if (!decoded) {
-        cs_close(&handle);
-        g_array_free(queue, TRUE);
-        g_hash_table_destroy(scheduled);
-        goto fail;
-    }
-    size_t tb_cap = 0, edge_cap = 0;
-    for (guint i = 0; i < queue->len; i++) {
-        uint64_t start = g_array_index(queue, uint64_t, i);
-        if (analyze_reachable_tb(handle, decoded, &elf, start, queue,
-                                 scheduled, program,
-                                 &tb_cap, &edge_cap)) {
-            cs_free(decoded, 1);
-            cs_close(&handle);
-            g_array_free(queue, TRUE);
-            g_hash_table_destroy(scheduled);
-            goto fail;
-        }
-    }
-    cs_free(decoded, 1);
-    cs_close(&handle);
-    g_array_free(queue, TRUE);
-    g_hash_table_destroy(scheduled);
-    elf_free(&elf);
-    return 0;
-
-fail:
-    if (error && error_size) {
-        snprintf(error, error_size, "reachable CFG analysis failed: %s",
-                 strerror(errno));
-    }
-    elf_free(&elf);
-    cfg_program_destroy(program);
-    return -1;
 }
 
 static CfgTbTerm term_from_insn(InsnKind kind)
@@ -471,9 +225,8 @@ static void extend_symbol_fallthroughs(const ElfFile *elf, FuncVec *funcs)
 static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
                             const IjmpSection *sections, size_t section_count,
                             const AddrVec *program_insns,
-                            const AddrVec *direct_targets,
-                            const AddrVec *extra_leaders, const FuncSym *fn,
-                            const CfgAnalyzeOptions *options, CfgProgram *out,
+                            const AddrVec *direct_targets, const FuncSym *fn,
+                            bool resolve_jt, CfgProgram *out,
                             size_t *tb_cap, size_t *edge_cap,
                             CfgProgramFunction *result)
 {
@@ -508,15 +261,6 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
     };
 
     if (!addr_push(&leaders, fn->addr)) goto done;
-    if (extra_leaders) {
-        size_t i = addr_lower_bound(extra_leaders, fn->addr);
-        for (; i < extra_leaders->n &&
-               addr_in_function(extra_leaders->v[i], fn); i++) {
-            if (!addr_push(&leaders, extra_leaders->v[i])) {
-                goto done;
-            }
-        }
-    }
     for (size_t i = 0; i < direct_targets->n; i++) {
         if (addr_in_function(direct_targets->v[i], fn) &&
             !addr_push(&leaders, direct_targets->v[i])) {
@@ -530,8 +274,7 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
             !addr_push(&leaders, in->target)) goto done;
         if (in->kind != INSN_NORMAL && next < fn->addr + fn->size &&
             !addr_push(&leaders, next)) goto done;
-        if ((!options || options->resolve_jump_tables) &&
-            (in->kind == INSN_IJMP ||
+        if (resolve_jt && (in->kind == INSN_IJMP ||
                            in->kind == INSN_ICALL)) {
             IjmpResult jt;
             if (ijmp_resolve_jump_table(&ijmp, buf, size, in->off, &jt)) {
@@ -586,7 +329,7 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
         case INSN_ICALL:
         {
             IjmpResult jt;
-            bool found = (!options || options->resolve_jump_tables) &&
+            bool found = resolve_jt &&
                 ijmp_resolve_jump_table(&ijmp, buf, size, last->off, &jt);
             if (found) {
                 for (size_t j = 0; j < jt.count; j++) {
@@ -610,7 +353,7 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
             break;
         case INSN_IJMP: {
             IjmpResult jt;
-            bool found = (!options || options->resolve_jump_tables) &&
+            bool found = resolve_jt &&
                 ijmp_resolve_jump_table(&ijmp, buf, size, last->off, &jt);
             if (found) {
                 out->resolved_jump_tables++;
@@ -655,7 +398,7 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     memset(program, 0, sizeof(*program));
     ElfFile elf = {0};
     FuncVec funcs = {0};
-    AddrVec program_insns = {0}, direct_targets = {0}, extra_leaders = {0};
+    AddrVec program_insns = {0}, direct_targets = {0};
     IjmpSection *sections = NULL;
     const char *source = NULL;
     size_t function_cap = 0, tb_cap = 0, edge_cap = 0;
@@ -668,14 +411,6 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     funcs_load_all(&elf, &funcs, &source);
     (void)source;
     extend_symbol_fallthroughs(&elf, &funcs);
-    if (options) {
-        for (size_t i = 0; i < options->extra_leader_count; i++) {
-            if (!addr_push(&extra_leaders, options->extra_leaders[i])) {
-                goto out;
-            }
-        }
-        sort_unique(&extra_leaders);
-    }
     if (collect_program_insns_and_direct_targets(
             &elf, &funcs, &program_insns, &direct_targets)) goto out;
     size_t section_count = 0;
@@ -701,9 +436,8 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
         };
         if (!fn.name) goto out;
         int ar = analyze_function(&elf, &funcs, sections, section_count,
-                                  &program_insns, &direct_targets,
-                                  &extra_leaders, &funcs.v[i],
-                                  options,
+                                  &program_insns, &direct_targets, &funcs.v[i],
+                                  !options || options->resolve_jump_tables,
                                   program, &tb_cap, &edge_cap, &fn);
         if (ar < 0) { free(fn.name); goto out; }
         if (ar > 0) { free(fn.name); continue; }
@@ -715,7 +449,6 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
 out:
     free(program_insns.v);
     free(direct_targets.v);
-    free(extra_leaders.v);
     free(sections);
     funcs_free(&funcs);
     elf_free(&elf);
