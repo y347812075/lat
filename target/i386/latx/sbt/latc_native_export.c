@@ -195,6 +195,8 @@ static int runtime_symbol(aot_rel_kind kind)
     case LOAD_HELPER_RAISE_INTO: return LAT_NATIVE_SYMBOL_RAISE_INTO;
     case LOAD_HELPER_RAISE_BOUND: return LAT_NATIVE_SYMBOL_RAISE_BOUND;
     case LOAD_HELPER_XGETBV: return LAT_NATIVE_SYMBOL_XGETBV;
+    case LOAD_HELPER_KZT_GET_ALTERNATE:
+        return LAT_NATIVE_SYMBOL_KZT_GET_ALTERNATE;
     default: return LAT_NATIVE_SYMBOL_INVALID;
     }
 }

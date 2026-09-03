@@ -305,6 +305,8 @@ static const char *runtime_entry(uint32_t symbol)
     case LAT_NATIVE_SYMBOL_RAISE_INTO: return "lat_aot_runtime_raise_into";
     case LAT_NATIVE_SYMBOL_RAISE_BOUND: return "lat_aot_runtime_raise_bound";
     case LAT_NATIVE_SYMBOL_XGETBV: return "lat_aot_runtime_xgetbv";
+    case LAT_NATIVE_SYMBOL_KZT_GET_ALTERNATE:
+        return "lat_aot_runtime_kzt_get_alternate";
     default:
         return NULL;
     }
