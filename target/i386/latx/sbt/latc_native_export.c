@@ -394,6 +394,14 @@ static int append_relocation(GArray *output, GHashTable *offsets,
     if ((relocation.kind == LAT_NATIVE_RELOC_GUEST_ADDRESS ||
          relocation.kind == LAT_NATIVE_RELOC_TB_TARGET) &&
         relocation.addend < load_bias) {
+        fprintf(stderr,
+                "latc: native relocation target 0x%llx precedes load bias 0x%llx"
+                " source=0x%llx cflags=0x%x kind=%d\n",
+                (unsigned long long)relocation.addend,
+                (unsigned long long)load_bias,
+                (unsigned long long)(segment->details.seg_begin +
+                                     tb->offset_in_segment),
+                tb->cflags, source->kind);
         return -1;
     }
     if (relocation.kind == LAT_NATIVE_RELOC_GUEST_ADDRESS ||

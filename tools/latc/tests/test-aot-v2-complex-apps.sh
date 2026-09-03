@@ -629,7 +629,7 @@ esac
 for phase in $phases; do
     run_phase "$phase"
     if [ "$phase" = cold ] ||
-       [ "$phase" = warm ]; then
+       { [ "$phase" = warm ] && [ "$warm_socket" -eq 1 ]; }; then
         flush_started=$(python3 "$script_dir/monotonic-ns.py")
         "$latcd" --flush-all --socket "$socket" \
           >"$work/$phase/flush-all.txt"

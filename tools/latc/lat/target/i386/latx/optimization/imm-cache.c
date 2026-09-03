@@ -17,7 +17,7 @@
 #include "reg-map.h"
 #include "translate.h"
 
-int itemp_stat[4] = {1, 1, 1, 1};
+static __thread int itemp_stat[4] = {1, 1, 1, 1};
 
 /**
  * itemp_stat index map itemp
@@ -55,8 +55,8 @@ const int itemp_reverse_map[11] = {
 //=====================
 //     stastic
 //=====================
-long cache_call = 0;
-long cache_hit = 0;
+static __thread long cache_call;
+static __thread long cache_hit;
 
 // ========================
 //      util functions
@@ -471,7 +471,7 @@ IMM_CACHE_RES imm_cache_allocate(IMM_CACHE *cache, int base, int index,
 {
     cache_call++;
     // skip imm opt if pc == 0x...
-    static bool stop_opt = false;
+    static __thread bool stop_opt;
 
     if (unlikely(imm_skip_pc != 0)) {
         if (!stop_opt && cache->curr_pc == imm_skip_pc) {

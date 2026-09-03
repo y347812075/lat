@@ -15,6 +15,25 @@
 #define STT_GNU_IFUNC 10
 #endif
 
+typedef struct TbTemplateKey {
+    uint64_t pc;
+    uint32_t flags;
+} TbTemplateKey;
+
+static guint tb_template_hash(gconstpointer value)
+{
+    const TbTemplateKey *key = value;
+    uint64_t mixed = key->pc ^ ((uint64_t)key->flags << 32);
+    return (guint)(mixed ^ (mixed >> 32));
+}
+
+static gboolean tb_template_equal(gconstpointer left, gconstpointer right)
+{
+    const TbTemplateKey *a = left;
+    const TbTemplateKey *b = right;
+    return a->pc == b->pc && a->flags == b->flags;
+}
+
 static int fail(char *error, size_t size, const char *message)
 {
     if (error && size) snprintf(error, size, "%s", message);
@@ -107,6 +126,15 @@ static int add_parallel_dynamic_entries(const char *path, CfgProgram *program,
         return fail(error, error_size, "invalid ELF section table");
     }
     const Elf64_Shdr *sections = (const void *)(file + header->e_shoff);
+    const char *section_names = NULL;
+    size_t section_names_size = 0;
+    if (header->e_shstrndx < header->e_shnum) {
+        const Elf64_Shdr *names = &sections[header->e_shstrndx];
+        if (names->sh_offset <= size && names->sh_size <= size - names->sh_offset) {
+            section_names = (const void *)(file + names->sh_offset);
+            section_names_size = names->sh_size;
+        }
+    }
     GHashTable *parallel_pcs = g_hash_table_new_full(
         g_int64_hash, g_int64_equal, g_free, NULL);
     for (size_t i = 0; i < program->tb_count; i++) {
@@ -166,6 +194,72 @@ static int add_parallel_dynamic_entries(const char *path, CfgProgram *program,
             g_hash_table_add(parallel_pcs, key);
         }
     }
+
+    /* A classic x86-64 PLT entry has a second entry point at byte 6.  The
+     * dynamic linker returns there on the first call, so it is a real runtime
+     * TB even though no direct branch in the ELF points to it.  Strict AOT can
+     * be the first user of a symbol itself; do not require a profiling run to
+     * have happened to exercise every lazy binding. */
+    if (header->e_machine == EM_X86_64 && section_names) {
+        size_t candidate_count = 0;
+        for (uint16_t section = 0; section < header->e_shnum; section++) {
+            const Elf64_Shdr *plt = &sections[section];
+            if (plt->sh_name >= section_names_size ||
+                strcmp(section_names + plt->sh_name, ".plt") ||
+                plt->sh_offset > size || plt->sh_size > size - plt->sh_offset) {
+                continue;
+            }
+            size_t entry_size = plt->sh_entsize ? plt->sh_entsize : 16;
+            if (entry_size >= 16) candidate_count += plt->sh_size / entry_size;
+        }
+        if (candidate_count > (SIZE_MAX / sizeof(*program->tbs)) -
+                              program->tb_count) {
+            g_hash_table_destroy(parallel_pcs);
+            g_free(contents);
+            return fail(error, error_size, "too many PLT runtime entries");
+        }
+        CfgTb *next = realloc(
+            program->tbs,
+            (program->tb_count + candidate_count) * sizeof(*next));
+        if (!next && candidate_count) {
+            g_hash_table_destroy(parallel_pcs);
+            g_free(contents);
+            return fail(error, error_size,
+                        "out of memory adding PLT runtime entries");
+        }
+        program->tbs = next;
+        for (uint16_t section = 0; section < header->e_shnum; section++) {
+            const Elf64_Shdr *plt = &sections[section];
+            if (plt->sh_name >= section_names_size ||
+                strcmp(section_names + plt->sh_name, ".plt") ||
+                plt->sh_offset > size || plt->sh_size > size - plt->sh_offset) {
+                continue;
+            }
+            size_t entry_size = plt->sh_entsize ? plt->sh_entsize : 16;
+            if (entry_size < 16) continue;
+            const uint8_t *bytes = file + plt->sh_offset;
+            for (size_t offset = 0; offset + 16 <= plt->sh_size;
+                 offset += entry_size) {
+                /* push imm32; jmp rel32 is the lazy-binding continuation. */
+                if (bytes[offset + 6] != 0x68 || bytes[offset + 11] != 0xe9) {
+                    continue;
+                }
+                uint64_t pc = plt->sh_addr + offset + 6;
+                if (g_hash_table_contains(parallel_pcs, &pc)) continue;
+                program->tbs[program->tb_count++] = (CfgTb) {
+                    .start = pc,
+                    .end = pc + 1,
+                    .terminator_pc = pc,
+                    .selected = true,
+                    .semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL,
+                    .terminator = CFG_TB_FALLTHROUGH,
+                };
+                uint64_t *key = g_new(uint64_t, 1);
+                *key = pc;
+                g_hash_table_add(parallel_pcs, key);
+            }
+        }
+    }
     g_hash_table_destroy(parallel_pcs);
     g_free(contents);
     return 0;
@@ -199,26 +293,47 @@ int latc_tbset_apply(const char *path, const char *source_path,
         return fail(error, error_size, "out of memory adding TB key entries");
     }
     program->tbs = reserved;
+    GHashTable *templates = g_hash_table_new_full(
+        tb_template_hash, tb_template_equal, g_free, NULL);
+    GHashTable *templates_by_pc = g_hash_table_new_full(
+        g_int64_hash, g_int64_equal, g_free, NULL);
+    for (size_t i = 0; i < template_count; i++) {
+        TbTemplateKey *key = g_new(TbTemplateKey, 1);
+        key->pc = program->tbs[i].start;
+        key->flags = program->tbs[i].semantic_flags;
+        g_hash_table_insert(templates, key, GSIZE_TO_POINTER(i + 1));
+        if (!g_hash_table_contains(templates_by_pc, &key->pc)) {
+            uint64_t *pc = g_new(uint64_t, 1);
+            *pc = key->pc;
+            g_hash_table_insert(templates_by_pc, pc,
+                                GSIZE_TO_POINTER(i + 1));
+        }
+    }
     for (size_t record = 0; record < set.count; record++) {
         const LatTbKey *key = &set.keys[record];
         has_parallel |= !!(key->flags & CFG_TB_PARALLEL);
         if (key->guest_rva > UINT64_MAX - load_base) {
+            g_hash_table_destroy(templates_by_pc);
+            g_hash_table_destroy(templates);
             lat_tb_key_set_destroy(&set);
             return fail(error, error_size, "TB key address overflows");
         }
         uint64_t pc = key->guest_rva + load_base;
-        bool found = false;
-        size_t template_index = SIZE_MAX;
+        TbTemplateKey wanted = { .pc = pc, .flags = key->flags };
+        gpointer exact = g_hash_table_lookup(templates, &wanted);
+        gpointer same_pc = g_hash_table_lookup(templates_by_pc, &pc);
+        bool found = exact != NULL;
+        size_t template_index = same_pc ?
+            GPOINTER_TO_SIZE(same_pc) - 1 : SIZE_MAX;
+        if (template_index != SIZE_MAX) {
+            /* A parallel observation still seeds the ordinary CFG graph. */
+            program->tbs[template_index].selected = true;
+        }
         /* The on-disk key set is already unique.  Only pre-existing CFG
          * templates can match; entries appended by this loop cannot. */
-        for (size_t i = 0; i < template_count; i++) {
-            if (program->tbs[i].start != pc) continue;
-            if (template_index == SIZE_MAX) template_index = i;
-            if (program->tbs[i].semantic_flags == key->flags) {
-                program->tbs[i].selected = true;
-                found = true;
-                break;
-            }
+        if (found) {
+            size_t index = GPOINTER_TO_SIZE(exact) - 1;
+            program->tbs[index].selected = true;
         }
         if (found) {
             hit++;
@@ -245,15 +360,98 @@ int latc_tbset_apply(const char *path, const char *source_path,
                          " is outside executable ELF sections",
                          path, record, pc);
             }
+            g_hash_table_destroy(templates_by_pc);
+            g_hash_table_destroy(templates);
             lat_tb_key_set_destroy(&set);
             return -1;
         }
     }
     if (has_parallel && add_parallel_dynamic_entries(
             source_path, program, error, error_size)) {
+        g_hash_table_destroy(templates_by_pc);
+        g_hash_table_destroy(templates);
         lat_tb_key_set_destroy(&set);
         return -1;
     }
+    /* Exported function entries may be reached by runtime symbol lookup.
+     * Seed their ordinary CFG form before traversing direct edges. */
+    for (size_t i = template_count; i < program->tb_count; i++) {
+        if (program->tbs[i].semantic_flags !=
+            (CFG_TB_CODE64 | CFG_TB_PARALLEL)) {
+            continue;
+        }
+        gpointer entry = g_hash_table_lookup(
+            templates_by_pc, &program->tbs[i].start);
+        if (entry) {
+            program->tbs[GPOINTER_TO_SIZE(entry) - 1].selected = true;
+        }
+    }
+    /* Starting from addresses observed by JIT and exported entries, add every statically reachable
+     * CFG block.  This covers untaken direct branches without compiling
+     * unrelated decoder false positives elsewhere in the ELF. */
+    GQueue reachable = G_QUEUE_INIT;
+    for (size_t i = 0; i < template_count; i++) {
+        if (program->tbs[i].selected) {
+            g_queue_push_tail(&reachable, GSIZE_TO_POINTER(i + 1));
+        }
+    }
+    while (!g_queue_is_empty(&reachable)) {
+        size_t index = GPOINTER_TO_SIZE(g_queue_pop_head(&reachable)) - 1;
+        const CfgTb *tb = &program->tbs[index];
+        for (size_t edge_index = tb->first_edge;
+             edge_index < tb->first_edge + tb->edge_count; edge_index++) {
+            const CfgProgramEdge *edge = &program->edges[edge_index];
+            if (edge->resolution != CFG_EDGE_STATIC) continue;
+            gpointer target = g_hash_table_lookup(templates_by_pc, &edge->to);
+            if (!target) continue;
+            size_t target_index = GPOINTER_TO_SIZE(target) - 1;
+            if (!program->tbs[target_index].selected) {
+                program->tbs[target_index].selected = true;
+                g_queue_push_tail(&reachable,
+                                  GSIZE_TO_POINTER(target_index + 1));
+            }
+        }
+    }
+    if (has_parallel && template_count) {
+        GHashTable *parallel_pcs = g_hash_table_new_full(
+            g_int64_hash, g_int64_equal, g_free, NULL);
+        for (size_t i = template_count; i < program->tb_count; i++) {
+            if (program->tbs[i].selected &&
+                program->tbs[i].semantic_flags ==
+                    (CFG_TB_CODE64 | CFG_TB_PARALLEL)) {
+                uint64_t *pc = g_new(uint64_t, 1);
+                *pc = program->tbs[i].start;
+                g_hash_table_add(parallel_pcs, pc);
+            }
+        }
+        CfgTb *expanded = realloc(
+            program->tbs,
+            (program->tb_count + template_count) * sizeof(*expanded));
+        if (!expanded) {
+            g_hash_table_destroy(parallel_pcs);
+            g_hash_table_destroy(templates_by_pc);
+            g_hash_table_destroy(templates);
+            lat_tb_key_set_destroy(&set);
+            return fail(error, error_size,
+                        "out of memory adding parallel CFG blocks");
+        }
+        program->tbs = expanded;
+        for (size_t i = 0; i < template_count; i++) {
+            if (!program->tbs[i].selected ||
+                g_hash_table_contains(parallel_pcs,
+                                      &program->tbs[i].start)) {
+                continue;
+            }
+            CfgTb added = program->tbs[i];
+            added.semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL;
+            added.first_edge = 0;
+            added.edge_count = 0;
+            program->tbs[program->tb_count++] = added;
+        }
+        g_hash_table_destroy(parallel_pcs);
+    }
+    g_hash_table_destroy(templates_by_pc);
+    g_hash_table_destroy(templates);
     lat_tb_key_set_destroy(&set);
     if (matched) *matched = hit;
     if (unmatched) *unmatched = miss;

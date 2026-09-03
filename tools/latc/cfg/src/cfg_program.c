@@ -71,6 +71,21 @@ static void sort_unique(AddrVec *v)
     v->n = out;
 }
 
+static size_t addr_lower_bound(const AddrVec *v, uint64_t value)
+{
+    size_t lo = 0;
+    size_t hi = v->n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (v->v[mid] < value) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
 static ssize_t find_insn(const InsnVec *v, uint64_t addr)
 {
     size_t lo = 0, hi = v->n;
@@ -261,9 +276,10 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
     };
 
     if (!addr_push(&leaders, fn->addr)) goto done;
-    for (size_t i = 0; i < direct_targets->n; i++) {
-        if (addr_in_function(direct_targets->v[i], fn) &&
-            !addr_push(&leaders, direct_targets->v[i])) {
+    uint64_t function_end = fn->addr + fn->size;
+    for (size_t i = addr_lower_bound(direct_targets, fn->addr);
+         i < direct_targets->n && direct_targets->v[i] < function_end; i++) {
+        if (!addr_push(&leaders, direct_targets->v[i])) {
             goto done;
         }
     }
@@ -305,22 +321,29 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
             if (kind != INSN_NORMAL) break;
         }
         if (ei == (size_t)si) continue;
-        Insn *last = &insns.v[ei - 1];
-        CfgTb tb = {
-            .start = start,
-            .end = last->addr + last->len,
-            .terminator_pc = last->addr,
-            .semantic_flags = CFG_TB_CODE64,
-            .terminator = term_from_insn(last->kind),
-            .first_edge = out->edge_count,
-        };
-        uint64_t next = last->addr + last->len;
+        for (size_t chunk_si = (size_t)si; chunk_si < ei; ) {
+            /* LATX turns instruction 255 into the synthetic TB-exit jump, so
+             * that instruction itself is the next TB start. */
+            size_t chunk_ei = chunk_si + 254;
+            if (chunk_ei > ei) chunk_ei = ei;
+            Insn *last = &insns.v[chunk_ei - 1];
+            uint64_t chunk_start = insns.v[chunk_si].addr;
+            CfgTb tb = {
+                .start = chunk_start,
+                .end = last->addr + last->len,
+                .terminator_pc = last->addr,
+                .semantic_flags = CFG_TB_CODE64,
+                .terminator = term_from_insn(last->kind),
+                .first_edge = out->edge_count,
+            };
+            uint64_t next = last->addr + last->len;
 #define EDGE(K, T, R) do { \
             if (!push_edge(out, edge_cap, (CfgProgramEdge){ \
-                    .from = start, .to = (T), .kind = (K), .resolution = (R) })) \
+                    .from = chunk_start, .to = (T), .kind = (K), \
+                    .resolution = (R) })) \
                 goto done; \
         } while (0)
-        switch (last->kind) {
+            switch (last->kind) {
         case INSN_CALL:
             if (last->has_target) EDGE(CFG_EDGE_CALL, last->target, CFG_EDGE_STATIC);
             if (next < fn->addr + fn->size)
@@ -379,10 +402,12 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
             break;
         case INSN_STOP:
             break;
-        }
+            }
 #undef EDGE
-        tb.edge_count = out->edge_count - tb.first_edge;
-        if (!push_tb(out, tb_cap, tb)) goto done;
+            tb.edge_count = out->edge_count - tb.first_edge;
+            if (!push_tb(out, tb_cap, tb)) goto done;
+            chunk_si = chunk_ei;
+        }
     }
     result->tb_count = out->tb_count - result->first_tb;
     rc = 0;

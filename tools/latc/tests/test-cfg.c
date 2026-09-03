@@ -35,6 +35,7 @@ static void test_program(const char *path)
     const CfgProgramFunction *jump_container = NULL;
     const CfgProgramFunction *jump_table_source = NULL;
     const CfgProgramFunction *jump_plt_source = NULL;
+    const CfgProgramFunction *computed_stride_source = NULL;
     const CfgProgramFunction *plt = NULL;
     const CfgProgramFunction *fallthrough_check = NULL;
     const CfgProgramFunction *fallthrough_next = NULL;
@@ -49,6 +50,8 @@ static void test_program(const char *path)
             jump_table_source = &p.functions[i];
         if (strcmp(p.functions[i].name, "jump_plt_source") == 0)
             jump_plt_source = &p.functions[i];
+        if (strcmp(p.functions[i].name, "computed_stride_source") == 0)
+            computed_stride_source = &p.functions[i];
         if (strcmp(p.functions[i].name, "_plt") == 0)
             plt = &p.functions[i];
         if (strcmp(p.functions[i].name, "fallthrough_check") == 0)
@@ -99,6 +102,19 @@ static void test_program(const char *path)
         }
     }
     assert(case_edges == 8 && local_case_edges == 5);
+
+    assert(computed_stride_source);
+    case_edges = 0;
+    for (size_t i = computed_stride_source->first_tb;
+         i < computed_stride_source->first_tb + computed_stride_source->tb_count;
+         i++) {
+        const CfgTb *tb = &p.tbs[i];
+        for (size_t j = tb->first_edge; j < tb->first_edge + tb->edge_count;
+             j++) {
+            case_edges += p.edges[j].kind == CFG_EDGE_CASE;
+        }
+    }
+    assert(case_edges == 4);
 
     assert(jump_plt_source && jump_plt_source->tb_count == 1 && plt);
     source_tb = &p.tbs[jump_plt_source->first_tb];

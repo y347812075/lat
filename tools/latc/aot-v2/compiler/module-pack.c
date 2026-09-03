@@ -385,9 +385,8 @@ static void select_supported_tbs(ModulePack *pack)
         if (owner < 0) {
             continue;
         }
-        if ((relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL &&
-             !runtime_symbol_supported(relocation->target)) ||
-            relocation->kind == LAT_NATIVE_RELOC_JRRA_TARGET) {
+        if (relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL &&
+            !runtime_symbol_supported(relocation->target)) {
             pack->supported[owner] = 0;
             continue;
         }
@@ -485,10 +484,7 @@ static void select_supported_tbs(ModulePack *pack)
                         relocation->code_offset,
                         pack->runtime_trampolines + relocation->reserved * 4);
             } else {
-                int direct_pair = relocation->slots == 2 &&
-                    (instructions[0] & 0xfe00001fu) == 0x1e00000cu &&
-                    (instructions[1] & 0xfc0003e0u) == 0x4c000180u;
-                patchable = direct_pair ?
+                patchable = relocation->slots == 2 ?
                     !patch_tb_target_pair(instructions,
                         relocation->code_offset,
                         pack->tbs[target].code_offset) :
@@ -631,7 +627,48 @@ static int patch_tb_target_pair(uint32_t *instructions,
             return 0;
         }
     }
-    return patch_address(instructions, 2, patch, target);
+    int64_t difference = (int64_t)target - (int64_t)patch;
+    if (!(difference & 3)) {
+        int64_t offset = difference >> 2;
+        if (offset >= -(1 << 25) && offset < (1 << 25)) {
+            instructions[0] = 0x50000000u |
+                ((uint32_t)offset & 0xffffu) << 10 |
+                (((uint32_t)offset >> 16) & 0x3ffu);
+            instructions[1] = 0x03400000u;
+            return 0;
+        }
+        int64_t upper = ((offset + (1 << 15)) >> 16) & 0xfffff;
+        int64_t lower = offset & 0xffff;
+        instructions[0] = 0x1e000000u | (uint32_t)upper << 5 | 12u;
+        instructions[1] = 0x4c000000u | (uint32_t)lower << 10 | 12u << 5;
+        return 0;
+    }
+    return -1;
+}
+
+static int patch_jrra_target(uint32_t *instructions, uint32_t slots,
+                             uint64_t patch, uint64_t target, int enabled)
+{
+    if (slots != 4) {
+        return -1;
+    }
+    if (!enabled) {
+        for (uint32_t i = 0; i < slots; i++) {
+            instructions[i] = 0x03400000u;
+        }
+        return 0;
+    }
+    int64_t pages = ((int64_t)(target & ~(uint64_t)0xfff) -
+                     (int64_t)(patch & ~(uint64_t)0xfff)) >> 12;
+    if (pages < -(1 << 19) || pages >= (1 << 19)) {
+        return -1;
+    }
+    uint32_t destination = instructions[0] & 0x1f;
+    instructions[0] = 0x1a000000u |
+        ((uint32_t)pages & 0xfffff) << 5 | destination;
+    instructions[1] = 0x03800000u | ((uint32_t)target & 0xfff) << 10 |
+        destination << 5 | destination;
+    return 0;
 }
 
 static int patch_runtime_target(uint32_t *instructions, uint32_t slots,
@@ -768,10 +805,7 @@ static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
             int target = find_tb(pack, (uint64_t)relocation->addend,
                                  relocation->target);
             if (target >= 0 && pack->supported[target]) {
-                int direct_pair = relocation->slots == 2 &&
-                    (instructions[0] & 0xfe00001fu) == 0x1e00000cu &&
-                    (instructions[1] & 0xfc0003e0u) == 0x4c000180u;
-                result = direct_pair ?
+                result = relocation->slots == 2 ?
                     patch_tb_target_pair(
                         instructions, relocation->code_offset,
                         pack->tbs[target].code_offset) :
@@ -785,6 +819,13 @@ static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
                     relocation->code_offset,
                     pack->runtime_trampolines + relocation->reserved * 4);
             }
+        } else if (relocation->kind == LAT_NATIVE_RELOC_JRRA_TARGET) {
+            int target = find_tb(pack, (uint64_t)relocation->addend,
+                                 relocation->target);
+            int enabled = target >= 0 && pack->supported[target];
+            result = patch_jrra_target(
+                instructions, relocation->slots, relocation->code_offset,
+                enabled ? pack->tbs[target].code_offset : 0, enabled);
         }
         if (result) {
             return fail(error, error_size,

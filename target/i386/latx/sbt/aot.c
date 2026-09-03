@@ -31,11 +31,17 @@
 #include "../translator/tr-vpaes.h"
 #include<sys/syscall.h>
 #include "exec/translate-all.h"
+#include "qemu/rcu.h"
+#include "qemu/thread.h"
+#include "tcg/tcg.h"
+#include "latx-config.h"
+#include "latx-disassemble-trace.h"
 #include "latx-smc.h"
 #ifdef CONFIG_LATX_AOT
 /* Tbs vector with @tb_num@ elements. */
 static TranslationBlock **tb_vector;
 static int tb_num;
+static GArray *compile_keys;
 static int curr_lib_tb_num;
 /* Compare function used to sort tb_vector. */
 static int tb_cmp(const void *a, const void *b)
@@ -60,6 +66,20 @@ static char *curr_lib_name;
 static char curr_aot_file_name[PATH_MAX];
 uintptr_t table_end_addr;
 const char *aot_process_profile = "browser";
+
+void aot_compile_key_add(target_ulong pc, uint32_t cflags,
+                         uint16_t bool_flags)
+{
+    if (!compile_keys) {
+        compile_keys = g_array_new(FALSE, FALSE, sizeof(tb_tmp_message));
+    }
+    tb_tmp_message message = {
+        .pc = pc,
+        .cflags = cflags,
+        .bool_flags = bool_flags,
+    };
+    g_array_append_val(compile_keys, message);
+}
 
 static uint64_t latc_monotonic_ns(void)
 {
@@ -142,9 +162,9 @@ static void do_tb_record(void *p, uint32_t hash, void *userp)
 }
 
 /* Basic Block relocation table with @rel_entry_num elements. */
-aot_rel *rel_table;
-static int rel_entry_num;
-static int rel_table_capacity;
+__thread aot_rel *rel_table;
+static __thread int rel_entry_num;
+static __thread int rel_table_capacity;
 int add_rel_entry(aot_rel_kind kind, uint32_t **tc_offset,
                   uint32_t **rel_slots_num, uint32_t x86_rip_offset,
                   target_ulong extra_addend)
@@ -182,6 +202,45 @@ void aot_rel_table_rollback(int checkpoint)
 {
     assert(checkpoint >= 0 && checkpoint <= rel_entry_num);
     rel_entry_num = checkpoint;
+}
+
+aot_rel *aot_rel_table_release(int *count)
+{
+    aot_rel *entries = rel_table;
+    *count = rel_entry_num;
+    rel_table = NULL;
+    rel_entry_num = 0;
+    rel_table_capacity = 0;
+    return entries;
+}
+
+void aot_rel_table_merge(aot_rel *entries, int count,
+                         TranslationBlock **tbs, int tb_count)
+{
+    if (!count) {
+        free(entries);
+        return;
+    }
+    int base = rel_entry_num;
+    int required = base + count;
+    if (rel_table_capacity < required) {
+        int capacity = rel_table_capacity ? rel_table_capacity : 10000;
+        while (capacity < required) {
+            capacity <<= 1;
+        }
+        rel_table = realloc(rel_table, capacity * sizeof(*rel_table));
+        assert(rel_table);
+        rel_table_capacity = capacity;
+    }
+    memcpy(rel_table + base, entries, count * sizeof(*entries));
+    rel_entry_num = required;
+    for (int i = 0; i < tb_count; i++) {
+        if (tbs[i]->s_data->rel_start >= 0) {
+            tbs[i]->s_data->rel_start += base;
+            tbs[i]->s_data->rel_end += base;
+        }
+    }
+    free(entries);
 }
 
 #ifdef CONFIG_LATX_TU
@@ -237,22 +296,6 @@ static void get_tb(void)
         return;
     }
     qsort(tb_vector, tb_num, sizeof(TranslationBlock *), tb_cmp);
-    const char *debug_pc_text = getenv("LATC_DEBUG_PC");
-    if (debug_pc_text && *debug_pc_text) {
-        target_ulong debug_pc = strtoull(debug_pc_text, NULL, 0);
-        int matches = 0;
-        for (int i = 0; i < tb_num; i++) {
-            if (tb_vector[i]->pc == debug_pc) {
-                fprintf(stderr, "latc-aot: candidate pc=0x%lx cflags=0x%x size=%u icount=%u invalid=%u\n",
-                        (unsigned long)debug_pc, tb_vector[i]->cflags,
-                        tb_vector[i]->size, tb_vector[i]->icount,
-                        !!(tb_vector[i]->cflags & CF_INVALID));
-                matches++;
-            }
-        }
-        fprintf(stderr, "latc-aot: candidate matches pc=0x%lx count=%d total=%d\n",
-                (unsigned long)debug_pc, matches, tb_num);
-    }
 }
 
 /* Prepare segment infomation. */ 
@@ -973,6 +1016,427 @@ char in_white_list(char *lib)
     return in_list(lib, lib_white_list);
 }
 
+typedef struct AotTranslateWorker {
+    QemuThread thread;
+    CPUState *cpu;
+    X86CPU *cpu_copy;
+    tb_tmp_message *messages;
+    seg_info *segments;
+    seg_info **segment_ptrs;
+    int segment_count;
+    TranslationBlock **tbs;
+    int tb_count;
+    aot_rel *relocations;
+    int relocation_count;
+    bool register_thread;
+} AotTranslateWorker;
+
+typedef struct AotTbKey {
+    target_ulong pc;
+    uint32_t parallel;
+} AotTbKey;
+
+static guint aot_tb_key_hash(gconstpointer opaque)
+{
+    const AotTbKey *key = opaque;
+    uint64_t value = key->pc ^ (key->pc >> 32) ^ key->parallel;
+    return (guint)(value ^ (value >> 32));
+}
+
+static gboolean aot_tb_key_equal(gconstpointer left, gconstpointer right)
+{
+    const AotTbKey *a = left;
+    const AotTbKey *b = right;
+    return a->pc == b->pc && a->parallel == b->parallel;
+}
+
+static bool aot_tb_key_add(GHashTable *keys, target_ulong pc, uint32_t cflags)
+{
+    AotTbKey lookup = { pc, cflags & CF_PARALLEL };
+    if (g_hash_table_contains(keys, &lookup)) {
+        return false;
+    }
+    AotTbKey *key = g_new(AotTbKey, 1);
+    *key = lookup;
+    g_hash_table_add(keys, key);
+    return true;
+}
+
+static bool aot_tb_key_contains(GHashTable *keys, target_ulong pc,
+                                uint32_t cflags)
+{
+    AotTbKey lookup = { pc, cflags & CF_PARALLEL };
+    return g_hash_table_contains(keys, &lookup);
+}
+
+static void *aot_translate_worker(void *opaque)
+{
+    AotTranslateWorker *worker = opaque;
+    if (worker->register_thread) {
+        rcu_register_thread();
+        tcg_register_thread();
+        latx_lsenv_init_translation_thread(worker->cpu->env_ptr);
+        gitcapstone_thread_init();
+    }
+    aot_parallel_translate = true;
+    clear_rel_table();
+    worker->tb_count = translate_lib(worker->segment_ptrs, 0,
+                                     worker->segment_count, worker->cpu,
+                                     worker->messages);
+    worker->tbs = ts_vector;
+    worker->relocations = aot_rel_table_release(&worker->relocation_count);
+    aot_parallel_translate = false;
+    if (worker->register_thread) {
+        rcu_unregister_thread();
+    }
+    return NULL;
+}
+
+static int configured_aot_threads(void)
+{
+    const char *value = getenv("LATC_AOT_THREADS");
+    unsigned long threads;
+    if (value && *value) {
+        threads = strtoul(value, NULL, 10);
+    } else {
+        long online = sysconf(_SC_NPROCESSORS_ONLN);
+        threads = online > 0 ? MIN(online, 8) : 1;
+    }
+    return MIN(MAX(threads, 1ul), 32ul);
+}
+
+static bool same_tu_group(const tb_tmp_message *left,
+                          const tb_tmp_message *right)
+{
+    return (left->pc & TARGET_PAGE_MASK) == (right->pc & TARGET_PAGE_MASK) &&
+           ((left->cflags ^ right->cflags) & CF_PARALLEL) == 0;
+}
+
+static int compare_aot_message(const void *left, const void *right)
+{
+    const tb_tmp_message *a = left;
+    const tb_tmp_message *b = right;
+    uint32_t a_parallel = a->cflags & CF_PARALLEL;
+    uint32_t b_parallel = b->cflags & CF_PARALLEL;
+    if (a_parallel != b_parallel) {
+        return a_parallel < b_parallel ? -1 : 1;
+    }
+    return a->pc < b->pc ? -1 : a->pc > b->pc;
+}
+
+static int parallel_translate_lib(seg_info **segments, int segment_count,
+                                  CPUState *cpu, bool use_threads,
+                                  tb_tmp_message *messages)
+{
+    int threads = use_threads ? configured_aot_threads() : 1;
+    int first_tb = segments[0]->first_tb_id;
+    int last_tb = segments[segment_count - 1]->last_tb_id;
+    int total = last_tb - first_tb + 1;
+    if (threads == 1 || total < 4096) {
+        aot_parallel_translate = true;
+        int count = translate_lib(segments, 0, segment_count, cpu,
+                                  messages);
+        aot_parallel_translate = false;
+        tb_vector = ts_vector;
+        return count;
+    }
+    for (int i = 0; i < segment_count; i++) {
+        int count = segments[i]->last_tb_id - segments[i]->first_tb_id + 1;
+        qsort(messages + segments[i]->first_tb_id, count,
+              sizeof(*messages), compare_aot_message);
+    }
+    threads = MIN(threads, total);
+    AotTranslateWorker *workers = g_new0(AotTranslateWorker, threads);
+    int *cuts = g_new(int, threads + 1);
+    cuts[0] = first_tb;
+    cuts[threads] = last_tb + 1;
+    for (int i = 1; i < threads; i++) {
+        int cut = first_tb + (int)((int64_t)total * i / threads);
+        while (cut <= last_tb && same_tu_group(&messages[cut - 1],
+                                                &messages[cut])) {
+            cut++;
+        }
+        cuts[i] = MAX(cut, cuts[i - 1]);
+    }
+    int active = 0;
+    for (int i = 0; i < threads; i++) {
+        if (cuts[i] == cuts[i + 1]) {
+            continue;
+        }
+        AotTranslateWorker *worker = &workers[active];
+        if (active == 0) {
+            worker->cpu = cpu;
+        } else {
+            worker->cpu_copy = g_new(X86CPU, 1);
+            memcpy(worker->cpu_copy, (X86CPU *)cpu, sizeof(X86CPU));
+            worker->cpu_copy->parent_obj.env_ptr = &worker->cpu_copy->env;
+            worker->cpu = &worker->cpu_copy->parent_obj;
+        }
+        worker->messages = messages;
+        worker->segments = g_new0(seg_info, segment_count);
+        worker->segment_ptrs = g_new0(seg_info *, segment_count);
+        for (int j = 0; j < segment_count; j++) {
+            int begin = MAX(segments[j]->first_tb_id, cuts[i]);
+            int end = MIN(segments[j]->last_tb_id + 1, cuts[i + 1]);
+            if (begin >= end) {
+                continue;
+            }
+            seg_info *copy = &worker->segments[worker->segment_count];
+            *copy = *segments[j];
+            copy->first_tb_id = begin;
+            copy->last_tb_id = end - 1;
+            worker->segment_ptrs[worker->segment_count++] = copy;
+        }
+        worker->register_thread = active != 0;
+        active++;
+    }
+    for (int i = 1; i < active; i++) {
+        qemu_thread_create(&workers[i].thread, "latc-aot",
+                           aot_translate_worker, &workers[i],
+                           QEMU_THREAD_JOINABLE);
+    }
+    aot_translate_worker(&workers[0]);
+    for (int i = 1; i < active; i++) {
+        qemu_thread_join(&workers[i].thread);
+    }
+    int combined = 0;
+    for (int i = 0; i < active; i++) {
+        combined += workers[i].tb_count;
+        if (getenv("LATC_COMPILE_TIMING")) {
+            fprintf(stderr, "latc: AOT worker %d tbs=%d relocations=%d\n",
+                    i, workers[i].tb_count, workers[i].relocation_count);
+        }
+    }
+    tb_vector = g_new(TranslationBlock *, combined);
+    int offset = 0;
+    for (int i = 0; i < active; i++) {
+        aot_rel_table_merge(workers[i].relocations,
+                            workers[i].relocation_count,
+                            workers[i].tbs, workers[i].tb_count);
+        memcpy(tb_vector + offset, workers[i].tbs,
+               workers[i].tb_count * sizeof(*tb_vector));
+        offset += workers[i].tb_count;
+        g_free(workers[i].segments);
+        g_free(workers[i].segment_ptrs);
+        g_free(workers[i].cpu_copy);
+    }
+    g_free(cuts);
+    g_free(workers);
+    return combined;
+}
+
+static bool aot_pc_in_segments(target_ulong pc, seg_info **segments,
+                               int segment_count)
+{
+    for (int i = 0; i < segment_count; i++) {
+        if (pc >= segments[i]->seg_begin && pc < segments[i]->seg_end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void aot_queue_successor(GArray *pending, GHashTable *keys,
+                                target_ulong pc, TranslationBlock *source,
+                                seg_info **segments, int segment_count)
+{
+    if (!pc || !aot_pc_in_segments(pc, segments, segment_count) ||
+        !aot_tb_key_add(keys, pc, source->cflags)) {
+        return;
+    }
+    tb_tmp_message message = {
+        .pc = pc,
+        .cflags = source->cflags,
+        .bool_flags = source->bool_flags & ~IS_AOT_TB,
+        .tb = NULL,
+    };
+    g_array_append_val(pending, message);
+}
+
+static void aot_collect_successors(TranslationBlock **tbs, int count,
+                                   GArray *pending, GHashTable *keys,
+                                   seg_info **segments, int segment_count)
+{
+    for (int i = 0; i < count; i++) {
+        TranslationBlock *tb = tbs[i];
+        if (!tb || !tb->s_data) {
+            continue;
+        }
+        switch (tb->s_data->last_ir1_type) {
+        case IR1_TYPE_BRANCH:
+            aot_queue_successor(pending, keys, tb->s_data->next_pc, tb,
+                                segments, segment_count);
+            /* fall through */
+        case IR1_TYPE_JUMP:
+            aot_queue_successor(pending, keys, tb->s_data->target_pc, tb,
+                                segments, segment_count);
+            break;
+        case IR1_TYPE_CALL:
+            aot_queue_successor(pending, keys, tb->s_data->target_pc, tb,
+                                segments, segment_count);
+            /* fall through */
+        case IR1_TYPE_CALLIN:
+        case IR1_TYPE_NORMAL:
+        case IR1_TYPE_SYSCALL:
+            aot_queue_successor(pending, keys, tb->s_data->next_pc, tb,
+                                segments, segment_count);
+            break;
+        default:
+            break;
+        }
+        aot_queue_successor(pending, keys, tb->next_86_pc, tb,
+                            segments, segment_count);
+    }
+}
+
+static void aot_append_batch(TranslationBlock ***all_tbs, int *all_tb_count,
+                             aot_rel **all_relocations,
+                             int *all_relocation_count,
+                             TranslationBlock **batch_tbs, int batch_tb_count,
+                             aot_rel *batch_relocations,
+                             int batch_relocation_count)
+{
+    int rel_base = *all_relocation_count;
+    *all_relocations = g_realloc_n(*all_relocations,
+                                   rel_base + batch_relocation_count,
+                                   sizeof(**all_relocations));
+    if (batch_relocation_count) {
+        memcpy(*all_relocations + rel_base, batch_relocations,
+               batch_relocation_count * sizeof(**all_relocations));
+    }
+    free(batch_relocations);
+    for (int i = 0; i < batch_tb_count; i++) {
+        if (batch_tbs[i]->s_data->rel_start >= 0) {
+            batch_tbs[i]->s_data->rel_start += rel_base;
+            batch_tbs[i]->s_data->rel_end += rel_base;
+        }
+    }
+    *all_relocation_count += batch_relocation_count;
+    *all_tbs = g_realloc_n(*all_tbs, *all_tb_count + batch_tb_count,
+                           sizeof(**all_tbs));
+    memcpy(*all_tbs + *all_tb_count, batch_tbs,
+           batch_tb_count * sizeof(**all_tbs));
+    *all_tb_count += batch_tb_count;
+}
+
+static int complete_aot_successors(seg_info **segments, int segment_count,
+                                   CPUState *cpu, tb_tmp_message *messages,
+                                   int message_begin, int message_count,
+                                   int initial_tb_count)
+{
+    GHashTable *keys = g_hash_table_new_full(aot_tb_key_hash,
+                                             aot_tb_key_equal, g_free, NULL);
+    GArray *pending = g_array_new(FALSE, FALSE, sizeof(tb_tmp_message));
+    TranslationBlock **all_tbs = NULL;
+    int all_tb_count = 0;
+    aot_rel *all_relocations = NULL;
+    int all_relocation_count = 0;
+    int batch_relocation_count;
+    aot_rel *batch_relocations =
+        aot_rel_table_release(&batch_relocation_count);
+
+    for (int i = 0; i < message_count; i++) {
+        aot_tb_key_add(keys, messages[message_begin + i].pc,
+                       messages[message_begin + i].cflags);
+    }
+    for (int i = 0; i < initial_tb_count; i++) {
+        if (tb_vector[i]) {
+            aot_tb_key_add(keys, tb_vector[i]->pc, tb_vector[i]->cflags);
+        }
+    }
+    aot_append_batch(&all_tbs, &all_tb_count, &all_relocations,
+                     &all_relocation_count, tb_vector, initial_tb_count,
+                     batch_relocations, batch_relocation_count);
+    aot_collect_successors(all_tbs, all_tb_count, pending, keys,
+                           segments, segment_count);
+
+    int batches = 0;
+    while (pending->len) {
+        GArray *batch = pending;
+        pending = g_array_new(FALSE, FALSE, sizeof(tb_tmp_message));
+        GHashTable *pages = g_hash_table_new_full(aot_tb_key_hash,
+                                                  aot_tb_key_equal,
+                                                  g_free, NULL);
+        for (guint i = 0; i < batch->len; i++) {
+            tb_tmp_message *message = &g_array_index(batch, tb_tmp_message, i);
+            aot_tb_key_add(pages, message->pc & TARGET_PAGE_MASK,
+                           message->cflags);
+        }
+        for (int i = 0; i < all_tb_count; i++) {
+            TranslationBlock *tb = all_tbs[i];
+            if (tb && aot_tb_key_contains(pages,
+                                          tb->pc & TARGET_PAGE_MASK,
+                                          tb->cflags)) {
+                tb_tmp_message message = {
+                    .pc = tb->pc,
+                    .cflags = tb->cflags,
+                    .bool_flags = tb->bool_flags & ~IS_AOT_TB,
+                    .tb = NULL,
+                };
+                g_array_append_val(batch, message);
+            }
+        }
+        for (int i = 0; i < segment_count; i++) {
+            segments[i]->first_tb_id = -1;
+            segments[i]->last_tb_id = -1;
+        }
+        int accepted = aot_set_dynamic_tb_messages(
+            (const tb_tmp_message *)batch->data, batch->len,
+            segments, segment_count);
+        GPtrArray *active_segments = g_ptr_array_new();
+        for (int i = 0; i < segment_count; i++) {
+            if (segments[i]->first_tb_id != -1) {
+                g_ptr_array_add(active_segments, segments[i]);
+            }
+        }
+        int batch_tb_count = 0;
+        if (accepted && active_segments->len) {
+            clear_rel_table();
+            batch_tb_count = parallel_translate_lib(
+                (seg_info **)active_segments->pdata, active_segments->len,
+                cpu, false, aot_dynamic_tb_messages());
+        }
+        batch_relocations = aot_rel_table_release(&batch_relocation_count);
+        int retained = 0;
+        for (int i = 0; i < all_tb_count; i++) {
+            TranslationBlock *tb = all_tbs[i];
+            if (!tb || !aot_tb_key_contains(pages,
+                                            tb->pc & TARGET_PAGE_MASK,
+                                            tb->cflags)) {
+                all_tbs[retained++] = tb;
+            }
+        }
+        all_tb_count = retained;
+        int first_new_tb = all_tb_count;
+        aot_append_batch(&all_tbs, &all_tb_count, &all_relocations,
+                         &all_relocation_count, tb_vector, batch_tb_count,
+                         batch_relocations, batch_relocation_count);
+        for (int i = first_new_tb; i < all_tb_count; i++) {
+            if (all_tbs[i]) {
+                aot_tb_key_add(keys, all_tbs[i]->pc, all_tbs[i]->cflags);
+            }
+        }
+        aot_collect_successors(all_tbs + first_new_tb,
+                               all_tb_count - first_new_tb, pending, keys,
+                               segments, segment_count);
+        batches++;
+        g_hash_table_destroy(pages);
+        g_ptr_array_free(active_segments, TRUE);
+        g_array_free(batch, TRUE);
+    }
+    if (getenv("LATC_COMPILE_TIMING")) {
+        fprintf(stderr, "latc: AOT successor batches=%d added_tbs=%d\n",
+                batches, all_tb_count - initial_tb_count);
+    }
+    tb_vector = all_tbs;
+    clear_rel_table();
+    aot_rel_table_merge(all_relocations, all_relocation_count,
+                        all_tbs, all_tb_count);
+    g_array_free(pending, TRUE);
+    g_hash_table_destroy(keys);
+    return all_tb_count;
+}
+
 #define PROLIFERATION_RATE 10
 static inline int need_gen_aot(CPUState *cpu,
         char *lib_name, char *aot_file_name, int *lockfd, uint32_t tb_count)
@@ -1050,9 +1514,19 @@ void pre_translate(int begin_id, int end_id, CPUState *cpu,
         }
     }
 
-    tb_num = translate_lib(seg_info_vector, begin_id,
-                    end_id, cpu, tb_message_vector);
-    tb_vector = ts_vector;
+    tb_tmp_message *messages = tb_message_vector ? tb_message_vector :
+                               aot_dynamic_tb_messages();
+    /* Reclaim regions consumed while collecting the final TB set. */
+    tcg_region_reset_all();
+    seg_info **segments = seg_info_vector + begin_id;
+    int segment_count = end_id - begin_id;
+    int message_begin = seg_info_vector[begin_id]->first_tb_id;
+    int message_count = seg_info_vector[end_id - 1]->last_tb_id -
+                        message_begin + 1;
+    tb_num = parallel_translate_lib(segments, segment_count, cpu, true,
+                                    messages);
+    tb_num = complete_aot_successors(segments, segment_count, cpu, messages,
+                                     message_begin, message_count, tb_num);
 }
 
 static bool rename_aot_file(char *lib_name)
@@ -1161,9 +1635,8 @@ static void generate_aot_v2(CPUState *cpu)
 
 void clear_rel_table(void)
 {
-    if (rel_entry_num) {
-        free(rel_table);
-    }
+    free(rel_table);
+    rel_table = NULL;
     rel_entry_num = 0;
     rel_table_capacity = 0;
 }
@@ -1186,14 +1659,23 @@ void aot_generate(CPUState *cpu)
     }
     close(fd);
     reset_all_locks(&tb_ctx.htable);
-    get_tb();
     get_seg_infomation();
+
+    if (compile_keys && compile_keys->len) {
+        tb_num = aot_set_dynamic_tb_messages(
+            (const tb_tmp_message *)compile_keys->data, compile_keys->len,
+            seg_info_vector, seg_info_num);
+    } else {
+        get_tb();
+        if (tb_num && seg_info_num) {
+            get_dynamic_message(tb_vector, tb_num, seg_info_vector,
+                                &seg_info_num);
+        }
+    }
 
     if (tb_num == 0 || seg_info_num == 0) {
         return;
     }
-
-    get_dynamic_message(tb_vector, tb_num, seg_info_vector, &seg_info_num);
 
     generate_aot_v2(cpu);
 }

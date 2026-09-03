@@ -90,6 +90,12 @@ typedef struct {
     size_t len;
 } JmpMem;
 
+typedef struct {
+    int dst;
+    uint32_t value;
+    size_t len;
+} RegImm;
+
 static bool in_func(const IjmpContext *ctx, uint64_t addr)
 {
     return addr >= ctx->func_addr && addr < ctx->func_addr + ctx->func_size;
@@ -288,6 +294,42 @@ static bool parse_add_reg(const uint8_t *buf, size_t size, size_t off,
     out->src = ((modrm >> 3) & 7) + p.rex_r * 8;
     out->dst = (modrm & 7) + p.rex_b * 8;
     out->len = p.op + 2 - off;
+    return true;
+}
+
+static bool parse_and_imm(const uint8_t *buf, size_t size, size_t off,
+                          RegImm *out)
+{
+    Prefix p = parse_prefix(buf, size, off);
+    if (p.op + 2 >= size || (buf[p.op] != 0x83 && buf[p.op] != 0x81)) {
+        return false;
+    }
+    uint8_t modrm = buf[p.op + 1];
+    if ((modrm >> 6) != 3 || ((modrm >> 3) & 7) != 4) {
+        return false;
+    }
+    out->dst = (modrm & 7) + p.rex_b * 8;
+    if (buf[p.op] == 0x83) {
+        out->value = (uint8_t)buf[p.op + 2];
+        out->len = p.op + 3 - off;
+    } else {
+        if (p.op + 5 >= size) return false;
+        out->value = (uint32_t)rd_i32(buf + p.op + 2);
+        out->len = p.op + 6 - off;
+    }
+    return true;
+}
+
+static bool parse_shl_imm(const uint8_t *buf, size_t size, size_t off,
+                          RegImm *out)
+{
+    Prefix p = parse_prefix(buf, size, off);
+    if (p.op + 2 >= size || buf[p.op] != 0xc1) return false;
+    uint8_t modrm = buf[p.op + 1];
+    if ((modrm >> 6) != 3 || ((modrm >> 3) & 7) != 4) return false;
+    out->dst = (modrm & 7) + p.rex_b * 8;
+    out->value = buf[p.op + 2];
+    out->len = p.op + 3 - off;
     return true;
 }
 
@@ -693,6 +735,62 @@ static bool resolve_const_reg_target(const IjmpContext *ctx,
     return false;
 }
 
+static bool resolve_computed_stride(const IjmpContext *ctx,
+                                    const uint8_t *func, size_t func_size,
+                                    size_t start, size_t combine_off,
+                                    int offset_reg, int base_reg,
+                                    IjmpResult *out)
+{
+    /* Optimized libc routines use code itself as a table:
+     *   lea base, [rip + first_case]
+     *   and index, case_count - 1
+     *   shl index, log2(case_stride)
+     *   add index, base
+     *   jmp index
+     * Every fixed-stride case is a valid indirect entry point. */
+    LeaRip base = {0};
+    RegImm mask = {0};
+    RegImm shift = {0};
+    bool have_base = false, have_mask = false, have_shift = false;
+    for (size_t off = start; off < combine_off; off++) {
+        if (!is_insn_off(ctx, off)) continue;
+        LeaRip cur_base;
+        if (parse_lea_rip(func, func_size, ctx->func_addr, off, &cur_base) &&
+            cur_base.dst == base_reg) {
+            base = cur_base;
+            have_base = true;
+        }
+        RegImm cur;
+        if (parse_and_imm(func, func_size, off, &cur) &&
+            cur.dst == offset_reg) {
+            mask = cur;
+            have_mask = true;
+        }
+        if (parse_shl_imm(func, func_size, off, &cur) &&
+            cur.dst == offset_reg) {
+            shift = cur;
+            have_shift = true;
+        }
+    }
+    uint64_t count = (uint64_t)mask.value + 1;
+    if (!have_base || !have_mask || !have_shift || shift.value >= 63 ||
+        !count || count > IJMP_MAX_TARGETS || (count & (count - 1))) {
+        return false;
+    }
+    uint64_t stride = UINT64_C(1) << shift.value;
+    memset(out, 0, sizeof(*out));
+    out->table_addr = base.target;
+    for (uint64_t i = 0; i < count; i++) {
+        uint64_t target = base.target + i * stride;
+        if (target < base.target || !is_valid_target(ctx, target) ||
+            !add_target(out, target)) {
+            memset(out, 0, sizeof(*out));
+            return false;
+        }
+    }
+    return out->count >= 2;
+}
+
 bool ijmp_resolve_jump_table(const IjmpContext *ctx, const uint8_t *func,
                              size_t func_size, size_t ijmp_off,
                              IjmpResult *out)
@@ -748,6 +846,12 @@ bool ijmp_resolve_jump_table(const IjmpContext *ctx, const uint8_t *func,
         }
         return resolve_const_reg_target(ctx, func, func_size, ijmp_off,
                                         jmp_reg, out);
+    }
+
+
+    if (resolve_computed_stride(ctx, func, func_size, start, combine_off,
+                                offset_reg, base_reg, out)) {
+        return true;
     }
 
     MovsxdMem mov = {0};

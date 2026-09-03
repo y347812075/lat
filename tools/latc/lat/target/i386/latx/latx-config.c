@@ -394,7 +394,7 @@ static void global_register_init(void)
     scr3_ir2_opnd = INIT_RA(IR2_OPND_SCR, 3);
 }
 
-static GHashTable *ht_pc_thunk;
+static __thread GHashTable *ht_pc_thunk;
 
 void ht_pc_thunk_insert(uint32_t thunk_addr, int reg_index)
 {
@@ -685,14 +685,20 @@ void latx_init_fpu_regs(CPUArchState *env)
     }
 }
 
-void latx_lsenv_init(CPUArchState *env)
+void latx_lsenv_init_translation_thread(CPUArchState *env)
 {
+    ht_pc_thunk_init();
     lsenv = &lsenv_real;
     lsenv->cpu_state = env;
     lsenv->tr_data = &tr_data_real;
 #ifdef CONFIG_LATX_TU
     tu_control_init();
 #endif
+}
+
+void latx_lsenv_init(CPUArchState *env)
+{
+    latx_lsenv_init_translation_thread(env);
 
     if (option_dump) {
         qemu_log("[LATX] env init : %p\n", lsenv->cpu_state);

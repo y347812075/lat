@@ -13,6 +13,7 @@
     {"source": "linux-user/mmap.c", "target": "tools/latc/lat/linux-user/mmap.c"},
     {"source": "linux-user/signal.c", "target": "tools/latc/lat/linux-user/signal.c"},
     {"source": "accel/tcg/translate-all.c", "target": "tools/latc/lat/accel/tcg/translate-all.c"},
+    {"source": "include/tcg/tcg.h", "target": "tools/latc/lat/include/tcg/tcg.h"},
     {"source": "accel/tcg/tb-flush.c", "target": "tools/latc/lat/accel/tcg/tb-flush.c"},
     {"source": "target/i386/latx/sbt/aot_recover_tb.c", "target": "tools/latc/lat/target/i386/latx/sbt/aot_recover_tb.c"},
     {"source": "target/i386/latx/sbt/aot.c", "target": "tools/latc/lat/target/i386/latx/sbt/aot.c"},

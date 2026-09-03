@@ -147,7 +147,44 @@
     {
       "path": "lat/target/i386/latx/translator/translate.c",
       "generated": true,
-      "reason": "check module context and generation before an AOT v2 indirect fast jump"
+      "reason": "check module context and generation before an AOT v2 indirect fast jump and allocate per-thread AOT translation scratch buffers"
+    },
+    {
+      "path": "lat/target/i386/latx/include/capstone_git.h",
+      "reason": "declare per-thread AOT disassembler initialization"
+    },
+    {
+      "path": "lat/target/i386/latx/include/latx-config.h",
+      "reason": "declare translation-only per-thread LATX state initialization"
+    },
+    {
+      "path": "lat/target/i386/latx/include/latx-disassemble-trace.h",
+      "reason": "expose per-thread disassembler initialization"
+    },
+    {
+      "path": "lat/target/i386/latx/include/ts.h",
+      "reason": "expose parallel AOT translation state and collected TB messages"
+    },
+    {
+      "path": "lat/target/i386/latx/latx-disassemble-trace/capstone_git.c",
+      "reason": "give each AOT translation thread independent Capstone handles"
+    },
+    {
+      "path": "lat/target/i386/latx/optimization/imm-cache.c",
+      "reason": "make immediate-cache translation scratch state thread-local"
+    },
+    {
+      "path": "lat/target/i386/latx/optimization/ts.c",
+      "reason": "translate disjoint final TB-set partitions concurrently"
+    },
+    {
+      "path": "lat/tcg/tcg.c",
+      "reason": "provide independent TCG code and TB storage regions to AOT compiler threads"
+    },
+    {
+      "path": "lat/include/tcg/tcg.h",
+      "generated": true,
+      "reason": "expose spare TCG region allocation to the parallel AOT translator"
     }
   ]
 }
