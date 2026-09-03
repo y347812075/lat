@@ -669,6 +669,12 @@ static inline void get_ts_queue(CPUState *cpu, target_ulong cs_base,
                 curr_tb_message_vector[untr_tb_id].bool_flags , TU_TB_START_ENTRY);
         tu_push_back(tb);
         untr_tb_id++;
+        /* The offline compiler has already selected the complete CFG set.
+         * Keep each selected TB in its own TU so inferred entry points retain
+         * stable, non-overlapping native PC maps. */
+        if (tb && (tb->bool_flags & IS_AOT_BOUNDED)) {
+            break;
+        }
         for (; tb_id <  *tb_num_in_tu && *tb_num_in_tu < MAX_TB_IN_TS;  tb_id++) {
 #ifdef CONFIG_LATX_DEBUG
             if (get_tb_id(tb->pc, tb->cflags) < 0) {
@@ -715,44 +721,6 @@ static inline void get_ts_queue(CPUState *cpu, target_ulong cs_base,
 static void delet_static_tb(TranslationBlock **tb_list, uint32_t *tb_num_in_tu)
 {
     TranslationBlock *tb, *target_tb, *next_tb;
-#ifdef CONFIG_LATX_AOT
-    /* During offline AOT these same-page successors are part of the final
-     * closure, not disposable TU analysis helpers.  Keeping them avoids a
-     * second compiler pass just to discover translation-created TB starts. */
-    if (option_aot && in_pre_translate) {
-        for (int i = 0; i < *tb_num_in_tu; i++) {
-            tb = tb_list[i];
-            if (!is_bad_tb(tb) &&
-                tb->s_data->tu_tb_mode == TU_TB_MODE_STATIC) {
-                tb->s_data->tu_tb_mode = TU_TB_MODE_NONE;
-            }
-        }
-        for (int i = 0; i < *tb_num_in_tu; i++) {
-            tb = tb_list[i];
-            target_tb = tb->s_data->next_tb[TU_TB_INDEX_TARGET];
-            next_tb = tb->s_data->next_tb[TU_TB_INDEX_NEXT];
-            if (next_tb && is_bad_tb(next_tb)) {
-                tb->s_data->next_tb[TU_TB_INDEX_NEXT] = NULL;
-            }
-            if (target_tb && is_bad_tb(target_tb)) {
-                tb->s_data->next_tb[TU_TB_INDEX_TARGET] = NULL;
-            }
-        }
-        int kept = 0;
-        for (int i = 0; i < *tb_num_in_tu; i++) {
-            tb = tb_list[i];
-            if (is_bad_tb(tb)) {
-                /* Static lookup caches may still reference this rejected TB.
-                 * Leave its short-lived analysis storage owned by the
-                 * compiler process, but do not emit it. */
-            } else {
-                tb_list[kept++] = tb;
-            }
-        }
-        *tb_num_in_tu = kept;
-        return;
-    }
-#endif
     /* Make next_tb or target_tb do not point to static tb. */
     for (int i = 0; i < *tb_num_in_tu; i++) {
         tb = tb_list[i];
@@ -819,7 +787,11 @@ static void ts_tb_explore(CPUState *cpu, target_ulong cs_base,
     }
 
 #ifdef CONFIG_LATX_HBR
-    hbr_opt(tb_list, *tb_num_in_tu);
+    /* Offline AOT does not preserve the runtime state assumed by HBR's
+     * cross-TB liveness analysis. */
+    if (!option_aot || !in_pre_translate) {
+        hbr_opt(tb_list, *tb_num_in_tu);
+    }
 #endif
 
     qsort(tb_list, *tb_num_in_tu, sizeof(TranslationBlock *), tb_sort_cmp);
@@ -872,8 +844,20 @@ static inline bool need_flush(void)
 static inline void gen_tu(CPUState *cpu,
         target_ulong cs_base, uint32_t flags, int cflags)
 {
+    int message_id = untr_tb_id;
     ts_tb_explore(cpu, cs_base, flags, cflags);
     if (!tu_data->tb_num) {
+        if (message_id <= curr_seg->last_tb_id &&
+            (curr_tb_message_vector[message_id].bool_flags &
+             IS_AOT_BOUNDED)) {
+            tb_tmp_message *message = &curr_tb_message_vector[message_id];
+            TranslationBlock *tb = tb_gen_code(
+                cpu, message->pc, cs_base, flags, message->cflags);
+            if (tb) {
+                aot_tb_insert(tb);
+                ts_push_back(tb);
+            }
+        }
         return;
     }
     translate_tu(tu_data->tb_num, tu_data->tb_list);

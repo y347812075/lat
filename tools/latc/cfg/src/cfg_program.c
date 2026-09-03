@@ -15,6 +15,15 @@
 
 typedef struct { Insn *v; size_t n; size_t cap; } InsnVec;
 typedef struct { uint64_t *v; size_t n; size_t cap; } AddrVec;
+typedef struct {
+    InsnVec insns;
+    AddrVec insn_addrs;
+    uint8_t *insn_bitmap;
+} DecodedFunction;
+typedef struct {
+    bool found;
+    IjmpResult result;
+} IjmpCache;
 
 static bool grow(void **ptr, size_t *cap, size_t count, size_t elem)
 {
@@ -61,7 +70,54 @@ static void sort_unique(AddrVec *v)
     if (!v->n) {
         return;
     }
-    qsort(v->v, v->n, sizeof(*v->v), cmp_addr);
+    bool sorted = true;
+    for (size_t i = 1; i < v->n; i++) {
+        if (v->v[i] < v->v[i - 1]) {
+            sorted = false;
+            break;
+        }
+    }
+    if (sorted) {
+        /* Function symbols and their decoded instructions are normally already
+         * in address order.  Deduplicate that common case in one linear pass. */
+    } else if (v->n < 4096) {
+        qsort(v->v, v->n, sizeof(*v->v), cmp_addr);
+    } else {
+        uint64_t *scratch = malloc(v->n * sizeof(*scratch));
+        size_t *offsets = calloc(1U << 16, sizeof(*offsets));
+
+        if (!scratch || !offsets) {
+            free(offsets);
+            free(scratch);
+            qsort(v->v, v->n, sizeof(*v->v), cmp_addr);
+        } else {
+            uint64_t *source = v->v;
+            uint64_t *destination = scratch;
+
+            for (unsigned int shift = 0; shift < 64; shift += 16) {
+                size_t next = 0;
+
+                memset(offsets, 0, (1U << 16) * sizeof(*offsets));
+                for (size_t i = 0; i < v->n; i++) {
+                    offsets[(source[i] >> shift) & 0xffff]++;
+                }
+                for (size_t bucket = 0; bucket < (1U << 16); bucket++) {
+                    size_t count = offsets[bucket];
+                    offsets[bucket] = next;
+                    next += count;
+                }
+                for (size_t i = 0; i < v->n; i++) {
+                    size_t bucket = (source[i] >> shift) & 0xffff;
+                    destination[offsets[bucket]++] = source[i];
+                }
+                uint64_t *swap = source;
+                source = destination;
+                destination = swap;
+            }
+            free(offsets);
+            free(scratch);
+        }
+    }
     size_t out = 1;
     for (size_t i = 1; i < v->n; i++) {
         if (v->v[i] != v->v[out - 1]) {
@@ -86,16 +142,6 @@ static size_t addr_lower_bound(const AddrVec *v, uint64_t value)
     return lo;
 }
 
-static ssize_t find_insn(const InsnVec *v, uint64_t addr)
-{
-    size_t lo = 0, hi = v->n;
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        if (v->v[mid].addr < addr) lo = mid + 1; else hi = mid;
-    }
-    return lo < v->n && v->v[lo].addr == addr ? (ssize_t)lo : -1;
-}
-
 static bool prefix_entry(const InsnVec *v, const uint8_t *buf, uint64_t addr)
 {
     for (size_t i = 0; i < v->n; i++) {
@@ -108,11 +154,6 @@ static bool prefix_entry(const InsnVec *v, const uint8_t *buf, uint64_t addr)
         return true;
     }
     return false;
-}
-
-static bool has_leader(const AddrVec *leaders, uint64_t addr)
-{
-    return bsearch(&addr, leaders->v, leaders->n, sizeof(addr), cmp_addr) != NULL;
 }
 
 static bool addr_in_function(uint64_t addr, const FuncSym *fn)
@@ -162,13 +203,20 @@ static CfgTbTerm term_from_insn(InsnKind kind)
     }
 }
 
+static bool insn_can_fall_through(InsnKind kind)
+{
+    return kind == INSN_CALL || kind == INSN_ICALL || kind == INSN_JCC ||
+           kind == INSN_SYSCALL;
+}
+
 static int collect_program_insns_and_direct_targets(const ElfFile *elf,
-                                                    const FuncVec *funcs,
+                                                    FuncVec *funcs,
+                                                    DecodedFunction *decoded,
                                                     AddrVec *insn_addrs,
                                                     AddrVec *targets)
 {
     for (size_t i = 0; i < funcs->n; i++) {
-        const FuncSym *fn = &funcs->v[i];
+        FuncSym *fn = &funcs->v[i];
         uint64_t file_off;
         if (!fn->size || !elf_function_file_offset(
                 elf, fn->addr, fn->size, fn->shndx, &file_off)) {
@@ -176,12 +224,20 @@ static int collect_program_insns_and_direct_targets(const ElfFile *elf,
         }
         const uint8_t *buf = elf->data + file_off;
         size_t size = (size_t)fn->size;
+        DecodedFunction *function = &decoded[i];
+        function->insn_bitmap = calloc(size, 1);
+        if (!function->insn_bitmap) {
+            return -1;
+        }
         for (size_t off = 0; off < size;) {
             Insn in = cfg_decode_insn(buf, size, fn->addr, off);
             if (!in.len) in.len = 1;
-            if (!addr_push(insn_addrs, in.addr)) {
+            if (!insn_push(&function->insns, in) ||
+                !addr_push(&function->insn_addrs, in.addr) ||
+                !addr_push(insn_addrs, in.addr)) {
                 return -1;
             }
+            function->insn_bitmap[off] = 1;
             if (in.has_target &&
                 (in.kind == INSN_CALL || in.kind == INSN_JCC ||
                  in.kind == INSN_JMP) &&
@@ -190,57 +246,56 @@ static int collect_program_insns_and_direct_targets(const ElfFile *elf,
             }
             off += in.len;
         }
+
+        /* Some glibc assembly functions end in a conditional branch and
+         * deliberately fall through alignment NOPs into the next symbol.
+         * Reuse the decode above to identify them, then decode only the gap. */
+        if (i + 1 < funcs->n && function->insns.n) {
+            const FuncSym *next = &funcs->v[i + 1];
+            const Insn *last = &function->insns.v[function->insns.n - 1];
+            if (fn->shndx == next->shndx && fn->addr + fn->size < next->addr &&
+                last->addr + last->len == fn->addr + fn->size &&
+                insn_can_fall_through(last->kind)) {
+                size_t extended_size = (size_t)(next->addr - fn->addr);
+                uint8_t *extended_bitmap = realloc(function->insn_bitmap,
+                                                   extended_size);
+                if (!extended_bitmap) {
+                    return -1;
+                }
+                function->insn_bitmap = extended_bitmap;
+                memset(extended_bitmap + size, 0, extended_size - size);
+                fn->size = extended_size;
+                buf = elf->data + file_off;
+                for (size_t off = size; off < extended_size;) {
+                    Insn in = cfg_decode_insn(buf, extended_size, fn->addr, off);
+                    if (!in.len) in.len = 1;
+                    if (!insn_push(&function->insns, in) ||
+                        !addr_push(&function->insn_addrs, in.addr) ||
+                        !addr_push(insn_addrs, in.addr)) {
+                        return -1;
+                    }
+                    extended_bitmap[off] = 1;
+                    if (in.has_target &&
+                        (in.kind == INSN_CALL || in.kind == INSN_JCC ||
+                         in.kind == INSN_JMP) &&
+                        !addr_push(targets, in.target)) {
+                        return -1;
+                    }
+                    off += in.len;
+                }
+            }
+        }
     }
     sort_unique(insn_addrs);
     sort_unique(targets);
     return 0;
 }
 
-static bool insn_can_fall_through(InsnKind kind)
-{
-    return kind == INSN_CALL || kind == INSN_ICALL || kind == INSN_JCC ||
-           kind == INSN_SYSCALL;
-}
-
-/*
- * Some glibc assembly functions end in a conditional branch and deliberately
- * fall through alignment NOPs into the next symbol. Include only these proven
- * fallthrough gaps; arbitrary executable-section gaps may contain data.
- */
-static void extend_symbol_fallthroughs(const ElfFile *elf, FuncVec *funcs)
-{
-    for (size_t i = 0; i + 1 < funcs->n; i++) {
-        FuncSym *fn = &funcs->v[i];
-        const FuncSym *next = &funcs->v[i + 1];
-        uint64_t file_off;
-        if (!fn->size || fn->shndx != next->shndx ||
-            fn->addr + fn->size >= next->addr ||
-            !elf_function_file_offset(elf, fn->addr, fn->size, fn->shndx,
-                                      &file_off)) {
-            continue;
-        }
-
-        const uint8_t *buf = elf->data + file_off;
-        size_t size = (size_t)fn->size;
-        Insn last = {0};
-        for (size_t off = 0; off < size;) {
-            last = cfg_decode_insn(buf, size, fn->addr, off);
-            if (!last.len) {
-                last.len = 1;
-            }
-            off += last.len;
-        }
-        if (last.addr + last.len == fn->addr + fn->size &&
-            insn_can_fall_through(last.kind)) {
-            fn->size = next->addr - fn->addr;
-        }
-    }
-}
-
 static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
                             const IjmpSection *sections, size_t section_count,
                             const AddrVec *program_insns,
                             const AddrVec *direct_targets, const FuncSym *fn,
+                            const DecodedFunction *decoded,
                             bool resolve_jt, CfgProgram *out,
                             size_t *tb_cap, size_t *edge_cap,
                             CfgProgramFunction *result)
@@ -252,20 +307,16 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
     }
     const uint8_t *buf = elf->data + file_off;
     size_t size = (size_t)fn->size;
-    InsnVec insns = {0};
-    AddrVec leaders = {0}, insn_addrs = {0};
-    uint8_t *insn_bitmap = calloc(size, 1);
+    InsnVec insns = decoded->insns;
+    AddrVec leaders = {0};
+    AddrVec insn_addrs = decoded->insn_addrs;
+    uint8_t *insn_bitmap = decoded->insn_bitmap;
+    IjmpCache **ijmp_cache = resolve_jt ?
+        calloc(insns.n, sizeof(*ijmp_cache)) : NULL;
+    uint8_t *leader_bitmap = NULL;
     int rc = -1;
 
-    if (!insn_bitmap) goto done;
-
-    for (size_t off = 0; off < size;) {
-        Insn in = cfg_decode_insn(buf, size, fn->addr, off);
-        if (!in.len) in.len = 1;
-        if (!insn_push(&insns, in) || !addr_push(&insn_addrs, in.addr)) goto done;
-        insn_bitmap[off] = 1;
-        off += in.len;
-    }
+    if (!insn_bitmap || (resolve_jt && !ijmp_cache && insns.n)) goto done;
 
     IjmpContext ijmp = {
         .file = elf->data, .file_size = elf->size,
@@ -297,36 +348,56 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
             !addr_push(&leaders, next)) goto done;
         if (resolve_jt && (in->kind == INSN_IJMP ||
                            in->kind == INSN_ICALL)) {
-            IjmpResult jt;
-            if (ijmp_resolve_jump_table(&ijmp, buf, size, in->off, &jt)) {
-                for (size_t j = 0; j < jt.count; j++) {
-                    if (addr_in_function(jt.targets[j], fn) &&
-                        !addr_push(&leaders, jt.targets[j])) goto done;
+            IjmpCache *cached = calloc(1, sizeof(*cached));
+            if (!cached) goto done;
+            cached->found = ijmp_resolve_jump_table(
+                &ijmp, buf, size, in->off, &cached->result);
+            ijmp_cache[i] = cached;
+            if (cached->found) {
+                for (size_t j = 0; j < cached->result.count; j++) {
+                    if (addr_in_function(cached->result.targets[j], fn) &&
+                        !addr_push(&leaders, cached->result.targets[j]))
+                        goto done;
                 }
             }
         }
     }
     sort_unique(&leaders);
+    leader_bitmap = calloc(size, 1);
+    if (!leader_bitmap && size) goto done;
+    for (size_t i = 0; i < leaders.n; i++) {
+        if (leaders.v[i] >= fn->addr && leaders.v[i] - fn->addr < size) {
+            leader_bitmap[leaders.v[i] - fn->addr] = 1;
+        }
+    }
 
     result->first_tb = out->tb_count;
     result->status = CFG_FUNCTION_OK;
+    size_t next_insn_index = 0;
     for (size_t li = 0; li < leaders.n; li++) {
         uint64_t start = leaders.v[li];
-        ssize_t si = find_insn(&insns, start);
-        if (si < 0) {
+        while (next_insn_index < insns.n &&
+               insns.v[next_insn_index].addr < start) {
+            next_insn_index++;
+        }
+        if (next_insn_index == insns.n ||
+            insns.v[next_insn_index].addr != start) {
             result->status = prefix_entry(&insns, buf, start) ?
                 CFG_FUNCTION_OPEN : CFG_FUNCTION_ERROR;
             continue;
         }
-        size_t ei = (size_t)si;
+        size_t si = next_insn_index;
+        size_t ei = si;
         while (ei < insns.n) {
-            if (ei != (size_t)si && has_leader(&leaders, insns.v[ei].addr)) break;
+            if (ei != si && insns.v[ei].addr >= fn->addr &&
+                insns.v[ei].addr - fn->addr < size &&
+                leader_bitmap[insns.v[ei].addr - fn->addr]) break;
             InsnKind kind = insns.v[ei].kind;
             ei++;
             if (kind != INSN_NORMAL) break;
         }
-        if (ei == (size_t)si) continue;
-        for (size_t chunk_si = (size_t)si; chunk_si < ei; ) {
+        if (ei == si) continue;
+        for (size_t chunk_si = si; chunk_si < ei; ) {
             /* LATX turns instruction 255 into the synthetic TB-exit jump, so
              * that instruction itself is the next TB start. */
             size_t chunk_ei = chunk_si + 254;
@@ -356,12 +427,12 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
             break;
         case INSN_ICALL:
         {
-            IjmpResult jt;
-            bool found = resolve_jt &&
-                ijmp_resolve_jump_table(&ijmp, buf, size, last->off, &jt);
+            IjmpCache *cached = ijmp_cache ? ijmp_cache[chunk_ei - 1] : NULL;
+            bool found = cached && cached->found;
             if (found) {
-                for (size_t j = 0; j < jt.count; j++) {
-                    EDGE(CFG_EDGE_CALL, jt.targets[j], CFG_EDGE_STATIC);
+                for (size_t j = 0; j < cached->result.count; j++) {
+                    EDGE(CFG_EDGE_CALL, cached->result.targets[j],
+                         CFG_EDGE_STATIC);
                 }
             } else {
                 EDGE(CFG_EDGE_RUNTIME, 0, CFG_EDGE_RUNTIME_RESOLVED);
@@ -380,14 +451,14 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
             if (last->has_target) EDGE(CFG_EDGE_JUMP, last->target, CFG_EDGE_STATIC);
             break;
         case INSN_IJMP: {
-            IjmpResult jt;
-            bool found = resolve_jt &&
-                ijmp_resolve_jump_table(&ijmp, buf, size, last->off, &jt);
+            IjmpCache *cached = ijmp_cache ? ijmp_cache[chunk_ei - 1] : NULL;
+            bool found = cached && cached->found;
             if (found) {
                 out->resolved_jump_tables++;
-                out->resolved_jump_table_targets += jt.count;
-                for (size_t j = 0; j < jt.count; j++)
-                    EDGE(CFG_EDGE_CASE, jt.targets[j], CFG_EDGE_STATIC);
+                out->resolved_jump_table_targets += cached->result.count;
+                for (size_t j = 0; j < cached->result.count; j++)
+                    EDGE(CFG_EDGE_CASE, cached->result.targets[j],
+                         CFG_EDGE_STATIC);
             } else {
                 EDGE(CFG_EDGE_RUNTIME, 0, CFG_EDGE_RUNTIME_RESOLVED);
                 if (result->status != CFG_FUNCTION_ERROR)
@@ -417,8 +488,12 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
     result->tb_count = out->tb_count - result->first_tb;
     rc = 0;
 done:
-    free(insn_bitmap);
-    free(insns.v); free(leaders.v); free(insn_addrs.v);
+    if (ijmp_cache) {
+        for (size_t i = 0; i < insns.n; i++) free(ijmp_cache[i]);
+    }
+    free(ijmp_cache);
+    free(leader_bitmap);
+    free(leaders.v);
     return rc;
 }
 
@@ -430,6 +505,7 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     ElfFile elf = {0};
     FuncVec funcs = {0};
     AddrVec program_insns = {0}, direct_targets = {0};
+    DecodedFunction *decoded = NULL;
     IjmpSection *sections = NULL;
     const char *source = NULL;
     size_t function_cap = 0, tb_cap = 0, edge_cap = 0;
@@ -441,9 +517,10 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     elf_load(path, &elf);
     funcs_load_all(&elf, &funcs, &source);
     (void)source;
-    extend_symbol_fallthroughs(&elf, &funcs);
+    decoded = calloc(funcs.n, sizeof(*decoded));
+    if (!decoded && funcs.n) goto out;
     if (collect_program_insns_and_direct_targets(
-            &elf, &funcs, &program_insns, &direct_targets)) goto out;
+            &elf, &funcs, decoded, &program_insns, &direct_targets)) goto out;
     size_t section_count = 0;
     sections = elf_build_ijmp_sections(&elf, &section_count);
     program->exec_ranges = calloc(elf.eh->e_shnum,
@@ -468,6 +545,7 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
         if (!fn.name) goto out;
         int ar = analyze_function(&elf, &funcs, sections, section_count,
                                   &program_insns, &direct_targets, &funcs.v[i],
+                                  &decoded[i],
                                   !options || options->resolve_jump_tables,
                                   program, &tb_cap, &edge_cap, &fn);
         if (ar < 0) { free(fn.name); goto out; }
@@ -478,6 +556,14 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     }
     rc = 0;
 out:
+    if (decoded) {
+        for (size_t i = 0; i < funcs.n; i++) {
+            free(decoded[i].insns.v);
+            free(decoded[i].insn_addrs.v);
+            free(decoded[i].insn_bitmap);
+        }
+    }
+    free(decoded);
     free(program_insns.v);
     free(direct_targets.v);
     free(sections);

@@ -58,6 +58,9 @@ void latc_aot_v2_report_stats(void);
 void latc_aot_v2_flush_pending_keys(void);
 /* Record a file-backed JIT translation request without execution counters. */
 void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags);
+/* Add TBs translated before a deferred ELF mapping was registered. */
+void latc_aot_v2_collect_existing_jit_tbs(target_ulong guest_begin,
+                                          target_ulong guest_end);
 bool latc_aot_v2_is_file_pc(target_ulong guest_pc);
 int latc_aot_v2_prepare(CPUArchState *env);
 bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,

@@ -233,15 +233,6 @@ static void queue_pretranslate_successors(GArray *pending,
 void latc_bundle_note_tb_attempt(uint64_t guest_pc, uint32_t cflags)
 {
     bool program_pc = program_address(guest_pc);
-    bool file_pc = latc_aot_v2_is_file_pc(guest_pc);
-    if (strict_aot || (program_pc && strict_program_aot) ||
-        (file_pc && strict_file_aot)) {
-        fprintf(stderr,
-                "latc: strict AOT rejected runtime TB generation at 0x%llx "
-                "cflags=0x%x file=%d program=%d\n",
-                (unsigned long long)guest_pc, cflags, file_pc, program_pc);
-        _exit(125);
-    }
     if (!runtime_stats_enabled()) return;
     if (!stat_runtime_tb_gen_attempts) {
         stat_runtime_first_pc = guest_pc;
@@ -266,12 +257,21 @@ void latc_bundle_note_tb_attempt(uint64_t guest_pc, uint32_t cflags)
 
 void latc_bundle_note_tb_generated(uint64_t guest_pc, uint32_t cflags)
 {
-    (void)cflags;
+    bool program_pc = program_address(guest_pc);
+    bool file_pc = latc_aot_v2_is_file_pc(guest_pc);
+    if (strict_aot || (program_pc && strict_program_aot) ||
+        (file_pc && strict_file_aot)) {
+        fprintf(stderr,
+                "latc: strict AOT rejected generated JIT TB at 0x%llx "
+                "cflags=0x%x file=%d program=%d\n",
+                (unsigned long long)guest_pc, cflags, file_pc, program_pc);
+        _exit(125);
+    }
     if (!runtime_stats_enabled()) return;
     stat_runtime_tb_gen_calls++;
-    if (program_address(guest_pc)) stat_runtime_program_tb_gen_calls++;
+    if (program_pc) stat_runtime_program_tb_gen_calls++;
     else stat_runtime_system_tb_gen_calls++;
-    if (latc_aot_v2_is_file_pc(guest_pc)) stat_runtime_file_tb_gen_calls++;
+    if (file_pc) stat_runtime_file_tb_gen_calls++;
     else stat_runtime_nonfile_tb_gen_calls++;
     write_stats();
 }
@@ -405,9 +405,6 @@ int latc_bundle_inject_argv(int *argc, char ***argv)
     strict_file_aot = getenv("LATC_STRICT_FILE_AOT") != NULL;
     const char *stats = getenv("LATC_STATS_OUT");
     stats_output_pattern = stats && *stats ? g_strdup(stats) : NULL;
-    unsetenv("LATC_STRICT_AOT");
-    unsetenv("LATC_STRICT_PROGRAM_AOT");
-    unsetenv("LATC_STRICT_FILE_AOT");
     unsetenv("LATC_STATS_OUT");
 
     int self = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
@@ -529,6 +526,27 @@ static int hex_nibble(char value)
     return -1;
 }
 
+int latc_bundle_verified_guest_digest(uint8_t digest[32])
+{
+    if (!digest) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (bundle_self_fd < 0) {
+        return 0;
+    }
+    for (size_t i = 0; i < 32; i++) {
+        int high = hex_nibble(bundle_footer.guest_sha256[i * 2]);
+        int low = hex_nibble(bundle_footer.guest_sha256[i * 2 + 1]);
+        if (high < 0 || low < 0) {
+            errno = ENOEXEC;
+            return -1;
+        }
+        digest[i] = (uint8_t)((high << 4) | low);
+    }
+    return 1;
+}
+
 int latc_bundle_verified_guest(uint8_t digest[32], uint64_t *guest_begin,
                                uint64_t *guest_end)
 {
@@ -581,15 +599,7 @@ int latc_bundle_verified_guest(uint8_t digest[32], uint64_t *guest_begin,
         errno = ENOEXEC;
         return -1;
     }
-    for (size_t i = 0; i < 32; i++) {
-        int high = hex_nibble(bundle_footer.guest_sha256[i * 2]);
-        int low = hex_nibble(bundle_footer.guest_sha256[i * 2 + 1]);
-        if (high < 0 || low < 0) {
-            errno = ENOEXEC;
-            return -1;
-        }
-        digest[i] = (uint8_t)((high << 4) | low);
-    }
+    if (latc_bundle_verified_guest_digest(digest) != 1) return -1;
     *guest_begin = begin;
     *guest_end = end;
     return 1;

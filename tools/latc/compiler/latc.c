@@ -184,6 +184,8 @@ static int compile_bundle(const char *input, const char *output,
                           int tbset_ignore_outside_exec, const char *aot)
 {
     CfgProgram program;
+    uint8_t guest_digest[32];
+    const uint8_t *known_guest_digest = NULL;
     char error[256] = {0};
     CfgAnalyzeOptions options = { .resolve_jump_tables = true };
     int analyze_result =
@@ -195,7 +197,7 @@ static int compile_bundle(const char *input, const char *output,
         size_t matched = 0, unmatched = 0, ignored = 0;
         if (latc_tbset_apply(tbset, input, &program,
                             tbset_ignore_outside_exec,
-                            &matched, &unmatched, &ignored,
+                            &matched, &unmatched, &ignored, guest_digest,
                             error, sizeof(error)) != 0) {
             fprintf(stderr, "latc: %s\n", error);
             cfg_program_destroy(&program);
@@ -203,8 +205,10 @@ static int compile_bundle(const char *input, const char *output,
         }
         fprintf(stderr, "latc: TB set matched=%zu added=%zu ignored=%zu\n",
                 matched, unmatched, ignored);
+        known_guest_digest = guest_digest;
     }
     int rc = latc_bundle_write(runner, input, output, aot, &program,
+                               known_guest_digest,
                                error, sizeof(error));
     cfg_program_destroy(&program);
     if (rc) { fprintf(stderr, "latc: %s\n", error); return 1; }

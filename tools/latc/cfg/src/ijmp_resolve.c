@@ -120,9 +120,16 @@ static bool is_insn_addr(const IjmpContext *ctx, uint64_t addr)
     return lo < ctx->insn_count && ctx->insn_addrs[lo] == addr;
 }
 
-static bool is_insn_off(const IjmpContext *ctx, size_t off)
+static size_t insn_lower_bound_off(const IjmpContext *ctx, size_t off)
 {
-    return is_insn_addr(ctx, ctx->func_addr + off);
+    uint64_t addr = ctx->func_addr + off;
+    size_t lo = 0, hi = ctx->insn_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (ctx->insn_addrs[mid] < addr) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
 }
 
 static bool is_func_entry(const IjmpContext *ctx, uint64_t addr)
@@ -534,11 +541,11 @@ static bool resolve_qword_table(const IjmpContext *ctx, const uint8_t *func,
                    ijmp_off - IJMP_LOOKBACK_BYTES : 0;
     LeaRip lea = {0};
     bool have_lea = false;
-    for (size_t off = start; off < ijmp_off; off++) {
+    for (size_t ii = insn_lower_bound_off(ctx, start);
+         ii < ctx->insn_count &&
+         ctx->insn_addrs[ii] < ctx->func_addr + ijmp_off; ii++) {
+        size_t off = (size_t)(ctx->insn_addrs[ii] - ctx->func_addr);
         LeaRip cur;
-        if (!is_insn_off(ctx, off)) {
-            continue;
-        }
         if (parse_lea_rip(func, ijmp_off, ctx->func_addr, off, &cur) &&
             cur.dst == jmp.base) {
             lea = cur;
@@ -595,11 +602,11 @@ static bool resolve_reg_qword_table(const IjmpContext *ctx,
     size_t mov_off = 0;
     bool have_mov = false;
 
-    for (size_t off = start; off < ijmp_off; off++) {
+    for (size_t ii = insn_lower_bound_off(ctx, start);
+         ii < ctx->insn_count &&
+         ctx->insn_addrs[ii] < ctx->func_addr + ijmp_off; ii++) {
+        size_t off = (size_t)(ctx->insn_addrs[ii] - ctx->func_addr);
         MovMem cur;
-        if (!is_insn_off(ctx, off)) {
-            continue;
-        }
         if (parse_mov_mem_scaled(func, ijmp_off, off, &cur) &&
             cur.dst == jmp_reg && cur.scale == 8) {
             mov = cur;
@@ -613,11 +620,11 @@ static bool resolve_reg_qword_table(const IjmpContext *ctx,
 
     LeaRip lea = {0};
     bool have_lea = false;
-    for (size_t off = start; off < mov_off; off++) {
+    for (size_t ii = insn_lower_bound_off(ctx, start);
+         ii < ctx->insn_count &&
+         ctx->insn_addrs[ii] < ctx->func_addr + mov_off; ii++) {
+        size_t off = (size_t)(ctx->insn_addrs[ii] - ctx->func_addr);
         LeaRip cur;
-        if (!is_insn_off(ctx, off)) {
-            continue;
-        }
         if (parse_lea_rip(func, mov_off, ctx->func_addr, off, &cur) &&
             cur.dst == mov.base) {
             lea = cur;
@@ -676,10 +683,9 @@ static bool resolve_const_reg_target(const IjmpContext *ctx,
                    ijmp_off - IJMP_LOOKBACK_BYTES : 0;
     int wanted = jmp_reg;
 
-    for (size_t off = ijmp_off; off-- > start;) {
-        if (!is_insn_off(ctx, off)) {
-            continue;
-        }
+    for (size_t ii = insn_lower_bound_off(ctx, ijmp_off); ii > 0;) {
+        size_t off = (size_t)(ctx->insn_addrs[--ii] - ctx->func_addr);
+        if (off < start) break;
 
         LeaRip lea;
         if (parse_lea_rip(func, func_size, ctx->func_addr, off, &lea) &&
@@ -756,8 +762,10 @@ static bool resolve_computed_stride(const IjmpContext *ctx,
     RegImm mask = {0};
     RegImm shift = {0};
     bool have_base = false, have_mask = false, have_shift = false;
-    for (size_t off = start; off < combine_off; off++) {
-        if (!is_insn_off(ctx, off)) continue;
+    for (size_t ii = insn_lower_bound_off(ctx, start);
+         ii < ctx->insn_count &&
+         ctx->insn_addrs[ii] < ctx->func_addr + combine_off; ii++) {
+        size_t off = (size_t)(ctx->insn_addrs[ii] - ctx->func_addr);
         LeaRip cur_base;
         if (parse_lea_rip(func, func_size, ctx->func_addr, off, &cur_base) &&
             cur_base.dst == base_reg) {
@@ -823,11 +831,11 @@ bool ijmp_resolve_jump_table(const IjmpContext *ctx, const uint8_t *func,
     size_t combine_off = 0;
     bool have_combine = false;
 
-    for (size_t off = start; off < ijmp_off; off++) {
+    for (size_t ii = insn_lower_bound_off(ctx, start);
+         ii < ctx->insn_count &&
+         ctx->insn_addrs[ii] < ctx->func_addr + ijmp_off; ii++) {
+        size_t off = (size_t)(ctx->insn_addrs[ii] - ctx->func_addr);
         AddReg cur;
-        if (!is_insn_off(ctx, off)) {
-            continue;
-        }
         if (parse_add_reg(func, ijmp_off, off, &cur) && cur.dst == jmp_reg) {
             offset_reg = jmp_reg;
             base_reg = cur.src;
@@ -861,11 +869,11 @@ bool ijmp_resolve_jump_table(const IjmpContext *ctx, const uint8_t *func,
     MovsxdMem mov = {0};
     size_t mov_off = 0;
     bool have_mov = false;
-    for (size_t off = start; off < combine_off; off++) {
+    for (size_t ii = insn_lower_bound_off(ctx, start);
+         ii < ctx->insn_count &&
+         ctx->insn_addrs[ii] < ctx->func_addr + combine_off; ii++) {
+        size_t off = (size_t)(ctx->insn_addrs[ii] - ctx->func_addr);
         MovsxdMem cur;
-        if (!is_insn_off(ctx, off)) {
-            continue;
-        }
         if (parse_movsxd_mem(func, combine_off, off, &cur) &&
             cur.dst == offset_reg && cur.base == base_reg) {
             mov = cur;
@@ -879,11 +887,11 @@ bool ijmp_resolve_jump_table(const IjmpContext *ctx, const uint8_t *func,
 
     LeaRip lea = {0};
     bool have_lea = false;
-    for (size_t off = start; off < mov_off; off++) {
+    for (size_t ii = insn_lower_bound_off(ctx, start);
+         ii < ctx->insn_count &&
+         ctx->insn_addrs[ii] < ctx->func_addr + mov_off; ii++) {
+        size_t off = (size_t)(ctx->insn_addrs[ii] - ctx->func_addr);
         LeaRip cur;
-        if (!is_insn_off(ctx, off)) {
-            continue;
-        }
         if (parse_lea_rip(func, combine_off, ctx->func_addr, off, &cur) &&
             cur.dst == mov.base) {
             lea = cur;

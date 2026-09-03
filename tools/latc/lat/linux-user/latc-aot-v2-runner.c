@@ -163,7 +163,6 @@ void latc_aot_v2_consume_environment(void)
 {
     aot_v2_strict = getenv("LATX_AOT_V2_STRICT") != NULL;
     aot_v2_reject_miss = getenv("LATC_STRICT_AOT") != NULL;
-    unsetenv("LATX_AOT_V2_STRICT");
 }
 
 bool latc_aot_v2_strict_enabled(void)
@@ -676,6 +675,12 @@ bool latc_aot_v2_is_file_pc(target_ulong guest_pc)
 static void note_dispatch_miss(LatAotV2ModuleStats *stats,
                                uint64_t guest_pc, uint32_t cflags)
 {
+    /* Strict verification rejects an actual generated JIT TB in
+     * latc_bundle_note_tb_generated().  Do not count decode attempts that
+     * produce no code as fallbacks. */
+    if (aot_v2_strict) {
+        return;
+    }
     if (stats) {
         atomic_fetch_add(&stats->jit_fallbacks, 1);
         atomic_fetch_add(&file_dispatch_misses, 1);
@@ -955,6 +960,8 @@ static void drain_mappings(void)
                 atomic_store_explicit(&stats->registration_ns,
                                       registration_ns,
                                       memory_order_release);
+                latc_aot_v2_collect_existing_jit_tbs(info->guest_begin,
+                                                      info->guest_end);
             }
             if (instance) {
                 instance->stats = stats;

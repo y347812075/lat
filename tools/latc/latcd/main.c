@@ -141,6 +141,9 @@ static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static LatcdSourceState *source_state_locked(LatcdService *service,
                                              const char *source_key);
+static int persisted_manifest_valid(const LatcdConfig *config,
+                                    const char source_key[65],
+                                    const uint8_t digest[32]);
 
 static int fail(char *error, size_t error_size, const char *format, ...)
 {
@@ -841,7 +844,7 @@ static int prepare_compile_delta(const LatcdConfig *config,
         delta.sequence = known.sequence;
         if (fd < 0 || lat_tb_key_set_write_fd(fd, &delta,
                                                error, error_size) ||
-            fsync(fd)) {
+            (!config->flush_only && fsync(fd))) {
             if (fd >= 0) close(fd);
             unlink(path);
             g_free(path);
@@ -873,12 +876,14 @@ static int store_published_tbset(const LatcdConfig *config,
     int fd = result ? -1 : g_mkstemp_full(temporary, O_RDWR | O_CLOEXEC, 0600);
     if (!result && (fd < 0 || lat_tb_key_set_write_fd(
                                   fd, &known, error, error_size) ||
-                    fsync(fd))) {
+                    (!config->flush_only && fsync(fd)))) {
         result = -1;
     }
     if (fd >= 0 && close(fd)) result = -1;
     if (!result && rename(temporary, final)) result = -1;
-    if (!result) result = sync_directory(directory, error, error_size);
+    if (!result && !config->flush_only) {
+        result = sync_directory(directory, error, error_size);
+    }
     if (result) {
         if (!error[0]) fail(error, error_size,
                             "cannot publish compiled TB set: %s",
@@ -894,7 +899,7 @@ static int store_published_tbset(const LatcdConfig *config,
 
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *source, const char *tbset,
-                        const char *output,
+                        const char *output, const uint8_t digest[32],
                         char *error, size_t error_size)
 {
     if (validate_toolchain(config, error, error_size)) {
@@ -911,8 +916,12 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     }
     char *library_path = g_strdup_printf("LD_LIBRARY_PATH=%s",
                                          config->runtime_dir);
-    char *temporary_path = g_strdup_printf("TMPDIR=%s/.tmp",
-                                            config->cache_dir);
+    const char *compile_tmpdir = getenv("LATCD_COMPILE_TMPDIR");
+    if (!compile_tmpdir || !*compile_tmpdir) {
+        compile_tmpdir = access("/dev/shm", W_OK | X_OK) == 0 ?
+                         "/dev/shm" : "/tmp";
+    }
+    char *temporary_path = g_strdup_printf("TMPDIR=%s", compile_tmpdir);
     char *guest_prefix = config->x86_rootfs ?
         g_strdup_printf("LAT_LD_PREFIX=%s", config->x86_rootfs) : NULL;
     char *compile_timing = getenv("LATCD_COMPILE_TIMING") ?
@@ -920,11 +929,22 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     long online = sysconf(_SC_NPROCESSORS_ONLN);
     uint32_t aot_thread_count = online > 0 ?
         MAX(1u, MIN(8u, (uint32_t)online / config->workers)) : 1u;
+    struct stat tbset_status;
+    if (aot_thread_count == 1 && tbset &&
+        !stat(tbset, &tbset_status) &&
+        tbset_status.st_size >= 512 * 1024) {
+        aot_thread_count = 2;
+    }
     char *aot_threads = g_strdup_printf("LATC_AOT_THREADS=%u",
                                          aot_thread_count);
+    char digest_text[65];
+    digest_hex(digest, digest_text);
+    char *trusted_digest = g_strdup_printf("LATC_TRUSTED_SOURCE_SHA256=%s",
+                                            digest_text);
     char *environment[] = {
         "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", library_path,
-        temporary_path, aot_threads, guest_prefix, compile_timing, NULL,
+        temporary_path, aot_threads, trusted_digest, guest_prefix,
+        compile_timing, NULL,
     };
     pid_t child = fork();
     if (child == 0) {
@@ -953,6 +973,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         g_free(temporary_path);
         g_free(guest_prefix);
         g_free(aot_threads);
+        g_free(trusted_digest);
         return fail(error, error_size, "cannot start compiler: %s",
                     strerror(errno));
     }
@@ -983,6 +1004,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     g_free(temporary_path);
     g_free(guest_prefix);
     g_free(aot_threads);
+    g_free(trusted_digest);
     if (waited < 0) {
         return fail(error, error_size, "cannot wait for compiler: %s",
                     strerror(errno));
@@ -1230,7 +1252,8 @@ static int publish_current_modules(const LatcdConfig *config, const char *hex,
         hex, codegen, published_sequence);
     ssize_t written = write(fd, contents->str, contents->len);
     int result = 0;
-    if (written != (ssize_t)contents->len || fchmod(fd, 0444) || fsync(fd)) {
+    if (written != (ssize_t)contents->len || fchmod(fd, 0444) ||
+        (!config->flush_only && fsync(fd))) {
         result = fail(error, error_size, "cannot write current index: %s",
                       strerror(errno));
     }
@@ -1455,8 +1478,9 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     }
     close(placeholder);
     unlink(module);
-    if (run_compiler(config, worker_index, snapshot, tbset, module,
-                     error, sizeof(error))) {
+    int compiler_result = run_compiler(config, worker_index, snapshot, tbset,
+                                       module, digest, error, sizeof(error));
+    if (compiler_result) {
         status = LATCD_STATUS_COMPILE_FAILED;
         goto out;
     }
@@ -1479,7 +1503,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
              strerror(errno));
         goto out;
     }
-    if (sync_file(module, error, sizeof(error))) {
+    if (!config->flush_only && sync_file(module, error, sizeof(error))) {
         goto out;
     }
     struct stat module_status;
@@ -1515,7 +1539,8 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         pthread_mutex_unlock(&cache_lock);
         goto out;
     }
-    if (sync_directory(config->cache_dir, error, sizeof(error))) {
+    if (!config->flush_only &&
+        sync_directory(config->cache_dir, error, sizeof(error))) {
         pthread_mutex_unlock(&cache_lock);
         goto out;
     }
@@ -1533,7 +1558,8 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         pthread_mutex_unlock(&cache_lock);
         goto out;
     }
-    if (sync_directory(config->cache_dir, error, sizeof(error))) {
+    if (!config->flush_only &&
+        sync_directory(config->cache_dir, error, sizeof(error))) {
         pthread_mutex_unlock(&cache_lock);
         goto out;
     }
@@ -1656,6 +1682,9 @@ static int cache_contains_tbset(const LatcdConfig *config,
     LatTbKeySet missing = {0};
     char error[128] = {0};
     char *path = published_tbset_path(config, digest);
+    char hex[65];
+    digest_hex(digest, hex);
+    GPtrArray *modules = g_ptr_array_new_with_free_func(g_free);
     int valid = !lat_tb_key_set_read_file(tbset, digest, &requested,
                                            error, sizeof(error)) &&
                 !lat_tb_key_set_read_file(path, digest, &published,
@@ -1663,14 +1692,26 @@ static int cache_contains_tbset(const LatcdConfig *config,
                 !lat_tb_key_set_difference(&requested, &published, &missing,
                                             error, sizeof(error)) &&
                 !missing.count;
+    pthread_mutex_lock(&cache_lock);
+    valid = valid && !current_modules_read(config, hex, modules) &&
+            modules->len > 0;
+    for (guint i = 0; valid && i < modules->len; i++) {
+        char *module_path = g_build_filename(
+            config->cache_dir, g_ptr_array_index(modules, i), NULL);
+        LatAotModuleInfoV2 info;
+        valid = cached_module_inspect(module_path, digest, &info);
+        g_free(module_path);
+    }
+    pthread_mutex_unlock(&cache_lock);
     lat_tb_key_set_destroy(&requested);
     lat_tb_key_set_destroy(&published);
     lat_tb_key_set_destroy(&missing);
+    g_ptr_array_free(modules, TRUE);
     g_free(path);
     return valid;
 }
 
-static void write_stats_locked(const LatcdService *service)
+static void write_stats_locked(LatcdService *service)
 {
     if (!service->config->stats_path) {
         return;
@@ -1697,7 +1738,7 @@ static void write_stats_locked(const LatcdService *service)
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
         ssize_t written = write(fd, contents, length);
-        if (written == length && !fsync(fd)) {
+        if (written == length) {
             close(fd);
             if (!rename(temporary, service->config->stats_path)) {
                 g_free(temporary);
@@ -1721,6 +1762,7 @@ static LatcdJob *queue_take_next_locked(LatcdService *service,
     int64_t now = g_get_monotonic_time();
     guint selected = 0;
     LatcdJob *best = NULL;
+    uint64_t best_work = 0;
     for (guint i = 0; i < service->queue->len; i++) {
         LatcdJob *candidate = g_ptr_array_index(service->queue, i);
         if (g_hash_table_contains(service->running_sources,
@@ -1734,11 +1776,29 @@ static LatcdJob *queue_take_next_locked(LatcdService *service,
             }
             continue;
         }
-        if (!best || candidate->priority > best->priority ||
-            (candidate->priority == best->priority &&
-             candidate->sequence < best->sequence)) {
+        struct stat tbset_status;
+        uint64_t candidate_work = candidate->source_size;
+        if (service->config->flush_only && candidate->tbset &&
+            !stat(candidate->tbset, &tbset_status) &&
+            tbset_status.st_size > 0) {
+            candidate_work = tbset_status.st_size;
+        }
+        bool preferred = !best;
+        if (best && service->config->flush_only) {
+            preferred = candidate_work > best_work ||
+                (candidate_work == best_work &&
+                 (candidate->priority > best->priority ||
+                  (candidate->priority == best->priority &&
+                   candidate->sequence < best->sequence)));
+        } else if (best) {
+            preferred = candidate->priority > best->priority ||
+                (candidate->priority == best->priority &&
+                 candidate->sequence < best->sequence);
+        }
+        if (preferred) {
             selected = i;
             best = candidate;
+            best_work = candidate_work;
         }
     }
     if (!best) {
@@ -1855,6 +1915,20 @@ static void *compiler_worker(void *opaque)
                                                compile_tbset, &compile_delta,
                                                &delta_empty,
                                                error, sizeof(error));
+                /*
+                 * A published TB set only describes key coverage.  It must
+                 * not suppress recompilation when its current module was
+                 * removed, corrupted, or built by another code generator.
+                 */
+                if (!result && delta_empty) {
+                    pthread_mutex_lock(&cache_lock);
+                    bool manifest_valid = persisted_manifest_valid(
+                        service->config, job->source_key, job->digest);
+                    pthread_mutex_unlock(&cache_lock);
+                    if (!manifest_valid) {
+                        delta_empty = false;
+                    }
+                }
             }
         }
         if (!result && !delta_empty) {
