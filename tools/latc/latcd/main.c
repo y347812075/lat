@@ -5,6 +5,7 @@
 #include "lat-tb-key-set.h"
 #include "latc-build-id.h"
 #include "module-inspect.h"
+#include "precompile.h"
 
 #include <dlfcn.h>
 #include <elf.h>
@@ -3109,8 +3110,10 @@ static void usage(const char *name)
             "  %s --submit --socket PATH --tbset FILE [--priority N] X86_ELF\n"
             "  %s --flush-source --socket PATH X86_ELF\n"
             "  %s --flush-all --socket PATH\n"
+            "  %s --precompile --socket PATH --x86-rootfs DIR"
+            " [--latc PATH] [--jobs N] GUEST_ELF\n"
             "  %s --build-id\n",
-            name, name, name, name, name, name);
+            name, name, name, name, name, name, name);
 }
 
 int main(int argc, char **argv)
@@ -3120,6 +3123,8 @@ int main(int argc, char **argv)
         return 0;
     }
     int once = 0, serve = 0, submit = 0, flush_source = 0, flush_all = 0;
+    int precompile = 0;
+    uint32_t precompile_jobs = 0;
     const char *source = NULL;
     const char *tbset = NULL;
     uint32_t priority = LATCD_PRIORITY_LIBRARY;
@@ -3142,6 +3147,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--submit")) submit = 1;
         else if (!strcmp(argv[i], "--flush-source")) flush_source = 1;
         else if (!strcmp(argv[i], "--flush-all")) flush_all = 1;
+        else if (!strcmp(argv[i], "--precompile")) precompile = 1;
         else if (!strcmp(argv[i], "--flush-only")) config.flush_only = true;
         else if (!strcmp(argv[i], "--socket") && i + 1 < argc)
             config.socket_path = argv[++i];
@@ -3181,12 +3187,15 @@ int main(int argc, char **argv)
             config.open_files = g_ascii_strtoull(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--priority") && i + 1 < argc)
             priority = g_ascii_strtoull(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--jobs") && i + 1 < argc)
+            precompile_jobs = g_ascii_strtoull(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--tbset") && i + 1 < argc)
             tbset = argv[++i];
-        else if ((submit || flush_source) && !source) source = argv[i];
+        else if ((submit || flush_source || precompile) && !source)
+            source = argv[i];
         else { usage(argv[0]); return 2; }
     }
-    if (once + serve + submit + flush_source + flush_all != 1 ||
+    if (once + serve + submit + flush_source + flush_all + precompile != 1 ||
         !config.socket_path) {
         usage(argv[0]);
         return 2;
@@ -3205,6 +3214,33 @@ int main(int argc, char **argv)
         if (source || tbset) { usage(argv[0]); return 2; }
         return run_client_request(config.socket_path, LATCD_OP_FLUSH_ALL,
                                   NULL, NULL, priority);
+    }
+    if (precompile) {
+        if (!source || !config.x86_rootfs || tbset ||
+            precompile_jobs > LATCD_MAX_WORKERS) {
+            usage(argv[0]);
+            return 2;
+        }
+        char *compiler = NULL;
+        if (config.compiler) {
+            compiler = g_canonicalize_filename(config.compiler, NULL);
+        } else {
+            char *executable = g_file_read_link("/proc/self/exe", NULL);
+            if (!executable) {
+                fprintf(stderr, "latcd: cannot resolve /proc/self/exe\n");
+                return 1;
+            }
+            char *directory = g_path_get_dirname(executable);
+            compiler = g_build_filename(directory, "latc", NULL);
+            g_free(directory);
+            g_free(executable);
+        }
+        if (!precompile_jobs) precompile_jobs = default_worker_count();
+        int result = latcd_run_precompile(config.socket_path,
+                                          config.x86_rootfs, compiler,
+                                          source, precompile_jobs);
+        g_free(compiler);
+        return result;
     }
     if (!config.workers) {
         config.workers = default_worker_count();

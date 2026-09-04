@@ -632,6 +632,14 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
   from compilation: `FLUSH_ALL` snapshots the final union and queues each ELF
   once. Default incremental mode uses a 100 ms quiet period and a 500 ms
   maximum wait before compiling newly added keys.
+- Offline precompilation starts from one absolute guest ELF path and follows
+  only `PT_INTERP` plus recursive `DT_NEEDED` inside the selected x86 rootfs.
+  It resolves and statically analyzes the complete dependency set before the
+  first request is sent. Each static CFG block produces both normal and
+  `CF_PARALLEL` keys. The client then uses the existing `SUBMIT_KEYS` and
+  `FLUSH_SOURCE` requests for every ELF; no separate cache or protocol exists.
+  Libraries loaded later with `dlopen()` are added by the same runtime
+  incremental path.
 - The compile delta is the accepted key union minus the TB table in the current
   module, not minus the previously observed TB-key set. If static CFG already
   put all newly observed keys in the module, `latcd` atomically publishes the

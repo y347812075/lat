@@ -320,6 +320,27 @@ CPUs. `latcd` runs up to 8 ELF compile jobs concurrently by default and divides
 the online CPUs among those jobs, so module-level and within-module parallelism
 share one CPU budget. Explicit thread counts are honored, including 1 and 2.
 
+An application can also seed the cache before it runs. Start the normal
+resident `latcd`, then run:
+
+```sh
+latcd --precompile --socket "$XDG_RUNTIME_DIR/latcd.sock" \
+  --x86-rootfs /path/to/x86-rootfs [--latc /path/to/latc] [--jobs 8] \
+  /usr/bin/python3
+```
+
+The final argument is an absolute guest path inside the rootfs. The command
+reads `PT_INTERP` and recursively resolves `DT_NEEDED`, using each object's
+`RPATH`/`RUNPATH`, the rootfs `ld.so.cache`, and the standard x86-64 library
+directories. It does not scan the rootfs or guess libraries loaded later by
+`dlopen()`. It first resolves and statically analyzes every discovered ELF. If
+any one fails, it submits nothing. Static analysis emits both normal and
+`CF_PARALLEL` TB variants. After all analyses succeed, the command submits each
+complete TB set to the resident service and waits for `FLUSH_SOURCE` before it
+returns. A later runtime submission uses the same union-and-incremental-publish
+path, so dynamically discovered TBs extend the static base instead of replacing
+it.
+
 The module tables are emitted as binary data and included directly by the
 assembler. They are not formatted as a large C source file for the host C
 compiler to parse. `latcd` accepts a cached module as a TB-set hit only when

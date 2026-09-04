@@ -11,4 +11,8 @@ int latc_tbset_apply(const char *path, const char *source_path,
                      size_t *unmatched, size_t *ignored, uint8_t digest[32],
                      char *error, size_t error_size);
 
+int latc_tbset_write_static(const char *path, const char *source_path,
+                            const CfgProgram *program,
+                            size_t *written, char *error, size_t error_size);
+
 #endif
