@@ -20,7 +20,8 @@ static void *lookup_unchanged_instance(void *opaque)
     while (!atomic_load_explicit(thread->stop, memory_order_acquire)) {
         LatAotTargetV2 target;
         if (lat_aot_v2_registry_lookup(thread->registry, 0x701000,
-                                       LAT_AOT_TB_CODE64, &target) ||
+                                       LAT_AOT_TB_CODE64 |
+                                       LAT_AOT_TB_PARALLEL, &target) ||
             target.host_address == NULL || target.instance == NULL) {
             atomic_store_explicit(thread->failed, 1, memory_order_release);
             break;
@@ -35,8 +36,6 @@ int main(void)
     static const unsigned char text[32];
     static const LatAotTbV2 tbs[] = {
         { .guest_rva = 0x1000, .host_offset = 4, .host_size = 4,
-          .flags = LAT_AOT_TB_CODE64 },
-        { .guest_rva = 0x1000, .host_offset = 8, .host_size = 4,
           .flags = LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL },
     };
     static const LatAotGuestSlotV2 guest_slots[] = {
@@ -47,7 +46,7 @@ int main(void)
         .text_begin = text,
         .text_end = text + sizeof(text),
         .tb_begin = tbs,
-        .tb_end = tbs + 2,
+        .tb_end = tbs + 1,
         .guest_slot_begin = guest_slots,
         .guest_slot_end = guest_slots + 2,
     };
@@ -106,7 +105,14 @@ int main(void)
     }
     LatAotTargetV2 target;
     if (lat_aot_v2_registry_lookup(&registry, 0x401000,
-                                   LAT_AOT_TB_CODE64, &target) ||
+                                   LAT_AOT_TB_CODE64, &target) == 0) {
+        lat_aot_v2_registry_target_release(&target);
+        fprintf(stderr, "registry accepted removed non-parallel variant\n");
+        return 1;
+    }
+    if (lat_aot_v2_registry_lookup(&registry, 0x401000,
+                                   LAT_AOT_TB_CODE64 |
+                                   LAT_AOT_TB_PARALLEL, &target) ||
         target.host_address != text + 4 || target.instance != &first) {
         fprintf(stderr, "registry lookup failed\n");
         return 1;
@@ -114,7 +120,8 @@ int main(void)
     lat_aot_v2_registry_target_release(&target);
     if (lat_aot_v2_registry_register(&registry, &shard) ||
         lat_aot_v2_registry_lookup(&registry, 0x402000,
-                                   LAT_AOT_TB_CODE64, &target) ||
+                                   LAT_AOT_TB_CODE64 |
+                                   LAT_AOT_TB_PARALLEL, &target) ||
         target.host_address != text + 12 || target.instance != &shard) {
         fprintf(stderr, "registry combined shard lookup failed\n");
         return 1;
@@ -127,7 +134,7 @@ int main(void)
     if (lat_aot_v2_registry_lookup(&registry, 0x701000,
                                    LAT_AOT_TB_CODE64 |
                                    LAT_AOT_TB_PARALLEL, &target) ||
-        target.host_address != text + 8 || target.instance != &second) {
+        target.host_address != text + 4 || target.instance != &second) {
         fprintf(stderr, "registry parallel lookup failed\n");
         return 1;
     }
@@ -236,7 +243,8 @@ int main(void)
     if (lat_aot_v2_registry_deactivate_range(&registry, 0x480000, 0x481000,
                                              &deactivated) || deactivated ||
         lat_aot_v2_registry_lookup(&registry, 0x401000,
-                                   LAT_AOT_TB_CODE64, &target)) {
+                                   LAT_AOT_TB_CODE64 |
+                                   LAT_AOT_TB_PARALLEL, &target)) {
         fprintf(stderr, "registry no-op range deactivation failed\n");
         return 1;
     }
@@ -246,9 +254,11 @@ int main(void)
         deactivated != 1 ||
         atomic_load(&first.generation) != generation + 1 ||
         lat_aot_v2_registry_lookup(&registry, 0x401000,
-                                   LAT_AOT_TB_CODE64, &target) == 0 ||
+                                   LAT_AOT_TB_CODE64 |
+                                   LAT_AOT_TB_PARALLEL, &target) == 0 ||
         lat_aot_v2_registry_lookup(&registry, 0x701000,
-                                   LAT_AOT_TB_CODE64, &target)) {
+                                   LAT_AOT_TB_CODE64 |
+                                   LAT_AOT_TB_PARALLEL, &target)) {
         fprintf(stderr, "registry range deactivation failed\n");
         return 1;
     }

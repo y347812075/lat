@@ -24,7 +24,7 @@ def write_key_set_digest(digest: bytes, output: Path, records,
                          sequence: int = 0):
     keys = sorted(set(records))
     for rva, flags in keys:
-        if rva < 0 or flags not in (CODE64, CODE64 | PARALLEL):
+        if rva < 0 or flags != CODE64 | PARALLEL:
             raise ValueError(f"invalid TB key rva={rva:#x} flags={flags:#x}")
     data = bytearray(HEADER.pack(MAGIC, VERSION, HEADER.size, digest,
                                  len(keys), sequence))
@@ -44,7 +44,7 @@ def read_key_set(path: Path):
     records = []
     for offset in range(HEADER.size, len(data), RECORD.size):
         rva, flags, reserved = RECORD.unpack_from(data, offset)
-        if reserved or flags not in (CODE64, CODE64 | PARALLEL):
+        if reserved or flags != CODE64 | PARALLEL:
             raise ValueError("invalid TB key")
         records.append((rva, flags))
     return digest, sequence, records

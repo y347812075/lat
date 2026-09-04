@@ -176,8 +176,8 @@ bool latc_aot_v2_strict_enabled(void)
 
 static uint32_t aot_v2_semantic_flags(uint32_t cflags)
 {
-    return LAT_AOT_TB_CODE64 |
-        ((cflags & CF_PARALLEL) ? LAT_AOT_TB_PARALLEL : 0);
+    (void)cflags;
+    return LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL;
 }
 static _Atomic uint64_t invalidated_instances;
 static _Atomic uint64_t invalidated_exec_ranges;

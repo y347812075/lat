@@ -1640,6 +1640,14 @@ int main(int argc, char **argv, char **envp)
     env = cpu->env_ptr;
     cpu_reset(cpu);
 
+#ifdef CONFIG_LATX
+    /* AOT v2 stores only the thread-safe CF_PARALLEL translation.  Keep JIT
+     * fallback and AOT execution on that same CPU mode from process start. */
+    if (latc_aot_v2_mapping_enabled()) {
+        cpu->tcg_cflags |= CF_PARALLEL;
+    }
+#endif
+
 #ifdef TARGET_I386
     if (inherited_guest_tsc_disabled) {
         env->cr[4] |= CR4_TSD_MASK;

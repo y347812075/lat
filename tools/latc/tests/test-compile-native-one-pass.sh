@@ -8,7 +8,7 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 
 printf guest >"$work/guest"
 python3 "$script_dir/tb_key_set.py" "$work/guest" \
-    "$work/input.tbset" 0x1000:0x1
+    "$work/input.tbset" 0x1000:0x3
 
 cat >"$work/stage1" <<'EOF'
 #!/bin/sh
