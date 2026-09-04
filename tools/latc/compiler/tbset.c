@@ -2,6 +2,7 @@
 
 #include "tbset.h"
 #include "lat-tb-key-set.h"
+#include "lat-aot-v2.h"
 
 #include <elf.h>
 #include <errno.h>
@@ -776,4 +777,72 @@ int latc_tbset_apply(const char *path, const char *source_path,
     if (unmatched) *unmatched = miss;
     if (ignored) *ignored = skip;
     return 0;
+}
+
+int latc_tbset_write_static(const char *path, const char *source_path,
+                            const CfgProgram *program,
+                            size_t *written, char *error, size_t error_size)
+{
+    uint64_t load_base;
+    LatTbKeySet set = {0};
+    if (!path || !source_path || !program ||
+        source_identity(source_path, set.source_sha256, &load_base,
+                        error, error_size)) {
+        return -1;
+    }
+    size_t variants = 2;
+    if (program->tb_count > SIZE_MAX / variants ||
+        program->tb_count * variants > LAT_AOT_V2_TBSET_RECORD_LIMIT) {
+        return fail(error, error_size, "too many static CFG blocks");
+    }
+    set.count = program->tb_count * variants;
+    set.keys = set.count ? calloc(set.count, sizeof(*set.keys)) : NULL;
+    if (set.count && !set.keys) {
+        return fail(error, error_size,
+                    "out of memory creating static TB key set");
+    }
+    size_t output = 0;
+    for (size_t i = 0; i < program->tb_count; i++) {
+        if (program->tbs[i].start < load_base) {
+            lat_tb_key_set_destroy(&set);
+            return fail(error, error_size,
+                        "static CFG block precedes preferred guest base");
+        }
+        uint64_t rva = program->tbs[i].start - load_base;
+        set.keys[output++] = (LatTbKey) {
+            .guest_rva = rva,
+            .flags = CFG_TB_CODE64,
+        };
+        set.keys[output++] = (LatTbKey) {
+            .guest_rva = rva,
+            .flags = CFG_TB_CODE64 | CFG_TB_PARALLEL,
+        };
+    }
+    if (lat_tb_key_set_sort_unique(&set, error, error_size)) {
+        lat_tb_key_set_destroy(&set);
+        return -1;
+    }
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                  0600);
+    if (fd < 0) {
+        lat_tb_key_set_destroy(&set);
+        if (error && error_size) {
+            snprintf(error, error_size, "cannot open static TB key set: %s",
+                     strerror(errno));
+        }
+        return -1;
+    }
+    int result = lat_tb_key_set_write_fd(fd, &set, error, error_size);
+    if (!result && fsync(fd)) {
+        result = fail(error, error_size,
+                      "cannot synchronize static TB key set");
+    }
+    if (close(fd) && !result) {
+        result = fail(error, error_size, "cannot close static TB key set");
+    }
+    if (!result && written) {
+        *written = set.count;
+    }
+    lat_tb_key_set_destroy(&set);
+    return result;
 }

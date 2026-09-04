@@ -8,6 +8,25 @@ script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 tbset="$bundle.input.tbset"
 python3 "$script_dir/tb_key_set.py" "$guest" "$tbset" 0x1000:0x1 0x1001:0x1
 
+static="$bundle.static.tbset"
+"$latc" emit-static-tbset "$guest" -o "$static" >"$bundle.static.out"
+python3 - "$static" "$guest" "$script_dir" <<'PY'
+from pathlib import Path
+import hashlib
+import sys
+
+sys.path.insert(0, sys.argv[3])
+from tb_key_set import read_key_set
+
+digest, sequence, records = read_key_set(Path(sys.argv[1]))
+assert digest == hashlib.sha256(Path(sys.argv[2]).read_bytes()).digest()
+assert sequence == 0 and records and len(records) % 2 == 0
+for first, second in zip(records[0::2], records[1::2]):
+    assert first[0] == second[0]
+    assert first[1] == 1 and second[1] == 3
+PY
+grep -q '^static_tb_keys=' "$bundle.static.out"
+
 message=$("$latc" compile "$guest" -o "$bundle" --runner "$guest" \
     --tbset "$tbset" 2>&1)
 case "$message" in

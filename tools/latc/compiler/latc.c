@@ -21,9 +21,10 @@ static void usage(const char *name)
 {
     fprintf(stderr, "usage:\n"
             "  %s analyze [--json] X86_ELF\n"
+            "  %s emit-static-tbset X86_ELF -o FILE\n"
             "  %s compile X86_ELF -o OUTPUT --runner RUNNER [--tbset FILE]"
             " [--tbset-ignore-outside-exec] [--aot FILE]\n"
-            "  %s inspect [--json] BUNDLE\n", name, name, name);
+            "  %s inspect [--json] BUNDLE\n", name, name, name, name);
     fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
     fprintf(stderr, "  %s merge-native BASE DELTA -o OUTPUT\n", name);
@@ -291,6 +292,28 @@ static int analyze(const char *path, int json)
     return 0;
 }
 
+static int emit_static_tbset(const char *input, const char *output)
+{
+    CfgProgram program;
+    CfgAnalyzeOptions options = { .resolve_jump_tables = true };
+    char error[256] = {0};
+    if (cfg_analyze_elf(input, &options, &program, error, sizeof(error))) {
+        fprintf(stderr, "latc: %s\n", error[0] ? error : "analysis failed");
+        return 1;
+    }
+    size_t written = 0;
+    int result = latc_tbset_write_static(output, input, &program,
+                                         &written,
+                                         error, sizeof(error));
+    cfg_program_destroy(&program);
+    if (result) {
+        fprintf(stderr, "latc: %s\n", error);
+        return 1;
+    }
+    printf("output=%s\nstatic_tb_keys=%zu\n", output, written);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "build-id") == 0) {
@@ -300,6 +323,23 @@ int main(int argc, char **argv)
     if (argc < 3) {
         usage(argv[0]);
         return 2;
+    }
+    if (strcmp(argv[1], "emit-static-tbset") == 0) {
+        const char *input = argv[2];
+        const char *output = NULL;
+        for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+                output = argv[++i];
+            } else {
+                usage(argv[0]);
+                return 2;
+            }
+        }
+        if (!output) {
+            usage(argv[0]);
+            return 2;
+        }
+        return emit_static_tbset(input, output);
     }
     if (strcmp(argv[1], "compile") == 0) {
         const char *input = argv[2], *output = NULL, *runner = NULL;

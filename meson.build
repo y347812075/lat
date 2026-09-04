@@ -597,6 +597,7 @@ if 'CONFIG_LATX' in config_host
     files(
       'tools/latc/latcd/main.c',
       'tools/latc/latcd/protocol.c',
+      'tools/latc/latcd/precompile.c',
       'tools/latc/aot-v2/common/tb-key-set.c',
       'tools/latc/aot-v2/compiler/module-inspect.c',
       'tools/latc/aot-v2/runtime/elf-validate.c',

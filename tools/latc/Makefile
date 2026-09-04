@@ -56,6 +56,7 @@ $(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/tbset.o \
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD)/latcd/latcd: $(BUILD)/latcd/main.o $(BUILD)/latcd/protocol.o \
+		$(BUILD)/latcd/precompile.o \
 		$(BUILD)/aot-v2/common/tb-key-set.o \
 		$(BUILD)/aot-v2/compiler/module-inspect.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o
@@ -279,6 +280,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-aot-v2-module-pack \
 	$(BUILD)/tests/test-latcd-protocol \
 	$(BUILD)/tests/test-latcd-client \
+	$(BUILD)/tests/test-precompile \
 	$(BUILD)/tests/test-aot-v2-guest-elf-map \
 	$(BUILD)/tests/test-x86-linux-user \
 	$(BUILD)/tests/x86-exit42 $(BUILD)/tests/x86-pie-exit42 \
@@ -348,6 +350,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-aot-v2-module-pack
 	$(BUILD)/tests/test-latcd-protocol
 	$(BUILD)/tests/test-latcd-client
+	$(BUILD)/tests/test-precompile
 	$(BUILD)/tests/test-aot-v2-guest-elf-map \
 	  $(BUILD)/tests/x86-pie-exit42 $(BUILD)/tests/x86-pie-exit42 \
 	  $(BUILD)/tests/x86-exit42
@@ -440,6 +443,11 @@ $(BUILD)/tests/test-latcd-client: aot-v2/tests/test-latcd-client.c \
 		aot-v2/runtime/latcd-client.c $(BUILD)/latcd/protocol.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+
+$(BUILD)/tests/test-precompile: tests/test-precompile.c \
+		$(BUILD)/latcd/precompile.o $(BUILD)/latcd/protocol.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Ilatcd -o $@ $^ $(LDLIBS)
 
 $(BUILD)/tests/test-aot-v2-format: aot-v2/tests/test-format.c \
 		$(BUILD)/aot-v2/runtime/elf-validate.o
