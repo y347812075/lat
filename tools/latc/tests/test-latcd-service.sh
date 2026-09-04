@@ -490,6 +490,90 @@ assert stats["runtime_file_tb_gen_attempts"] == 0, stats
 PY
 stop_service
 
+native_aware_counter=$work/native-aware-compiler.count
+native_aware_compiler=$work/native-aware-latc
+printf '%s\n' '#!/bin/sh' 'set -eu' \
+  "if [ \"\${1:-}\" = build-id ]; then exec $latc \"\$@\"; fi" \
+  "printf 'compile\\n' >>$native_aware_counter" \
+  "exec $latc \"\$@\"" >"$native_aware_compiler"
+chmod 755 "$native_aware_compiler"
+start_service native-aware "$native_aware_compiler" --flush-only
+submit_source "$socket" "$guest" "$phase/initial.client"
+"$latcd" --flush-source --socket "$socket" "$guest" \
+  >"$phase/initial-flush.client"
+test "$(wc -l <"$native_aware_counter")" -eq 1
+python3 - "$cache" "$guest" "$phase/initial-generation.json" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+cache, source, output = map(Path, sys.argv[1:])
+source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+manifest = json.loads((cache / f"{source_sha}.current").read_text())
+output.write_text(json.dumps({name: manifest[name]
+                              for name in ("module", "native")},
+                             sort_keys=True))
+PY
+python3 - "$cache" "$guest" "$phase/covered.tbset" "$script_dir" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import struct
+import sys
+
+cache, source, output = map(Path, sys.argv[1:4])
+sys.path.insert(0, sys.argv[4])
+from tb_key_set import read_key_set, write_key_set
+source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+manifest = json.loads((cache / f"{source_sha}.current").read_text())
+_, _, records = read_key_set(cache / manifest["tbset"])
+assert len(records) == 1
+module = (cache / manifest["module"]).read_bytes()
+section_offset = struct.unpack_from("<Q", module, 40)[0]
+section_size, section_count, names_index = struct.unpack_from("<HHH", module, 58)
+sections = [struct.unpack_from("<IIQQQQIIQQ", module,
+                               section_offset + index * section_size)
+            for index in range(section_count)]
+names = sections[names_index]
+name_data = module[names[4]:names[4] + names[5]]
+tb_section = next(section for section in sections
+                  if name_data[section[0]:].split(b"\0", 1)[0] ==
+                     b".rodata.lat.tb")
+tb_data = module[tb_section[4]:tb_section[4] + tb_section[5]]
+module_keys = [(rva, flags) for rva, _, _, flags in
+               struct.iter_unpack("<QQII", tb_data)]
+covered = next(key for key in module_keys if key not in records)
+write_key_set(source, output, [covered])
+PY
+"$latcd" --submit --socket "$socket" --tbset "$phase/covered.tbset" \
+  "$guest" >"$phase/covered.client"
+"$latcd" --flush-source --socket "$socket" "$guest" \
+  >"$phase/covered-flush.client"
+grep -q '^status=0$' "$phase/covered-flush.client"
+test "$(wc -l <"$native_aware_counter")" -eq 1
+python3 - "$cache" "$guest" "$phase/initial-generation.json" \
+  "$script_dir" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+cache, source, initial = map(Path, sys.argv[1:4])
+sys.path.insert(0, sys.argv[4])
+from tb_key_set import read_key_set
+source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+manifest = json.loads((cache / f"{source_sha}.current").read_text())
+assert {name: manifest[name] for name in ("module", "native")} == \
+       json.loads(initial.read_text())
+_, _, records = read_key_set(cache / manifest["tbset"])
+assert len(records) == 2, records
+assert len(list(cache.glob(f"{source_sha}-*.so"))) == 1
+assert len(list(cache.glob(f"{source_sha}-*.native"))) == 1
+assert len(list(cache.glob(f"{source_sha}-*.tbset"))) == 1
+PY
+stop_service
+
 atomic_marker=$work/atomic-before-manifest.fail
 export LATCD_TEST_FAIL_BEFORE_MANIFEST=$atomic_marker
 start_service atomic "$latc" --flush-only --negative-ms 10

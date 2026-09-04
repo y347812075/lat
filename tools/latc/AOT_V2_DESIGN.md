@@ -632,6 +632,10 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
   from compilation: `FLUSH_ALL` snapshots the final union and queues each ELF
   once. Default incremental mode uses a 100 ms quiet period and a 500 ms
   maximum wait before compiling newly added keys.
+- The compile delta is the accepted key union minus the TB table in the current
+  module, not minus the previously observed TB-key set. If static CFG already
+  put all newly observed keys in the module, `latcd` atomically publishes the
+  new complete TB-key set and manifest without translation or relinking.
 - The per-user compiler defaults to the online logical CPU count capped at
   eight workers. Different source ELFs compile in parallel; one source has at
   most one active compiler job.

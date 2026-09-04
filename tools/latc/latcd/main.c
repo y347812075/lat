@@ -79,6 +79,8 @@ static int current_manifest_read(const LatcdConfig *config, const char *hex,
 static int persisted_manifest_valid(const LatcdConfig *config,
                                     const char source_key[65],
                                     const uint8_t digest[32]);
+static int cached_module_inspect(const char *path, const uint8_t digest[32],
+                                 LatAotModuleInfoV2 *info);
 
 static uint32_t default_worker_count(void)
 {
@@ -808,32 +810,44 @@ static int prepare_compile_delta(const LatcdConfig *config,
                                  bool *empty, char *error, size_t error_size)
 {
     LatTbKeySet known = {0};
-    LatTbKeySet published = {0};
     LatTbKeySet delta = {0};
     *delta_path = NULL;
     *empty = false;
     int result = lat_tb_key_set_read_file(known_path, digest, &known,
                                            error, error_size);
-    char source_hex[65];
-    digest_hex(digest, source_hex);
-    LatcdCurrentManifest manifest = {0};
-    int manifest_result = current_manifest_read(config, source_hex, &manifest);
-    char *published_path = !manifest_result && *manifest.tbset ?
-        g_build_filename(config->cache_dir, manifest.tbset, NULL) : NULL;
-    if (!result && (!published_path ||
-        lat_tb_key_set_read_file(published_path, digest, &published,
-                                 error, error_size))) {
-        if (!published_path || errno == ENOENT) {
-            memset(&published, 0, sizeof(published));
-            memcpy(published.source_sha256, digest, 32);
-            error[0] = '\0';
-        } else {
-            result = -1;
-        }
-    }
     if (!result) {
-        result = lat_tb_key_set_difference(&known, &published, &delta,
-                                           error, error_size);
+        char source_hex[65];
+        digest_hex(digest, source_hex);
+        LatcdCurrentManifest manifest = {0};
+        char *module_path = NULL;
+        char *native_path = NULL;
+        char *published_path = NULL;
+        LatAotModuleInfoV2 info;
+        pthread_mutex_lock(&cache_lock);
+        bool current_valid = !current_manifest_read(
+            config, source_hex, &manifest) && *manifest.tbset;
+        if (current_valid) {
+            module_path = g_build_filename(config->cache_dir,
+                                            manifest.module, NULL);
+            native_path = g_build_filename(config->cache_dir,
+                                            manifest.native, NULL);
+            published_path = g_build_filename(config->cache_dir,
+                                               manifest.tbset, NULL);
+            current_valid = cached_module_inspect(module_path, digest, &info) &&
+                !access(native_path, R_OK) && !access(published_path, R_OK);
+        }
+        if (current_valid) {
+            result = lat_aot_v2_module_missing_tbset_file(
+                module_path, known_path, &info, &delta, error, error_size);
+        } else {
+            delta = known;
+            memset(&known, 0, sizeof(known));
+        }
+        pthread_mutex_unlock(&cache_lock);
+        g_free(published_path);
+        g_free(native_path);
+        g_free(module_path);
+        current_manifest_clear(&manifest);
     }
     if (!result && !delta.count) {
         *empty = true;
@@ -855,10 +869,7 @@ static int prepare_compile_delta(const LatcdConfig *config,
             *delta_path = path;
         }
     }
-    current_manifest_clear(&manifest);
-    g_free(published_path);
     lat_tb_key_set_destroy(&known);
-    lat_tb_key_set_destroy(&published);
     lat_tb_key_set_destroy(&delta);
     return result;
 }
@@ -1016,6 +1027,78 @@ static int sync_file(const char *path, char *error, size_t error_size)
                     strerror(saved));
     }
     close(fd);
+    return 0;
+}
+
+static int snapshot_cached_file(const char *source, const char *temporary_dir,
+                                uint64_t max_size, char **snapshot,
+                                char *error, size_t error_size)
+{
+    *snapshot = NULL;
+    int input = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat status;
+    if (input < 0 || fstat(input, &status) || !S_ISREG(status.st_mode) ||
+        status.st_uid != geteuid() || status.st_nlink != 1 ||
+        (status.st_mode & 0222) || status.st_size <= 0 ||
+        (uint64_t)status.st_size > max_size) {
+        int saved = errno;
+        if (input >= 0) close(input);
+        errno = saved ? saved : ENOEXEC;
+        return fail(error, error_size,
+                    "cannot open canonical native image: %s",
+                    strerror(errno));
+    }
+    char *path = g_build_filename(temporary_dir, "base-native-XXXXXX", NULL);
+    int output = g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
+    if (output < 0) {
+        close(input);
+        g_free(path);
+        return fail(error, error_size,
+                    "cannot create canonical native snapshot: %s",
+                    strerror(errno));
+    }
+    unsigned char buffer[128 * 1024];
+    int result = 0;
+    for (;;) {
+        ssize_t count = read(input, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            result = fail(error, error_size,
+                          "cannot read canonical native image: %s",
+                          strerror(errno));
+            break;
+        }
+        if (!count) break;
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(output, buffer + offset, count - offset);
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) {
+                result = fail(error, error_size,
+                              "cannot write canonical native snapshot: %s",
+                              strerror(errno));
+                break;
+            }
+            offset += written;
+        }
+        if (result) break;
+    }
+    if (close(input) && !result) {
+        result = fail(error, error_size,
+                      "cannot close canonical native image: %s",
+                      strerror(errno));
+    }
+    if (close(output) && !result) {
+        result = fail(error, error_size,
+                      "cannot close canonical native snapshot: %s",
+                      strerror(errno));
+    }
+    if (result) {
+        unlink(path);
+        g_free(path);
+        return -1;
+    }
+    *snapshot = path;
     return 0;
 }
 
@@ -1412,6 +1495,159 @@ static void remove_superseded_generation(const LatcdConfig *config,
     g_dir_close(directory);
 }
 
+/* Publish a newer complete observed-key set when the current module already
+ * contains every key.  Return 1 if the current generation changed or stopped
+ * being usable and the caller must fall back to a full compile. */
+static int publish_covered_tbset(const LatcdConfig *config,
+                                 const char *complete_tbset,
+                                 const uint8_t digest[32],
+                                 uint64_t published_sequence,
+                                 LatcdResponseV2 *response)
+{
+    char error[sizeof(response->message)] = {0};
+    gchar *tbset_data = NULL;
+    gsize tbset_size = 0;
+    char *temporary_dir = NULL;
+    char *temporary = NULL;
+    char *final_tbset = NULL;
+    char *tbset_name = NULL;
+    char *module_path = NULL;
+    char *native_path = NULL;
+    bool tbset_staged = false;
+    int result = -1;
+    memcpy(response->source_sha256, digest, 32);
+    if (!g_file_get_contents(complete_tbset, &tbset_data,
+                             &tbset_size, NULL)) {
+        fail(error, sizeof(error), "cannot read complete TB set");
+        goto out;
+    }
+    char source_hex[65];
+    digest_hex(digest, source_hex);
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    g_checksum_update(checksum, (const guchar *)tbset_data, tbset_size);
+    tbset_name = g_strdup_printf("%s-%s.tbset", source_hex,
+                                  g_checksum_get_string(checksum));
+    g_checksum_free(checksum);
+    final_tbset = g_build_filename(config->cache_dir, tbset_name, NULL);
+    temporary_dir = g_build_filename(config->cache_dir, ".tmp", NULL);
+    temporary = g_build_filename(temporary_dir, "published-XXXXXX", NULL);
+    int fd = g_mkstemp_full(temporary, O_RDWR | O_CLOEXEC, 0600);
+    bool stage_failed = fd < 0;
+    gsize offset = 0;
+    while (!stage_failed && offset < tbset_size) {
+        ssize_t written = write(fd, tbset_data + offset,
+                                tbset_size - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) {
+            stage_failed = true;
+        } else {
+            offset += written;
+        }
+    }
+    if (!stage_failed && (fchmod(fd, 0444) || fsync(fd))) {
+        stage_failed = true;
+    }
+    if (fd >= 0 && close(fd)) stage_failed = true;
+    if (stage_failed) {
+        fail(error, sizeof(error), "cannot stage complete TB set: %s",
+             strerror(errno));
+        goto out;
+    }
+
+    pthread_mutex_lock(&cache_lock);
+    LatcdCurrentManifest manifest = {0};
+    LatAotModuleInfoV2 info;
+    bool covered = !current_manifest_read(config, source_hex, &manifest) &&
+                   *manifest.tbset;
+    if (covered) {
+        module_path = g_build_filename(config->cache_dir,
+                                        manifest.module, NULL);
+        native_path = g_build_filename(config->cache_dir,
+                                        manifest.native, NULL);
+        covered = cached_module_inspect(module_path, digest, &info) &&
+                  !access(native_path, R_OK) &&
+                  !lat_aot_v2_module_validate_tbset_file(
+                      module_path, complete_tbset, error, sizeof(error));
+    }
+    if (!covered) {
+        current_manifest_clear(&manifest);
+        pthread_mutex_unlock(&cache_lock);
+        result = 1;
+        goto out;
+    }
+    if (strcmp(manifest.tbset, tbset_name)) {
+        if (cache_make_room(config, tbset_size, manifest.module,
+                            error, sizeof(error)) ||
+            rename(temporary, final_tbset)) {
+            if (!error[0]) {
+                fail(error, sizeof(error),
+                     "cannot publish complete TB set: %s", strerror(errno));
+            }
+            current_manifest_clear(&manifest);
+            pthread_mutex_unlock(&cache_lock);
+            goto out;
+        }
+        temporary[0] = '\0';
+        tbset_staged = true;
+        if (sync_directory(config->cache_dir, error, sizeof(error))) {
+            current_manifest_clear(&manifest);
+            pthread_mutex_unlock(&cache_lock);
+            goto out;
+        }
+        const char *failpoint = getenv("LATCD_TEST_FAIL_BEFORE_MANIFEST");
+        if (failpoint && *failpoint && !access(failpoint, F_OK)) {
+            unlink(failpoint);
+            fail(error, sizeof(error),
+                 "injected failure before manifest commit");
+            current_manifest_clear(&manifest);
+            pthread_mutex_unlock(&cache_lock);
+            goto out;
+        }
+    }
+    if (publish_current_index(config, source_hex, manifest.module,
+                              manifest.native, tbset_name, &info,
+                              published_sequence, error, sizeof(error))) {
+        current_manifest_clear(&manifest);
+        pthread_mutex_unlock(&cache_lock);
+        goto out;
+    }
+    tbset_staged = false;
+    char sync_error[128] = {0};
+    if (sync_directory(config->cache_dir, sync_error,
+                       sizeof(sync_error))) {
+        fprintf(stderr,
+                "latcd: committed covered-TB manifest sync failed: %s\n",
+                sync_error);
+    }
+    remove_superseded_generation(config, source_hex, manifest.module,
+                                 manifest.native, tbset_name);
+    utimensat(AT_FDCWD, module_path, NULL, AT_SYMLINK_NOFOLLOW);
+    snprintf(error, sizeof(error), "published covered TB set: %s",
+             module_path);
+    current_manifest_clear(&manifest);
+    pthread_mutex_unlock(&cache_lock);
+    response->status = LATCD_STATUS_OK;
+    result = 0;
+out:
+    if (result < 0) {
+        response->status = LATCD_STATUS_IO_ERROR;
+        g_strlcpy(response->message, error[0] ? error : "unknown error",
+                  sizeof(response->message));
+    } else if (!result) {
+        g_strlcpy(response->message, error, sizeof(response->message));
+    }
+    if (temporary && *temporary) unlink(temporary);
+    if (tbset_staged) unlink(final_tbset);
+    g_free(native_path);
+    g_free(module_path);
+    g_free(tbset_name);
+    g_free(final_tbset);
+    g_free(temporary);
+    g_free(temporary_dir);
+    g_free(tbset_data);
+    return result;
+}
+
 static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
                             const char *snapshot, const char *compile_tbset,
                             const char *complete_tbset,
@@ -1502,11 +1738,17 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         LatcdCurrentManifest previous = {0};
         if (!current_manifest_read(config, hex, &previous) &&
             persisted_manifest_valid(config, hex, digest)) {
-            base_native = g_build_filename(config->cache_dir,
-                                            previous.native, NULL);
-            if (access(base_native, R_OK)) {
-                g_clear_pointer(&base_native, g_free);
+            char *cached_base = g_build_filename(config->cache_dir,
+                                                  previous.native, NULL);
+            if (snapshot_cached_file(cached_base, temporary_dir,
+                                     config->file_size_limit, &base_native,
+                                     error, sizeof(error))) {
+                g_free(cached_base);
+                current_manifest_clear(&previous);
+                pthread_mutex_unlock(&cache_lock);
+                goto out;
             }
+            g_free(cached_base);
         }
         current_manifest_clear(&previous);
     }
@@ -1651,6 +1893,7 @@ out:
     if (native_staged) unlink(final_native);
     if (tbset_staged) unlink(final_tbset);
     g_free(tbset_data);
+    if (base_native) unlink(base_native);
     g_free(base_native);
     g_free(final_tbset);
     g_free(final_native);
@@ -2020,9 +2263,17 @@ static void *compiler_worker(void *opaque)
                                       compile_tbset, job->digest,
                                       job->compile_sequence, &response);
         } else if (!result) {
-            response.status = LATCD_STATUS_OK;
-            g_strlcpy(response.message, "all keys already published",
-                      sizeof(response.message));
+            int publish_result = publish_covered_tbset(
+                service->config, compile_tbset, job->digest,
+                job->compile_sequence, &response);
+            if (publish_result > 0) {
+                result = publish_snapshot(
+                    service->config, worker->index, job->snapshot,
+                    compile_tbset, compile_tbset, job->digest,
+                    job->compile_sequence, &response);
+            } else {
+                result = publish_result;
+            }
         }
         if (result && response.status == LATCD_STATUS_OK) {
             response.status = LATCD_STATUS_BAD_REQUEST;

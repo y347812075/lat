@@ -130,10 +130,12 @@ int lat_aot_v2_module_validate_tbset_file(const char *path,
         path, tbset_path, &info, error, error_size);
 }
 
-int lat_aot_v2_module_inspect_and_validate_tbset_file(
+static int module_missing_tbset_file(
     const char *path, const char *tbset_path, LatAotModuleInfoV2 *info,
+    LatTbKeySet *missing, size_t *requested_count,
     char *error, size_t error_size)
 {
+    memset(missing, 0, sizeof(*missing));
     if (lat_aot_v2_module_inspect_file(path, info, error, error_size)) {
         return -1;
     }
@@ -163,10 +165,17 @@ int lat_aot_v2_module_inspect_and_validate_tbset_file(
         g_free(contents);
         return -1;
     }
-    int result = 0;
-    size_t missing = 0;
-    uint64_t first_missing_rva = 0;
-    uint32_t first_missing_flags = 0;
+    if (requested_count) *requested_count = tbset.count;
+    memcpy(missing->source_sha256, tbset.source_sha256,
+           sizeof(missing->source_sha256));
+    missing->sequence = tbset.sequence;
+    missing->keys = g_try_new(LatTbKey, tbset.count);
+    if (tbset.count && !missing->keys) {
+        lat_tb_key_set_destroy(&tbset);
+        g_free(contents);
+        return fail(error, error_size,
+                    "cannot allocate missing module TB set");
+    }
     size_t module_record = 0;
     for (size_t record = 0; record < tbset.count; record++) {
         uint64_t rva = tbset.keys[record].guest_rva;
@@ -180,22 +189,44 @@ int lat_aot_v2_module_inspect_and_validate_tbset_file(
         if (module_record == tb_count ||
             tbs[module_record].guest_rva != rva ||
             tbs[module_record].flags != flags) {
-            if (!missing) {
-                first_missing_rva = rva;
-                first_missing_flags = flags;
-            }
-            missing++;
+            missing->keys[missing->count++] = tbset.keys[record];
         }
-    }
-    size_t covered = tbset.count - missing;
-    if (!result && missing) {
-        result = fail(error, error_size,
-                      "TB set is not fully covered: covered=%zu total=%zu "
-                      "first_missing_rva=0x%" PRIx64 " flags=0x%x",
-                      covered, tbset.count, first_missing_rva,
-                      first_missing_flags);
     }
     lat_tb_key_set_destroy(&tbset);
     g_free(contents);
+    return 0;
+}
+
+int lat_aot_v2_module_missing_tbset_file(
+    const char *path, const char *tbset_path, LatAotModuleInfoV2 *info,
+    LatTbKeySet *missing, char *error, size_t error_size)
+{
+    if (!path || !tbset_path || !info || !missing) {
+        return fail(error, error_size,
+                    "invalid missing module TB set arguments");
+    }
+    return module_missing_tbset_file(path, tbset_path, info, missing, NULL,
+                                     error, error_size);
+}
+
+int lat_aot_v2_module_inspect_and_validate_tbset_file(
+    const char *path, const char *tbset_path, LatAotModuleInfoV2 *info,
+    char *error, size_t error_size)
+{
+    LatTbKeySet missing = {0};
+    size_t requested = 0;
+    if (module_missing_tbset_file(path, tbset_path, info, &missing,
+                                  &requested, error, error_size)) {
+        return -1;
+    }
+    int result = 0;
+    if (missing.count) {
+        result = fail(error, error_size,
+                      "TB set is not fully covered: covered=%zu total=%zu "
+                      "first_missing_rva=0x%" PRIx64 " flags=0x%x",
+                      requested - missing.count, requested,
+                      missing.keys[0].guest_rva, missing.keys[0].flags);
+    }
+    lat_tb_key_set_destroy(&missing);
     return result;
 }
