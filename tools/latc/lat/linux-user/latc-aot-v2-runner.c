@@ -156,6 +156,10 @@ static _Atomic uint64_t compiler_submission_failures;
 static _Atomic uint64_t compiler_submission_duplicates;
 static _Atomic uint64_t compiler_submission_throttled;
 static _Atomic uint64_t compiler_request_sequence;
+static _Atomic uint64_t precompile_requests;
+static _Atomic uint64_t precompile_successes;
+static _Atomic uint64_t precompile_failures;
+static _Atomic uint64_t precompile_request_sequence;
 static bool aot_v2_strict;
 static bool aot_v2_reject_miss;
 
@@ -483,6 +487,8 @@ void latc_aot_v2_report_stats(void)
             "compiler_submission_failures=%llu "
             "compiler_submission_duplicates=%llu "
             "compiler_submission_throttled=%llu "
+            "precompile_requests=%llu precompile_successes=%llu "
+            "precompile_failures=%llu "
             "invalidated_instances=%llu invalidated_exec_ranges=%llu "
             "revalidated_instances=%llu revalidation_failures=%llu "
             "invalidation_unmap=%llu "
@@ -500,6 +506,9 @@ void latc_aot_v2_report_stats(void)
             (unsigned long long)atomic_load(&compiler_submission_failures),
             (unsigned long long)atomic_load(&compiler_submission_duplicates),
             (unsigned long long)atomic_load(&compiler_submission_throttled),
+            (unsigned long long)atomic_load(&precompile_requests),
+            (unsigned long long)atomic_load(&precompile_successes),
+            (unsigned long long)atomic_load(&precompile_failures),
             (unsigned long long)atomic_load(&invalidated_instances),
             (unsigned long long)atomic_load(&invalidated_exec_ranges),
             (unsigned long long)atomic_load(&revalidated_instances),
@@ -917,6 +926,35 @@ static void schedule_runtime_tbset_submission(void)
     pthread_mutex_unlock(&submission_control_lock);
 }
 
+static bool precompile_enabled(void)
+{
+    const char *value = getenv("LATX_AOT_V2_PRECOMPILE");
+    return value && !strcmp(value, "1");
+}
+
+static int precompile_source(int source_fd, char *error, size_t error_size)
+{
+    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
+    const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
+    if (!socket || !*socket || !cache || !*cache) {
+        snprintf(error, error_size,
+                 "LATX_AOT_V2_PRECOMPILE requires cache and latcd socket");
+        errno = EINVAL;
+        return -1;
+    }
+    uint64_t sequence = atomic_fetch_add(&precompile_request_sequence, 1) + 1;
+    uint64_t request_id = ((uint64_t)getpid() << 32) ^
+                          UINT64_C(0x8000000000000000) ^ sequence;
+    atomic_fetch_add(&precompile_requests, 1);
+    if (latcd_client_precompile_source(socket, source_fd, request_id,
+                                       error, error_size)) {
+        atomic_fetch_add(&precompile_failures, 1);
+        return -1;
+    }
+    atomic_fetch_add(&precompile_successes, 1);
+    return 0;
+}
+
 static void drain_mappings(void)
 {
     if (have_mmap_lock()) {
@@ -949,6 +987,13 @@ static void drain_mappings(void)
             int64_t registration_start = g_get_monotonic_time();
             int registered = register_discovered_module(
                 info, &instance, error, sizeof(error));
+            if (!registered && precompile_enabled()) {
+                if (!precompile_source(pending->fd, error, sizeof(error))) {
+                    error[0] = '\0';
+                    registered = register_discovered_module(
+                        info, &instance, error, sizeof(error));
+                }
+            }
             uint64_t registration_ns =
                 (g_get_monotonic_time() - registration_start) * 1000;
             LatAotV2ModuleStats *stats = add_module_stats(

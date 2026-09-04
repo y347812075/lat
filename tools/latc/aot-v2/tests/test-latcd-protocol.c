@@ -99,6 +99,18 @@ int main(void)
     }
     close(received_fd);
 
+    sent.operation = LATCD_OP_PRECOMPILE_SOURCE;
+    if (send_raw_request(sockets[0], &sent, &source, 1)) {
+        return fail("cannot send precompile request");
+    }
+    if (latcd_receive_request(sockets[1], &received, &received_fd,
+                              &received_tbset, error, sizeof(error)) ||
+        received_fd < 0 || received_tbset >= 0 ||
+        received.operation != LATCD_OP_PRECOMPILE_SOURCE) {
+        return fail("valid precompile request was rejected");
+    }
+    close(received_fd);
+
     if (send_raw_request(sockets[0], &sent, two_fds, 2)) {
         return fail("cannot send request with two descriptors");
     }
@@ -107,7 +119,7 @@ int main(void)
                                &received_tbset,
                                error, sizeof(error)) ||
         !strstr(error, "descriptor count")) {
-        return fail("flush-source with two descriptors was accepted");
+        return fail("one-FD request with two descriptors was accepted");
     }
 
     int many_fds[5] = { source, source, source, source, source };

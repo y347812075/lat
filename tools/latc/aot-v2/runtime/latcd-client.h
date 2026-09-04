@@ -13,5 +13,8 @@ int latcd_client_flush_source(const char *socket_path, int source_fd,
                               char *error, size_t error_size);
 int latcd_client_flush_all(const char *socket_path, uint64_t request_id,
                            char *error, size_t error_size);
+int latcd_client_precompile_source(const char *socket_path, int source_fd,
+                                   uint64_t request_id,
+                                   char *error, size_t error_size);
 
 #endif

@@ -19,6 +19,7 @@ enum LatcdOperation {
     LATCD_OP_SUBMIT_KEYS = 1,
     LATCD_OP_FLUSH_SOURCE = 2,
     LATCD_OP_FLUSH_ALL = 3,
+    LATCD_OP_PRECOMPILE_SOURCE = 4,
 };
 
 enum LatcdStatus {

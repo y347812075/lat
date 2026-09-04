@@ -98,6 +98,39 @@ int main(void)
         !WIFEXITED(submit_status) || WEXITSTATUS(submit_status)) {
         return fail("submission was not acknowledged");
     }
+    pid_t precompiler = fork();
+    if (precompiler < 0) {
+        return fail("cannot fork precompiler");
+    }
+    if (!precompiler) {
+        char error[128] = {0};
+        int result = latcd_client_precompile_source(path, source, 44,
+                                                     error, sizeof(error));
+        if (result) fprintf(stderr, "test-latcd-client: %s\n", error);
+        _exit(result ? 1 : 0);
+    }
+    client = accept4(server, NULL, NULL, SOCK_CLOEXEC);
+    int precompile_source = -1, no_keys = -1;
+    char receive_error[128] = {0};
+    if (client < 0 || latcd_receive_request(client, &request,
+                                             &precompile_source, &no_keys,
+                                             receive_error,
+                                             sizeof(receive_error)) ||
+        request.operation != LATCD_OP_PRECOMPILE_SOURCE ||
+        request.request_id != 44 || precompile_source < 0 || no_keys >= 0) {
+        return fail("received request does not match precompile");
+    }
+    response.request_id = request.request_id;
+    if (send(client, &response, sizeof(response), MSG_NOSIGNAL) !=
+        sizeof(response)) {
+        return fail("cannot acknowledge precompile");
+    }
+    close(precompile_source);
+    close(client);
+    if (waitpid(precompiler, &submit_status, 0) != precompiler ||
+        !WIFEXITED(submit_status) || WEXITSTATUS(submit_status)) {
+        return fail("precompile was not acknowledged");
+    }
     close(source);
     close(server);
     unlink(path);
