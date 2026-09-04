@@ -68,7 +68,7 @@ static const LatAotTbV2 fixture_tbs[] = {
         .guest_rva = 0x1000,
         .host_offset = 0,
         .host_size = 28,
-        .flags = LAT_AOT_TB_CODE64,
+        .flags = LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL,
     },
 };
 

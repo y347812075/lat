@@ -40,6 +40,8 @@ static void test_program(const char *path)
     const CfgProgramFunction *fallthrough_check = NULL;
     const CfgProgramFunction *fallthrough_next = NULL;
     const CfgProgramFunction *zero_sized = NULL;
+    const CfgProgramFunction *init_array = NULL;
+    const CfgProgramFunction *array_direct_target = NULL;
     for (size_t i = 0; i < p.function_count; i++) {
         if (strcmp(p.functions[i].name, "_start") == 0) start = &p.functions[i];
         if (strcmp(p.functions[i].name, "jump_source") == 0)
@@ -60,6 +62,10 @@ static void test_program(const char *path)
             fallthrough_next = &p.functions[i];
         if (strcmp(p.functions[i].name, "zero_sized") == 0)
             zero_sized = &p.functions[i];
+        if (strncmp(p.functions[i].name, "init_array_", 11) == 0)
+            init_array = &p.functions[i];
+        if (strncmp(p.functions[i].name, "direct_target_", 14) == 0)
+            array_direct_target = &p.functions[i];
     }
     assert(start && start->tb_count >= 4);
     int call = 0, jcc = 0, icall = 0, syscall = 0;
@@ -144,6 +150,9 @@ static void test_program(const char *path)
     }
     assert(found_cross_symbol_fallthrough);
     assert(zero_sized && zero_sized->size > 0 && zero_sized->tb_count == 1);
+    assert(init_array && init_array->size > 0 && init_array->tb_count == 1);
+    assert(array_direct_target && array_direct_target->size > 0 &&
+           array_direct_target->tb_count == 1);
     cfg_program_destroy(&p);
 }
 

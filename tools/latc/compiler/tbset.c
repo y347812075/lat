@@ -565,15 +565,30 @@ static int select_all_parallel_cfg(CfgProgram *program, size_t template_count,
                          program->tb_count) {
         return fail(error, error_size, "too many parallel CFG blocks");
     }
+    PcSet parallel_pcs = {0};
+    if (pc_set_init(&parallel_pcs, program->tb_count + template_count)) {
+        return fail(error, error_size,
+                    "out of memory indexing parallel CFG blocks");
+    }
+    for (size_t i = 0; i < program->tb_count; i++) {
+        if (program->tbs[i].selected &&
+            (program->tbs[i].semantic_flags & CFG_TB_PARALLEL)) {
+            pc_set_add(&parallel_pcs, program->tbs[i].start);
+        }
+    }
     CfgTb *expanded = realloc(
         program->tbs,
         (program->tb_count + template_count) * sizeof(*expanded));
     if (!expanded && template_count) {
+        pc_set_destroy(&parallel_pcs);
         return fail(error, error_size,
                     "out of memory adding parallel CFG blocks");
     }
     program->tbs = expanded;
     for (size_t i = 0; i < template_count; i++) {
+        if (pc_set_contains(&parallel_pcs, program->tbs[i].start)) {
+            continue;
+        }
         CfgTb added = program->tbs[i];
         added.selected = true;
         added.semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
@@ -581,7 +596,9 @@ static int select_all_parallel_cfg(CfgProgram *program, size_t template_count,
         added.first_edge = 0;
         added.edge_count = 0;
         program->tbs[program->tb_count++] = added;
+        pc_set_add(&parallel_pcs, added.start);
     }
+    pc_set_destroy(&parallel_pcs);
     return 0;
 }
 
@@ -601,14 +618,14 @@ int latc_tbset_apply(const char *path, const char *source_path,
     size_t hit = 0, miss = 0, skip = 0;
     bool has_parallel = false;
     size_t template_count = program->tb_count;
-    if (set.count > ((SIZE_MAX / sizeof(*program->tbs)) -
-                     program->tb_count) / 2) {
+    if (set.count > (SIZE_MAX / sizeof(*program->tbs)) -
+                    program->tb_count) {
         lat_tb_key_set_destroy(&set);
         return fail(error, error_size, "too many TB key entries");
     }
     CfgTb *reserved = realloc(
         program->tbs,
-        (program->tb_count + set.count * 2) * sizeof(*reserved));
+        (program->tb_count + set.count) * sizeof(*reserved));
     if (!reserved && set.count) {
         lat_tb_key_set_destroy(&set);
         return fail(error, error_size, "out of memory adding TB key entries");
@@ -647,9 +664,6 @@ int latc_tbset_apply(const char *path, const char *source_path,
         template_lookup(templates, template_count, pc, key->flags,
                         &template_index, &exact_index);
         bool found = exact_index != SIZE_MAX;
-        if (template_index != SIZE_MAX) {
-            program->tbs[template_index].selected = true;
-        }
         /* The on-disk key set is already unique.  Only pre-existing CFG
          * templates can match; entries appended by this loop cannot. */
         if (found) {
@@ -658,8 +672,8 @@ int latc_tbset_apply(const char *path, const char *source_path,
         if (found) {
             hit++;
         } else if (cfg_program_address_is_executable(program, pc)) {
-            CfgTb added = template_index != SIZE_MAX ?
-                program->tbs[template_index] : (CfgTb) {
+                CfgTb added = template_index != SIZE_MAX ?
+                    program->tbs[template_index] : (CfgTb) {
                     .start = pc,
                     .end = pc + 1,
                     .terminator_pc = pc,
@@ -683,36 +697,6 @@ int latc_tbset_apply(const char *path, const char *source_path,
             free(templates);
             lat_tb_key_set_destroy(&set);
             return -1;
-        }
-
-        /* A process can switch CF_PARALLEL after creating a thread or forking.
-         * Compile both semantic variants for every observed address so a later
-         * run does not need another profile merely because that transition
-         * happened at a different point in the workload. */
-        uint32_t alternate_flags = key->flags ^ CFG_TB_PARALLEL;
-        if ((found || cfg_program_address_is_executable(program, pc)) &&
-            !lat_tb_key_set_contains(&set, key->guest_rva,
-                                     alternate_flags)) {
-            size_t alternate_template;
-            size_t alternate_exact;
-            template_lookup(templates, template_count, pc, alternate_flags,
-                            &alternate_template, &alternate_exact);
-            if (alternate_exact != SIZE_MAX) {
-                program->tbs[alternate_exact].selected = true;
-            } else {
-                CfgTb added = alternate_template != SIZE_MAX ?
-                    program->tbs[alternate_template] : (CfgTb) {
-                        .start = pc,
-                        .end = pc + 1,
-                        .terminator_pc = pc,
-                        .terminator = CFG_TB_FALLTHROUGH,
-                    };
-                added.selected = true;
-                added.semantic_flags = alternate_flags;
-                added.first_edge = 0;
-                added.edge_count = 0;
-                program->tbs[program->tb_count++] = added;
-            }
         }
     }
     if (has_parallel && add_parallel_dynamic_entries(
@@ -790,12 +774,10 @@ int latc_tbset_write_static(const char *path, const char *source_path,
                         error, error_size)) {
         return -1;
     }
-    size_t variants = 2;
-    if (program->tb_count > SIZE_MAX / variants ||
-        program->tb_count * variants > LAT_AOT_V2_TBSET_RECORD_LIMIT) {
+    if (program->tb_count > LAT_AOT_V2_TBSET_RECORD_LIMIT) {
         return fail(error, error_size, "too many static CFG blocks");
     }
-    set.count = program->tb_count * variants;
+    set.count = program->tb_count;
     set.keys = set.count ? calloc(set.count, sizeof(*set.keys)) : NULL;
     if (set.count && !set.keys) {
         return fail(error, error_size,
@@ -809,10 +791,6 @@ int latc_tbset_write_static(const char *path, const char *source_path,
                         "static CFG block precedes preferred guest base");
         }
         uint64_t rva = program->tbs[i].start - load_base;
-        set.keys[output++] = (LatTbKey) {
-            .guest_rva = rva,
-            .flags = CFG_TB_CODE64,
-        };
         set.keys[output++] = (LatTbKey) {
             .guest_rva = rva,
             .flags = CFG_TB_CODE64 | CFG_TB_PARALLEL,

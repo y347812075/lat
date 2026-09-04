@@ -133,6 +133,19 @@ zero_sized_next:
     ret
 .size zero_sized_next, .-zero_sized_next
 
+/* Neither entry has STT_FUNC or unwind metadata.  The array discovers the
+ * second entry, whose direct jump must pull the first into the CFG closure. */
+init_array_direct_target:
+    ret
+
+init_array_only:
+    jmp init_array_direct_target
+
+.type init_array_boundary,@function
+init_array_boundary:
+    ret
+.size init_array_boundary, .-init_array_boundary
+
 /* Deliberately omit STT_FUNC symbols, as in a static glibc .plt section. */
 .section .plt,"ax",@progbits
 synthetic_plt_first:
@@ -146,5 +159,8 @@ synthetic_plt_second:
 .align 8
 synthetic_plt_target:
     .quad callee
+
+.section .init_array,"aw",@init_array
+    .quad init_array_only
 
 .section .note.GNU-stack,"",@progbits

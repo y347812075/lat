@@ -334,8 +334,9 @@ reads `PT_INTERP` and recursively resolves `DT_NEEDED`, using each object's
 `RPATH`/`RUNPATH`, the rootfs `ld.so.cache`, and the standard x86-64 library
 directories. It does not scan the rootfs or guess libraries loaded later by
 `dlopen()`. It first resolves and statically analyzes every discovered ELF. If
-any one fails, it submits nothing. Static analysis emits both normal and
-`CF_PARALLEL` TB variants. After all analyses succeed, the command submits each
+any one fails, it submits nothing. Static analysis emits one `CF_PARALLEL` TB
+variant per address; single-thread and multi-thread execution use that same
+translation. After all analyses succeed, the command submits each
 complete TB set to the resident service and waits for `FLUSH_SOURCE` before it
 returns. A later runtime submission uses the same union-and-incremental-publish
 path, so dynamically discovered TBs extend the static base instead of replacing

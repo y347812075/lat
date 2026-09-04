@@ -2,6 +2,7 @@
 
 #include "function_symbols.h"
 
+#include "cfg_decoder.h"
 #include "common.h"
 
 /*
@@ -295,6 +296,155 @@ static bool special_section_func(const ElfFile *elf, const char *section_name,
     return true;
 }
 
+static bool add_root_function(const ElfFile *elf, FuncVec *funcs,
+                              uint64_t addr, const char *root_name)
+{
+    unsigned shndx = 0;
+    if (!addr || !elf_find_exec_section_for_range(elf, addr, 1, &shndx)) {
+        return false;
+    }
+    for (size_t i = 0; i < funcs->n; i++) {
+        uint64_t end = funcs->v[i].addr + funcs->v[i].size;
+        if (end >= funcs->v[i].addr && addr >= funcs->v[i].addr &&
+            addr < end) {
+            return false;
+        }
+    }
+
+    char name[64];
+    snprintf(name, sizeof(name), "%s_%016" PRIx64, root_name, addr);
+    func_push(funcs, (FuncSym){
+        .name = xstrdup(name),
+        .addr = addr,
+        .size = 0,
+        .shndx = shndx,
+    });
+    return true;
+}
+
+static void load_array_relocations(const ElfFile *elf,
+                                   const Elf64_Shdr *array,
+                                   const char *array_name, FuncVec *funcs)
+{
+    uint64_t array_end = array->sh_addr + array->sh_size;
+    if (array_end < array->sh_addr) {
+        return;
+    }
+
+    for (unsigned si = 0; si < elf->eh->e_shnum; si++) {
+        const Elf64_Shdr *relsec = &elf->sh[si];
+        if (relsec->sh_type != SHT_RELA ||
+            relsec->sh_entsize != sizeof(Elf64_Rela) ||
+            !range_ok(elf->size, relsec->sh_offset, relsec->sh_size)) {
+            continue;
+        }
+
+        const Elf64_Sym *symbols = NULL;
+        size_t symbol_count = 0;
+        if (relsec->sh_link < elf->eh->e_shnum) {
+            const Elf64_Shdr *symsec = &elf->sh[relsec->sh_link];
+            if ((symsec->sh_type == SHT_SYMTAB ||
+                 symsec->sh_type == SHT_DYNSYM) &&
+                symsec->sh_entsize == sizeof(Elf64_Sym) &&
+                range_ok(elf->size, symsec->sh_offset, symsec->sh_size)) {
+                symbols = (const void *)(elf->data + symsec->sh_offset);
+                symbol_count = symsec->sh_size / sizeof(*symbols);
+            }
+        }
+
+        const Elf64_Rela *relas =
+            (const void *)(elf->data + relsec->sh_offset);
+        size_t count = relsec->sh_size / sizeof(*relas);
+        for (size_t i = 0; i < count; i++) {
+            if (relas[i].r_offset < array->sh_addr ||
+                relas[i].r_offset >= array_end) {
+                continue;
+            }
+
+            unsigned type = ELF64_R_TYPE(relas[i].r_info);
+            uint64_t addr = 0;
+            if (type == R_X86_64_RELATIVE || type == R_X86_64_IRELATIVE) {
+                addr = (uint64_t)relas[i].r_addend;
+            } else if (type == R_X86_64_64 && symbols) {
+                size_t sym = ELF64_R_SYM(relas[i].r_info);
+                if (sym < symbol_count && symbols[sym].st_shndx != SHN_UNDEF) {
+                    addr = symbols[sym].st_value + relas[i].r_addend;
+                }
+            }
+            add_root_function(elf, funcs, addr, array_name);
+        }
+    }
+}
+
+static void load_function_array(const ElfFile *elf, const char *section_name,
+                                const char *array_name, FuncVec *funcs)
+{
+    const Elf64_Shdr *array =
+        elf_find_section_by_name(elf, section_name, NULL);
+    if (!array || array->sh_size < sizeof(uint64_t) ||
+        !range_ok(elf->size, array->sh_offset, array->sh_size)) {
+        return;
+    }
+
+    const uint8_t *entries = elf->data + array->sh_offset;
+    for (uint64_t off = 0; off + sizeof(uint64_t) <= array->sh_size;
+         off += sizeof(uint64_t)) {
+        add_root_function(elf, funcs, rd64(entries + off), array_name);
+    }
+    load_array_relocations(elf, array, array_name, funcs);
+}
+
+static void load_direct_target_closure(const ElfFile *elf, FuncVec *funcs)
+{
+    size_t work_count = 0;
+    size_t work_cap = funcs->n ? funcs->n : 1;
+    uint64_t *work = xmalloc(work_cap * sizeof(*work));
+    for (size_t i = 0; i < funcs->n; i++) {
+        if (!strncmp(funcs->v[i].name, "preinit_array_", 14) ||
+            !strncmp(funcs->v[i].name, "init_array_", 11) ||
+            !strncmp(funcs->v[i].name, "fini_array_", 11)) {
+            work[work_count++] = funcs->v[i].addr;
+        }
+    }
+
+    for (size_t next = 0; next < work_count; next++) {
+        const FuncSym *fn = funcs_find_by_entry(funcs, work[next]);
+        uint64_t file_off;
+        if (!fn || !fn->size || !elf_function_file_offset(
+                elf, fn->addr, fn->size, fn->shndx, &file_off)) {
+            continue;
+        }
+        uint64_t fn_addr = fn->addr;
+        size_t fn_size = (size_t)fn->size;
+        const uint8_t *buf = elf->data + file_off;
+        for (size_t off = 0; off < fn_size;) {
+            Insn in = cfg_decode_insn(buf, fn_size, fn_addr, off);
+            if (!in.len) in.len = 1;
+            off += in.len;
+            if (!in.has_target ||
+                (in.kind != INSN_CALL && in.kind != INSN_JCC &&
+                 in.kind != INSN_JMP) ||
+                funcs_find_containing(funcs, in.target)) {
+                continue;
+            }
+            if (!add_root_function(elf, funcs, in.target, "direct_target")) {
+                continue;
+            }
+            dedup_functions(funcs);
+            infer_zero_function_sizes(elf, funcs);
+            if (work_count == work_cap) {
+                work_cap *= 2;
+                uint64_t *next_work =
+                    realloc(work, work_cap * sizeof(*work));
+                if (!next_work) die_errno("realloc direct target worklist");
+                work = next_work;
+            }
+            work[work_count++] = in.target;
+        }
+    }
+    free(work);
+}
+
 static void load_special_section_functions(const ElfFile *elf, FuncVec *funcs)
 {
     FuncSym fn;
@@ -313,7 +463,12 @@ static void load_special_section_functions(const ElfFile *elf, FuncVec *funcs)
     if (special_section_func(elf, ".plt.sec", "_plt_sec", &fn)) {
         func_push(funcs, fn);
     }
+    load_function_array(elf, ".preinit_array", "preinit_array", funcs);
+    load_function_array(elf, ".init_array", "init_array", funcs);
+    load_function_array(elf, ".fini_array", "fini_array", funcs);
     dedup_functions(funcs);
+    infer_zero_function_sizes(elf, funcs);
+    load_direct_target_closure(elf, funcs);
 }
 
 /*

@@ -36,8 +36,7 @@ static int key_compare(const void *left, const void *right)
 static int key_valid(const LatTbKey *key)
 {
     return !key->reserved &&
-        (key->flags == LAT_AOT_TB_CODE64 ||
-         key->flags == (LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL));
+        key->flags == (LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL);
 }
 
 void lat_tb_key_set_destroy(LatTbKeySet *set)

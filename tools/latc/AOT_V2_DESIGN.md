@@ -635,8 +635,9 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
 - Offline precompilation starts from one absolute guest ELF path and follows
   only `PT_INTERP` plus recursive `DT_NEEDED` inside the selected x86 rootfs.
   It resolves and statically analyzes the complete dependency set before the
-  first request is sent. Each static CFG block produces both normal and
-  `CF_PARALLEL` keys. The client then uses the existing `SUBMIT_KEYS` and
+  first request is sent. Each static CFG block produces one `CF_PARALLEL` key;
+  that conservative translation is also used by single-thread execution. The
+  client then uses the existing `SUBMIT_KEYS` and
   `FLUSH_SOURCE` requests for every ELF; no separate cache or protocol exists.
   Libraries loaded later with `dlopen()` are added by the same runtime
   incremental path.
@@ -683,9 +684,10 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
   generation, and invalidates dispatch entries. A cached target is usable only
   while its saved instance, generation and translation flags still match.
 - **TB-key set** is the per-source set of observed guest RVA and semantic flag
-  pairs. It contains no execution count. `latcd` serializes merges for one
-  source, compiles an immutable snapshot, and uses its digest in the module
-  name.
+  pairs. It contains no execution count. `latcd` serializes updates for one
+  source, translates the first immutable snapshot, then translates and merges
+  only keys absent from the current module. The complete set digest names each
+  published generation.
 - **current** is `<source-sha>.current`, a version 2 JSON index naming one
   immutable module, one canonical native image, one complete TB-key set, and
   their source/codegen identity. No earlier manifest format is accepted.

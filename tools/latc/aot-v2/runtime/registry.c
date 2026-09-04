@@ -63,7 +63,6 @@ static const LatAotTbV2 *instance_find_tb(
     }
     uint64_t guest_rva = guest_pc - instance->guest_load_bias;
     const LatAotModuleV2 *module = instance->module->descriptor;
-retry:
     size_t left = 0;
     size_t right = (size_t)(module->tb_end - module->tb_begin);
     while (left < right) {
@@ -81,10 +80,6 @@ retry:
         if (tb->guest_rva == guest_rva && tb->flags == flags) {
             return tb;
         }
-    }
-    if (flags == LAT_AOT_TB_CODE64) {
-        flags |= LAT_AOT_TB_PARALLEL;
-        goto retry;
     }
     return NULL;
 }
