@@ -600,8 +600,9 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
 - The original x86 ELF is the only user-visible launch target. `binfmt_misc`
   or explicit `latx` starts LAT; AOT modules are internal cache artifacts.
 - One source x86 ELF has one exact merged TB-key set and one atomic manifest.
-  The manifest may name immutable incremental shards; missing keys use JIT and
-  are added to the same set.
+  The manifest names exactly one immutable AOT module, its canonical native
+  image, and the complete published TB-key set. Missing keys use JIT and are
+  added to the same set for the next publication.
 - AOT and JIT use the same register and CPU-state ABI. Dispatch may return
   either kind of TB and validates cached targets with module or TCG generation.
 - A TB key contains guest RVA, x86 code mode, parallel-safe variant, and stable
@@ -634,8 +635,9 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
 - The per-user compiler defaults to the online logical CPU count capped at
   eight workers. Different source ELFs compile in parallel; one source has at
   most one active compiler job.
-- Cache cleanup uses a capacity limit and LRU policy, preserves the current and
-  previous artifact for each variant, and keeps merged profiles independently.
+- Cache cleanup uses a capacity limit and LRU policy. It preserves the current
+  generation while a replacement is being built and removes the superseded
+  generation only after the replacement manifest is visible.
 - Given identical source, codegen, CPU variant, options, and TB-key-set digest,
   compilation must produce a byte-identical ELF without timestamps, temporary
   paths, process addresses, or random build IDs.
@@ -644,8 +646,9 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
 
 - **source** is the complete x86 ELF identified by SHA-256. A pathname is only
   diagnostic and never identifies cached code.
-- **module** is one immutable AOT ELF shard for a source, codegen identity and
-  exact TB-key-set digest. Host module text stays mapped until process exit.
+- **module** is the one immutable AOT ELF selected for a source, codegen
+  identity and exact TB-key-set digest. Host module text stays mapped until
+  process exit.
   A module that omits a requested TB variant is rejected before publication.
   Complex-application acceptance counts every executed file-backed ELF,
   including missing modules, and requires 100% AOT lookup coverage for each
@@ -663,8 +666,10 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
   pairs. It contains no execution count. `latcd` serializes merges for one
   source, compiles an immutable snapshot, and uses its digest in the module
   name.
-- **current** is `<source-sha>.current`, a small JSON index naming one immutable
-  module and its source/codegen identity. `latcd` writes it to a private
+- **current** is `<source-sha>.current`, a version 2 JSON index naming one
+  immutable module, one canonical native image, one complete TB-key set, and
+  their source/codegen identity. No earlier manifest format is accepted.
+  `latcd` writes it to a private
   temporary file, changes it to read-only, calls `fsync()`, atomically renames
   it over the old index, then synchronizes the cache directory. The cache owner
   lock prevents a second latcd from publishing concurrently.

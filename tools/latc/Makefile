@@ -341,6 +341,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  $(abspath $(BUILD)/tests/liblat-good.so) \
 	  $(abspath $(BUILD)/tests/liblat-bad.so)
 	$(BUILD)/tests/test-native-format $(BUILD)/tests/native-image
+	$(BUILD)/tests/test-native-format $(BUILD)/tests/base.native \
+	  $(BUILD)/tests/delta.native $(BUILD)/tests/merged.native
 	$(BUILD)/tests/test-native-relocate
 	$(BUILD)/tests/test-native-dispatch
 	$(BUILD)/tests/test-aot-v2-module-pack

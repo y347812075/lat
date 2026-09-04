@@ -2,6 +2,7 @@
 
 #include <elf.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,52 @@ static int invalid(char *error, size_t error_size, const char *format, ...)
 static int range_valid(uint64_t offset, uint64_t length, size_t size)
 {
     return offset <= size && length <= size - offset;
+}
+
+static uint64_t align_up(uint64_t value, uint64_t alignment)
+{
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+static int read_image(const char *path, unsigned char **data, size_t *size,
+                      char *error, size_t error_size)
+{
+    FILE *input = fopen(path, "rb");
+    if (!input) {
+        return invalid(error, error_size, "cannot open native image %s", path);
+    }
+    int result = -1;
+    if (fseek(input, 0, SEEK_END)) goto out;
+    long end = ftell(input);
+    if (end < 0 || fseek(input, 0, SEEK_SET)) goto out;
+    *size = (size_t)end;
+    if ((long)*size != end || !(*data = malloc(*size ? *size : 1)) ||
+        (*size && fread(*data, *size, 1, input) != 1)) {
+        goto out;
+    }
+    result = 0;
+out:
+    if (fclose(input) && !result) result = -1;
+    if (result) {
+        free(*data);
+        *data = NULL;
+        if (error && error_size && !error[0]) {
+            snprintf(error, error_size, "cannot read native image %s", path);
+        }
+    }
+    return result;
+}
+
+static int write_image(const char *path, const void *data, size_t size,
+                       char *error, size_t error_size)
+{
+    FILE *output = fopen(path, "wb");
+    int failed = !output || (size && fwrite(data, size, 1, output) != 1);
+    if (output && fclose(output)) failed = 1;
+    if (!failed) return 0;
+    invalid(error, error_size, "cannot write merged native image %s", path);
+    remove(path);
+    return -1;
 }
 
 static int tb_target_valid(const LatNativeTbV1 *tbs, uint64_t count,
@@ -221,6 +268,202 @@ int lat_native_image_validate(const void *data, size_t size,
         }
     }
     return 0;
+}
+
+int lat_native_image_merge_files(const char *base_path,
+                                 const char *delta_path,
+                                 const char *output_path,
+                                 char *error, size_t error_size)
+{
+    unsigned char *base_data = NULL;
+    unsigned char *delta_data = NULL;
+    unsigned char *output_data = NULL;
+    size_t base_size = 0, delta_size = 0;
+    int result = -1;
+
+    if (!base_path || !delta_path || !output_path ||
+        read_image(base_path, &base_data, &base_size, error, error_size) ||
+        read_image(delta_path, &delta_data, &delta_size, error, error_size) ||
+        lat_native_image_validate(base_data, base_size, error, error_size) ||
+        lat_native_image_validate(delta_data, delta_size, error, error_size)) {
+        goto out;
+    }
+    const LatNativeImageHeaderV2 *base = (const void *)base_data;
+    const LatNativeImageHeaderV2 *delta = (const void *)delta_data;
+    if (base->flags != delta->flags ||
+        base->guest_entry != delta->guest_entry ||
+        base->preferred_guest_base != delta->preferred_guest_base ||
+        base->guest_image_size != delta->guest_image_size ||
+        memcmp(base->guest_sha256, delta->guest_sha256,
+               sizeof(base->guest_sha256)) ||
+        strcmp(base->lat_build_id, delta->lat_build_id) ||
+        memcmp(base_data + base->guest_image_offset,
+               delta_data + delta->guest_image_offset,
+               base->guest_image_size)) {
+        invalid(error, error_size,
+                "native images do not describe the same guest and codegen");
+        goto out;
+    }
+    if (base->tb_count > UINT64_MAX - delta->tb_count ||
+        base->relocation_count > UINT64_MAX - delta->relocation_count ||
+        base->pc_map_count > UINT64_MAX - delta->pc_map_count ||
+        base->code_size > UINT64_MAX - 7) {
+        invalid(error, error_size, "merged native image is too large");
+        goto out;
+    }
+
+    uint64_t delta_code_offset = align_up(base->code_size, 8);
+    if (delta->code_size > UINT64_MAX - delta_code_offset) {
+        invalid(error, error_size, "merged native code is too large");
+        goto out;
+    }
+    const LatNativeTbV1 *base_tbs =
+        (const void *)(base_data + base->tb_table_offset);
+    const LatNativeTbV1 *delta_tbs =
+        (const void *)(delta_data + delta->tb_table_offset);
+    uint64_t duplicate_tbs = 0;
+    for (uint64_t bi = 0, di = 0;
+         bi < base->tb_count && di < delta->tb_count;) {
+        const LatNativeTbV1 *left = &base_tbs[bi];
+        const LatNativeTbV1 *right = &delta_tbs[di];
+        if (left->guest_pc == right->guest_pc && left->flags == right->flags) {
+            duplicate_tbs++;
+            bi++;
+            di++;
+        } else if (left->guest_pc < right->guest_pc ||
+                   (left->guest_pc == right->guest_pc &&
+                    left->flags < right->flags)) {
+            bi++;
+        } else {
+            di++;
+        }
+    }
+    if (duplicate_tbs == delta->tb_count) {
+        result = write_image(output_path, base_data, base_size,
+                             error, error_size);
+        goto out;
+    }
+
+    LatNativeImageHeaderV2 merged = *base;
+    merged.guest_image_offset = sizeof(merged);
+    merged.code_offset = align_up(merged.guest_image_offset +
+                                  merged.guest_image_size, 8);
+    merged.code_size = delta_code_offset + delta->code_size;
+    if (merged.code_offset > UINT64_MAX - merged.code_size - 7) {
+        invalid(error, error_size, "merged native image offsets overflow");
+        goto out;
+    }
+    merged.tb_table_offset = align_up(merged.code_offset + merged.code_size, 8);
+    merged.tb_count = base->tb_count + delta->tb_count - duplicate_tbs;
+    if (merged.tb_count > (UINT64_MAX - merged.tb_table_offset) /
+                          sizeof(LatNativeTbV1)) {
+        invalid(error, error_size, "merged native TB table is too large");
+        goto out;
+    }
+    merged.relocation_offset = merged.tb_table_offset +
+        merged.tb_count * sizeof(LatNativeTbV1);
+    merged.relocation_count = base->relocation_count +
+                              delta->relocation_count;
+    if (merged.relocation_count >
+        (UINT64_MAX - merged.relocation_offset) /
+            sizeof(LatNativeRelocationV1)) {
+        invalid(error, error_size,
+                "merged native relocation table is too large");
+        goto out;
+    }
+    merged.pc_map_offset = merged.relocation_offset +
+        merged.relocation_count * sizeof(LatNativeRelocationV1);
+    merged.pc_map_count = base->pc_map_count + delta->pc_map_count;
+    if (merged.pc_map_count >
+        (UINT64_MAX - merged.pc_map_offset) / sizeof(LatNativePcMapV2)) {
+        invalid(error, error_size, "merged native PC map is too large");
+        goto out;
+    }
+    uint64_t output_size64 = merged.pc_map_offset +
+        merged.pc_map_count * sizeof(LatNativePcMapV2);
+    size_t output_size = (size_t)output_size64;
+    if ((uint64_t)output_size != output_size64 ||
+        !(output_data = calloc(output_size ? output_size : 1, 1))) {
+        invalid(error, error_size, "cannot allocate merged native image");
+        goto out;
+    }
+
+    memcpy(output_data, &merged, sizeof(merged));
+    memcpy(output_data + merged.guest_image_offset,
+           base_data + base->guest_image_offset, base->guest_image_size);
+    memcpy(output_data + merged.code_offset,
+           base_data + base->code_offset, base->code_size);
+    memcpy(output_data + merged.code_offset + delta_code_offset,
+           delta_data + delta->code_offset, delta->code_size);
+
+    LatNativeTbV1 *merged_tbs =
+        (void *)(output_data + merged.tb_table_offset);
+    uint64_t bi = 0, di = 0, oi = 0;
+    while (bi < base->tb_count || di < delta->tb_count) {
+        bool take_base = di == delta->tb_count;
+        if (bi < base->tb_count && di < delta->tb_count) {
+            const LatNativeTbV1 *left = &base_tbs[bi];
+            const LatNativeTbV1 *right = &delta_tbs[di];
+            if (left->guest_pc == right->guest_pc &&
+                left->flags == right->flags) {
+                merged_tbs[oi++] = *left;
+                bi++;
+                di++;
+                continue;
+            }
+            take_base = left->guest_pc < right->guest_pc ||
+                (left->guest_pc == right->guest_pc &&
+                 left->flags < right->flags);
+        }
+        merged_tbs[oi] = take_base ? base_tbs[bi++] : delta_tbs[di++];
+        if (!take_base) merged_tbs[oi].code_offset += delta_code_offset;
+        oi++;
+    }
+    if (oi != merged.tb_count) {
+        invalid(error, error_size, "merged native TB count is inconsistent");
+        goto out;
+    }
+
+    const LatNativeRelocationV1 *base_relocations =
+        (const void *)(base_data + base->relocation_offset);
+    const LatNativeRelocationV1 *delta_relocations =
+        (const void *)(delta_data + delta->relocation_offset);
+    LatNativeRelocationV1 *merged_relocations =
+        (void *)(output_data + merged.relocation_offset);
+    memcpy(merged_relocations, base_relocations,
+           base->relocation_count * sizeof(*merged_relocations));
+    for (uint64_t i = 0; i < delta->relocation_count; i++) {
+        merged_relocations[base->relocation_count + i] = delta_relocations[i];
+        merged_relocations[base->relocation_count + i].code_offset +=
+            delta_code_offset;
+    }
+
+    const LatNativePcMapV2 *base_maps =
+        (const void *)(base_data + base->pc_map_offset);
+    const LatNativePcMapV2 *delta_maps =
+        (const void *)(delta_data + delta->pc_map_offset);
+    LatNativePcMapV2 *merged_maps =
+        (void *)(output_data + merged.pc_map_offset);
+    memcpy(merged_maps, base_maps, base->pc_map_count * sizeof(*merged_maps));
+    for (uint64_t i = 0; i < delta->pc_map_count; i++) {
+        merged_maps[base->pc_map_count + i] = delta_maps[i];
+        merged_maps[base->pc_map_count + i].host_offset_begin +=
+            delta_code_offset;
+        merged_maps[base->pc_map_count + i].host_offset_end +=
+            delta_code_offset;
+    }
+
+    if (lat_native_image_validate(output_data, output_size,
+                                  error, error_size)) {
+        goto out;
+    }
+    result = write_image(output_path, output_data, output_size,
+                         error, error_size);
+out:
+    free(output_data);
+    free(delta_data);
+    free(base_data);
+    return result;
 }
 
 int lat_native_image_inspect_file(const char *path,

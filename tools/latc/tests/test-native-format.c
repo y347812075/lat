@@ -83,6 +83,36 @@ int main(int argc, char **argv)
         fprintf(stderr, "valid image rejected: %s\n", error);
         return 1;
     }
+    if (argc == 4) {
+        if (write_image(argv[1], image, image_size)) return 1;
+        tb->guest_pc = 0x401010;
+        if (write_image(argv[2], image, image_size) ||
+            lat_native_image_merge_files(argv[1], argv[2], argv[3],
+                                         error, sizeof(error)) ||
+            lat_native_image_inspect_file(argv[3], header, error,
+                                          sizeof(error)) ||
+            header->tb_count != 2 || header->code_size != 64 ||
+            header->relocation_count != 2) {
+            fprintf(stderr, "cannot merge native images: %s\n", error);
+            return 1;
+        }
+        error[0] = '\0';
+        if (lat_native_image_merge_files(argv[1], argv[1], argv[3],
+                                         error, sizeof(error)) ||
+            lat_native_image_inspect_file(argv[3], header, error,
+                                          sizeof(error)) ||
+            header->tb_count != 1 || header->code_size != 32 ||
+            header->relocation_count != 1) {
+            fprintf(stderr, "cannot merge overlapping native TBs: %s\n",
+                    error);
+            return 1;
+        }
+        remove(argv[1]);
+        remove(argv[2]);
+        remove(argv[3]);
+        puts("test-native-format: PASS merge=2 overlap=deduplicated");
+        return 0;
+    }
     if (argc == 2) {
         if (write_image(argv[1], image, image_size)) {
             fprintf(stderr, "cannot write native image fixture\n");
@@ -135,7 +165,7 @@ int main(int argc, char **argv)
             return 1;
         }
     } else if (argc != 1) {
-        fprintf(stderr, "usage: %s [OUTPUT]\n", argv[0]);
+        fprintf(stderr, "usage: %s [OUTPUT | BASE DELTA MERGED]\n", argv[0]);
         return 2;
     }
     tb->code_size = 33;

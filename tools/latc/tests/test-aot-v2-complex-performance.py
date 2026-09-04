@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 
 
@@ -18,7 +19,7 @@ parser.add_argument("rootfs")
 parser.add_argument("cache")
 parser.add_argument("workdir")
 parser.add_argument("--rounds", type=int, default=5)
-parser.add_argument("--min-aot-percent", type=float, default=99.9)
+parser.add_argument("--min-aot-percent", type=float, default=100.0)
 parser.add_argument("--applications", nargs="+",
                     choices=("python", "git", "sqlite", "redis"),
                     default=("python", "git", "sqlite", "redis"))
@@ -38,7 +39,8 @@ def cache_manifest():
     root = pathlib.Path(args.cache)
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
-        tracked = (path.suffix in (".so", ".current", ".tbset", ".sha256"))
+        tracked = path.suffix in (
+            ".so", ".native", ".current", ".tbset", ".sha256")
         if path.is_file() and tracked:
             result[str(relative)] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
@@ -91,6 +93,7 @@ def run_coverage_validation(label):
     for application in args.applications:
         path = phase_work / "warm" / f"{application}-aot-coverage.json"
         coverage[application] = json.loads(path.read_text())
+    shutil.rmtree(phase_work / "cache")
     return coverage
 
 
@@ -124,6 +127,7 @@ for round_number in range(1, args.rounds + 1):
             raise SystemExit(
                 f"{mode} round {round_number} failed: {completed.returncode}")
         phase = json.loads((phase_work / mode / "result.json").read_text())
+        shutil.rmtree(phase_work / "cache")
         pair[mode] = phase
     pair["warm_to_jit"] = (pair["warm"]["application_total_ns"] /
                            pair["jit"]["application_total_ns"])
