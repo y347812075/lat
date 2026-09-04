@@ -327,9 +327,13 @@ every requested `(RVA, flags)` pair exists in that module.
 
 For each source ELF, the version 2 `current` manifest names exactly one `.so`,
 one canonical `.native` image, and one complete `.tbset`. The first publication
-translates the complete set. A later publication translates only newly added
-keys, merges that native image into the canonical image, and links one
-replacement `.so`. It does not keep a list of incremental modules. The three
+translates the complete set. A later publication subtracts the current module's
+actual TB table, translates only keys that the module does not contain, merges
+that native image into the canonical image, and links one replacement `.so`.
+If the module already contains every newly observed key, `latcd` publishes only
+the complete `.tbset` and manifest; it does not invoke translation or linking,
+and the `.so` and `.native` remain unchanged. It does not keep a list of
+incremental modules. The three
 immutable generation files are synchronized before an atomic manifest rename;
 only after that commit does `latcd` remove the superseded generation. A failed
 compile, merge, link, or pre-manifest publication leaves the prior manifest and
