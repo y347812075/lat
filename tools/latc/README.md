@@ -341,6 +341,17 @@ returns. A later runtime submission uses the same union-and-incremental-publish
 path, so dynamically discovered TBs extend the static base instead of replacing
 it.
 
+Runtime precompilation is opt-in. Set `LATX_AOT_V2_PRECOMPILE=1` together
+with `LATX_AOT_V2_CACHE_DIR` and `LATX_AOT_V2_LATCD_SOCKET`. When LAT maps an
+x86 ELF that has no compatible cached module, it sends that source FD to the
+resident `latcd` and blocks before guest execution. `latcd` derives the guest
+path from its configured `--x86-rootfs`, runs the same dependency precompile
+described above, and replies only after every accepted module is published.
+LAT then loads the newly published module into the current process. The
+default remains non-blocking incremental JIT collection when the variable is
+unset or is not exactly `1`. A precompile failure is reported and falls back
+to JIT unless strict AOT mode separately rejects the miss.
+
 The module tables are emitted as binary data and included directly by the
 assembler. They are not formatted as a large C source file for the host C
 compiler to parse. `latcd` accepts a cached module as a TB-set hit only when

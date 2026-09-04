@@ -120,3 +120,12 @@ int latcd_client_flush_all(const char *socket_path, uint64_t request_id,
                     LATCD_PRIORITY_STARTUP, request_id, 0,
                     error, error_size);
 }
+
+int latcd_client_precompile_source(const char *socket_path, int source_fd,
+                                   uint64_t request_id,
+                                   char *error, size_t error_size)
+{
+    return exchange(socket_path, source_fd, -1,
+                    LATCD_OP_PRECOMPILE_SOURCE, LATCD_PRIORITY_STARTUP,
+                    request_id, 0, error, error_size);
+}

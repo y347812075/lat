@@ -150,6 +150,13 @@ typedef struct LatcdWorker {
     uint32_t index;
 } LatcdWorker;
 
+typedef struct LatcdPrecompileRequest {
+    const LatcdConfig *config;
+    int client_fd;
+    int source_fd;
+    uint64_t request_id;
+} LatcdPrecompileRequest;
+
 static volatile sig_atomic_t stop_requested;
 static volatile sig_atomic_t compiler_process_groups[LATCD_MAX_WORKERS];
 static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -2795,6 +2802,100 @@ static int make_server(const char *path, char *error, size_t error_size)
 
 static int peer_is_current_user(int fd);
 
+static char *precompile_guest_path(const LatcdConfig *config, int source_fd,
+                                   char *error, size_t error_size)
+{
+    if (!config->x86_rootfs || !*config->x86_rootfs) {
+        fail(error, error_size,
+             "precompile requires latcd --x86-rootfs");
+        return NULL;
+    }
+    char *rootfs = realpath(config->x86_rootfs, NULL);
+    char descriptor[64];
+    snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", source_fd);
+    char *source = realpath(descriptor, NULL);
+    if (!rootfs || !source) {
+        fail(error, error_size, "cannot resolve precompile source: %s",
+             strerror(errno));
+        g_free(rootfs);
+        g_free(source);
+        return NULL;
+    }
+    size_t root_length = strlen(rootfs);
+    if (strncmp(source, rootfs, root_length) ||
+        (source[root_length] && source[root_length] != '/')) {
+        fail(error, error_size,
+             "precompile source is outside configured x86 rootfs");
+        g_free(rootfs);
+        g_free(source);
+        return NULL;
+    }
+    char *guest = g_strdup(source[root_length] ? source + root_length : "/");
+    g_free(rootfs);
+    g_free(source);
+    return guest;
+}
+
+static void precompile_request_worker(gpointer data, gpointer user_data)
+{
+    (void)user_data;
+    LatcdPrecompileRequest *work = data;
+    LatcdResponseV2 response;
+    response_init(&response, work->request_id);
+    char error[sizeof(response.message)] = {0};
+    char *guest = precompile_guest_path(work->config, work->source_fd,
+                                        error, sizeof(error));
+    if (guest && hash_source(work->source_fd, work->config->max_input,
+                             response.source_sha256,
+                             error, sizeof(error))) {
+        g_free(guest);
+        guest = NULL;
+    }
+    if (guest) {
+        char *executable = g_file_read_link("/proc/self/exe", NULL);
+        char jobs[16];
+        snprintf(jobs, sizeof(jobs), "%u",
+                 MIN(work->config->workers, LATCD_AUTO_WORKERS_MAX));
+        char *arguments[] = {
+            executable, (char *)"--precompile",
+            (char *)"--socket", (char *)work->config->socket_path,
+            (char *)"--x86-rootfs", (char *)work->config->x86_rootfs,
+            (char *)"--latc", (char *)work->config->compiler,
+            (char *)"--jobs", jobs, guest, NULL,
+        };
+        gint wait_status = 0;
+        gchar *standard_error = NULL;
+        GError *gerror = NULL;
+        bool spawned = executable && g_spawn_sync(
+            NULL, arguments, NULL, G_SPAWN_STDOUT_TO_DEV_NULL,
+            NULL, NULL, NULL, &standard_error, &wait_status, &gerror);
+        if (spawned && g_spawn_check_wait_status(wait_status, &gerror)) {
+            response.status = LATCD_STATUS_OK;
+            g_strlcpy(response.message, "precompile published",
+                      sizeof(response.message));
+        } else {
+            response.status = LATCD_STATUS_COMPILE_FAILED;
+            g_strlcpy(response.message,
+                      gerror ? gerror->message :
+                      (standard_error && *standard_error ? standard_error :
+                       "precompile failed"),
+                      sizeof(response.message));
+        }
+        g_clear_error(&gerror);
+        g_free(standard_error);
+        g_free(executable);
+    } else {
+        response.status = LATCD_STATUS_BAD_SOURCE;
+        g_strlcpy(response.message, error[0] ? error : "bad source",
+                  sizeof(response.message));
+    }
+    latcd_send_response(work->client_fd, &response, NULL, 0);
+    close(work->source_fd);
+    close(work->client_fd);
+    g_free(guest);
+    g_free(work);
+}
+
 static int run_once(const LatcdConfig *config)
 {
     char error[256] = {0};
@@ -2945,6 +3046,15 @@ static int run_service(const LatcdConfig *config)
     sigaction(SIGINT, &action, NULL);
     sigaction(SIGTERM, &action, NULL);
     stop_requested = 0;
+    GError *pool_error = NULL;
+    GThreadPool *precompile_pool = g_thread_pool_new(
+        precompile_request_worker, NULL, 1, FALSE, &pool_error);
+    if (!precompile_pool) {
+        fprintf(stderr, "latcd: cannot start precompile worker: %s\n",
+                pool_error ? pool_error->message : "unknown error");
+        g_clear_error(&pool_error);
+        stop_requested = 1;
+    }
     while (!stop_requested) {
         struct pollfd poll_fd = { .fd = server, .events = POLLIN };
         int available = poll(&poll_fd, 1, 250);
@@ -2963,6 +3073,7 @@ static int run_service(const LatcdConfig *config)
         response_init(&response, 0);
         int source = -1;
         int tbset = -1;
+        bool handed_off = false;
         if (!peer_is_current_user(client) || !request_is_ready(client)) {
             response.status = LATCD_STATUS_BAD_REQUEST;
             g_strlcpy(response.message, "request user does not own latcd",
@@ -2974,9 +3085,34 @@ static int run_service(const LatcdConfig *config)
         } else if (request.operation == LATCD_OP_SUBMIT_KEYS) {
             service_queue_request(&service, source, tbset, &request,
                                   &response);
+        } else if (request.operation == LATCD_OP_PRECOMPILE_SOURCE) {
+            LatcdPrecompileRequest *work = g_new0(
+                LatcdPrecompileRequest, 1);
+            if (work) {
+                *work = (LatcdPrecompileRequest) {
+                    .config = config,
+                    .client_fd = client,
+                    .source_fd = source,
+                    .request_id = request.request_id,
+                };
+                if (g_thread_pool_push(precompile_pool, work, NULL)) {
+                    handed_off = true;
+                } else {
+                    g_free(work);
+                    response.status = LATCD_STATUS_QUEUE_FULL;
+                    g_strlcpy(response.message,
+                              "cannot queue precompile request",
+                              sizeof(response.message));
+                }
+            } else {
+                response.status = LATCD_STATUS_QUEUE_FULL;
+                g_strlcpy(response.message, "out of memory",
+                          sizeof(response.message));
+            }
         } else {
             service_flush_request(&service, source, &request, &response);
         }
+        if (handed_off) continue;
         latcd_send_response(client, &response, NULL, 0);
         if (source >= 0) {
             close(source);
@@ -2988,6 +3124,9 @@ static int run_service(const LatcdConfig *config)
     }
     close(server);
     unlink(config->socket_path);
+    if (precompile_pool) {
+        g_thread_pool_free(precompile_pool, FALSE, TRUE);
+    }
     pthread_mutex_lock(&service.lock);
     service.stopping = 1;
     for (guint i = 0; i < service.queue->len; i++) {

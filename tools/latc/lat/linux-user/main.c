@@ -1451,7 +1451,7 @@ int main(int argc, char **argv, char **envp)
         "LATX_AOT_V2_SOURCE", "LATX_AOT_V2_TEST_HWCAP",
         "LATX_AOT_V2_TEST_LIFECYCLE_ROUNDS",
         "LATX_AOT_V2_TEST_SIGNAL_INVALIDATION_RACE",
-        "LATX_AOT_V2_TRACE_MISSES", NULL,
+        "LATX_AOT_V2_TRACE_MISSES", "LATX_AOT_V2_PRECOMPILE", NULL,
     };
     for (i = 0; lat_internal_environment[i]; i++) {
         (void)envlist_unsetenv(envlist, lat_internal_environment[i]);

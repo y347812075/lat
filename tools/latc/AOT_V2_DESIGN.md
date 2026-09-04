@@ -640,6 +640,14 @@ Reference: [Apple Platform Security: Rosetta 2 on a Mac with Apple silicon](http
   `FLUSH_SOURCE` requests for every ELF; no separate cache or protocol exists.
   Libraries loaded later with `dlopen()` are added by the same runtime
   incremental path.
+- Runtime precompilation is disabled by default. With
+  `LATX_AOT_V2_PRECOMPILE=1`, the loader sends one source FD when it first maps
+  an ELF without a compatible module and waits for `latcd`. The daemon maps
+  the FD back into its configured x86 rootfs, performs the same full dependency
+  analysis, publishes through the normal TB-set queue, and acknowledges only
+  after publication. The waiting LAT process retries module registration
+  before it executes guest code. Failure leaves JIT available unless strict
+  AOT is also requested.
 - The compile delta is the accepted key union minus the TB table in the current
   module, not minus the previously observed TB-key set. If static CFG already
   put all newly observed keys in the module, `latcd` atomically publishes the
