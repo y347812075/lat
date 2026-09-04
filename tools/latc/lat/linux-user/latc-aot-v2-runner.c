@@ -1452,38 +1452,30 @@ static GPtrArray *read_module_manifest(const char *cache,
         return NULL;
     }
     g_free(index_path);
-    if (!size || size >= 4096 || !strstr(contents, "\"version\":1")) {
+    if (!size || size >= 4096 || !strstr(contents, "\"version\":2")) {
         snprintf(error, error_size, "AOT v2 module manifest is invalid");
         g_free(contents);
         errno = ENOEXEC;
         return NULL;
     }
-    char *cursor = strstr(contents, "\"modules\":[");
+    char *cursor = strstr(contents, "\"module\":\"");
     if (!cursor) {
-        snprintf(error, error_size, "AOT v2 module manifest has no modules");
+        snprintf(error, error_size, "AOT v2 module manifest has no module");
         g_free(contents);
         errno = ENOEXEC;
         return NULL;
     }
-    cursor += strlen("\"modules\":[");
+    cursor += strlen("\"module\":\"");
     GPtrArray *modules = g_ptr_array_new_with_free_func(g_free);
-    while (*cursor && *cursor != ']') {
-        while (*cursor == ' ' || *cursor == '\t' || *cursor == ',') cursor++;
-        if (*cursor != '\"') break;
-        char *end = strchr(++cursor, '\"');
-        if (!end || end == cursor || end - cursor >= 192 ||
-            memchr(cursor, '/', end - cursor) || end - cursor <= 3 ||
-            memcmp(end - 3, ".so", 3) ||
-            strncmp(cursor, source_hex, 64)) {
-            break;
-        }
+    char *end = strchr(cursor, '\"');
+    if (end && end != cursor && end - cursor < 192 &&
+        !memchr(cursor, '/', end - cursor) && end - cursor > 3 &&
+        !memcmp(end - 3, ".so", 3) && !strncmp(cursor, source_hex, 64)) {
         g_ptr_array_add(modules, g_strndup(cursor, end - cursor));
-        if (modules->len > 8) break;
-        cursor = end + 1;
     }
     g_free(contents);
-    if (!modules->len || modules->len > 8 || *cursor != ']') {
-        snprintf(error, error_size, "AOT v2 module manifest list is invalid");
+    if (modules->len != 1) {
+        snprintf(error, error_size, "AOT v2 module manifest is invalid");
         g_ptr_array_free(modules, TRUE);
         errno = ENOEXEC;
         return NULL;

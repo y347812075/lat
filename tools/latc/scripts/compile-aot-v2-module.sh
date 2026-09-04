@@ -26,8 +26,17 @@ else
         "$latc" "$runner" "$guest" \
         "$work/module.latnative" >/dev/null
 fi
-"$script_dir/link-aot-v2-module.sh" "$latc" "$work/module.latnative" \
+native_image=$work/module.latnative
+if [ -n "${LATC_NATIVE_BASE:-}" ]; then
+    "$latc" merge-native "$LATC_NATIVE_BASE" "$native_image" \
+        -o "$work/merged.latnative"
+    native_image=$work/merged.latnative
+fi
+"$script_dir/link-aot-v2-module.sh" "$latc" "$native_image" \
     "$runtime_dir" "$output"
+if [ -n "${LATC_NATIVE_OUTPUT:-}" ]; then
+    cp "$native_image" "$LATC_NATIVE_OUTPUT"
+fi
 if [ "${LATC_SKIP_FINAL_INSPECT:-0}" -ne 1 ]; then
     "$latc" inspect-module --json "$output"
 fi

@@ -26,6 +26,7 @@ static void usage(const char *name)
             "  %s inspect [--json] BUNDLE\n", name, name, name);
     fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
+    fprintf(stderr, "  %s merge-native BASE DELTA -o OUTPUT\n", name);
     fprintf(stderr, "  %s emit-aot-v2 NATIVE_IMAGE OUTPUT_DIRECTORY\n",
             name);
     fprintf(stderr,
@@ -389,6 +390,18 @@ int main(int argc, char **argv)
         if (argc != 3) { usage(argv[0]); return 2; }
         if (lat_native_image_mark_x86_static_file(argv[2], error,
                                                   sizeof(error))) {
+            fprintf(stderr, "latc: %s\n", error);
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(argv[1], "merge-native") == 0) {
+        const char *output = NULL;
+        char error[256] = {0};
+        if (argc == 6 && !strcmp(argv[4], "-o")) output = argv[5];
+        if (!output) { usage(argv[0]); return 2; }
+        if (lat_native_image_merge_files(argv[2], argv[3], output,
+                                         error, sizeof(error))) {
             fprintf(stderr, "latc: %s\n", error);
             return 1;
         }

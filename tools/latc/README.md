@@ -325,6 +325,16 @@ assembler. They are not formatted as a large C source file for the host C
 compiler to parse. `latcd` accepts a cached module as a TB-set hit only when
 every requested `(RVA, flags)` pair exists in that module.
 
+For each source ELF, the version 2 `current` manifest names exactly one `.so`,
+one canonical `.native` image, and one complete `.tbset`. The first publication
+translates the complete set. A later publication translates only newly added
+keys, merges that native image into the canonical image, and links one
+replacement `.so`. It does not keep a list of incremental modules. The three
+immutable generation files are synchronized before an atomic manifest rename;
+only after that commit does `latcd` remove the superseded generation. A failed
+compile, merge, link, or pre-manifest publication leaves the prior manifest and
+all files it names unchanged. This manifest has no older-format parser.
+
 On LoongArch, validate a copied LAT runner and real x86 guest with:
 
 ```sh
@@ -432,7 +442,9 @@ global JIT TB table. latcd unions keys from all processes; an unchanged set
 does not schedule another compile. In `--flush-only` mode it performs no
 compilation until `FLUSH_SOURCE` or `FLUSH_ALL`, then compiles each final source
 set once. The flush waits until every previously accepted set is published or
-an explicit compile error is returned.
+an explicit compile error is returned. A successful flush has already merged
+and relinked every accepted increment; it never reports success for a pending
+fragment.
 
 Profile-module generation is single-pass. The compiler must include every
 requested TB and its required direct branch targets in that pass. A missing

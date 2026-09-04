@@ -129,7 +129,8 @@ python3 - "$cache/$static_source_sha.current" \
 import json
 import sys
 current = json.load(open(sys.argv[1]))
-assert current["modules"] == [sys.argv[2]], current
+assert current["version"] == 2, current
+assert current["module"] == sys.argv[2], current
 PY
 chmod 0644 "$cache/$static_source_sha.current"
 printf '{broken current index\n' >"$cache/$static_source_sha.current"
