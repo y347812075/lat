@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include "lat-tb-key-set.h"
 #include "lat-aot-v2.h"

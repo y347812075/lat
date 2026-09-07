@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include "precompile.h"
 #include "latcd-protocol.h"
@@ -588,14 +590,14 @@ static void analyze_dependency(gpointer data, gpointer user_data)
     dependency->tbset_path = g_strdup_printf(
         "%s/%s.tbset", context->temporary_dir,
         dependency->source_sha256);
-    char *arguments[] = {
-        (char *)context->compiler, "emit-static-tbset",
+    const char *arguments[] = {
+        context->compiler, "emit-static-tbset",
         dependency->host_path, "-o", dependency->tbset_path, NULL,
     };
     gchar *standard_output = NULL, *standard_error = NULL;
     gint wait_status = 0;
     GError *gerror = NULL;
-    if (!g_spawn_sync(NULL, arguments, NULL, 0, NULL, NULL,
+    if (!g_spawn_sync(NULL, (char **)arguments, NULL, 0, NULL, NULL,
                       &standard_output, &standard_error,
                       &wait_status, &gerror) ||
         !g_spawn_check_wait_status(wait_status, &gerror)) {

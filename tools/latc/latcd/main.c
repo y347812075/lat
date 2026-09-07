@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include "latcd-protocol.h"
 #include "lat-aot-v2.h"
@@ -891,14 +893,14 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (validate_toolchain(config, error, error_size)) {
         return -1;
     }
-    char *arguments[] = {
-        (char *)config->compiler, "compile-module", (char *)source,
-        "-o", (char *)output, "--runner", (char *)config->runner,
-        "--runtime-dir", (char *)config->runtime_dir, NULL, NULL, NULL,
+    const char *arguments[] = {
+        config->compiler, "compile-module", source,
+        "-o", output, "--runner", config->runner,
+        "--runtime-dir", config->runtime_dir, NULL, NULL, NULL,
     };
     if (tbset) {
         arguments[9] = "--tbset";
-        arguments[10] = (char *)tbset;
+        arguments[10] = tbset;
     }
     char *library_path = g_strdup_printf("LD_LIBRARY_PATH=%s",
                                          config->runtime_dir);
@@ -910,7 +912,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     char *temporary_path = g_strdup_printf("TMPDIR=%s", compile_tmpdir);
     char *guest_prefix = config->x86_rootfs ?
         g_strdup_printf("LAT_LD_PREFIX=%s", config->x86_rootfs) : NULL;
-    char *compile_timing = getenv("LATCD_COMPILE_TIMING") ?
+    const char *compile_timing = getenv("LATCD_COMPILE_TIMING") ?
         "LATC_COMPILE_TIMING=1" : NULL;
     long online = sysconf(_SC_NPROCESSORS_ONLN);
     uint32_t aot_thread_count = online > 0 ?
@@ -931,7 +933,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     digest_hex(digest, digest_text);
     char *trusted_digest = g_strdup_printf("LATC_TRUSTED_SOURCE_SHA256=%s",
                                             digest_text);
-    char *environment[13];
+    const char *environment[13];
     size_t environment_count = 0;
     environment[environment_count++] = "PATH=/usr/bin:/bin";
     environment[environment_count++] = "LANG=C";
@@ -965,7 +967,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             setrlimit(RLIMIT_NOFILE, &descriptors)) {
             _exit(126);
         }
-        execve(config->compiler, arguments, environment);
+        execve(config->compiler, (char *const *)arguments,
+               (char *const *)environment);
         _exit(127);
     }
     if (child < 0) {

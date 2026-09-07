@@ -20,6 +20,7 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 "$latc" emit-aot-v2 "$native_image" "$work" >/dev/null
 (
     cd "$work"
+    umask 022
     "${CC:-cc}" -I"$include_dir" -O2 -fPIC -c -o module-meta.o module.c
     "${CC:-cc}" -I"$include_dir" -fPIC -c -o module-text.o module.S
     "${CC:-cc}" -shared -nostdlib \
@@ -32,3 +33,4 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
       -Wl,--build-id=sha1 -L"$runtime_dir" -Wl,--no-as-needed \
       -l:liblat-aot-runtime.so.2 -o "$output" module-meta.o module-text.o
 )
+chmod go-w "$output"

@@ -710,7 +710,7 @@ ADDRX ir1_disasm(IR1_INST *ir1, uint8_t *addr, ADDRX t_pc, int ir1_num,
     }
     bool use_template = ir1_decode_templates_enabled;
     bool original_code = true;
-    uint32_t nop = 0x401f0f;
+    uint64_t nop = 0x401f0f;
     uint64_t nop_5 = 0x441f0f;
     if (((*((uint32_t *)addr)) & 0xf8ffffff) == 0xc81e0ff3) {
         //repleace endbr32/rdsspd with 4 bytes nop, just a temporary solution

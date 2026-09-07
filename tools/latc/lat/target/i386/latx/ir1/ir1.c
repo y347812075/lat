@@ -15,6 +15,10 @@
 #include "insts-pattern.h"
 #include "lsenv.h"
 
+#if defined(CONFIG_LATX_KZT)
+#include "bridge.h"
+#endif
+
 IR1_OPND al_ir1_opnd;
 IR1_OPND ah_ir1_opnd;
 IR1_OPND ax_ir1_opnd;
@@ -706,7 +710,7 @@ ADDRX ir1_disasm(IR1_INST *ir1, uint8_t *addr, ADDRX t_pc, int ir1_num,
     }
     bool use_template = ir1_decode_templates_enabled;
     bool original_code = true;
-    uint32_t nop = 0x401f0f;
+    uint64_t nop = 0x401f0f;
     uint64_t nop_5 = 0x441f0f;
     if (((*((uint32_t *)addr)) & 0xf8ffffff) == 0xc81e0ff3) {
         //repleace endbr32/rdsspd with 4 bytes nop, just a temporary solution
@@ -2119,8 +2123,9 @@ int ir1_is_syscall(IR1_INST *ir1)
 bool ir1_is_tb_ending(IR1_INST *ir1)
 {
 #if defined(CONFIG_LATX_KZT)
-    if (latx_kzt_runtime_enabled() &&
-        ir1_opcode(ir1) == dt_X86_INS_INT3) {
+    if (CODEIS64 && latx_kzt_runtime_enabled() &&
+        ir1_opcode(ir1) == dt_X86_INS_INT3 &&
+        kzt_is_registered_onebridge(ir1_addr(ir1))) {
         return true;
     }
 #endif
