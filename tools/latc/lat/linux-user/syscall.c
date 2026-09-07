@@ -2523,9 +2523,11 @@ static inline abi_long target_to_host_sockaddr(int fd, struct sockaddr *addr,
     const socklen_t unix_maxlen = sizeof (struct sockaddr_un);
     sa_family_t sa_family;
     struct target_sockaddr *target_saddr;
+    TargetFdAddrFunc trans;
 
-    if (fd_trans_target_to_host_addr(fd)) {
-        return fd_trans_target_to_host_addr(fd)(addr, target_addr, len);
+    trans = fd_trans_target_to_host_addr(fd);
+    if (trans) {
+        return trans(addr, target_addr, len);
     }
 
     target_saddr = lock_user(VERIFY_READ, target_addr, len, 1);
@@ -4651,6 +4653,7 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
     abi_ulong count;
     struct iovec *vec;
     abi_ulong target_vec;
+    TargetFdDataFunc trans;
 
     if (msgp->msg_name) {
         msg.msg_namelen = tswap32(msgp->msg_namelen);
@@ -4695,13 +4698,13 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
     msg.msg_iov = vec;
 
     if (send) {
-        if (fd_trans_target_to_host_data(fd)) {
+        trans = fd_trans_target_to_host_data(fd);
+        if (trans) {
             void *host_msg;
 
             host_msg = g_malloc(msg.msg_iov->iov_len);
             memcpy(host_msg, msg.msg_iov->iov_base, msg.msg_iov->iov_len);
-            ret = fd_trans_target_to_host_data(fd)(host_msg,
-                                                   msg.msg_iov->iov_len);
+            ret = trans(host_msg, msg.msg_iov->iov_len);
             if (ret >= 0) {
                 msg.msg_iov->iov_base = host_msg;
                 ret = get_errno(safe_sendmsg(fd, &msg, flags));
@@ -4736,9 +4739,10 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
 
         if (!is_error(ret)) {
             len = ret;
-            if (fd_trans_host_to_target_data(fd)) {
-                ret = fd_trans_host_to_target_data(fd)(msg.msg_iov->iov_base,
-                                               MIN(msg.msg_iov->iov_len, len));
+            trans = fd_trans_host_to_target_data(fd);
+            if (trans) {
+                ret = trans(msg.msg_iov->iov_base,
+                            MIN(msg.msg_iov->iov_len, len));
             }
             if (!is_error(ret)) {
                 ret = host_to_target_cmsg(msgp, &msg);
@@ -4983,6 +4987,7 @@ static abi_long do_sendto(int fd, abi_ulong msg, size_t len, int flags,
     void *host_msg;
     void *copy_msg = NULL;
     abi_long ret;
+    TargetFdDataFunc trans;
 
     if ((int)addrlen < 0) {
         return -TARGET_EINVAL;
@@ -4991,11 +4996,12 @@ static abi_long do_sendto(int fd, abi_ulong msg, size_t len, int flags,
     host_msg = lock_user(VERIFY_READ, msg, len, 1);
     if (!host_msg)
         return -TARGET_EFAULT;
-    if (fd_trans_target_to_host_data(fd)) {
+    trans = fd_trans_target_to_host_data(fd);
+    if (trans) {
         copy_msg = host_msg;
         host_msg = g_malloc(len);
         memcpy(host_msg, copy_msg, len);
-        ret = fd_trans_target_to_host_data(fd)(host_msg, len);
+        ret = trans(host_msg, len);
         if (ret < 0) {
             goto fail;
         }
@@ -5028,6 +5034,7 @@ static abi_long do_recvfrom(int fd, abi_ulong msg, size_t len, int flags,
     void *addr;
     void *host_msg;
     abi_long ret;
+    TargetFdDataFunc trans;
 
     if (!msg) {
         host_msg = NULL;
@@ -5056,11 +5063,11 @@ static abi_long do_recvfrom(int fd, abi_ulong msg, size_t len, int flags,
         ret = get_errno(safe_recvfrom(fd, host_msg, len, flags, NULL, 0));
     }
     if (!is_error(ret)) {
-        if (fd_trans_host_to_target_data(fd)) {
-            abi_long trans;
-            trans = fd_trans_host_to_target_data(fd)(host_msg, MIN(ret, len));
-            if (is_error(trans)) {
-                ret = trans;
+        trans = fd_trans_host_to_target_data(fd);
+        if (trans) {
+            abi_long trans_ret = trans(host_msg, MIN(ret, len));
+            if (is_error(trans_ret)) {
+                ret = trans_ret;
                 goto fail;
             }
         }
@@ -9720,14 +9727,14 @@ static void QEMU_NORETURN seccomp_kill_thread(CPUArchState *env)
 }
 
 typedef struct ForkCloneContext {
-    void *jump_buffer[5];
+    jmp_buf jump_buffer;
 } ForkCloneContext;
 
 static int fork_clone_func(void *opaque)
 {
     ForkCloneContext *context = opaque;
 
-    __builtin_longjmp(context->jump_buffer, 1);
+    longjmp(context->jump_buffer, 1);
 }
 
 static int fork_with_flags(unsigned int flags)
@@ -9735,7 +9742,7 @@ static int fork_with_flags(unsigned int flags)
     char stack[PTHREAD_STACK_MIN] __attribute__((aligned(16)));
     ForkCloneContext context;
 
-    if (__builtin_setjmp(context.jump_buffer) == 0) {
+    if (setjmp(context.jump_buffer) == 0) {
         return clone(fork_clone_func, stack + sizeof(stack), flags, &context);
     }
     return 0;
@@ -9950,6 +9957,9 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
             if (flags & CLONE_CHILD_SETTID)
                 put_user_u32(sys_gettid(), child_tidptr);
             ts = (TaskState *)cpu->opaque;
+#if defined(CONFIG_LATX) && defined(TARGET_I386) && !defined(TARGET_X86_64)
+            qatomic_set(&ts->robust_list_head, 0);
+#endif
             /* Linux clears syscall user dispatch in every fork child. */
 #ifdef TARGET_I386
             ts->sys_dispatch = 0;
@@ -11087,6 +11097,38 @@ static int do_safe_futex(int *uaddr, int op, int val,
 #endif /* HOST_LONG_BITS == 64 */
     return -TARGET_ENOSYS;
 }
+
+#if defined(CONFIG_LATX) && defined(TARGET_I386) && !defined(TARGET_X86_64)
+#define I386_ROBUST_LIST_HEAD_SIZE       (3 * sizeof(uint32_t))
+
+static abi_long i386_latx_set_robust_list(CPUState *cpu, abi_ulong head,
+                                           abi_ulong len)
+{
+    if (len != I386_ROBUST_LIST_HEAD_SIZE) {
+        return -TARGET_EINVAL;
+    }
+
+    /* The i386 list layout cannot be registered with the native kernel. */
+    qatomic_set(&((TaskState *)cpu->opaque)->robust_list_head, head);
+    return 0;
+}
+
+static abi_long i386_latx_get_robust_list(CPUState *cpu, abi_long pid,
+                                           abi_ulong head_ptr,
+                                           abi_ulong len_ptr)
+{
+    TaskState *current = cpu->opaque;
+
+    if (pid && pid != sys_gettid()) {
+        return -TARGET_ESRCH;
+    }
+    if (put_user_u32(I386_ROBUST_LIST_HEAD_SIZE, len_ptr) ||
+        put_user_u32(qatomic_read(&current->robust_list_head), head_ptr)) {
+        return -TARGET_EFAULT;
+    }
+    return 0;
+}
+#endif
 
 /* ??? Using host futex calls even when target atomic operations
    are not really atomic probably breaks things.  However implementing
@@ -14358,6 +14400,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     struct statfs stfs;
 #endif
     void *p;
+    TargetFdDataFunc fd_data_trans;
 
     switch(num) {
     case TARGET_NR_ioperm:
@@ -14416,9 +14459,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             if (!(p = lock_user(VERIFY_WRITE, arg2, arg3, 0)))
                 return -TARGET_EFAULT;
             ret = get_errno(safe_read(arg1, p, arg3));
-            if (ret >= 0 &&
-                fd_trans_host_to_target_data(arg1)) {
-                ret = fd_trans_host_to_target_data(arg1)(p, ret);
+            fd_data_trans = fd_trans_host_to_target_data(arg1);
+            if (ret >= 0 && fd_data_trans) {
+                ret = fd_data_trans(p, ret);
             }
             unlock_user(p, arg2, ret);
         }
@@ -14429,10 +14472,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         }
         if (!(p = lock_user(VERIFY_READ, arg2, arg3, 1)))
             return -TARGET_EFAULT;
-        if (fd_trans_target_to_host_data(arg1)) {
+        fd_data_trans = fd_trans_target_to_host_data(arg1);
+        if (fd_data_trans) {
             void *copy = g_malloc(arg3);
             memcpy(copy, p, arg3);
-            ret = fd_trans_target_to_host_data(arg1)(copy, arg3);
+            ret = fd_data_trans(copy, arg3);
             if (ret >= 0) {
                 ret = get_errno(safe_write(arg1, copy, ret));
             }
@@ -19752,8 +19796,15 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 
 #ifdef TARGET_NR_set_robust_list
     case TARGET_NR_set_robust_list:
-         return get_errno(syscall(__NR_set_robust_list, arg1, arg2));
+#if defined(CONFIG_LATX) && defined(TARGET_I386) && !defined(TARGET_X86_64)
+        return i386_latx_set_robust_list(cpu, arg1, arg2);
+#else
+        return get_errno(syscall(__NR_set_robust_list, arg1, arg2));
+#endif
     case TARGET_NR_get_robust_list:
+#if defined(CONFIG_LATX) && defined(TARGET_I386) && !defined(TARGET_X86_64)
+        return i386_latx_get_robust_list(cpu, arg1, arg2, arg3);
+#else
         /* The ABI for supporting robust futexes has userspace pass
          * the kernel a pointer to a linked list which is updated by
          * userspace after the syscall; the list is walked by the kernel
@@ -19768,6 +19819,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
          */
         return get_errno(syscall(__NR_get_robust_list, arg1, g2h_untagged(arg2),
                         g2h_untagged(arg3)));
+#endif
 #endif
 
 #if defined(TARGET_NR_utimensat)

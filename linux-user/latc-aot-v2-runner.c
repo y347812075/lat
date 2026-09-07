@@ -263,7 +263,8 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
         atomic_load_explicit(&active, memory_order_acquire)) {
         static const char message[] =
             "latx: AOT v2 fork child retained AOT\n";
-        (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+        ssize_t written = write(STDERR_FILENO, message, sizeof(message) - 1);
+        (void)written;
     }
     aot_v2_current_instance = NULL;
     aot_v2_current_generation = 0;
@@ -2116,6 +2117,10 @@ static int inspect_source(const char *path, LatAotExpectedV2 *expected,
                 };
             }
         }
+    }
+    if (begin != UINT64_MAX) {
+        begin &= TARGET_PAGE_MASK;
+        end = TARGET_PAGE_ALIGN(end);
     }
     if (begin == UINT64_MAX || end <= begin || !*exec_range_count) {
         snprintf(error, error_size,

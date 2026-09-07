@@ -526,6 +526,7 @@ $(BUILD)/aot-v2/fixture.so: aot-v2/tests/fixture.c \
 	  -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
 	  -l:liblat-aot-runtime.so.2 -o $@ \
 	  aot-v2/tests/fixture.c aot-v2/tests/fixture-entry.S
+	chmod go-w $@
 
 $(BUILD)/aot-v2/fixture-bad-descriptor.so: aot-v2/tests/fixture.c \
 		aot-v2/tests/fixture-entry.S aot-v2/tests/module.map \
@@ -542,6 +543,7 @@ $(BUILD)/aot-v2/fixture-bad-descriptor.so: aot-v2/tests/fixture.c \
 	  -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
 	  -l:liblat-aot-runtime.so.2 -o $@ \
 	  aot-v2/tests/fixture.c aot-v2/tests/fixture-entry.S
+	chmod go-w $@
 
 $(BUILD)/aot-v2/fixture-bad-pc-map.so: aot-v2/tests/fixture.c \
 		aot-v2/tests/fixture-entry.S aot-v2/tests/module.map \
@@ -558,6 +560,7 @@ $(BUILD)/aot-v2/fixture-bad-pc-map.so: aot-v2/tests/fixture.c \
 	  -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
 	  -l:liblat-aot-runtime.so.2 -o $@ \
 	  aot-v2/tests/fixture.c aot-v2/tests/fixture-entry.S
+	chmod go-w $@
 
 $(BUILD)/tests/test-aot-v2-loader: aot-v2/tests/test-loader.c \
 		$(BUILD)/aot-v2/runtime/module-loader.o \
@@ -861,7 +864,7 @@ $(BUILD)/tests/test-native-format: tests/test-native-format.c \
 $(BUILD)/tests/test-native-relocate: tests/test-native-relocate.c \
 		native/runtime/relocate.c native/runtime/runtime-symbols.c \
 		native/runtime/x86-linux-user.c \
-		native/runtime/dispatch.c
+		native/runtime/dispatch.c native/runtime/dispatch-x86.S
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
 

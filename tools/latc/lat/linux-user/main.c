@@ -51,6 +51,9 @@
 #include "target_elf.h"
 #include "cpu_loop-common.h"
 #include "crypto/init.h"
+#ifdef CONFIG_LATX
+#include "pressure-vessel.h"
+#endif
 int mydebug = 1;
 
 #ifdef CONFIG_LATX
@@ -219,6 +222,7 @@ void fork_start(void)
     mmap_fork_start();
     sigact_fork_start();
     path_fork_start();
+    fd_trans_fork_start();
     cpu_list_lock();
 }
 
@@ -227,6 +231,7 @@ void fork_end(int child)
     mmap_fork_end(child);
     sigact_fork_end(child);
     path_fork_end(child);
+    fd_trans_fork_end();
     latc_aot_v2_fork_end(thread_cpu, child != 0);
     if (child) {
         CPUState *cpu, *next_cpu;
@@ -1432,7 +1437,10 @@ int main(int argc, char **argv, char **envp)
         fprintf(stderr, ". Please check KERNEL and HARDWARE.\n");
     }
     if (!(hwcap & HWCAP_LOONGARCH_LASX)) {
-            option_enable_lasx = 0;
+        option_enable_lasx = 0;
+#ifdef CONFIG_LATX_AVX_OPT
+        option_avx_cpuid = 0;
+#endif
     }
 #endif
 
@@ -1551,6 +1559,13 @@ int main(int argc, char **argv, char **envp)
         return EXIT_SUCCESS;
     }
 
+    /* Scan interp_prefix dir for replacement files. */
+    init_paths(interp_prefix);
+
+#ifdef CONFIG_LATX
+    latx_pressure_vessel_prepare(exec_path, target_argv, envlist);
+#endif
+
     error_init(argv[0]);
     module_call_init(MODULE_INIT_TRACE);
     qemu_init_cpu_list();
@@ -1594,9 +1609,6 @@ int main(int argc, char **argv, char **envp)
     memset(info, 0, sizeof(struct image_info));
 
     memset(&bprm, 0, sizeof (bprm));
-
-    /* Scan interp_prefix dir for replacement files. */
-    init_paths(interp_prefix);
 
     init_qemu_uname_release();
 
@@ -1703,6 +1715,10 @@ int main(int argc, char **argv, char **envp)
 
     target_environ = envlist_to_environ(envlist, NULL);
     envlist_free(envlist);
+
+#ifdef CONFIG_LATX
+    latx_pressure_vessel_exec_payload(target_environ);
+#endif
 
 #define KERNEL_CONFIG_LSM_MMAP_MIN_ADDR 65536
     /*
