@@ -33,9 +33,12 @@ LAT_LD_PREFIX="$rootfs" \
   "$work/plugin.tbset" >/dev/null
 plugin_sha=$(sha256sum "$plugin" | awk '{print $1}')
 cp "$work/plugin.so" "$work/cache/$plugin_sha.so"
+printf '{"version":2,"module":"%s.so"}\n' "$plugin_sha" \
+  >"$work/cache/$plugin_sha.current"
+chmod 444 "$work/cache/$plugin_sha.current"
 
-plugin_one=/tmp/latc-m5-invalidation-one.so
-plugin_two=/tmp/latc-m5-invalidation-two.so
+plugin_one=$work/latc-m5-invalidation-one.so
+plugin_two=$work/latc-m5-invalidation-two.so
 cp "$plugin" "$plugin_one"
 cp "$plugin" "$plugin_two"
 trap 'rm -f "$plugin_one" "$plugin_two"' EXIT HUP INT TERM

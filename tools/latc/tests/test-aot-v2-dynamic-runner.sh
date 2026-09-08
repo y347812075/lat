@@ -31,6 +31,9 @@ compile_module()
       "$latc" "$runner" "$source" "$runtime_dir" "$output" >/dev/null
     sha=$(sha256sum "$source" | awk '{print $1}')
     cp "$output" "$work/hot-cache/$sha.so"
+    printf '{"version":2,"module":"%s.so"}\n' "$sha" \
+      >"$work/hot-cache/$sha.current"
+    chmod 444 "$work/hot-cache/$sha.current"
 }
 
 compile_module "$guest" "$work/main.so"

@@ -138,7 +138,9 @@ int main(void)
     uintptr_t last_base = 0;
     int result = 0;
     for (int iteration = 0; iteration < iterations; iteration++) {
-        void *handle = dlopen(LATC_DLOPEN_PLUGIN, RTLD_NOW | RTLD_LOCAL);
+        void *handle = dlopen(getenv("LATC_DLOPEN_PLUGIN") ?
+                              getenv("LATC_DLOPEN_PLUGIN") : LATC_DLOPEN_PLUGIN,
+                              RTLD_NOW | RTLD_LOCAL);
         if (!handle) {
             fprintf(stderr, "dlopen failed: %s\n", dlerror());
             return 2;
