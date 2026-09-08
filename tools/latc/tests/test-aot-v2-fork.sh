@@ -26,6 +26,9 @@ LAT_LD_PREFIX="$rootfs" \
   "$latc" "$runner" "$guest" "$runtime_dir" "$work/fork.so" \
   "$work/fork.tbset" >"$work/compile.stdout"
 cp "$work/fork.so" "$work/cache/$source_sha.so"
+printf '{"version":2,"module":"%s.so"}\n' "$source_sha" \
+  >"$work/cache/$source_sha.current"
+chmod 444 "$work/cache/$source_sha.current"
 
 env HOME="$work/home" LD_LIBRARY_PATH="$runtime_dir" LATX_AOT=0 \
   LATX_AOT_V2_CACHE_DIR="$work/cache" LATX_AOT_V2_REPORT=1 \

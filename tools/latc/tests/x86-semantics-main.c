@@ -46,7 +46,7 @@ static int loop_count_from_env(void)
 
 int main(void)
 {
-    void *plugin = dlopen("/tmp/latc-m3-semantics-plugin.so",
+    void *plugin = dlopen(getenv("LATC_SEMANTICS_PLUGIN"),
                           RTLD_NOW | RTLD_LOCAL);
     if (!plugin) {
         fprintf(stderr, "plugin dlopen failed: %s\n", dlerror());

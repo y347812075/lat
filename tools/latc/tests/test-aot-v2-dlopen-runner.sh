@@ -22,8 +22,7 @@ mkdir -p "$work/empty-cache" "$work/hot-cache" "$work/loader-cache" \
 interp=$(readlink -f "$rootfs/lib64/ld-linux-x86-64.so.2")
 libc=$(readlink -f "$rootfs/lib/x86_64-linux-gnu/libc.so.6")
 test -f "$interp" -a -f "$libc"
-cp "$plugin" /tmp/latc-m3-dlopen-plugin.so
-trap 'rm -f /tmp/latc-m3-dlopen-plugin.so' EXIT HUP INT TERM
+export LATC_DLOPEN_PLUGIN="$plugin"
 
 compile_module()
 {
@@ -41,6 +40,9 @@ compile_module()
       "$latc" "$runner" "$source" "$runtime_dir" "$output" "$@" >/dev/null
     sha=$(sha256sum "$source" | awk '{print $1}')
     cp "$output" "$work/hot-cache/$sha.so"
+    printf '{"version":2,"module":"%s.so"}\n' "$sha" \
+      >"$work/hot-cache/$sha.current"
+    chmod 444 "$work/hot-cache/$sha.current"
 }
 
 python3 "$script_dir/make-symbol-tbset.py" "$plugin" \
@@ -49,14 +51,29 @@ python3 "$script_dir/make-symbol-tbset.py" "$plugin" \
 compile_module "$plugin" "$work/plugin.so" "$work/plugin.tbset"
 plugin_sha=$(sha256sum "$plugin" | awk '{print $1}')
 cp "$work/plugin.so" "$work/race-cache/$plugin_sha.so"
+printf '{"version":2,"module":"%s.so"}\n' "$plugin_sha" \
+  >"$work/race-cache/$plugin_sha.current"
+chmod 444 "$work/race-cache/$plugin_sha.current"
 compile_module "$interp" "$work/interp.so"
 interp_sha=$(sha256sum "$interp" | awk '{print $1}')
 cp "$work/interp.so" "$work/loader-cache/$interp_sha.so"
+printf '{"version":2,"module":"%s.so"}\n' "$interp_sha" \
+  >"$work/loader-cache/$interp_sha.current"
+chmod 444 "$work/loader-cache/$interp_sha.current"
 cp "$work/interp.so" "$work/mixed-cache/$interp_sha.so"
+printf '{"version":2,"module":"%s.so"}\n' "$interp_sha" \
+  >"$work/mixed-cache/$interp_sha.current"
+chmod 444 "$work/mixed-cache/$interp_sha.current"
 compile_module "$libc" "$work/libc.so"
 libc_sha=$(sha256sum "$libc" | awk '{print $1}')
 cp "$work/libc.so" "$work/libc-cache/$libc_sha.so"
+printf '{"version":2,"module":"%s.so"}\n' "$libc_sha" \
+  >"$work/libc-cache/$libc_sha.current"
+chmod 444 "$work/libc-cache/$libc_sha.current"
 cp "$work/libc.so" "$work/mixed-cache/$libc_sha.so"
+printf '{"version":2,"module":"%s.so"}\n' "$libc_sha" \
+  >"$work/mixed-cache/$libc_sha.current"
+chmod 444 "$work/mixed-cache/$libc_sha.current"
 
 run_guest()
 {
@@ -74,7 +91,8 @@ run_guest()
     else
         rc=$?
     fi
-    printf '%s\n' "$rc" >"$rc_file"
+    printf '%s\n' "$rc" \
+      >"$rc_file"
     return "$rc"
 }
 

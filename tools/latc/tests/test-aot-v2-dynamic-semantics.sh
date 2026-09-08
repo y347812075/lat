@@ -22,10 +22,9 @@ mkdir -p "$work/empty-cache" "$work/hot-cache"
 
 interp=$(readlink -f "$rootfs/lib64/ld-linux-x86-64.so.2")
 libc=$(readlink -f "$rootfs/lib/x86_64-linux-gnu/libc.so.6")
-cp "$startup" /tmp/liblatc-semantics-startup.so
-cp "$plugin" /tmp/latc-m3-semantics-plugin.so
-cp "$preload" /tmp/latc-m3-semantics-preload.so
-trap 'rm -f /tmp/liblatc-semantics-startup.so /tmp/latc-m3-semantics-plugin.so /tmp/latc-m3-semantics-preload.so' EXIT HUP INT TERM
+cp "$startup" "$work/liblatc-semantics-startup.so"
+export LATC_SEMANTICS_PLUGIN="$plugin"
+
 
 make_tbset()
 {
@@ -47,11 +46,14 @@ compile_module()
       "$latc" "$runner" "$source" "$runtime_dir" "$output" "$@" >/dev/null
     sha=$(sha256sum "$source" | awk '{print $1}')
     cp "$output" "$work/hot-cache/$sha.so"
+    printf '{"version":2,"module":"%s.so"}\n' "$sha" \
+      >"$work/hot-cache/$sha.current"
+    chmod 444 "$work/hot-cache/$sha.current"
 }
 
-make_tbset "$startup" "$work/startup.tbset" '^semantic_startup_'
-make_tbset "$plugin" "$work/plugin.tbset" '^semantic_'
-make_tbset "$preload" "$work/preload.tbset" '^semantic_'
+make_tbset "$startup" "$work/startup.tbset" '^semantic_startup_.*'
+make_tbset "$plugin" "$work/plugin.tbset" '^semantic_.*'
+make_tbset "$preload" "$work/preload.tbset" '^semantic_.*'
 compile_module "$startup" "$work/startup.so" "$work/startup.tbset"
 compile_module "$plugin" "$work/plugin.so" "$work/plugin.tbset"
 compile_module "$preload" "$work/preload.so" "$work/preload.tbset"
@@ -65,8 +67,9 @@ run_guest()
     output=$2
     error=$3
     loops=${4:-0}
-    env LD_LIBRARY_PATH="$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-      LD_PRELOAD=/tmp/latc-m3-semantics-preload.so \
+    guest_library_path="$work:$runtime_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    env LD_LIBRARY_PATH="$guest_library_path" \
+      LD_PRELOAD="$preload" \
       LATX_AOT=0 LATX_AOT_V2_CACHE_DIR="$cache" LATX_AOT_V2_REPORT=1 \
       LATC_M3_CROSS_MODULE_LOOPS="$loops" \
       timeout -k 2s "$run_timeout" "$runner" -L "$rootfs" \

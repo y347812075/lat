@@ -34,6 +34,11 @@ report_timing()
     timing_last=$timing_now
 }
 
+if [ -z "$tbset" ]; then
+    tbset="$work/static.tbset"
+    "$latc" emit-static-tbset "$guest" -o "$tbset" >/dev/null
+fi
+
 if [ -n "$tbset" ]; then
     "$latc" compile "$guest" -o "$work/stage1.la64" --runner "$runner" \
         --tbset "$tbset" --tbset-ignore-outside-exec >/dev/null

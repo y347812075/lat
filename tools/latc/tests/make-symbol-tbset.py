@@ -7,7 +7,7 @@ import struct
 import subprocess
 import sys
 
-from tb_key_set import write_key_set
+from tb_key_set import CODE64, PARALLEL, write_key_set
 
 
 def main() -> int:
@@ -36,7 +36,7 @@ def main() -> int:
     for line in output.splitlines():
         fields = line.split()
         if len(fields) >= 3 and pattern.fullmatch(fields[2]):
-            records.add((int(fields[0], 16) - image_base, 1))
+            records.add((int(fields[0], 16) - image_base, CODE64 | PARALLEL))
     if not records:
         print(f"{source}: no symbols matched {pattern.pattern!r}", file=sys.stderr)
         return 1
