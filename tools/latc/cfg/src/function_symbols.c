@@ -621,6 +621,18 @@ void funcs_load_all(const ElfFile *elf, FuncVec *funcs,
         load_functions_from_eh_frame(elf, funcs);
         source = had_symbol_funcs ? "symbols+.eh_frame" : ".eh_frame";
     }
+    /* The loader starts at e_entry even when no symbol or FDE names it. */
+    unsigned entry_section;
+    if (elf->eh->e_entry &&
+        !funcs_find_by_entry(funcs, elf->eh->e_entry) &&
+        elf_find_exec_section_for_range(elf, elf->eh->e_entry, 1,
+                                        &entry_section)) {
+        func_push(funcs, (FuncSym){
+            .name = xstrdup("elf_entry"),
+            .addr = elf->eh->e_entry,
+            .shndx = entry_section,
+        });
+    }
     load_special_section_functions(elf, funcs);
     *source_out = source;
 }
