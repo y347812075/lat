@@ -8,6 +8,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <time.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -60,10 +62,11 @@ static int inspect_once(int fd, uint8_t digest[32])
     return result;
 }
 
-static int copy_file(const char *source, char path[64])
+static int copy_file(const char *source, char path[PATH_MAX])
 {
     int input = open(source, O_RDONLY | O_CLOEXEC);
-    strcpy(path, "/tmp/latc-guest-elf-XXXXXX");
+    snprintf(path, PATH_MAX, "%s/latc-guest-elf-XXXXXX",
+             getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
     int output = mkstemp(path);
     char buffer[65536];
     ssize_t count = 0;
@@ -85,7 +88,7 @@ static int copy_file(const char *source, char path[64])
 
 static int count_identities(const char *cache)
 {
-    char path[128];
+    char path[PATH_MAX + 32];
     snprintf(path, sizeof(path), "%s/.identities", cache);
     DIR *directory = opendir(path);
     int count = 0;
@@ -101,12 +104,12 @@ static int count_identities(const char *cache)
 static int publish_identity(const char *cache, int source_fd,
                             const uint8_t digest[32])
 {
-    char directory[128];
+    char directory[PATH_MAX + 32];
     snprintf(directory, sizeof(directory), "%s/.identities", cache);
     if (mkdir(directory, 0700) && errno != EEXIST) return -1;
     struct stat status;
     if (fstat(source_fd, &status)) return -1;
-    char path[512];
+    char path[PATH_MAX + 512];
     snprintf(path, sizeof(path),
         "%s/%llx-%llx-%llx-%llx-%lx-%llx-%lx.sha256", directory,
         (unsigned long long)status.st_dev,
@@ -131,14 +134,14 @@ static int publish_identity(const char *cache, int source_fd,
 
 static int corrupt_identity(const char *cache)
 {
-    char directory[128];
+    char directory[PATH_MAX + 32];
     snprintf(directory, sizeof(directory), "%s/.identities", cache);
     DIR *identities = opendir(directory);
     struct dirent *entry;
     int result = -1;
     while (identities && (entry = readdir(identities))) {
         if (entry->d_name[0] == '.') continue;
-        char path[512];
+        char path[PATH_MAX + 512];
         snprintf(path, sizeof(path), "%s/%s", directory, entry->d_name);
         int fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC);
         if (fd >= 0) {
@@ -153,8 +156,10 @@ static int corrupt_identity(const char *cache)
 
 static int test_identity_cache(const char *source)
 {
-    char cache[] = "/tmp/latc-identity-cache-XXXXXX";
-    char copy[64];
+    char cache[PATH_MAX];
+    char copy[PATH_MAX];
+    snprintf(cache, sizeof(cache), "%s/latc-identity-cache-XXXXXX",
+             getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
     if (!mkdtemp(cache) || setenv("LATX_AOT_V2_CACHE_DIR", cache, 1)) {
         return -1;
     }
@@ -178,10 +183,14 @@ static int test_identity_cache(const char *source)
         return -1;
     }
     struct timespec times[2] = { status.st_atim, status.st_mtim };
+    /* Give coarse filesystem timestamps a distinct mutation time. */
+    struct timespec delay = { .tv_sec = 1 };
+    while (nanosleep(&delay, &delay) && errno == EINTR) {
+    }
     byte ^= 1;
     if (pwrite(fd, &byte, 1, status.st_size - 1) != 1 || fsync(fd) ||
         futimens(fd, times) || !inspect_once(fd, changed) ||
-        setenv("LATX_AOT_V2_LATCD_SOCKET", "/tmp/latcd-test.sock", 1) ||
+        setenv("LATX_AOT_V2_LATCD_SOCKET", "unused-test-socket", 1) ||
         inspect_once(fd, changed) || unsetenv("LATX_AOT_V2_LATCD_SOCKET") ||
         !memcmp(before, changed, 32) || count_identities(cache) != 1 ||
         publish_identity(cache, fd, changed) || count_identities(cache) != 2) {
@@ -212,13 +221,13 @@ static int test_identity_cache(const char *source)
     }
     close(fd);
     unlink(copy);
-    char directory[128];
+    char directory[PATH_MAX + 32];
     snprintf(directory, sizeof(directory), "%s/.identities", cache);
     DIR *identities = opendir(directory);
     struct dirent *entry;
     while (identities && (entry = readdir(identities))) {
         if (entry->d_name[0] == '.') continue;
-        char path[512];
+        char path[PATH_MAX + 512];
         snprintf(path, sizeof(path), "%s/%s", directory, entry->d_name);
         unlink(path);
     }
