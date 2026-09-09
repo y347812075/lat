@@ -6,11 +6,11 @@
  * Pattern-based indirect jump resolver.
  *
  * Supported table forms:
- *   - absolute qword table: jmp qword ptr [base + index * 8]
- *   - GCC PIC offset table: movsxd table[index*4], add/lea base, jmp reg
+ *   - qword table with a register base or absolute disp32, direct or loaded
+ *   - GCC PIC offset table: movsxd table[index*4], add/lea offset base, jmp reg
  *
- * Candidate targets are accepted only if they stay in the current function and
- * land exactly on a decoded instruction boundary.
+ * Candidate targets must match decoded instruction boundaries or known
+ * cross-function targets.
  */
 
 #include <string.h>
@@ -23,6 +23,7 @@ typedef struct {
     int rex_r;
     int rex_x;
     int rex_b;
+    bool nonflat_address;
     size_t op;
 } Prefix;
 
@@ -83,10 +84,11 @@ typedef struct {
 } MovMem;
 
 typedef struct {
-    /* jmp qword ptr [base + index * scale] */
+    /* jmp qword ptr [base + index * scale], or [disp32 + index * scale]. */
     int base;
     int index;
     int scale;
+    uint64_t table_addr;
     size_t len;
 } JmpMem;
 
@@ -205,6 +207,7 @@ static Prefix parse_prefix(const uint8_t *buf, size_t size, size_t off)
         if (b == 0x3e || b == 0x66 || b == 0x67 || b == 0xf2 ||
             b == 0xf3 || b == 0xf0 || b == 0x2e || b == 0x36 ||
             b == 0x26 || b == 0x64 || b == 0x65) {
+            p.nonflat_address |= b == 0x67 || b == 0x64 || b == 0x65;
             p.op++;
             continue;
         }
@@ -278,14 +281,22 @@ static bool parse_jmp_mem_scaled(const uint8_t *buf, size_t size, size_t off,
     uint8_t scale_bits = sib >> 6;
     uint8_t index = (sib >> 3) & 7;
     uint8_t base = sib & 7;
-    if ((index == 4 && !p.rex_x) || base == 5) {
+    if (index == 4 && !p.rex_x) {
         return false;
     }
 
-    out->base = base + p.rex_b * 8;
+    out->table_addr = 0;
+    if (base == 5) {
+        if (size - p.op < 7 || p.nonflat_address) {
+            return false;
+        }
+        /* A no-base SIB uses a sign-extended disp32, even with REX.B. */
+        out->table_addr = (uint64_t)(int64_t)rd_i32(buf + p.op + 3);
+    }
+    out->base = base == 5 ? -1 : base + p.rex_b * 8;
     out->index = index + p.rex_x * 8;
     out->scale = 1 << scale_bits;
-    out->len = p.op + 3 - off;
+    out->len = p.op + 3 + (base == 5 ? 4 : 0) - off;
     return true;
 }
 
@@ -478,7 +489,11 @@ static bool parse_mov_mem_scaled(const uint8_t *buf, size_t size, size_t off,
     uint8_t scale_bits = sib >> 6;
     uint8_t index = (sib >> 3) & 7;
     uint8_t base = sib & 7;
-    if ((index == 4 && !p.rex_x) || (mod == 0 && base == 5)) {
+    if (index == 4 && !p.rex_x) {
+        return false;
+    }
+    bool absolute = mod == 0 && base == 5;
+    if (absolute && (!p.rex_w || p.nonflat_address)) {
         return false;
     }
 
@@ -490,7 +505,7 @@ static bool parse_mov_mem_scaled(const uint8_t *buf, size_t size, size_t off,
         }
         disp = (int8_t)buf[p.op + 3];
         len += 1;
-    } else if (mod == 2) {
+    } else if (mod == 2 || absolute) {
         if (p.op + 6 >= size) {
             return false;
         }
@@ -499,7 +514,7 @@ static bool parse_mov_mem_scaled(const uint8_t *buf, size_t size, size_t off,
     }
 
     out->dst = ((modrm >> 3) & 7) + p.rex_r * 8;
-    out->base = base + p.rex_b * 8;
+    out->base = absolute ? -1 : base + p.rex_b * 8;
     out->index = index + p.rex_x * 8;
     out->scale = 1 << scale_bits;
     out->disp = disp;
@@ -530,6 +545,7 @@ static bool resolve_qword_table(const IjmpContext *ctx, const uint8_t *func,
      * Absolute qword table pattern:
      *   lea base, [rip + table]
      *   jmp qword ptr [base + index * 8]
+     * or jmp qword ptr [disp32 + index * 8].
      */
     JmpMem jmp;
     if (!parse_jmp_mem_scaled(func, func_size, ijmp_off, &jmp) ||
@@ -539,10 +555,10 @@ static bool resolve_qword_table(const IjmpContext *ctx, const uint8_t *func,
 
     size_t start = ijmp_off > IJMP_LOOKBACK_BYTES ?
                    ijmp_off - IJMP_LOOKBACK_BYTES : 0;
-    LeaRip lea = {0};
-    bool have_lea = false;
+    LeaRip lea = { .target = jmp.table_addr };
+    bool have_lea = jmp.base < 0;
     for (size_t ii = insn_lower_bound_off(ctx, start);
-         ii < ctx->insn_count &&
+         jmp.base >= 0 && ii < ctx->insn_count &&
          ctx->insn_addrs[ii] < ctx->func_addr + ijmp_off; ii++) {
         size_t off = (size_t)(ctx->insn_addrs[ii] - ctx->func_addr);
         LeaRip cur;
@@ -561,6 +577,9 @@ static bool resolve_qword_table(const IjmpContext *ctx, const uint8_t *func,
     size_t entries = 0;
     bool has_cross_target = false;
     for (size_t i = 0; i < IJMP_MAX_TARGETS; i++) {
+        if (i > (UINT64_MAX - lea.target) / 8) {
+            break;
+        }
         const uint8_t *p = va_ptr(ctx, lea.target + i * 8, 8);
         if (!p) {
             break;
@@ -609,6 +628,9 @@ static bool resolve_reg_qword_table(const IjmpContext *ctx,
         MovMem cur;
         if (parse_mov_mem_scaled(func, ijmp_off, off, &cur) &&
             cur.dst == jmp_reg && cur.scale == 8) {
+            if (cur.base < 0 && cur.len != ijmp_off - off) {
+                continue;
+            }
             mov = cur;
             mov_off = off;
             have_mov = true;
@@ -619,9 +641,9 @@ static bool resolve_reg_qword_table(const IjmpContext *ctx,
     }
 
     LeaRip lea = {0};
-    bool have_lea = false;
+    bool have_lea = mov.base < 0;
     for (size_t ii = insn_lower_bound_off(ctx, start);
-         ii < ctx->insn_count &&
+         mov.base >= 0 && ii < ctx->insn_count &&
          ctx->insn_addrs[ii] < ctx->func_addr + mov_off; ii++) {
         size_t off = (size_t)(ctx->insn_addrs[ii] - ctx->func_addr);
         LeaRip cur;
@@ -640,6 +662,9 @@ static bool resolve_reg_qword_table(const IjmpContext *ctx,
     size_t entries = 0;
     bool has_cross_target = false;
     for (size_t i = 0; i < IJMP_MAX_TARGETS; i++) {
+        if (i > (UINT64_MAX - out->table_addr) / 8) {
+            break;
+        }
         const uint8_t *p = va_ptr(ctx, out->table_addr + i * 8, 8);
         if (!p) {
             break;
@@ -814,10 +839,23 @@ bool ijmp_resolve_jump_table(const IjmpContext *ctx, const uint8_t *func,
         return resolve_qword_table(ctx, func, func_size, ijmp_off, out);
     }
 
+    /* An adjacent absolute table load defines the jump register directly. */
+    size_t jump_index = insn_lower_bound_off(ctx, ijmp_off);
+    if (jump_index) {
+        size_t off = ctx->insn_addrs[jump_index - 1] - ctx->func_addr;
+        MovMem mov;
+        if (parse_mov_mem_scaled(func, ijmp_off, off, &mov) &&
+            mov.base < 0 && mov.dst == jmp_reg && mov.scale == 8 &&
+            mov.len == ijmp_off - off) {
+            return resolve_reg_qword_table(ctx, func, ijmp_off, jmp_reg, out);
+        }
+    }
+
     /*
      * GCC PIC table pattern:
-     *   lea base, [rip + table]
-     *   movsxd off, dword ptr [base + index * 4]
+     *   lea table_base, [rip + table]
+     *   lea base, [rip + offset_base]  (may be the same as table_base)
+     *   movsxd off, dword ptr [table_base + index * 4]
      *   add/lea jmp_reg, base + off
      *   jmp jmp_reg
      *
@@ -875,7 +913,7 @@ bool ijmp_resolve_jump_table(const IjmpContext *ctx, const uint8_t *func,
         size_t off = (size_t)(ctx->insn_addrs[ii] - ctx->func_addr);
         MovsxdMem cur;
         if (parse_movsxd_mem(func, combine_off, off, &cur) &&
-            cur.dst == offset_reg && cur.base == base_reg) {
+            cur.dst == offset_reg) {
             mov = cur;
             mov_off = off;
             have_mov = true;
@@ -886,19 +924,26 @@ bool ijmp_resolve_jump_table(const IjmpContext *ctx, const uint8_t *func,
     }
 
     LeaRip lea = {0};
+    LeaRip target_base = {0};
     bool have_lea = false;
+    bool have_target_base = false;
     for (size_t ii = insn_lower_bound_off(ctx, start);
          ii < ctx->insn_count &&
          ctx->insn_addrs[ii] < ctx->func_addr + mov_off; ii++) {
         size_t off = (size_t)(ctx->insn_addrs[ii] - ctx->func_addr);
         LeaRip cur;
-        if (parse_lea_rip(func, combine_off, ctx->func_addr, off, &cur) &&
-            cur.dst == mov.base) {
-            lea = cur;
-            have_lea = true;
+        if (parse_lea_rip(func, combine_off, ctx->func_addr, off, &cur)) {
+            if (cur.dst == mov.base) {
+                lea = cur;
+                have_lea = true;
+            }
+            if (cur.dst == base_reg) {
+                target_base = cur;
+                have_target_base = true;
+            }
         }
     }
-    if (!have_lea) {
+    if (!have_lea || !have_target_base) {
         return false;
     }
 
@@ -909,7 +954,7 @@ bool ijmp_resolve_jump_table(const IjmpContext *ctx, const uint8_t *func,
             break;
         }
 
-        uint64_t target = lea.target + (uint64_t)rd_i32(p);
+        uint64_t target = target_base.target + (uint64_t)rd_i32(p);
         if (!is_valid_target(ctx, target)) {
             break;
         }
