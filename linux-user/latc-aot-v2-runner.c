@@ -582,6 +582,77 @@ void latc_aot_v2_flush_pending_keys(void)
     submit_runtime_tbsets();
 }
 
+static int relocate_source_fd(int *owned_fd, int guest_fd)
+{
+    if (*owned_fd != guest_fd) {
+        return 0;
+    }
+    int replacement = fcntl(guest_fd, F_DUPFD_CLOEXEC, 3);
+    if (replacement < 0) {
+        return -1;
+    }
+    *owned_fd = replacement;
+    return 0;
+}
+
+int latc_aot_v2_relocate_source_fd(int fd)
+{
+    int result = 0;
+    int saved_errno;
+    bool submission_locked = false;
+
+    if (fd < 0) {
+        return 0;
+    }
+retry:
+    pthread_mutex_lock(&elf_tracker_lock);
+    for (LatAotV2ModuleStats *stats = atomic_load_explicit(
+             &module_stats, memory_order_acquire); stats; stats = stats->next) {
+        if (stats->source_fd != fd) {
+            continue;
+        }
+        if (!submission_locked) {
+            /*
+             * Never hold the tracker lock while waiting for submission I/O.
+             * Recheck ownership after waiting, preserving fork's lock order.
+             */
+            if (pthread_mutex_trylock(&submission_lock)) {
+                pthread_mutex_unlock(&elf_tracker_lock);
+                pthread_mutex_lock(&submission_lock);
+                pthread_mutex_unlock(&submission_lock);
+                goto retry;
+            }
+            submission_locked = true;
+        }
+        if (relocate_source_fd(&stats->source_fd, fd)) {
+            result = -1;
+            goto out;
+        }
+    }
+    for (LatAotV2PendingMapping *pending = pending_mapping_head; pending;
+         pending = pending->next) {
+        if (relocate_source_fd(&pending->fd, fd)) {
+            result = -1;
+            goto out;
+        }
+    }
+    for (LatAotV2SourceMapping *source = source_mappings; source;
+         source = source->next) {
+        if (relocate_source_fd(&source->fd, fd)) {
+            result = -1;
+            goto out;
+        }
+    }
+out:
+    saved_errno = errno;
+    if (submission_locked) {
+        pthread_mutex_unlock(&submission_lock);
+    }
+    pthread_mutex_unlock(&elf_tracker_lock);
+    errno = saved_errno;
+    return result;
+}
+
 static guint tbset_entry_hash(gconstpointer value)
 {
     const LatAotV2TbsetEntry *entry = value;

@@ -1044,6 +1044,15 @@ test-invalidation-stats:
 test: test-invalidation-stats
 
 .PHONY: test-aot-v2-thread-env
+.PHONY: test-aot-v2-source-fd
+test-aot-v2-source-fd:
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_ROOTFS)" -a -n "$(AOT_V2_LATCD)"
+	sh tests/test-aot-v2-source-fd.sh "$(AOT_V2_LATCD)" \
+	  "$(abspath $(BUILD)/latc)" "$(AOT_V2_RUNNER)" \
+	  "$(AOT_V2_RUNTIME_DIR)" "$(X86_ROOTFS)" \
+	  "$(abspath $(BUILD)/aot-v2-source-fd-test)"
+
 test-aot-v2-thread-env:
 	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
 	  -a -n "$(X86_ROOTFS)"
