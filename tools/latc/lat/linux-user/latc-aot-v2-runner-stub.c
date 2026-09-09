@@ -89,6 +89,12 @@ void latc_aot_v2_flush_pending_keys(void)
 {
 }
 
+int latc_aot_v2_relocate_source_fd(int fd)
+{
+    (void)fd;
+    return 0;
+}
+
 void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
 {
     (void)guest_pc;

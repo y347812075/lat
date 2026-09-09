@@ -10340,6 +10340,9 @@ static abi_long guest_exe_identity_relocate(CPUArchState *env, int fd)
     if (new_fd >= 0) {
         fd_trans_unregister(new_fd);
     }
+    if (!ret) {
+        ret = get_errno(latc_aot_v2_relocate_source_fd(fd));
+    }
     return ret;
 }
 #endif
