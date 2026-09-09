@@ -67,6 +67,7 @@ static int find_exec_segment(struct dl_phdr_info *info, size_t size,
 static int load_module(const char *path, Module *module)
 {
     memset(module, 0, sizeof(*module));
+    fprintf(stderr, "LATC_INVALIDATION_LOAD_BEGIN\n");
     module->handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (!module->handle) {
         fprintf(stderr, "dlopen %s: %s\n", path, dlerror());
@@ -87,6 +88,7 @@ static int load_module(const char *path, Module *module)
     }
     module->exec_begin = find.begin;
     module->exec_end = find.end;
+    fprintf(stderr, "LATC_INVALIDATION_LOAD_END\n");
     return 0;
 }
 
