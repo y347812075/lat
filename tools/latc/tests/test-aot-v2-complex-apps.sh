@@ -288,7 +288,13 @@ run_redis()
       SUBSCRIBE latc-channel >"$phase_dir/redis-subscribe.stdout" \
       2>"$phase_dir/redis-subscribe.stderr" &
     subscriber_pid=$!
-    sleep 0.2
+    n=0
+    while ! grep -qx '1' "$phase_dir/redis-subscribe.stdout"; do
+        kill -0 "$subscriber_pid" 2>/dev/null || return 1
+        n=$((n + 1))
+        [ "$n" -lt 250 ] || return 1
+        sleep 0.02
+    done
     test "$(run_guest "$phase_dir/redis-publish.stderr" \
       "$rootfs/usr/bin/redis-cli" -h 127.0.0.1 -p "$redis_port" \
       PUBLISH latc-channel message)" = 1
