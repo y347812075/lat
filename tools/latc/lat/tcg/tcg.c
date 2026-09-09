@@ -850,6 +850,11 @@ static unsigned int tcg_aot_thread_count(void)
     const char *value = getenv("LATC_AOT_THREADS");
     unsigned long requested;
 
+    /* Export workers have private contexts; guest threads share the JIT. */
+    if (!getenv("LATC_EMIT_AOT")) {
+        return 1;
+    }
+
     if (value && *value) {
         requested = strtoul(value, NULL, 10);
     } else if (getenv("LATC_EMIT_AOT")) {
