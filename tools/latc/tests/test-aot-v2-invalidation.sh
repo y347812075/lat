@@ -51,7 +51,9 @@ run_mode()
       LATX_AOT_V2_REPORT=1 \
       timeout -k 2s "$run_timeout" "$runner" -L "$rootfs" \
       "$guest" "$mode" "$plugin_one" "$plugin_two" \
-      >"$work/$mode.out" 2>"$work/$mode.err"
+      >"$work/$mode.out" 2>"$work/$mode.raw.err"
+    python3 "$script_dir/normalize-invalidation-stats.py" \
+      "$work/$mode.raw.err" >"$work/$mode.err"
     grep -q "$mode: PASS" "$work/$mode.out"
     grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' \
       "$work/$mode.err"

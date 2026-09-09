@@ -1024,3 +1024,21 @@ clean:
 	$(BUILD)/aot-v2/runtime/elf-validate.d \
 	$(BUILD)/aot-v2/runtime/registry.d \
 	$(BUILD)/aot-v2/runtime/module-loader.d
+
+.PHONY: test-aot-v2-direct-closure
+test-aot-v2-direct-closure: all $(BUILD)/tests/x86-direct-closure
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)"
+	sh tests/test-aot-v2-direct-closure.sh $(abspath $(BUILD)/latc) \
+	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) \
+	  $(abspath $(BUILD)/tests/x86-direct-closure) \
+	  $(abspath $(BUILD)/aot-v2-direct-closure-test)
+
+$(BUILD)/tests/x86-direct-closure: tests/x86-direct-closure.S
+	@mkdir -p $(dir $@)
+	$(X86_CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+.PHONY: test-invalidation-stats
+test-invalidation-stats:
+	python3 tests/test-normalize-invalidation-stats.py
+
+test: test-invalidation-stats

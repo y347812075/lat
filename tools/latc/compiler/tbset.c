@@ -3,6 +3,8 @@
 #endif
 
 #include "tbset.h"
+#include "cfg_decoder.h"
+#include "elf_image.h"
 #include "lat-tb-key-set.h"
 #include "lat-aot-v2.h"
 
@@ -604,6 +606,116 @@ static int select_all_parallel_cfg(CfgProgram *program, size_t template_count,
     return 0;
 }
 
+/*
+ * Follow direct exits even when the destination has no function symbol.
+ * Bounded translation does not discover these successors on our behalf.
+ */
+static int close_parallel_targets(const char *path, CfgProgram *program,
+                                 char *error, size_t error_size)
+{
+    ElfFile elf;
+    elf_load(path, &elf);
+    GHashTable *seen = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                            g_free, NULL);
+    GArray *pending = g_array_new(FALSE, FALSE, sizeof(uint64_t));
+    GArray *added = g_array_new(FALSE, FALSE, sizeof(CfgTb));
+    int result = 0;
+
+    for (size_t i = 0; i < program->tb_count; i++) {
+        const CfgTb *tb = &program->tbs[i];
+        if (tb->selected && (tb->semantic_flags & CFG_TB_PARALLEL) &&
+            !g_hash_table_contains(seen, &tb->start)) {
+            uint64_t *key = g_new(uint64_t, 1);
+            *key = tb->start;
+            g_hash_table_add(seen, key);
+            g_array_append_val(pending, *key);
+        }
+    }
+    for (guint i = 0; i < pending->len; i++) {
+        uint64_t pc = g_array_index(pending, uint64_t, i);
+        unsigned section;
+        uint64_t offset;
+        if (!elf_find_exec_section_for_range(&elf, pc, 1, &section) ||
+            !elf_function_file_offset(&elf, pc, 1, section, &offset)) {
+            continue;
+        }
+        const Elf64_Shdr *sh = &elf.sh[section];
+        size_t available = sh->sh_size - (pc - sh->sh_addr);
+        if (offset > elf.size || available > elf.size - offset) {
+            continue;
+        }
+        size_t cursor = 0;
+        Insn insn = {0};
+        for (unsigned count = 0; count < 254 && cursor < available; count++) {
+            insn = cfg_decode_insn(elf.data + offset, available, pc, cursor);
+            if (!insn.len || insn.len > available - cursor) {
+                break;
+            }
+            cursor += insn.len;
+            if (insn.kind != INSN_NORMAL) {
+                break;
+            }
+        }
+        if (!cursor) {
+            continue;
+        }
+        uint64_t targets[2];
+        unsigned count = 0;
+        if (insn.has_target) {
+            targets[count++] = insn.target;
+        }
+        if (insn.kind == INSN_NORMAL || insn.kind == INSN_CALL ||
+            insn.kind == INSN_ICALL || insn.kind == INSN_JCC ||
+            insn.kind == INSN_SYSCALL) {
+            targets[count++] = pc + cursor;
+        }
+        for (unsigned j = 0; j < count; j++) {
+            uint64_t target = targets[j];
+            if (!cfg_program_address_is_executable(program, target) ||
+                g_hash_table_contains(seen, &target)) {
+                continue;
+            }
+            if (pending->len >= 1048576) {
+                result = fail(error, error_size, "direct TB closure too large");
+                goto out;
+            }
+            uint64_t *key = g_new(uint64_t, 1);
+            *key = target;
+            g_hash_table_add(seen, key);
+            g_array_append_val(pending, target);
+            CfgTb tb = {
+                .start = target,
+                .end = target + 1,
+                .terminator_pc = target,
+                .selected = true,
+                .semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
+                                  CFG_TB_BOUNDED,
+                .terminator = CFG_TB_FALLTHROUGH,
+            };
+            g_array_append_val(added, tb);
+        }
+    }
+    if (added->len) {
+        CfgTb *next = realloc(program->tbs,
+                              (program->tb_count + added->len) * sizeof(*next));
+        if (!next) {
+            result = fail(error, error_size,
+                          "out of memory closing TB targets");
+            goto out;
+        }
+        program->tbs = next;
+        memcpy(next + program->tb_count, added->data,
+               added->len * sizeof(*next));
+        program->tb_count += added->len;
+    }
+out:
+    g_array_free(added, TRUE);
+    g_array_free(pending, TRUE);
+    g_hash_table_destroy(seen);
+    elf_free(&elf);
+    return result;
+}
+
 int latc_tbset_apply(const char *path, const char *source_path,
                      CfgProgram *program,
                      bool ignore_outside_exec, size_t *matched,
@@ -748,6 +860,12 @@ int latc_tbset_apply(const char *path, const char *source_path,
     }
     if (has_parallel && expand_bounded_parallel_functions(
             program, template_count, error, error_size)) {
+        free(templates);
+        lat_tb_key_set_destroy(&set);
+        return -1;
+    }
+    if (has_parallel && close_parallel_targets(source_path, program,
+                                                error, error_size)) {
         free(templates);
         lat_tb_key_set_destroy(&set);
         return -1;
