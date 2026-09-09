@@ -1042,3 +1042,11 @@ test-invalidation-stats:
 	python3 tests/test-normalize-invalidation-stats.py
 
 test: test-invalidation-stats
+
+.PHONY: test-aot-v2-thread-env
+test-aot-v2-thread-env:
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
+	  -a -n "$(X86_ROOTFS)"
+	sh tests/test-aot-v2-thread-env.sh $(AOT_V2_RUNNER) \
+	  $(AOT_V2_RUNTIME_DIR) $(X86_ROOTFS) \
+	  $(abspath $(BUILD)/aot-v2-thread-env-test)

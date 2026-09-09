@@ -189,6 +189,7 @@
     },
     {
       "path": "lat/tcg/tcg.c",
+      "generated": true,
       "reason": "provide independent TCG code and TB storage regions to AOT compiler threads"
     },
     {
