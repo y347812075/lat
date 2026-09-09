@@ -82,4 +82,7 @@ if "$latc" compile "$guest" -o "$bundle.headerless" --runner "$guest" \
     echo "headerless three-column input was accepted" >&2
     exit 1
 fi
+python3 "$script_dir/test-static-entry.py" "$latc" "$guest" \
+  "$bundle.entry.tbset"
+
 echo "test-tbset: PASS"
