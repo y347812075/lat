@@ -1,6 +1,8 @@
 #include "lat-native-image.h"
+#include "lat-eflags-link.h"
 #include "lat-aot-v2.h"
 #include "module-pack.h"
+#include "native-image.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -177,14 +179,194 @@ static int write_large_guest_table_fixture(const char *path,
     return result;
 }
 
+static int test_edge_flags(const char *directory)
+{
+    /* All four widths, logical, arithmetic and shift flag writes. */
+    const uint32_t flag_instructions[] = {
+        0x003f3588, 0x003f3589, 0x003f358a, 0x003f358b,
+        0x003fb190, 0x003fb191, 0x003fb192, 0x003fb193,
+        0x003fb194, 0x003fb195, 0x003fb196, 0x003fb197,
+        0x003fb198, 0x003fb199, 0x003fb19a, 0x003fb19b,
+        0x003f3194, 0x003f3195, 0x003f3196, 0x003f3197,
+        0x003f3198, 0x003f3199, 0x003f319a, 0x003f319b,
+        0x003f319c, 0x003f319d, 0x003f319e, 0x003f319f,
+        0x00542180, 0x00544181, 0x00548182, 0x00550183,
+        0x00542184, 0x00544185, 0x00548186, 0x00550187,
+        0x00542188, 0x00544189, 0x0054818a, 0x0055018b,
+        0x00008180, 0x00008181, 0x00008182, 0x00008183,
+        0x00008184, 0x00008185, 0x00008186, 0x00008187,
+    };
+    for (unsigned use = 0; use < 256; use++) {
+        g_assert(lat_eflags_link_actions(use, 0, 0, 4) ==
+                 (use ? 0 : LAT_EFLAGS_LINK_NOP | LAT_EFLAGS_LINK_BYPASS));
+        g_assert(lat_eflags_link_actions(use, 1, 0, 4) ==
+                 (use ? 0 : LAT_EFLAGS_LINK_BYPASS));
+        g_assert(lat_eflags_link_actions(use, 0, UINT16_MAX, UINT16_MAX) == 0);
+    }
+    char *path = g_build_filename(directory, "flags.native", NULL);
+    char *base_path = g_build_filename(directory, "flags-base.native", NULL);
+    char *merged_path = g_build_filename(directory, "flags-merged.native",
+                                         NULL);
+    char *text_path = g_build_filename(directory, "text.bin", NULL);
+    const unsigned mode_count = 18 + G_N_ELEMENTS(flag_instructions);
+    for (unsigned mode = 0; mode < mode_count; mode++) {
+        unsigned char image[512] = {0};
+        LatNativeImageHeaderV2 *h = (void *)image;
+        memcpy(h->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
+        h->version = LAT_NATIVE_IMAGE_VERSION;
+        h->header_size = sizeof(*h);
+        h->flags = LAT_NATIVE_IMAGE_X86_STATIC_EXEC |
+                   LAT_NATIVE_IMAGE_CROSS_MODULE_TARGETS;
+        h->guest_image_offset = sizeof(*h);
+        h->guest_image_size = 8;
+        h->code_offset = h->guest_image_offset + 8;
+        h->code_size = 16;
+        h->tb_table_offset = h->code_offset + h->code_size;
+        h->tb_count = mode == 2 ? 1 : 2;
+        h->relocation_offset = h->tb_table_offset +
+                               h->tb_count * sizeof(LatNativeTbV1);
+        h->relocation_count = 1;
+        h->pc_map_offset = h->relocation_offset + sizeof(LatNativeRelocationV1);
+        h->pc_map_count = h->tb_count;
+        strcpy(h->lat_build_id, "flags-test");
+        uint32_t *code = (void *)(image + h->code_offset);
+        code[0] = 0x003f358a; /* x86sub.w t0, t1 */
+        code[1] = 0x1e00000c;
+        code[2] = 0x4c000184;
+        code[3] = 0x03400000;
+        LatNativeTbV1 *tbs = (void *)(image + h->tb_table_offset);
+        tbs[0] = (LatNativeTbV1){ .guest_pc = 0x1000, .code_size = 12,
+                                .eflags_instruction = code[0],
+                                .eflags_offset = {1, 0} };
+        if (h->tb_count == 2) {
+            tbs[1] = (LatNativeTbV1){ .guest_pc = 0x2000, .code_offset = 12,
+                .code_size = 4,
+                .optimization_flags = LAT_NATIVE_TB_ENTRY_FLAGS_DEAD };
+        }
+        LatNativeRelocationV1 *rel = (void *)(image + h->relocation_offset);
+        *rel = (LatNativeRelocationV1){ .code_offset = 4, .addend = 0x2000,
+            .kind = LAT_NATIVE_RELOC_TB_TARGET, .slots = 2,
+            .reserved = LAT_NATIVE_SYMBOL_JIRL_EPILOGUE_RET_ID_0 };
+        LatNativePcMapV2 *maps = (void *)(image + h->pc_map_offset);
+        maps[0] = (LatNativePcMapV2){ .guest_pc = 0x1000, .host_offset_end = 12,
+                                    .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE };
+        if (h->tb_count == 2) {
+            maps[1] = (LatNativePcMapV2){ .guest_pc = 0x2000,
+                .host_offset_begin = 12, .host_offset_end = 16,
+                .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE };
+        }
+        switch (mode) {
+        case 0:
+            tbs[1].optimization_flags = 0;
+            break;
+        case 3:
+            tbs[0].eflags_offset[0] = 2;
+            break;
+        case 4:
+            tbs[0].eflags_offset[0] = 13;
+            break;
+        case 5:
+            code[0] = 0x0010b58c; /* add.d must not be erased */
+            break;
+        case 6:
+            tbs[1].optimization_flags = 2;
+            break;
+        case 7:
+            tbs[0].eflags_offset[0] = 0;
+            break;
+        case 8:
+            tbs[0].eflags_offset[0] = 0;
+            tbs[0].eflags_offset[1] = 1;
+            rel->reserved = LAT_NATIVE_SYMBOL_JIRL_EPILOGUE_RET_ID_1;
+            break;
+        case 9:
+            rel->reserved = LAT_NATIVE_SYMBOL_EPILOGUE_RET_ID_0;
+            break;
+        case 10:
+            h->version = 2;
+            break;
+        case 12:
+        case 13:
+        case 14:
+        case 15:
+            code[0] = 0x03400000;
+            tbs[0].eflags_offset[0] = 0;
+            tbs[0].eflags_stub_offset[0] = mode == 14 ? 2 : 1;
+            if (mode == 13) {
+                tbs[1].optimization_flags = 0;
+            } else if (mode == 15) {
+                code[0] = 0x003f358a;
+            }
+            break;
+        case 16:
+            code[0] = tbs[0].eflags_instruction = 0x003f9490; /* x86and.b */
+            break;
+        case 17:
+            h->version = 3;
+            break;
+        }
+        if (mode >= 18) {
+            code[0] = tbs[0].eflags_instruction = flag_instructions[mode - 18];
+        }
+        size_t size = h->pc_map_offset + h->pc_map_count * sizeof(*maps);
+        if (mode == 11) {
+            size--;
+        }
+        g_assert(g_file_set_contents(path, (const char *)image, size, NULL));
+        char error[256] = {0};
+        int rc = lat_aot_v2_emit_module_sources(path, directory, error,
+                                               sizeof(error));
+        if ((mode >= 3 && mode <= 6) || mode == 10 || mode == 11 ||
+            mode == 14 || mode == 15 || mode == 17) {
+            g_assert(rc != 0);
+            continue;
+        }
+        g_assert(rc == 0);
+        gchar *text = NULL;
+        g_assert(g_file_get_contents(text_path, &text, NULL, NULL));
+        uint32_t expected = (mode == 1 || mode == 8 || mode == 13 ||
+                             mode == 16 || mode >= 18) ?
+                             0x03400000u : 0x003f358au;
+        if (mode == 12) {
+            expected = 0x50000c00u; /* bypass the entire stub to TB+12 */
+        }
+        g_assert(*(uint32_t *)text == expected);
+        g_free(text);
+        if (mode == 2) {
+            g_assert(g_file_set_contents(base_path, (const char *)image,
+                                         size, NULL));
+        }
+        if (mode == 7) {
+            /* The base edge gains a target supplied by the delta. */
+            g_assert(lat_native_image_merge_files(base_path, path, merged_path,
+                                                   error, sizeof(error)) == 0);
+            g_assert(lat_aot_v2_emit_module_sources(merged_path, directory,
+                                                    error, sizeof(error)) == 0);
+            g_assert(g_file_get_contents(text_path, &text, NULL, NULL));
+            g_assert(*(uint32_t *)text == 0x03400000u);
+            g_free(text);
+        }
+    }
+    g_remove(path);
+    g_remove(base_path);
+    g_remove(merged_path);
+    g_free(path);
+    g_free(base_path);
+    g_free(merged_path);
+    g_free(text_path);
+    return 0;
+}
+
 int main(void)
 {
-    char directory[] = "/tmp/latc-aot-v2-module-pack-XXXXXX";
+    g_autofree char *directory = g_build_filename(g_get_tmp_dir(),
+        "latc-aot-v2-module-pack-XXXXXX", NULL);
     if (!g_mkdtemp(directory)) {
         perror("create test directory");
         return 1;
     }
     char *image_path = g_build_filename(directory, "fixture.latnative", NULL);
+    test_edge_flags(directory);
     char error[256] = {0};
     if (write_fixture(image_path, 0, 0, 0) ||
         lat_aot_v2_emit_module_sources(image_path, directory,

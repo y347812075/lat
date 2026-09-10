@@ -2,6 +2,7 @@
 
 #include "lat-aot-v2.h"
 #include "native-image.h"
+#include "lat-eflags-link.h"
 
 #include <errno.h>
 #include <glib.h>
@@ -841,6 +842,42 @@ static int patch_guest_address(ModulePack *pack,
     return 0;
 }
 
+static void eliminate_edge_flags(ModulePack *pack,
+                                 const LatNativeRelocationV1 *relocation,
+                                 int owner, int target)
+{
+    int edge;
+    if (relocation->reserved == LAT_NATIVE_SYMBOL_JIRL_EPILOGUE_RET_ID_0) {
+        edge = 0;
+    } else if (relocation->reserved == LAT_NATIVE_SYMBOL_JIRL_EPILOGUE_RET_ID_1) {
+        edge = 1;
+    } else {
+        return;
+    }
+    const LatNativeTbV1 *tb = &pack->tbs[owner];
+    unsigned actions = lat_eflags_link_actions(
+        !(pack->tbs[target].optimization_flags & LAT_NATIVE_TB_ENTRY_FLAGS_DEAD),
+        0, tb->eflags_offset[edge] ? tb->eflags_offset[edge] - 1 : UINT16_MAX,
+        tb->eflags_stub_offset[edge] ?
+            tb->eflags_stub_offset[edge] - 1 : UINT16_MAX);
+    if (actions & LAT_EFLAGS_LINK_NOP) {
+        uint64_t offset = tb->code_offset + tb->eflags_offset[edge] - 1;
+        if (offset + 4 <= relocation->code_offset) {
+            /* Preserve the original native code and all PC-map offsets. */
+            uint32_t nop = 0x03400000u;
+            memcpy(pack->code + offset, &nop, sizeof(nop));
+        }
+    }
+    if (actions & LAT_EFLAGS_LINK_BYPASS) {
+        uint64_t offset = tb->code_offset + tb->eflags_stub_offset[edge] - 1;
+        uint32_t branch = 0x50000000u;
+        if (offset + 4 <= relocation->code_offset &&
+            !patch_branch(&branch, offset, pack->tbs[target].code_offset)) {
+            memcpy(pack->code + offset, &branch, sizeof(branch));
+        }
+    }
+}
+
 static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
 {
     for (uint64_t i = 0; i < pack->header->tb_count; i++) {
@@ -881,6 +918,9 @@ static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
                         instructions, relocation->slots,
                         relocation->code_offset,
                         pack->tbs[target].code_offset);
+                if (!result) {
+                    eliminate_edge_flags(pack, relocation, owner, target);
+                }
             } else if (target < 0 && runtime_entry(relocation->reserved)) {
                 result = patch_runtime_target(
                     instructions, relocation->slots,
