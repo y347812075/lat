@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define LAT_NATIVE_IMAGE_MAGIC "LATNAT2"
-#define LAT_NATIVE_IMAGE_VERSION 2u
+#define LAT_NATIVE_IMAGE_VERSION 4u
 #define LAT_NATIVE_BUILD_ID_SIZE 65u
 
 enum LatNativeImageFlags {
@@ -127,7 +127,16 @@ typedef struct LatNativeTbV1 {
     uint64_t code_offset;
     uint32_t code_size;
     uint32_t flags;
+    uint32_t optimization_flags;
+    /* TB-relative instruction offset plus one; zero means unavailable. */
+    uint16_t eflags_offset[2];
+    uint32_t eflags_instruction;
+    uint16_t eflags_stub_offset[2];
 } LatNativeTbV1;
+
+enum LatNativeTbOptimizationFlags {
+    LAT_NATIVE_TB_ENTRY_FLAGS_DEAD = 1u << 0,
+};
 
 typedef struct LatNativeRelocationV1 {
     uint64_t code_offset;

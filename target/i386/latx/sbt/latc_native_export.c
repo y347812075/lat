@@ -3,6 +3,7 @@
 #include "latc_native_export.h"
 #include "lat-aot-v2.h"
 #include "lat-native-image.h"
+#include "lat-eflags-link.h"
 #include "latc-build-id.h"
 #include "latc-bundle-loader.h"
 
@@ -773,6 +774,57 @@ int latc_native_export(const char *path, const char *guest_path,
             .code_size = tbs[i].tb_cache_size,
             .flags = native_semantic_flags(tbs[i].cflags),
         };
+#ifdef CONFIG_LATX_INSTS_PATTERN
+        if (!tbs[i].eflag_use) {
+            native_tb.optimization_flags = LAT_NATIVE_TB_ENTRY_FLAGS_DEAD;
+        }
+        for (int edge = 0; edge < 2; edge++) {
+            uint32_t offset = tbs[i].eflags_target_arg[edge];
+            uint16_t stub = UINT16_MAX;
+#ifdef CONFIG_LATX_XCOMISX_OPT
+            stub = tbs[i].jmp_stub_reset_offset[edge];
+#endif
+            if (tbs[i].bool_flags & IS_TU_JMP) {
+                continue;
+            }
+            unsigned actions = lat_eflags_link_actions(0,
+                edge && (tbs[i].bool_flags & OPT_BCC), offset, stub);
+            if (actions & LAT_EFLAGS_LINK_NOP) {
+                uint32_t backup = tbs[i].eflags_target_arg[EFLAG_BACKUP];
+                uint32_t instruction, original;
+                if (offset % 4 || offset + 4 > native_tb.code_size ||
+                    backup == UINT16_MAX || backup % 4 ||
+                    backup + 4 > native_tb.code_size) {
+                    fprintf(stderr, "latc: invalid eflags patch site\n");
+                    goto out;
+                }
+                memcpy(&instruction, native_code + code_offset + offset, 4);
+                memcpy(&original, native_code + code_offset + backup, 4);
+                if (instruction != original) {
+                    fprintf(stderr, "latc: eflags patch differs from backup\n");
+                    goto out;
+                }
+                native_tb.eflags_instruction = original;
+                native_tb.eflags_offset[edge] = offset + 1;
+            }
+#ifdef CONFIG_LATX_XCOMISX_OPT
+            if (actions & LAT_EFLAGS_LINK_BYPASS) {
+                uint64_t site = tbs[i].jmp_stub_target_arg[edge];
+                uint32_t instruction;
+                if (site % 4 || site + 4 > native_tb.code_size) {
+                    fprintf(stderr, "latc: invalid eflags stub site\n");
+                    goto out;
+                }
+                memcpy(&instruction, native_code + code_offset + site, 4);
+                if (instruction != 0x03400000u) {
+                    fprintf(stderr, "latc: eflags stub is not unlinked\n");
+                    goto out;
+                }
+                native_tb.eflags_stub_offset[edge] = site + 1;
+            }
+#endif
+        }
+#endif
         g_array_append_val(native_tbs, native_tb);
 
         if (tbs[i].rel_start_index == -1) {

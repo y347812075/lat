@@ -13,7 +13,7 @@ _Static_assert(offsetof(LatX86StateV1, xmm) == 300,
                "LatX86StateV1 XMM offset changed");
 _Static_assert(sizeof(LatNativeImageHeaderV2) == 224,
                "native image header size changed");
-_Static_assert(sizeof(LatNativeTbV1) == 24,
+_Static_assert(sizeof(LatNativeTbV1) == 40,
                "native TB record size changed");
 _Static_assert(sizeof(LatNativeRelocationV1) == 32,
                "native relocation record size changed");

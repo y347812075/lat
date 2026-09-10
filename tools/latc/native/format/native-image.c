@@ -194,6 +194,44 @@ int lat_native_image_validate(const void *data, size_t size,
                            "native TB %llu has an invalid code range",
                            (unsigned long long)i);
         }
+        if (tbs[i].optimization_flags & ~LAT_NATIVE_TB_ENTRY_FLAGS_DEAD) {
+            return invalid(error, error_size, "invalid native TB optimization flags");
+        }
+        for (int edge = 0; edge < 2; edge++) {
+            uint32_t encoded = tbs[i].eflags_offset[edge];
+            if (encoded && ((encoded - 1) % 4 ||
+                            encoded - 1 + 4 > tbs[i].code_size)) {
+                return invalid(error, error_size, "invalid native TB eflags offset");
+            }
+            if (encoded) {
+                uint32_t instruction;
+                memcpy(&instruction, (const unsigned char *)data +
+                       header->code_offset + tbs[i].code_offset + encoded - 1,
+                       sizeof(instruction));
+                if (instruction != tbs[i].eflags_instruction) {
+                    return invalid(error, error_size,
+                                   "invalid native TB eflags instruction");
+                }
+            }
+            encoded = tbs[i].eflags_stub_offset[edge];
+            if (encoded) {
+                uint32_t instruction;
+                if ((encoded - 1) % 4 ||
+                    encoded - 1 + 4 > tbs[i].code_size) {
+                    return invalid(error, error_size,
+                                   "invalid native TB eflags stub offset");
+                }
+                memcpy(&instruction, (const unsigned char *)data +
+                       header->code_offset + tbs[i].code_offset + encoded - 1,
+                       sizeof(instruction));
+                if (instruction != 0x03400000u ||
+                    encoded == tbs[i].eflags_offset[0] ||
+                    encoded == tbs[i].eflags_offset[1]) {
+                    return invalid(error, error_size,
+                                   "invalid native TB eflags stub instruction");
+                }
+            }
+        }
         if (i && (tbs[i - 1].guest_pc > tbs[i].guest_pc ||
                   (tbs[i - 1].guest_pc == tbs[i].guest_pc &&
                    tbs[i - 1].flags >= tbs[i].flags))) {

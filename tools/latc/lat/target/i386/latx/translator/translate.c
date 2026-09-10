@@ -7,6 +7,7 @@
 #include "lsenv.h"
 #include "reg-alloc.h"
 #include "flag-lbt.h"
+#include "lat-eflags-link.h"
 #include <string.h>
 #include "latx-options.h"
 #include "fpu/softfloat.h"
@@ -3585,16 +3586,20 @@ void latx_tb_set_jmp_target(TranslationBlock *tb, int n,
             tb->bool_flags |= TARGET1_ELIMINATE;
         }
     }
-    /* TODO: TU */
-    /* Eflags elimination */
-    if (!next_tb->eflag_use &&
-        tb->eflags_target_arg[n] != TB_JMP_RESET_OFFSET_INVALID)
-        tb_eflag_eliminate(tb, n);
+    uint16_t stub_offset = UINT16_MAX;
 #ifdef CONFIG_LATX_XCOMISX_OPT
-    /* stub select */
-    if (!next_tb->eflag_use &&
-        tb->jmp_stub_reset_offset[n] != TB_JMP_RESET_OFFSET_INVALID)
+    stub_offset = tb->jmp_stub_reset_offset[n];
+#endif
+    unsigned actions = lat_eflags_link_actions(next_tb->eflag_use,
+        n && (tb->bool_flags & OPT_BCC), tb->eflags_target_arg[n],
+        stub_offset);
+    if (actions & LAT_EFLAGS_LINK_NOP) {
+        tb_eflag_eliminate(tb, n);
+    }
+#ifdef CONFIG_LATX_XCOMISX_OPT
+    if (actions & LAT_EFLAGS_LINK_BYPASS) {
         tb_stub_bypass(tb, n, (uintptr_t)next_tb->tc.ptr);
+    }
 #ifdef CONFIG_LATX_DEBUG
     eflags_eliminate_debugger(tb, n, next_tb);
 #endif
