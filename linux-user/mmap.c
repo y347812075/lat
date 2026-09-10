@@ -35,6 +35,7 @@
 #include "latx-options.h"
 #endif
 #include <sys/resource.h>
+#include <sys/shm.h>
 
 static pthread_mutex_t mmap_mutex = PTHREAD_MUTEX_INITIALIZER;
 static __thread int mmap_lock_count;
@@ -631,6 +632,31 @@ abi_ulong mmap_find_vma_2g(abi_ulong start, abi_ulong size, abi_ulong align)
 }
 #endif
 
+static abi_ulong mmap_find_shared_vma(abi_ulong start, abi_ulong size,
+                                      abi_ulong offset)
+{
+#if defined(__loongarch__) && !defined(CONFIG_LOONGARCH_NEW_WORLD)
+    abi_ulong align = MAX((abi_ulong)SHMLBA, qemu_host_page_size);
+    abi_ulong bias = (offset - (uintptr_t)g2h_untagged(0)) & (align - 1);
+    abi_ulong base;
+
+    /* Shared mappings must have the same cache colour as their file offset. */
+    if (size > (abi_ulong)-1 - bias) {
+        return (abi_ulong)-1;
+    }
+    base = mmap_find_vma(start, size + bias, align);
+    if (base == (abi_ulong)-1) {
+        return base;
+    }
+    if (bias && !reserved_va) {
+        munmap(g2h_untagged(base), bias);
+    }
+    return base + bias;
+#else
+    return mmap_find_vma(start, size, TARGET_PAGE_SIZE);
+#endif
+}
+
 static int create_shadow_file(int fd, uint64 offset, abi_ulong start, abi_ulong len)
 {
     char *tmp_buf;
@@ -767,6 +793,8 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
             start = mmap_find_vma_2g(real_start, host_len, TARGET_PAGE_SIZE);
             flags &= ~X86_64_MAP_32BIT;
 #endif
+        } else if ((flags & MAP_TYPE) == MAP_SHARED) {
+            start = mmap_find_shared_vma(real_start, host_len, host_offset);
         } else {
              start = mmap_find_vma(real_start, host_len, TARGET_PAGE_SIZE);
         }
@@ -817,6 +845,7 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
 
     if (!(flags & MAP_FIXED)) {
         unsigned long host_start;
+        int reserve_flags = flags;
         void *p;
 
         host_len = len + offset - host_offset;
@@ -825,8 +854,12 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
         /* Note: we prefer to control the mapping address. It is
            especially important if qemu_host_page_size >
            qemu_real_host_page_size */
+        /* File-offset cache colouring need not suit an anonymous shared map. */
+        if (!(flags & MAP_ANONYMOUS)) {
+            reserve_flags = (flags & ~MAP_TYPE) | MAP_PRIVATE;
+        }
         p = mmap(g2h_untagged(start), host_len, host_prot,
-                 flags | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+                 reserve_flags | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
         if (p == MAP_FAILED) {
             goto fail;
         }
