@@ -46,10 +46,10 @@ def main():
                     '--runner', runner, '--runtime-dir', runtime],
         {'LATC_NATIVE_OUTPUT': str(native)})
     data = native.read_bytes()
-    assert struct.unpack_from('<I', data, 8)[0] == 4
+    assert struct.unpack_from('<I', data, 8)[0] == 6
     offset, count = struct.unpack_from('<QQ', data, 72)
-    records = list(struct.iter_unpack('<QQIIIHHIHH',
-                                     data[offset:offset + count * 40]))
+    records = list(struct.iter_unpack('<QQIIIHHIHHII',
+                                     data[offset:offset + count * 48]))
     assert any(tb[5] or tb[6] for tb in records), 'missing NOP sites'
     assert any(tb[8] or tb[9] for tb in records), 'missing stub bypass sites'
     symbols = subprocess.check_output(['nm', '-n', str(module)], text=True)
@@ -64,11 +64,42 @@ def main():
             functions.append((int(fields[0], 16), int(fields[1], 16),
                               fields[3].split('.')[0]))
     linked = module.read_bytes()
+    native_code = struct.unpack_from('<Q', data, 56)[0]
+    conditional_proof = []
+    indirect_proof = []
     proof = []
     for tb in records:
         for start, size, name in functions:
             if not start <= tb[0] < start + size:
                 continue
+            if tb[11]:
+                site = tb[11] - 1
+                assert site % 4 == 0 and site + 152 < tb[2], name
+                original = struct.unpack_from(
+                    '<I', data, native_code + tb[1] + site)[0]
+                final = struct.unpack_from(
+                    '<I', linked, text_begin + tb[1] + site)[0]
+                assert original == 0x004542ab, name
+                assert final != original, name
+                indirect_proof.append(dict(function=name, guest_pc=hex(tb[0]),
+                                            offset=site, linked=hex(final)))
+            if tb[10]:
+                site = tb[10] - 1
+                assert site % 4 == 0 and site + 4 <= tb[2], name
+                original = struct.unpack_from(
+                    '<I', data, native_code + tb[1] + site)[0]
+                assert 0x16 <= original >> 26 <= 0x1b, name
+                displacement = (original >> 10) & 0xffff
+                if displacement & 0x8000:
+                    displacement -= 0x10000
+                target = site + displacement * 4
+                assert 0 <= target <= tb[2] - 4, name
+                final = struct.unpack_from(
+                    '<I', linked, text_begin + tb[1] + site)[0]
+                assert original & 0xfc0003ff == final & 0xfc0003ff, name
+                conditional_proof.append(dict(
+                    function=name, guest_pc=hex(tb[0]), offset=site,
+                    original=hex(original), linked=hex(final)))
             for edge in range(2):
                 sites = [('nop', tb[5 + edge]), ('stub', tb[8 + edge])]
                 for kind, encoded in sites:
@@ -81,6 +112,18 @@ def main():
                                           changed=changed,
                                           instruction=hex(word)))
     (work / 'patch-proof.json').write_text(json.dumps(proof, indent=2) + '\n')
+    (work / 'conditional-proof.json').write_text(
+        json.dumps(conditional_proof, indent=2) + '\n')
+    (work / 'indirect-proof.json').write_text(
+        json.dumps(indirect_proof, indent=2) + '\n')
+    assert {'cmp32_live', 'cmp32_dead'} <= {
+        p['function'] for p in indirect_proof}, 'missing indirect producer sites'
+    # Require producer coverage in fixture code, independent of libc coverage.
+    exported = {p['function'] for p in conditional_proof}
+    for family in ['cmp8', 'cmp16', 'cmp32', 'cmp64',
+                   'test8', 'test16', 'test32', 'test64']:
+        for suffix in ['live', 'dead']:
+            assert family + '_' + suffix in exported, (family, suffix)
     required = {
         'nop': ['cmp8', 'cmp16', 'cmp32', 'cmp64',
                 'test8', 'test16', 'test32', 'test64', 'sub64',

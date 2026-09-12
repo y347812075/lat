@@ -28,7 +28,8 @@ static void usage(const char *name)
     fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
     fprintf(stderr, "  %s merge-native BASE DELTA -o OUTPUT\n", name);
-    fprintf(stderr, "  %s emit-aot-v2 NATIVE_IMAGE OUTPUT_DIRECTORY\n",
+    fprintf(stderr, "  %s emit-aot-v2 NATIVE_IMAGE OUTPUT_DIRECTORY"
+                    " [X86_ELF]\n",
             name);
     fprintf(stderr,
             "  %s compile-module X86_ELF -o MODULE --runner RUNNER"
@@ -82,6 +83,27 @@ static void digest_hex(const uint8_t digest[32], char hex[65])
         hex[i * 2 + 1] = digits[digest[i] & 15];
     }
     hex[64] = '\0';
+}
+
+static int file_digest(const char *path, uint8_t digest[32],
+                       char *error, size_t error_size)
+{
+    gchar *contents = NULL;
+    gsize size = 0;
+    GError *gerror = NULL;
+    if (!g_file_get_contents(path, &contents, &size, &gerror)) {
+        g_snprintf(error, error_size, "cannot read %s: %s", path,
+                   gerror ? gerror->message : "unknown error");
+        g_clear_error(&gerror);
+        return -1;
+    }
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    g_checksum_update(checksum, (const guchar *)contents, size);
+    gsize digest_size = 32;
+    g_checksum_get_digest(checksum, digest, &digest_size);
+    g_checksum_free(checksum);
+    g_free(contents);
+    return digest_size == 32 ? 0 : -1;
 }
 
 static int inspect_module(const char *path, int json)
@@ -449,9 +471,26 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "emit-aot-v2") == 0) {
         char error[256] = {0};
-        if (argc != 4) { usage(argv[0]); return 2; }
-        if (lat_aot_v2_emit_module_sources(argv[2], argv[3], error,
-                                           sizeof(error))) {
+        if (argc != 4 && argc != 5) { usage(argv[0]); return 2; }
+        int result;
+        if (argc == 4) {
+            result = lat_aot_v2_emit_module_sources(
+                argv[2], argv[3], error, sizeof(error));
+        } else {
+            CfgProgram program;
+            CfgAnalyzeOptions options = {.resolve_jump_tables = true};
+            uint8_t digest[32];
+            if (file_digest(argv[4], digest, error, sizeof(error)) ||
+                cfg_analyze_elf(argv[4], &options, &program,
+                                error, sizeof(error))) {
+                fprintf(stderr, "latc: %s\n", error);
+                return 1;
+            }
+            result = lat_aot_v2_emit_module_sources_with_cfg(
+                argv[2], argv[3], &program, digest, error, sizeof(error));
+            cfg_program_destroy(&program);
+        }
+        if (result) {
             fprintf(stderr, "latc: %s\n", error);
             return 1;
         }

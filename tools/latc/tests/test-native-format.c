@@ -13,7 +13,7 @@ _Static_assert(offsetof(LatX86StateV1, xmm) == 300,
                "LatX86StateV1 XMM offset changed");
 _Static_assert(sizeof(LatNativeImageHeaderV2) == 224,
                "native image header size changed");
-_Static_assert(sizeof(LatNativeTbV1) == 40,
+_Static_assert(sizeof(LatNativeTbV1) == 48,
                "native TB record size changed");
 _Static_assert(sizeof(LatNativeRelocationV1) == 32,
                "native relocation record size changed");
@@ -83,6 +83,46 @@ int main(int argc, char **argv)
         fprintf(stderr, "valid image rejected: %s\n", error);
         return 1;
     }
+    uint32_t *code = (void *)(image + header->code_offset);
+    code[0] = 0x58000400u; /* beq zero, zero, +4 */
+    tb->conditional_exit_offset = 1;
+    if (lat_native_image_validate(image, image_size, error, sizeof(error))) {
+        fprintf(stderr, "valid conditional exit rejected: %s\n", error);
+        return 1;
+    }
+    const uint32_t bad_offsets[] = {2, 17, UINT32_MAX};
+    for (size_t i = 0; i < sizeof(bad_offsets) / sizeof(bad_offsets[0]); i++) {
+        tb->conditional_exit_offset = bad_offsets[i];
+        if (!lat_native_image_validate(image, image_size, error, sizeof(error))) {
+            fprintf(stderr, "bad conditional offset accepted\n");
+            return 1;
+        }
+    }
+    tb->conditional_exit_offset = 1;
+    const uint32_t bad_instructions[] = {
+        0x03400000u, 0x58001000u, 0x5bfffc00u,
+    }; /* NOP, target at TB end, negative target */
+    for (size_t i = 0;
+         i < sizeof(bad_instructions) / sizeof(bad_instructions[0]); i++) {
+        code[0] = bad_instructions[i];
+        if (!lat_native_image_validate(image, image_size, error, sizeof(error))) {
+            fprintf(stderr, "bad conditional instruction accepted\n");
+            return 1;
+        }
+    }
+    code[0] = 0x58000400u;
+    tb->indirect_exit_offset = 1;
+    if (!lat_native_image_validate(image, image_size, error, sizeof(error))) {
+        fprintf(stderr, "invalid indirect exit accepted\n");
+        return 1;
+    }
+    tb->indirect_exit_offset = 0;
+    header->version = 5;
+    if (!lat_native_image_validate(image, image_size, error, sizeof(error))) {
+        fprintf(stderr, "old native version accepted\n");
+        return 1;
+    }
+    header->version = LAT_NATIVE_IMAGE_VERSION;
     if (argc == 4) {
         if (write_image(argv[1], image, image_size)) return 1;
         tb->guest_pc = 0x401010;
@@ -94,6 +134,17 @@ int main(int argc, char **argv)
             header->tb_count != 2 || header->code_size != 64 ||
             header->relocation_count != 2) {
             fprintf(stderr, "cannot merge native images: %s\n", error);
+            return 1;
+        }
+        LatNativeTbV1 merged_tbs[2];
+        FILE *merged_file = fopen(argv[3], "rb");
+        if (!merged_file || fseek(merged_file, header->tb_table_offset, SEEK_SET) ||
+            fread(merged_tbs, sizeof(merged_tbs), 1, merged_file) != 1 ||
+            fclose(merged_file) ||
+            merged_tbs[0].conditional_exit_offset != 1 ||
+            merged_tbs[1].conditional_exit_offset != 1 ||
+            merged_tbs[1].code_offset != 32) {
+            fprintf(stderr, "merged conditional exit metadata changed\n");
             return 1;
         }
         error[0] = '\0';
@@ -113,6 +164,8 @@ int main(int argc, char **argv)
         puts("test-native-format: PASS merge=2 overlap=deduplicated");
         return 0;
     }
+    tb->conditional_exit_offset = 0;
+    code[0] = 0;
     if (argc == 2) {
         if (write_image(argv[1], image, image_size)) {
             fprintf(stderr, "cannot write native image fixture\n");
