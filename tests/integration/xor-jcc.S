@@ -1,4 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+#ifndef INSTPTN_LOOP_COUNT
+#define INSTPTN_LOOP_COUNT 100000
+#endif
+
     .text
     .globl _start
 _start:
@@ -179,7 +183,7 @@ _start:
     jne exit_guest
     call check_flags
 
-    movl $100000, %ecx
+    movl $INSTPTN_LOOP_COUNT, %ecx
 13:
     movl $0x12345678, %eax
     xorl $0x12345678, %eax
@@ -190,7 +194,7 @@ _start:
 
     /* The taken TU successor consumes CF while fallthrough does not. */
     xorl %r8d, %r8d
-    movl $100000, %ecx
+    movl $INSTPTN_LOOP_COUNT, %ecx
 .Ltu_target_loop:
     stc
     movl $1, %eax

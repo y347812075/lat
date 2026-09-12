@@ -4,6 +4,10 @@
  * Exercise the adjacent GPR DEC + JE/JNE instruction pattern.
  */
 
+#ifndef INSTPTN_LOOP_COUNT
+#define INSTPTN_LOOP_COUNT 100000
+#endif
+
     .text
     .globl _start
 _start:
@@ -130,7 +134,7 @@ _start:
 
     /* Heat a matching loop and verify CF survives every DEC. */
     movl $12, %edi
-    movl $100000, %ecx
+    movl $INSTPTN_LOOP_COUNT, %ecx
     stc
 10:
     decl %ecx

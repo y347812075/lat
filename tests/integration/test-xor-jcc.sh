@@ -38,9 +38,15 @@ grep -Eq 'reject\.disabled=[1-9][0-9]*' "$workdir/disabled.log"
 env LATX_AOT=0 LATX_INSTPTN_MASK=0x200 LATX_INSTPTN_STATS=1 \
     "$emulator" "$guest" >"$workdir/xor-div.log" 2>&1
 
+# Debug unlink flushes every TB; keep the hot-loop runs above unchanged.
+"$clang" --target=x86_64-linux-gnu -fuse-ld=lld -nostdlib -static \
+    -Wl,--build-id=none -DINSTPTN_LOOP_COUNT=4 "$source_file" \
+    -o "$workdir/xor-jcc-unlink"
+unlink_guest="$workdir/xor-jcc-unlink"
+
 for unlink in 0 1; do
     env LATX_UNLINK="$unlink" LATX_AOT=0 LATX_INSTPTN_MASK="$mask" \
-        "$emulator" "$guest" >"$workdir/unlink-$unlink.log" 2>&1
+        "$emulator" "$unlink_guest" >"$workdir/unlink-$unlink.log" 2>&1
 done
 
 mkdir -p "$workdir/aot-home"

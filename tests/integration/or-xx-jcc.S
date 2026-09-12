@@ -21,6 +21,10 @@ resume_rip:
 signal_count:
     .quad 0
 
+#ifndef INSTPTN_LOOP_COUNT
+#define INSTPTN_LOOP_COUNT 200000
+#endif
+
     .text
     .globl _start
 _start:
@@ -224,7 +228,7 @@ _start:
     addq $8, %rsp
 
     /* Hot path with ordinary-itemp pressure between OR and Jcc. */
-    movl $200000, %ecx
+    movl $INSTPTN_LOOP_COUNT, %ecx
     xorl %r8d, %r8d
 .Lhot_loop:
     orb $0, %r8b
