@@ -160,6 +160,25 @@ _start:
     cmpl $1, %edx
     jne exit_guest
 
+    /* The memory load is signed, while EAX has a zero-extended high half. */
+    movl $20, %edi
+    movl $0x44, %r9d
+    movl $0x80000000, %eax
+    movl %eax, mem32(%rip)
+    xorl %eax, mem32(%rip)
+    je .Lmem32_zero
+    jmp exit_guest
+.Lmem32_zero:
+    call check_flags
+    cmpl $0, mem32(%rip)
+    jne exit_guest
+
+    movl $21, %edi
+    movl %eax, mem32(%rip)
+    xorl %eax, mem32(%rip)
+    jne exit_guest
+    call check_flags
+
     movl $100000, %ecx
 13:
     movl $0x12345678, %eax

@@ -169,6 +169,24 @@ _start:
     cmpl $1, lock_value(%rip)
     jne exit_guest
 
+    /* Dword memory writes discard the high half of the host ADD result. */
+    movl $18, %edi
+    movl $0x845, %r9d
+    movl $0x80000000, mem32(%rip)
+    addl $-2147483648, mem32(%rip)
+    je .Lmem32_zero
+    jmp exit_guest
+.Lmem32_zero:
+    call check_flags
+    cmpl $0, mem32(%rip)
+    jne exit_guest
+
+    movl $19, %edi
+    movl $0x80000000, mem32(%rip)
+    addl $-2147483648, mem32(%rip)
+    jne exit_guest
+    call check_flags
+
     /* Heat a matching loop so the TU/retranslation path is exercised. */
     movl $-100000, %ecx
 14:

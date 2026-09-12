@@ -670,8 +670,10 @@ static bool translate_add_jcc(IR1_INST *ir1)
     bool zero_branch = ir1_opcode(next) == WRAP(JE) ||
                        ir1_opcode(next) == WRAP(JNE);
     IR2_OPND branch_result;
+    /* Memory writeback truncates the value, but not the host temporary. */
     if (opnd0_size == 64 ||
-        (opnd0_size == 32 && zero_branch && !GHBR_ON(curr))) {
+        (opnd0_size == 32 && zero_branch && CODEIS64 &&
+         ir1_opnd_is_gpr(opnd0) && !GHBR_ON(curr))) {
         branch_result = dest;
     } else {
         branch_result = load_opnd_from_opnd(
@@ -964,8 +966,10 @@ static bool translate_xor_jcc(IR1_INST *ir1)
     bool zero_branch = ir1_opcode(next) == WRAP(JE) ||
                        ir1_opcode(next) == WRAP(JNE);
     IR2_OPND branch_result;
+    /* Memory writeback truncates the value, but not the host temporary. */
     if (opnd0_size == 64 ||
-        (opnd0_size == 32 && zero_branch && !GHBR_ON(curr))) {
+        (opnd0_size == 32 && zero_branch && CODEIS64 &&
+         ir1_opnd_is_gpr(opnd0) && !GHBR_ON(curr))) {
         branch_result = dest;
     } else {
         branch_result = load_opnd_from_opnd(
