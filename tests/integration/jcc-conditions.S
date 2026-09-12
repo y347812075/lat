@@ -2,6 +2,43 @@
     .text
     .globl _start
 _start:
+#if defined(INSTPTN_CMP_PROBE) || defined(INSTPTN_SUB_PROBE) || \
+    defined(INSTPTN_AND_PROBE)
+    /* Isolate new conditions so legacy matches cannot hide a mask error. */
+    movl $1, %edi
+    movl $0x80000000, %eax
+#if defined(INSTPTN_CMP_PROBE)
+    cmpl $1, %eax
+    jns .Lprobe_second
+    jmp .Lprobe_exit
+.Lprobe_second:
+    movl $0, %eax
+    cmpl $1, %eax
+    js .Lprobe_ok
+#elif defined(INSTPTN_SUB_PROBE)
+    subl $1, %eax
+    jns .Lprobe_second
+    jmp .Lprobe_exit
+.Lprobe_second:
+    movl $0, %eax
+    subl $1, %eax
+    js .Lprobe_ok
+#else
+    andl $0, %eax
+    je .Lprobe_second
+    jmp .Lprobe_exit
+.Lprobe_second:
+    movl $1, %eax
+    andl $0, %eax
+    je .Lprobe_ok
+#endif
+    jmp .Lprobe_exit
+.Lprobe_ok:
+    xorl %edi, %edi
+.Lprobe_exit:
+    movl $60, %eax
+    syscall
+#else
     cmpq $2, (%rsp)
     je cmp_fault
     cmpq $3, (%rsp)
@@ -286,6 +323,7 @@ and_fault:
     movl $23, %edi
     jmp exit_guest
 
+#endif
     .data
     .p2align 3
 mem32:       .long 0

@@ -89,6 +89,9 @@ static bool instptn_opcode_to_option(InstPtnOpcode opcode,
     case INSTPTN_OPC_CMP_JCC:
         *option = INSTPTN_OPT_CMP_JCC;
         break;
+    case INSTPTN_OPC_CMP_JS_JNS:
+        *option = INSTPTN_OPT_CMP_JS_JNS;
+        break;
     case INSTPTN_OPC_TEST_JCC:
         *option = INSTPTN_OPT_TEST_JCC;
         break;
@@ -152,6 +155,9 @@ static bool instptn_opcode_to_option(InstPtnOpcode opcode,
     case INSTPTN_OPC_SUB_JCC:
         *option = INSTPTN_OPT_SUB_JCC;
         break;
+    case INSTPTN_OPC_SUB_JS_JNS:
+        *option = INSTPTN_OPT_SUB_JS_JNS;
+        break;
     case INSTPTN_OPC_MOVAPS_VST_X4:
         *option = INSTPTN_OPT_MOVAPS_VST_X4;
         break;
@@ -163,6 +169,9 @@ static bool instptn_opcode_to_option(InstPtnOpcode opcode,
         break;
     case INSTPTN_OPC_AND_JCC:
         *option = INSTPTN_OPT_AND_JCC;
+        break;
+    case INSTPTN_OPC_AND_JE:
+        *option = INSTPTN_OPT_AND_JE;
         break;
     case INSTPTN_OPC_ADD_JCC:
         *option = INSTPTN_OPT_ADD_JCC;
@@ -774,13 +783,13 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *pir1, int pir1_i
         case WRAP(JS):
         case WRAP(JNS):
             if (pir1_index + 1 == SCAN_IDX(scan, 0)) {
-                instptn_check_cmp_jcc_0();
-                pir1->instptn.opc = INSTPTN_OPC_CMP_JCC;
+                instptn_check_cmp_js_jns_0();
+                pir1->instptn.opc = INSTPTN_OPC_CMP_JS_JNS;
                 pir1->instptn.next = ir1_jcc;
                 ir1_jcc->instptn.opc = INSTPTN_OPC_NOP;
             } else {
                 instptn_stats_record_reject(
-                    INSTPTN_OPT_CMP_JCC,
+                    INSTPTN_OPT_CMP_JS_JNS,
                     INSTPTN_REJECT_NON_ADJACENT);
             }
             return false;
@@ -887,14 +896,22 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *pir1, int pir1_i
         case WRAP(JS):
         case WRAP(JNS):
             if (pir1_index + 1 == SCAN_IDX(scan, 0)) {
-                instptn_check_sub_jcc_0();
-                pir1->instptn.opc  = INSTPTN_OPC_SUB_JCC;
+                if (ir1_opcode(ir1_jcc) == WRAP(JS) ||
+                    ir1_opcode(ir1_jcc) == WRAP(JNS)) {
+                    instptn_check_sub_js_jns_0();
+                    pir1->instptn.opc = INSTPTN_OPC_SUB_JS_JNS;
+                } else {
+                    instptn_check_sub_jcc_0();
+                    pir1->instptn.opc = INSTPTN_OPC_SUB_JCC;
+                }
                 pir1->instptn.next = ir1_jcc;
                 ir1_jcc->instptn.opc  = INSTPTN_OPC_NOP;
                 // ir1_jcc->instptn.next = NULL;
             } else {
                 instptn_stats_record_reject(
-                    INSTPTN_OPT_SUB_JCC,
+                    ir1_opcode(ir1_jcc) == WRAP(JS) ||
+                    ir1_opcode(ir1_jcc) == WRAP(JNS) ?
+                        INSTPTN_OPT_SUB_JS_JNS : INSTPTN_OPT_SUB_JCC,
                     INSTPTN_REJECT_NON_ADJACENT);
             }
             return false;
@@ -988,14 +1005,20 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *pir1, int pir1_i
         case WRAP(JE):
         case WRAP(JNE):
             if (pir1_index + 1 == SCAN_IDX(scan, 0)) {
-                instptn_check_and_jcc_0();
-                pir1->instptn.opc  = INSTPTN_OPC_AND_JCC;
+                if (ir1_opcode(ir1_jcc) == WRAP(JE)) {
+                    instptn_check_and_je_0();
+                    pir1->instptn.opc = INSTPTN_OPC_AND_JE;
+                } else {
+                    instptn_check_and_jcc_0();
+                    pir1->instptn.opc = INSTPTN_OPC_AND_JCC;
+                }
                 pir1->instptn.next = ir1_jcc;
                 ir1_jcc->instptn.opc  = INSTPTN_OPC_NOP;
                 // ir1_jcc->instptn.next = NULL;
             } else {
                 instptn_stats_record_reject(
-                    INSTPTN_OPT_AND_JCC,
+                    ir1_opcode(ir1_jcc) == WRAP(JE) ?
+                        INSTPTN_OPT_AND_JE : INSTPTN_OPT_AND_JCC,
                     INSTPTN_REJECT_NON_ADJACENT);
             }
             return false;

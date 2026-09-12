@@ -182,6 +182,7 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
 } while (0)
 
 #define instptn_check_cmp_jcc_0() INSTPTN_CHECK_XX_0(CMP_JCC)
+#define instptn_check_cmp_js_jns_0() INSTPTN_CHECK_XX_0(CMP_JS_JNS)
 #define instptn_check_test_jcc_0() INSTPTN_CHECK_XX_0(TEST_JCC)
 #define instptn_check_bt_jcc_0() INSTPTN_CHECK_XX_0(BT_JCC)
 #define instptn_check_cqo_idiv_0() INSTPTN_CHECK_XX_0(CQO_IDIV)
@@ -206,6 +207,7 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
 
 #define instptn_check_ucomisd_seta_0() INSTPTN_CHECK_XX_0(UCOMISD_SETA)
 #define instptn_check_sub_jcc_0() INSTPTN_CHECK_XX_0(SUB_JCC)
+#define instptn_check_sub_js_jns_0() INSTPTN_CHECK_XX_0(SUB_JS_JNS)
 
 #define instptn_check_movaps_vst_x4_0() INSTPTN_CHECK_XX_0(MOVAPS_VST_X4)
 #define instptn_check_neg_cmovcc_0() INSTPTN_CHECK_XX_0(NEG_CMOVCC)
@@ -214,6 +216,7 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
 #define instptn_check_sar_jcc_0() INSTPTN_CHECK_XX_0(SAR_JCC)
 #define instptn_check_shr_je_0() INSTPTN_CHECK_XX_0(SHR_JE)
 #define instptn_check_and_jcc_0() INSTPTN_CHECK_XX_0(AND_JCC)
+#define instptn_check_and_je_0() INSTPTN_CHECK_XX_0(AND_JE)
 #define instptn_check_add_jcc_0() INSTPTN_CHECK_XX_0(ADD_JCC)
 #define instptn_check_or_jcc_0() INSTPTN_CHECK_XX_0(OR_JCC)
 #define instptn_check_xor_jcc_0() INSTPTN_CHECK_XX_0(XOR_JCC)
@@ -223,6 +226,7 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
 #define instptn_check_void(option)
 #define instptn_check_false(option)
 #define instptn_check_cmp_jcc_0()
+#define instptn_check_cmp_js_jns_0()
 #define instptn_check_test_jcc_0()
 #define instptn_check_bt_jcc_0()
 #define instptn_check_cqo_idiv_0()
@@ -247,6 +251,7 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
 
 #define instptn_check_ucomisd_seta_0()
 #define instptn_check_sub_jcc_0()
+#define instptn_check_sub_js_jns_0()
 
 #define instptn_check_movaps_vst_x4_0()
 #define instptn_check_neg_cmovcc_0()
@@ -255,6 +260,7 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
 #define instptn_check_sar_jcc_0()
 #define instptn_check_shr_je_0()
 #define instptn_check_and_jcc_0()
+#define instptn_check_and_je_0()
 #define instptn_check_add_jcc_0()
 #define instptn_check_or_jcc_0()
 #define instptn_check_xor_jcc_0()

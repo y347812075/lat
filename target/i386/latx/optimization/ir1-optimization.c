@@ -61,11 +61,20 @@ static bool result_jcc_option(IR1_INST *ir1, InstPtnOption *option)
     case INSTPTN_OPC_CMP_JCC:
         *option = INSTPTN_OPT_CMP_JCC;
         return true;
+    case INSTPTN_OPC_CMP_JS_JNS:
+        *option = INSTPTN_OPT_CMP_JS_JNS;
+        return true;
     case INSTPTN_OPC_SUB_JCC:
         *option = INSTPTN_OPT_SUB_JCC;
         return true;
+    case INSTPTN_OPC_SUB_JS_JNS:
+        *option = INSTPTN_OPT_SUB_JS_JNS;
+        return true;
     case INSTPTN_OPC_AND_JCC:
         *option = INSTPTN_OPT_AND_JCC;
+        return true;
+    case INSTPTN_OPC_AND_JE:
+        *option = INSTPTN_OPT_AND_JE;
         return true;
     default:
         return false;

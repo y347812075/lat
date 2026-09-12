@@ -21,14 +21,23 @@ fi
     -Wl,--build-id=none "$source_file" -o "$workdir/jcc-conditions"
 guest="$workdir/jcc-conditions"
 
-# Existing CMP_JCC (0), SUB_JCC (21), AND_JCC (25), plus SHR_JE (34).
-conditions_mask=0x402200001
+# Compile isolated probes for the three independently selectable conditions.
+for entry in 'cmp CMP' 'sub SUB' 'and AND'; do
+    set -- $entry
+    "$clang" --target=x86_64-linux-gnu -fuse-ld=lld -nostdlib -static \
+        -Wl,--build-id=none -DINSTPTN_${2}_PROBE "$source_file" \
+        -o "$workdir/probe-$1"
+done
+sh "$(dirname "$0")/check-jcc-condition-options.sh" "$emulator" "$workdir"
+
+# Preserve the old conditions and enable new bits 31 through 34 explicitly.
+conditions_mask=0x782200001
 positive='[1-9][0-9]*'
 reject_re="reject\.non-adjacent=$positive"
 reject_re="$reject_re|reject\.zero-shift-count=$positive"
 env LATX_AOT=0 LATX_INSTPTN_MASK="$conditions_mask" LATX_INSTPTN_STATS=1 \
     "$emulator" "$guest" >"$workdir/enabled.log" 2>&1
-for pattern in cmp-jcc sub-jcc and-jcc shr-je; do
+for pattern in cmp-js-jns sub-js-jns and-je shr-je; do
     grep -Eq "$pattern match=[1-9][0-9]* .*eflags-fallback=[1-9][0-9]*" \
         "$workdir/enabled.log"
     grep -A1 "$pattern match=" "$workdir/enabled.log" | \
@@ -36,9 +45,9 @@ for pattern in cmp-jcc sub-jcc and-jcc shr-je; do
 done
 
 for entry in \
-    '0x1 cmp-jcc' \
-    '0x200000 sub-jcc' \
-    '0x2000000 and-jcc' \
+    '0x80000000 cmp-js-jns' \
+    '0x100000000 sub-js-jns' \
+    '0x200000000 and-je' \
     '0x400000000 shr-je'; do
     set -- $entry
     mask=$1
@@ -50,7 +59,7 @@ done
 
 env LATX_AOT=0 LATX_INSTPTN_MASK=0x2 LATX_INSTPTN_STATS=1 \
     "$emulator" "$guest" >"$workdir/disabled.log" 2>&1
-for pattern in cmp-jcc sub-jcc and-jcc shr-je; do
+for pattern in cmp-js-jns sub-js-jns and-je shr-je; do
     grep -Eq "$pattern match=0 " "$workdir/disabled.log"
 done
 grep -Eq 'reject\.disabled=[1-9][0-9]*' "$workdir/disabled.log"

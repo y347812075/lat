@@ -3136,6 +3136,7 @@ static bool try_translate_instptn_impl(IR1_INST *pir1)
     case INSTPTN_OPC_NOP_DIV:
         return true;
     case INSTPTN_OPC_CMP_JCC:
+    case INSTPTN_OPC_CMP_JS_JNS:
         return translate_cmp_jcc(pir1);
     case INSTPTN_OPC_TEST_JCC:
         return translate_test_jcc(pir1);
@@ -3168,6 +3169,7 @@ static bool try_translate_instptn_impl(IR1_INST *pir1)
     case INSTPTN_OPC_UCOMISD_SETA:
         return translate_ucomisd_seta(pir1);
     case INSTPTN_OPC_SUB_JCC:
+    case INSTPTN_OPC_SUB_JS_JNS:
         return translate_sub_jcc(pir1);
 
     case INSTPTN_OPC_CMP_XX_JCC:
@@ -3206,6 +3208,7 @@ static bool try_translate_instptn_impl(IR1_INST *pir1)
     case INSTPTN_OPC_SHR_JE:
         return translate_shift_jcc(pir1);
     case INSTPTN_OPC_AND_JCC:
+    case INSTPTN_OPC_AND_JE:
         return translate_and_jcc(pir1);
     case INSTPTN_OPC_ADD_JCC:
         return translate_add_jcc(pir1);
