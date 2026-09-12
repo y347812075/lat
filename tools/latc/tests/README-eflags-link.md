@@ -16,7 +16,8 @@ unlinked recovery stubs so incremental merges can reconsider successor liveness.
 | IS_TU_JMP | Already lowered by the TU path; ordinary JIT linking also excludes it |
 | Missing or unsupported local successor, cross-module target | Preserve flag calculation and recovery stub |
 
-The native format is version 4 (40-byte TB records). Runtime module ABI remains
+The native format is version 6 (48-byte TB records, including validated
+conditional and indirect exit offsets). Runtime module ABI remains
 version 2. Regenerate older native images; do not reuse them with this compiler.
 
 `make -C tools/latc test` includes the shared-decision matrix and native format,
@@ -41,6 +42,10 @@ The script checks actual NOP and recovery-stub patches in the fixture functions,
 retention of live-flag sites, and exact output against the x86-native reference
 for JIT, first module load and two strict warm runs. The first load uses a
 precompiled cache; it is not an empty-cache compilation latency measurement.
+It also requires conditional-exit metadata from the real translator for all
+CMP/TEST widths with both live and dead successors. The recorded sites must
+contain an in-TB conditional branch, and linking must preserve its opcode and
+registers. `conditional-proof.json` records these producer checks.
 
 Cases include CMP/TEST widths, SUB, BT, intervening MOV instructions, AND/JNE,
 immediate SHR/JNE, and COMIS/UCOMIS single/double precision, with and without

@@ -197,6 +197,34 @@ int lat_native_image_validate(const void *data, size_t size,
         if (tbs[i].optimization_flags & ~LAT_NATIVE_TB_ENTRY_FLAGS_DEAD) {
             return invalid(error, error_size, "invalid native TB optimization flags");
         }
+        if (tbs[i].indirect_exit_offset) {
+            uint32_t offset = tbs[i].indirect_exit_offset - 1;
+            uint32_t length = LAT_NATIVE_INDIRECT_EXIT_WORDS * 4;
+            if (offset % 4 || tbs[i].code_size <= length ||
+                offset >= tbs[i].code_size - length ||
+                !lat_native_indirect_exit_valid((const uint8_t *)data +
+                    header->code_offset + tbs[i].code_offset + offset)) {
+                return invalid(error, error_size, "invalid native indirect exit");
+            }
+        }
+        if (tbs[i].conditional_exit_offset) {
+            uint32_t offset = tbs[i].conditional_exit_offset - 1;
+            uint32_t instruction;
+            if (offset % 4 || tbs[i].code_size < 4 ||
+                offset > tbs[i].code_size - 4) {
+                return invalid(error, error_size,
+                               "invalid native conditional exit offset");
+            }
+            memcpy(&instruction, (const unsigned char *)data +
+                   header->code_offset + tbs[i].code_offset + offset, 4);
+            int64_t target = (int64_t)offset +
+                (int16_t)(instruction >> 10) * 4;
+            if (instruction >> 26 < 0x16 || instruction >> 26 > 0x1b ||
+                target < 0 || target > tbs[i].code_size - 4) {
+                return invalid(error, error_size,
+                               "invalid native conditional exit instruction");
+            }
+        }
         for (int edge = 0; edge < 2; edge++) {
             uint32_t encoded = tbs[i].eflags_offset[edge];
             if (encoded && ((encoded - 1) % 4 ||

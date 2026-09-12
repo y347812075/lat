@@ -2,10 +2,40 @@
 #define LATC_LAT_NATIVE_IMAGE_H
 
 #include <stdint.h>
+#include <string.h>
 
 #define LAT_NATIVE_IMAGE_MAGIC "LATNAT2"
-#define LAT_NATIVE_IMAGE_VERSION 4u
+#define LAT_NATIVE_IMAGE_VERSION 6u
 #define LAT_NATIVE_BUILD_ID_SIZE 65u
+
+#define LAT_NATIVE_INDIRECT_EXIT_WORDS 38u
+
+/* The ordinary FAST_JMPCACHE dispatch window, excluding its runtime exit. */
+static inline int lat_native_indirect_exit_valid(const void *code)
+{
+    static const uint32_t expected[LAT_NATIVE_INDIRECT_EXIT_WORDS] = {
+        0x004542abu, 0x0015aeabu, 0x00cf016bu, 0x002dd96bu,
+        0x28c0016cu, 0x5c000d95u, 0x28c0216bu, 0x4c000160u,
+        0x28c003edu, 0x580075a0u, 0x004542aeu, 0x0015baaeu,
+        0x00cf01ceu, 0x004119ceu, 0x0010b5ceu, 0x28c001ccu,
+        0x5c005995u, 0x28c061ccu, 0x58005180u, 0x28c0018bu,
+        0x28c081ccu, 0x5c00458bu, 0x28c041ccu, 0x28c003ebu,
+        0x5800318bu, 0x28c0a1cdu, 0x28c0c1cbu, 0x58002160u,
+        0x001502cfu, 0x02ffe1adu, 0x02ffe1efu, 0x28c001b0u,
+        0x29c001f0u, 0x02fffd6bu, 0x5fffed60u, 0x29c003ecu,
+        0x28c021cbu, 0x4c000160u,
+    };
+    for (unsigned int i = 0; i < LAT_NATIVE_INDIRECT_EXIT_WORDS; i++) {
+        uint32_t word;
+        memcpy(&word, (const uint8_t *)code + i * 4, 4);
+        uint32_t mask = i == 8 || i == 23 || i == 35 ?
+            0xffc003ffu : UINT32_MAX;
+        if ((word & mask) != expected[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
 
 enum LatNativeImageFlags {
     LAT_NATIVE_IMAGE_PIE = 1u << 0,
@@ -132,6 +162,10 @@ typedef struct LatNativeTbV1 {
     uint16_t eflags_offset[2];
     uint32_t eflags_instruction;
     uint16_t eflags_stub_offset[2];
+    /* TB-relative BEQ/BNE/BLT/BGE/BLTU/BGEU offset plus one, or zero. */
+    uint32_t conditional_exit_offset;
+    /* TB-relative ordinary indirect dispatch offset plus one, or zero. */
+    uint32_t indirect_exit_offset;
 } LatNativeTbV1;
 
 enum LatNativeTbOptimizationFlags {

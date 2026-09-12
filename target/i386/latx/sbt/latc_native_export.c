@@ -316,6 +316,54 @@ static int find_guest_load_bias(const GByteArray *guest,
     return 0;
 }
 
+static uint32_t native_indirect_exit(const aot_tb *tb, const uint8_t *code)
+{
+    uint32_t size = LAT_NATIVE_INDIRECT_EXIT_WORDS * 4;
+    if (!(tb->bool_flags & IS_INDIRECT_JMP) ||
+        (tb->bool_flags & IS_TU_JMP) || tb->jmp_indirect % 4 ||
+        tb->tb_cache_size <= size ||
+        tb->jmp_indirect >= tb->tb_cache_size - size ||
+        !lat_native_indirect_exit_valid(code + tb->jmp_indirect)) {
+        return 0;
+    }
+    return tb->jmp_indirect + 1;
+}
+
+static uint32_t native_conditional_exit(const aot_tb *tb,
+                                        const uint8_t *code)
+{
+#ifdef CONFIG_LATX_BNE_B
+    if ((tb->bool_flags & IS_TU_JMP) ||
+        tb->jmp_reset_offset[0] == UINT16_MAX ||
+        tb->jmp_reset_offset[1] == UINT16_MAX ||
+        tb->first_jmp_align == UINT16_MAX) {
+        return 0;
+    }
+    uint32_t preceding = 4;
+#ifdef CONFIG_LATX_INSTS_PATTERN
+    if (tb->eflags_target_arg[0] != UINT16_MAX) {
+        preceding += 4;
+    }
+#endif
+    if (tb->first_jmp_align < preceding) {
+        return 0;
+    }
+    uint32_t offset = tb->first_jmp_align - preceding;
+    if (offset % 4 || tb->tb_cache_size < 4 ||
+        offset > tb->tb_cache_size - 4) {
+        return 0;
+    }
+    uint32_t instruction;
+    memcpy(&instruction, code + offset, sizeof(instruction));
+    int64_t target = (int64_t)offset + (int16_t)(instruction >> 10) * 4;
+    if (instruction >> 26 >= 0x16 && instruction >> 26 <= 0x1b &&
+        target >= 0 && target <= tb->tb_cache_size - 4) {
+        return offset + 1;
+    }
+#endif
+    return 0;
+}
+
 static bool direct_tb_target(const aot_tb *tb, const aot_segment *segment,
         aot_rel_kind kind, uint64_t *guest_pc)
 {
@@ -773,6 +821,10 @@ int latc_native_export(const char *path, const char *guest_path,
             .code_offset = code_offset,
             .code_size = tbs[i].tb_cache_size,
             .flags = native_semantic_flags(tbs[i].cflags),
+            .conditional_exit_offset = native_conditional_exit(
+                &tbs[i], native_code + code_offset),
+            .indirect_exit_offset = native_indirect_exit(
+                &tbs[i], native_code + code_offset),
         };
 #ifdef CONFIG_LATX_INSTS_PATTERN
         if (!tbs[i].eflag_use) {

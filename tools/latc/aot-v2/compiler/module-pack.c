@@ -36,6 +36,12 @@ typedef struct ModulePack {
     int three_level_guest_slots;
     uint64_t runtime_trampolines;
     uint64_t pf_table;
+    uint64_t local_base;
+    uint64_t local_size;
+    uint32_t local_base_words;
+    unsigned char *local_dispatch;
+    unsigned char *return_guard_count;
+    int (*return_guard_targets)[5];
 } ModulePack;
 
 static gint compare_tb_code(gconstpointer left, gconstpointer right)
@@ -437,9 +443,42 @@ static int find_tb(const ModulePack *pack, uint64_t guest_pc, uint32_t flags)
 
 static int guest_slot(ModulePack *pack, uint64_t guest_rva);
 static int patch_tb_target_pair(uint32_t *instructions,
-                                uint64_t patch, uint64_t target);
+                                uint64_t patch, uint64_t target,
+                                uint32_t exit_symbol);
 static int patch_runtime_target(uint32_t *instructions, uint32_t slots,
                                 uint64_t patch, uint64_t target);
+
+static void configure_local_dispatch(ModulePack *pack)
+{
+    uint64_t first = UINT64_MAX, last = 0;
+    int have_exit = 0;
+    if (pack->header->code_size > (64u << 20) ||
+        pack->header->tb_count > (1u << 20) ||
+        pack->header->pc_map_count > (1u << 20)) {
+        return;
+    }
+    for (uint64_t i = 0; i < pack->header->tb_count; i++) {
+        const LatNativeTbV1 *tb = &pack->tbs[i];
+        if (tb->flags != (LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL) ||
+            tb->guest_pc < pack->header->preferred_guest_base) {
+            continue;
+        }
+        first = MIN(first, tb->guest_pc);
+        last = MAX(last, tb->guest_pc);
+        have_exit |= tb->indirect_exit_offset != 0;
+    }
+    if (!have_exit || first == UINT64_MAX || last >> 48) {
+        return;
+    }
+    first = MAX(first & ~(uint64_t)4095,
+                pack->header->preferred_guest_base);
+    uint64_t end = (last + 4096) & ~(uint64_t)4095;
+    uint64_t size = (end - first + 4095) & ~(uint64_t)4095;
+    if (size <= (4u << 20)) {
+        pack->local_base = first;
+        pack->local_size = size;
+    }
+}
 
 static void select_supported_tbs(ModulePack *pack)
 {
@@ -503,6 +542,18 @@ static void select_supported_tbs(ModulePack *pack)
                     changed = 1;
                 }
             }
+            if (pack->local_size) {
+                uint64_t local_rva = pack->local_base -
+                                     pack->header->preferred_guest_base;
+                gpointer existing = g_hash_table_lookup(
+                    pack->guest_rva_indexes, &local_rva);
+                if (!existing && pack->guest_rvas->len ==
+                        LAT_AOT_V2_TWO_LEVEL_GUEST_ADDRESS_LIMIT) {
+                    pack->local_size = 0;
+                } else if (guest_slot(pack, local_rva) < 0) {
+                    pack->local_size = 0;
+                }
+            }
             pack->three_level_guest_slots =
                 pack->guest_rvas->len >
                 LAT_AOT_V2_TWO_LEVEL_GUEST_ADDRESS_LIMIT;
@@ -557,7 +608,8 @@ static void select_supported_tbs(ModulePack *pack)
                 patchable = relocation->slots == 2 ?
                     !patch_tb_target_pair(instructions,
                         relocation->code_offset,
-                        pack->tbs[target].code_offset) :
+                        pack->tbs[target].code_offset,
+                        relocation->reserved) :
                     !patch_runtime_target(instructions, relocation->slots,
                         relocation->code_offset,
                         pack->tbs[target].code_offset);
@@ -680,15 +732,31 @@ static int patch_address(uint32_t *instructions, uint32_t slots,
 }
 
 static int patch_tb_target_pair(uint32_t *instructions,
-                                uint64_t patch, uint64_t target)
+                                uint64_t patch, uint64_t target,
+                                uint32_t exit_symbol)
 {
     if ((instructions[0] & 0xfe00001fu) == 0x1e00000cu &&
         (instructions[1] & 0xfc0003e0u) == 0x4c000180u) {
+        uint32_t destination = instructions[1] & 0x1fu;
+        /* A linked local exit does not return through the runtime epilogue. */
+        if (destination == 4 &&
+            (exit_symbol == LAT_NATIVE_SYMBOL_JIRL_EPILOGUE_RET_ID_0 ||
+             exit_symbol == LAT_NATIVE_SYMBOL_JIRL_EPILOGUE_RET_ID_1)) {
+            int64_t difference = (int64_t)target - (int64_t)patch;
+            int64_t offset = difference >> 2;
+            if (!(difference & 3) && offset >= -(1 << 25) &&
+                offset < (1 << 25)) {
+                instructions[0] = 0x50000000u |
+                    ((uint32_t)offset & 0xffffu) << 10 |
+                    (((uint32_t)offset >> 16) & 0x3ffu);
+                instructions[1] = 0x03400000u;
+                return 0;
+            }
+        }
         int64_t difference = (int64_t)target - (int64_t)(patch + 4);
         int64_t offset = difference >> 2;
         if (!(difference & 3) && offset >= -(1 << 25) &&
             offset < (1 << 25)) {
-            uint32_t destination = instructions[1] & 0x1fu;
             instructions[0] = destination ?
                 0x18000040u | destination : 0x03400000u;
             instructions[1] = 0x50000000u |
@@ -878,6 +946,60 @@ static void eliminate_edge_flags(ModulePack *pack,
     }
 }
 
+static void thread_conditional_exits(ModulePack *pack)
+{
+    for (uint64_t i = 0; i < pack->header->tb_count; i++) {
+        const LatNativeTbV1 *tb = &pack->tbs[i];
+        if (!pack->supported[i] || !tb->conditional_exit_offset) {
+            continue;
+        }
+        uint64_t site = tb->code_offset + tb->conditional_exit_offset - 1;
+        uint32_t branch;
+        memcpy(&branch, pack->code + site, sizeof(branch));
+        if (branch >> 26 < 0x16 || branch >> 26 > 0x1b) {
+            continue;
+        }
+        int64_t stub = (int64_t)site + (int16_t)(branch >> 10) * 4;
+        uint64_t end = tb->code_offset + tb->code_size;
+        uint32_t instruction = 0;
+        /* Remaining flag operations or other side effects stop threading. */
+        while (stub >= (int64_t)tb->code_offset && stub <= (int64_t)end - 4) {
+            memcpy(&instruction, pack->code + stub, sizeof(instruction));
+            if (instruction != 0x03400000u) {
+                break;
+            }
+            stub += 4;
+        }
+        if (stub < (int64_t)tb->code_offset || stub > (int64_t)end - 4 ||
+            instruction >> 26 != 0x14) {
+            continue;
+        }
+        int64_t immediate = ((instruction & 0x3ffu) << 16) |
+                             ((instruction >> 10) & 0xffffu);
+        if (immediate & (1 << 25)) {
+            immediate -= 1 << 26;
+        }
+        int64_t target = stub + immediate * 4;
+        if (target < 0) {
+            continue;
+        }
+        int index = find_code_tb(pack, target);
+        if (index < 0 || !pack->supported[index] ||
+            pack->tbs[index].code_offset != (uint64_t)target ||
+            pack->tbs[index].flags != tb->flags) {
+            continue;
+        }
+        int64_t difference = target - (int64_t)site;
+        if (difference % 4 || difference < -(1 << 17) ||
+            difference >= (1 << 17)) {
+            continue;
+        }
+        branch = (branch & 0xfc0003ffu) |
+                 ((uint32_t)(difference / 4) & 0xffffu) << 10;
+        memcpy(pack->code + site, &branch, sizeof(branch));
+    }
+}
+
 static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
 {
     for (uint64_t i = 0; i < pack->header->tb_count; i++) {
@@ -913,7 +1035,8 @@ static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
                 result = relocation->slots == 2 ?
                     patch_tb_target_pair(
                         instructions, relocation->code_offset,
-                        pack->tbs[target].code_offset) :
+                        pack->tbs[target].code_offset,
+                        relocation->reserved) :
                     patch_runtime_target(
                         instructions, relocation->slots,
                         relocation->code_offset,
@@ -1093,7 +1216,291 @@ out:
     return result;
 }
 
-static int emit_assembly(const char *path, char *error, size_t error_size)
+static int prepare_local_dispatch(ModulePack *pack)
+{
+    if (!pack->local_size) {
+        return 0;
+    }
+    if (pack->header->flags & LAT_NATIVE_IMAGE_PIE) {
+        pack->local_base_words = pack->three_level_guest_slots ? 3 : 2;
+    } else if (pack->local_base < 0x80000000u) {
+        pack->local_base_words = (pack->local_base & 0xfff) ? 2 : 1;
+    } else {
+        pack->local_base_words = 3;
+    }
+    for (uint64_t i = 0; i < pack->header->pc_map_count; i++) {
+        int owner = pack->pc_map_owners[i];
+        if (owner < 0 || !pack->supported[owner]) {
+            continue;
+        }
+        const LatNativeTbV1 *tb = &pack->tbs[owner];
+        const LatNativePcMapV2 *map = &pack->pc_maps[i];
+        if (!tb->indirect_exit_offset ||
+            tb->flags != (LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL)) {
+            continue;
+        }
+        uint64_t site = tb->code_offset + tb->indirect_exit_offset - 1;
+        if ((map->flags & LAT_NATIVE_PC_MAP_DYNAMIC_STATE) &&
+            map->host_offset_begin <= site && map->host_offset_end >=
+                site + LAT_NATIVE_INDIRECT_EXIT_WORDS * 4) {
+            pack->local_dispatch[owner] = 1;
+        }
+    }
+    for (uint64_t i = 0; i < pack->header->tb_count; i++) {
+        if (!pack->local_dispatch[i]) {
+            continue;
+        }
+        uint64_t site = pack->tbs[i].code_offset +
+                        pack->tbs[i].indirect_exit_offset - 1;
+        if (!lat_native_indirect_exit_valid(pack->code + site)) {
+            pack->local_dispatch[i] = 0;
+            continue;
+        }
+        uint32_t base[3] = {0x1400000cu, 0x0380018cu, 0x1600000cu};
+        memcpy(pack->code + site, base, sizeof(base));
+        LatNativeRelocationV1 relocation = {
+            .code_offset = site, .addend = pack->local_base,
+            .kind = LAT_NATIVE_RELOC_GUEST_ADDRESS,
+            .slots = MAX(pack->local_base_words, 2u),
+        };
+        if (patch_guest_address(pack, &relocation)) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+typedef struct ReturnCandidates {
+    uint64_t target[5];
+    unsigned int score[5];
+    unsigned int count;
+} ReturnCandidates;
+
+static void add_return_candidate(ReturnCandidates *candidates,
+                                 uint64_t target, unsigned int score)
+{
+    for (unsigned int i = 0; i < MIN(candidates->count, 5u); i++) {
+        if (candidates->target[i] == target) {
+            candidates->score[i] = MAX(candidates->score[i], score);
+            return;
+        }
+    }
+    if (candidates->count < 5) {
+        candidates->target[candidates->count] = target;
+        candidates->score[candidates->count] = score;
+    }
+    candidates->count++;
+}
+
+static const CfgProgramFunction *cfg_function_for_tb(
+    const CfgProgram *program, size_t tb_index)
+{
+    for (size_t i = 0; i < program->function_count; i++) {
+        const CfgProgramFunction *function = &program->functions[i];
+        if (tb_index >= function->first_tb &&
+            tb_index - function->first_tb < function->tb_count) {
+            return function;
+        }
+    }
+    return NULL;
+}
+
+static unsigned int return_candidate_score(const CfgProgram *program,
+                                           size_t tb_index)
+{
+    const CfgProgramFunction *function = cfg_function_for_tb(program, tb_index);
+    if (!function) {
+        return 0;
+    }
+    uint64_t pc = program->tbs[tb_index].start;
+    unsigned int score = 0;
+    for (size_t i = 0; i < function->tb_count; i++) {
+        const CfgTb *tb = &program->tbs[function->first_tb + i];
+        for (size_t j = 0; j < tb->edge_count; j++) {
+            const CfgProgramEdge *edge =
+                &program->edges[tb->first_edge + j];
+            if (edge->resolution == CFG_EDGE_STATIC &&
+                edge->kind != CFG_EDGE_CALL &&
+                edge->kind != CFG_EDGE_CALL_RETURN &&
+                edge->to >= function->start &&
+                edge->to < function->start + function->size &&
+                edge->to <= pc && pc <= edge->from) {
+                score++;
+            }
+        }
+    }
+    return score;
+}
+
+static void configure_return_guards(ModulePack *pack,
+                                    const CfgProgram *program)
+{
+    if (!program || !program->function_count || !pack->local_size) {
+        return;
+    }
+    ReturnCandidates *candidates = g_new0(
+        ReturnCandidates, program->function_count);
+    for (size_t i = 0; i < program->tb_count; i++) {
+        const CfgTb *tb = &program->tbs[i];
+        if (tb->terminator != CFG_TB_CALL &&
+            tb->terminator != CFG_TB_INDIRECT_CALL) {
+            continue;
+        }
+        uint64_t return_pc = 0;
+        for (size_t j = 0; j < tb->edge_count; j++) {
+            const CfgProgramEdge *edge =
+                &program->edges[tb->first_edge + j];
+            if (edge->kind == CFG_EDGE_CALL_RETURN &&
+                edge->resolution == CFG_EDGE_STATIC) {
+                return_pc = edge->to;
+                break;
+            }
+        }
+        if (!return_pc) {
+            continue;
+        }
+        unsigned int score = return_candidate_score(program, i);
+        for (size_t j = 0; j < tb->edge_count; j++) {
+            const CfgProgramEdge *edge =
+                &program->edges[tb->first_edge + j];
+            if (edge->kind != CFG_EDGE_CALL ||
+                edge->resolution != CFG_EDGE_STATIC) {
+                continue;
+            }
+            for (size_t k = 0; k < program->function_count; k++) {
+                if (program->functions[k].start == edge->to) {
+                    add_return_candidate(&candidates[k], return_pc, score);
+                }
+            }
+        }
+    }
+    const uint32_t flags = LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL;
+    for (size_t i = 0; i < program->function_count; i++) {
+        const CfgProgramFunction *function = &program->functions[i];
+        if (function->status != CFG_FUNCTION_OK || candidates[i].count < 2 ||
+            candidates[i].count > 5) {
+            continue;
+        }
+        unsigned int selected[2] = {UINT_MAX, UINT_MAX};
+        for (unsigned int j = 0; j < candidates[i].count; j++) {
+            unsigned int first = selected[0];
+            bool before_first = first == UINT_MAX ||
+                candidates[i].score[j] > candidates[i].score[first] ||
+                (candidates[i].score[j] == candidates[i].score[first] &&
+                 candidates[i].target[j] > candidates[i].target[first]);
+            if (before_first) {
+                selected[1] = first;
+                selected[0] = j;
+                continue;
+            }
+            unsigned int second = selected[1];
+            if (second == UINT_MAX ||
+                candidates[i].score[j] > candidates[i].score[second] ||
+                (candidates[i].score[j] == candidates[i].score[second] &&
+                 candidates[i].target[j] > candidates[i].target[second])) {
+                selected[1] = j;
+            }
+        }
+        int targets[2] = {-1, -1};
+        for (unsigned int j = 0; j < 2; j++) {
+            targets[j] = find_tb(pack,
+                candidates[i].target[selected[j]], flags);
+            if (targets[j] < 0 || !pack->supported[targets[j]] ||
+                pack->tbs[targets[j]].guest_pc < pack->local_base ||
+                pack->tbs[targets[j]].guest_pc >=
+                    pack->local_base + pack->local_size) {
+                targets[0] = -1;
+                break;
+            }
+        }
+        if (targets[0] < 0) {
+            continue;
+        }
+        for (size_t j = 0; j < function->tb_count; j++) {
+            const CfgTb *cfg_tb = &program->tbs[function->first_tb + j];
+            if (cfg_tb->terminator != CFG_TB_RETURN) {
+                continue;
+            }
+            for (uint64_t k = 0; k < pack->header->pc_map_count; k++) {
+                const LatNativePcMapV2 *map = &pack->pc_maps[k];
+                int owner = pack->pc_map_owners[k];
+                if (owner < 0 || map->guest_pc < cfg_tb->start ||
+                    map->guest_pc >= cfg_tb->end ||
+                    pack->tbs[owner].flags != flags ||
+                    !pack->local_dispatch[owner]) {
+                    continue;
+                }
+                for (unsigned int n = 0; n < 2; n++) {
+                    pack->return_guard_targets[owner][n] = targets[n];
+                }
+                pack->return_guard_count[owner] = 2;
+            }
+        }
+    }
+    g_free(candidates);
+}
+
+static int emit_local_dispatch(FILE *file, const ModulePack *pack,
+                               uint64_t index, uint64_t site)
+{
+    uint32_t base[3];
+    memcpy(base, pack->code + site, sizeof(base));
+    for (uint32_t i = 0; i < pack->local_base_words; i++) {
+        fprintf(file, ".word 0x%08x\n", base[i]);
+    }
+    fprintf(file, "sub.d $t0,$r21,$t0\n");
+    for (unsigned int i = 0; i < pack->return_guard_count[index]; i++) {
+        int target = pack->return_guard_targets[index][i];
+        uint64_t rva = pack->tbs[target].guest_pc - pack->local_base;
+        uint64_t branch_site = site + (pack->local_base_words + 4 + i * 4) * 4;
+        uint32_t branch = 0x50000000u;
+        if (rva >= pack->local_size || rva >> 32 ||
+            patch_branch(&branch, branch_site,
+                         pack->tbs[target].code_offset)) {
+            return -1;
+        }
+        fprintf(file,
+            "lu12i.w $t2,%llu\n"
+            "ori $t2,$t2,%llu\n"
+            "bne $t0,$t2,.Llat_return_next_%llu_%u\n"
+            ".word 0x%08x\n"
+            ".Llat_return_next_%llu_%u:\n",
+            (unsigned long long)(rva >> 12),
+            (unsigned long long)(rva & 0xfff),
+            (unsigned long long)index, i, branch,
+            (unsigned long long)index, i);
+    }
+    fprintf(file,
+        "lu12i.w $t2,%llu\n"
+        "bgeu $t0,$t2,.Llat_local_miss_%llu\n"
+        "pcalau12i $t1,%%pc_hi20(.Llat_local_targets)\n"
+        "alsl.d $t2,$t0,$t1,2\n"
+        "ld.w $a7,$t2,0\n"
+        "beqz $a7,.Llat_local_miss_%llu\n"
+        "add.d $a7,$a7,$t1\n"
+        "jr $a7\n"
+        ".Llat_local_miss_%llu:\n"
+        "srli.d $a7,$r21,16\n"
+        "xor $a7,$r21,$a7\n"
+        "bstrpick.d $a7,$a7,15,0\n"
+        "alsl.d $a7,$a7,$fp,4\n"
+        "ld.d $t0,$a7,0\n"
+        "bne $t0,$r21,.Llat_local_end_%llu\n"
+        "ld.d $a7,$a7,8\n"
+        "jr $a7\n"
+        ".rept %u\nnop\n.endr\n"
+        ".Llat_local_end_%llu:\n",
+        (unsigned long long)(pack->local_size >> 12),
+        (unsigned long long)index, (unsigned long long)index,
+        (unsigned long long)index, (unsigned long long)index,
+        21 - pack->local_base_words -
+            4 * pack->return_guard_count[index],
+        (unsigned long long)index);
+    return 0;
+}
+
+static int emit_assembly(const char *path, const ModulePack *pack,
+                          char *error, size_t error_size)
 {
     FILE *file = fopen(path, "w");
     if (!file) {
@@ -1104,7 +1511,33 @@ static int emit_assembly(const char *path, char *error, size_t error_size)
         ".section .text.lat.tu,\"ax\",@progbits\n.p2align 12\n"
         ".global lat_aot_generated_text_begin\n"
         ".hidden lat_aot_generated_text_begin\n"
-        "lat_aot_generated_text_begin:\n.incbin \"text.bin\"\n.align 2\n");
+        "lat_aot_generated_text_begin:\n");
+    uint64_t cursor = 0;
+    int have_local_dispatch = 0;
+    for (guint i = 0; i < pack->code_order->len; i++) {
+        const LatNativeTbV1 *tb = g_array_index(
+            pack->code_order, const LatNativeTbV1 *, i);
+        uint64_t index = tb - pack->tbs;
+        if (!pack->local_dispatch[index]) {
+            continue;
+        }
+        uint64_t site = tb->code_offset + tb->indirect_exit_offset - 1;
+        if (site > cursor) {
+            fprintf(file, ".incbin \"text.bin\",%llu,%llu\n",
+                    (unsigned long long)cursor,
+                    (unsigned long long)(site - cursor));
+        }
+        if (emit_local_dispatch(file, pack, index, site)) {
+            fclose(file);
+            return fail(error, error_size,
+                        "cannot encode local return guard");
+        }
+        cursor = site + LAT_NATIVE_INDIRECT_EXIT_WORDS * 4;
+        have_local_dispatch = 1;
+    }
+    fprintf(file, ".incbin \"text.bin\",%llu,%llu\n.align 2\n",
+            (unsigned long long)cursor,
+            (unsigned long long)(pack->header->code_size - cursor));
     for (uint32_t symbol = 0; symbol < LAT_NATIVE_SYMBOL_COUNT; symbol++) {
         const char *entry = runtime_entry(symbol);
         fprintf(file, ".Llat_aot_runtime_%u:\n", symbol);
@@ -1147,6 +1580,28 @@ static int emit_assembly(const char *path, char *error, size_t error_size)
         "lat_aot_generated_slots_begin:\n.incbin \"guest-slots.bin\"\n"
         ".global lat_aot_generated_slots_end\n.hidden lat_aot_generated_slots_end\n"
         "lat_aot_generated_slots_end:\n.zero 16\n");
+    if (have_local_dispatch) {
+        fprintf(file, ".section .rodata.lat.local,\"a\",@progbits\n"
+                      ".p2align 12\n.Llat_local_targets:\n");
+        uint64_t next = pack->local_base;
+        for (uint64_t i = 0; i < pack->header->tb_count; i++) {
+            const LatNativeTbV1 *tb = &pack->tbs[i];
+            if (!pack->supported[i] ||
+                tb->flags != (LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL)) {
+                continue;
+            }
+            if (tb->guest_pc > next) {
+                fprintf(file, ".zero %llu\n",
+                        (unsigned long long)((tb->guest_pc - next) * 4));
+            }
+            fprintf(file, ".word lat_aot_generated_text_begin+%llu"
+                          "-.Llat_local_targets\n",
+                    (unsigned long long)tb->code_offset);
+            next = tb->guest_pc + 1;
+        }
+        fprintf(file, ".zero %llu\n", (unsigned long long)(
+            (pack->local_base + pack->local_size - next) * 4));
+    }
     int result = 0;
     if (fclose(file)) {
         result = fail(error, error_size, "cannot close %s", path);
@@ -1154,9 +1609,11 @@ static int emit_assembly(const char *path, char *error, size_t error_size)
     return result;
 }
 
-int lat_aot_v2_emit_module_sources(const char *native_image,
-                                   const char *output_directory,
-                                   char *error, size_t error_size)
+static int emit_module_sources(const char *native_image,
+                               const char *output_directory,
+                               const CfgProgram *program,
+                               const uint8_t guest_sha256[32],
+                               char *error, size_t error_size)
 {
     gchar *image = NULL;
     gsize image_size = 0;
@@ -1175,6 +1632,12 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
                     output_directory);
     }
     const LatNativeImageHeaderV2 *header = (const void *)image;
+    if (program && (!guest_sha256 ||
+                    memcmp(header->guest_sha256, guest_sha256, 32))) {
+        g_free(image);
+        return fail(error, error_size,
+                    "CFG guest digest differs from native image");
+    }
     ModulePack pack = {
         .header = header,
         .tbs = (const void *)(image + header->tb_table_offset),
@@ -1186,6 +1649,10 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
         .pc_maps_complete = g_new(unsigned char, header->tb_count),
         .code = g_malloc(header->code_size),
         .supported = g_malloc0(header->tb_count),
+        .local_dispatch = g_malloc0(header->tb_count),
+        .return_guard_count = g_malloc0(header->tb_count),
+        .return_guard_targets = g_malloc0_n(
+            header->tb_count, sizeof(*pack.return_guard_targets)),
         .code_order = g_array_sized_new(FALSE, FALSE,
                                         sizeof(const LatNativeTbV1 *),
                                         header->tb_count),
@@ -1221,6 +1688,7 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
     }
     memcpy(pack.code, image + header->code_offset, header->code_size);
     int all_ranges_valid = all_tb_ranges_valid(&pack);
+    configure_local_dispatch(&pack);
     select_supported_tbs(&pack);
     size_t supported_count = 0;
     for (uint64_t i = 0; i < header->tb_count; i++) {
@@ -1242,7 +1710,11 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
                       "supported AOT v2 TBs have no complete PC map");
     } else if (patch_relocations(&pack, error, error_size)) {
         result = -1;
+    } else if (prepare_local_dispatch(&pack)) {
+        result = fail(error, error_size, "cannot prepare local indirect dispatch");
     } else {
+        configure_return_guards(&pack, program);
+        thread_conditional_exits(&pack);
         char *text_path = g_build_filename(output_directory, "text.bin", NULL);
         char *metadata_path = g_build_filename(output_directory, "module.c", NULL);
         char *assembly_path = g_build_filename(output_directory, "module.S", NULL);
@@ -1250,7 +1722,7 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
                       error, error_size) ||
             emit_tables(output_directory, &pack, error, error_size) ||
             emit_metadata(metadata_path, &pack, error, error_size) ||
-            emit_assembly(assembly_path, error, error_size)) {
+            emit_assembly(assembly_path, &pack, error, error_size)) {
             result = -1;
         }
         g_free(text_path);
@@ -1266,7 +1738,27 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
     g_free(pack.relocation_targets);
     g_free(pack.relocation_owners);
     g_free(pack.supported);
+    g_free(pack.local_dispatch);
+    g_free(pack.return_guard_count);
+    g_free(pack.return_guard_targets);
     g_free(pack.code);
     g_free(image);
     return result;
+}
+
+int lat_aot_v2_emit_module_sources(const char *native_image,
+                                   const char *output_directory,
+                                   char *error, size_t error_size)
+{
+    return emit_module_sources(native_image, output_directory, NULL, NULL,
+                               error, error_size);
+}
+
+int lat_aot_v2_emit_module_sources_with_cfg(
+    const char *native_image, const char *output_directory,
+    const CfgProgram *program, const uint8_t guest_sha256[32],
+    char *error, size_t error_size)
+{
+    return emit_module_sources(native_image, output_directory, program,
+                               guest_sha256, error, error_size);
 }

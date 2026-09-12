@@ -50,7 +50,7 @@ def parse_image(path):
     if data[:8] != b"LATNAT2\0":
         raise ValueError("%s: invalid LAT native image magic" % path)
     version, header_size = struct.unpack_from("<II", data, 8)
-    if version not in (2, 3, 4) or header_size != 224 or len(data) < header_size:
+    if version not in (2, 3, 4, 5, 6) or header_size != 224 or len(data) < header_size:
         raise ValueError("%s: unsupported LAT native image header" % path)
     flags = struct.unpack_from("<I", data, 16)[0]
     code_offset, code_size, tb_offset, tb_count, reloc_offset, reloc_count = \
@@ -64,7 +64,7 @@ def parse_image(path):
     pc_counts = collections.Counter()
     tu_heads = 0
     tu_members = 0
-    tb_stride = {2: 24, 3: 32, 4: 40}[version]
+    tb_stride = {2: 24, 3: 32, 4: 40, 5: 48, 6: 48}[version]
     for index in range(tb_count):
         guest_pc, _code, size, tb_flags = struct.unpack_from(
             "<QQII", data, tb_offset + index * tb_stride)
