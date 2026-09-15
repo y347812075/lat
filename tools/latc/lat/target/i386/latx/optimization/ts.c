@@ -790,11 +790,7 @@ static void ts_tb_explore(CPUState *cpu, target_ulong cs_base,
     }
 
 #ifdef CONFIG_LATX_HBR
-    /* Offline AOT does not preserve the runtime state assumed by HBR's
-     * cross-TB liveness analysis. */
-    if (!option_aot || !in_pre_translate) {
-        hbr_opt(tb_list, *tb_num_in_tu);
-    }
+    hbr_opt(tb_list, *tb_num_in_tu);
 #endif
 
     qsort(tb_list, *tb_num_in_tu, sizeof(TranslationBlock *), tb_sort_cmp);

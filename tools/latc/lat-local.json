@@ -20,6 +20,16 @@
       "reason": "stable CFG to LAT TB boundary verification interface"
     },
     {
+      "path": "lat/target/i386/latx/include/hbr-semantic.h",
+      "generated": true,
+      "reason": "share SHBR lane semantics with the standalone AOT translator"
+    },
+    {
+      "path": "lat/target/i386/latx/optimization/hbr-xmm-semantics.inc",
+      "generated": true,
+      "reason": "share generated SHBR instruction semantics with the standalone AOT translator"
+    },
+    {
       "path": "lat/target/i386/latx/ir1/latc-verify.c",
       "reason": "decode CFG TBs with the copied LAT IR1 decoder"
     },
@@ -109,6 +119,11 @@
       "reason": "preserve standalone translation state while tracking delayed stack-pointer updates"
     },
     {
+      "path": "lat/target/i386/latx/include/hbr.h",
+      "generated": true,
+      "reason": "share SHBR optimization controls with the standalone AOT translator"
+    },
+    {
       "path": "lat/target/i386/latx/include/translate.h",
       "reason": "preserve standalone translator declarations while exposing delayed stack-pointer update helpers"
     },
@@ -168,6 +183,20 @@
     {
       "path": "lat/target/i386/latx/translator/tr-mov.c",
       "reason": "preserve standalone move translation while merging consecutive PUSH/POP stack-pointer updates"
+    },
+    {
+      "path": "lat/target/i386/latx/translator/tr-simd-cvt.c",
+      "generated": true,
+      "reason": "share SHBR scalar conversion code generation with the standalone AOT translator"
+    },
+    {
+      "path": "lat/target/i386/latx/translator/tr-simd-mov.c",
+      "reason": "preserve standalone SIMD move handling while applying SHBR scalar-load elimination"
+    },
+    {
+      "path": "lat/target/i386/latx/translator/tr-simd.c",
+      "generated": true,
+      "reason": "share SHBR scalar arithmetic code generation with the standalone AOT translator"
     },
     {
       "path": "lat/target/i386/latx/translator/translate.c",
