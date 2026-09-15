@@ -672,6 +672,254 @@ cleanup_files:
     return result;
 }
 
+static int test_profiled_layout(const char *directory)
+{
+    const uint64_t code_size = 160;
+    size_t image_size = sizeof(LatNativeImageHeaderV2) + 8 + code_size +
+        4 * sizeof(LatNativeTbV1) + sizeof(LatNativeRelocationV1) +
+        4 * sizeof(LatNativePcMapV2);
+    uint8_t *image = g_malloc0(image_size);
+    LatNativeImageHeaderV2 *header = (void *)image;
+    memcpy(header->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
+    header->version = LAT_NATIVE_IMAGE_VERSION;
+    header->header_size = sizeof(*header);
+    header->flags = LAT_NATIVE_IMAGE_X86_STATIC_EXEC;
+    header->preferred_guest_base = 0x400000;
+    header->guest_image_offset = sizeof(*header);
+    header->guest_image_size = 1;
+    header->code_offset = header->guest_image_offset + 8;
+    header->code_size = code_size;
+    header->tb_table_offset = header->code_offset + code_size;
+    header->tb_count = 4;
+    header->relocation_offset = header->tb_table_offset +
+                                4 * sizeof(LatNativeTbV1);
+    header->relocation_count = 1;
+    header->pc_map_offset = header->relocation_offset +
+                            sizeof(LatNativeRelocationV1);
+    header->pc_map_count = 4;
+    memset(header->guest_sha256, 0x5a, sizeof(header->guest_sha256));
+    strcpy(header->lat_build_id, "profile-layout-test");
+
+    uint32_t *code = (void *)(image + header->code_offset);
+    code[0] = 0x58000000u;
+    code[1] = 0x03400000u;
+    code[4] = 0x03400001u;
+    code[5] = 0x50000000u;
+    code[6] = 0x03400002u;
+    code[7] = 0x03400000u;
+    code[10] = 0x03400003u;
+    code[11] = 0x03400000u;
+
+    LatNativeTbV1 *tbs = (void *)(image + header->tb_table_offset);
+    tbs[0] = (LatNativeTbV1) {
+        .guest_pc = 0x401000, .code_offset = 0, .code_size = 8, .flags = 3,
+    };
+    tbs[1] = (LatNativeTbV1) {
+        .guest_pc = 0x402000, .code_offset = 16, .code_size = 8, .flags = 3,
+    };
+    tbs[2] = (LatNativeTbV1) {
+        .guest_pc = 0x403000, .code_offset = 40, .code_size = 8, .flags = 3,
+    };
+    tbs[3] = (LatNativeTbV1) {
+        .guest_pc = 0x404000, .code_offset = 24, .code_size = 8, .flags = 3,
+    };
+    LatNativeRelocationV1 *relocation =
+        (void *)(image + header->relocation_offset);
+    *relocation = (LatNativeRelocationV1) {
+        .code_offset = 0, .addend = 0x404000,
+        .kind = LAT_NATIVE_RELOC_TB_TARGET, .target = 3, .slots = 1,
+    };
+    LatNativePcMapV2 *maps = (void *)(image + header->pc_map_offset);
+    const unsigned int code_order[] = {0, 1, 3, 2};
+    for (unsigned int i = 0; i < G_N_ELEMENTS(code_order); i++) {
+        unsigned int index = code_order[i];
+        maps[i] = (LatNativePcMapV2) {
+            .guest_pc = tbs[index].guest_pc,
+            .host_offset_begin = tbs[index].code_offset,
+            .host_offset_end = tbs[index].code_offset + tbs[index].code_size,
+            .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+        };
+    }
+
+    char *image_path = g_build_filename(
+        directory, "profile-layout.native", NULL);
+    char *text_path = g_build_filename(directory, "text.bin", NULL);
+    char *tbs_path = g_build_filename(directory, "tbs.bin", NULL);
+    char *maps_path = g_build_filename(directory, "pc-maps.bin", NULL);
+    CfgProgram program = {0};
+    program.function_count = 1;
+    program.functions = g_new0(CfgProgramFunction, 1);
+    program.functions[0] = (CfgProgramFunction) {
+        .start = 0x402000, .size = 0x3000,
+        .first_tb = 0, .tb_count = 2,
+    };
+    program.tb_count = 4;
+    program.tbs = g_new0(CfgTb, 4);
+    program.tbs[0] = (CfgTb) {
+        .start = 0x402000, .end = 0x402001,
+        .semantic_flags = CFG_TB_CODE64,
+    };
+    program.tbs[1] = (CfgTb) {
+        .start = 0x404000, .end = 0x404001,
+        .semantic_flags = CFG_TB_CODE64,
+        .first_edge = 0, .edge_count = 1,
+    };
+    program.tbs[2] = program.tbs[0];
+    program.tbs[2].observed = true;
+    program.tbs[2].semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL;
+    program.tbs[3] = program.tbs[1];
+    program.tbs[3].observed = true;
+    program.tbs[3].semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL;
+    program.edge_count = 1;
+    program.edges = g_new0(CfgProgramEdge, 1);
+    program.edges[0] = (CfgProgramEdge) {
+        .from = 0x404000, .to = 0x404000,
+        .kind = CFG_EDGE_JUMP, .resolution = CFG_EDGE_STATIC,
+    };
+    char error[256] = {0};
+    gchar *text = NULL, *tb_data = NULL, *map_data = NULL;
+    gsize text_size = 0, tb_size = 0, map_size = 0;
+    int failed = !g_file_set_contents(
+        image_path, (const char *)image, image_size, NULL) ||
+        lat_aot_v2_emit_module_sources_with_cfg(
+            image_path, directory, &program, header->guest_sha256,
+            error, sizeof(error)) ||
+        !g_file_get_contents(text_path, &text, &text_size, NULL) ||
+        !g_file_get_contents(tbs_path, &tb_data, &tb_size, NULL) ||
+        !g_file_get_contents(maps_path, &map_data, &map_size, NULL);
+    const LatAotTbV2 *output_tbs = (const void *)tb_data;
+    const LatAotPcMapV2 *output_maps = (const void *)map_data;
+    const uint64_t expected_tb_offsets[] = {20, 64, 96, 32};
+    const uint64_t expected_map_rvas[] = {0x1000, 0x4000, 0x2000, 0x3000};
+    const uint64_t expected_map_offsets[] = {20, 32, 64, 96};
+    for (unsigned int i = 0; !failed && i < 4; i++) {
+        failed |= output_tbs[i].host_offset != expected_tb_offsets[i];
+        failed |= output_maps[i].guest_rva != expected_map_rvas[i];
+        failed |= output_maps[i].host_offset_begin != expected_map_offsets[i];
+    }
+    if (!failed) {
+        const uint32_t *words = (const void *)text;
+        failed = text_size != code_size ||
+                 tb_size != 4 * sizeof(*output_tbs) ||
+                 map_size != 4 * sizeof(*output_maps) ||
+                 (words[5] & 0xfc000000u) != 0x58000000u ||
+                 words[8] != 0x03400002u ||
+                 words[16] != 0x03400001u ||
+                 words[24] != 0x03400003u;
+    }
+    if (failed) {
+        fprintf(stderr, "profiled TB layout was not preserved: %s\n",
+                error[0] ? error : "invalid output");
+    }
+    g_free(map_data);
+    g_free(tb_data);
+    g_free(text);
+    g_free(program.edges);
+    g_free(program.tbs);
+    g_free(program.functions);
+    g_remove(image_path);
+    g_free(maps_path);
+    g_free(tbs_path);
+    g_free(text_path);
+    g_free(image_path);
+    g_free(image);
+    return failed ? -1 : 0;
+}
+
+static int test_profiled_layout_fallback(const char *directory)
+{
+    const uint64_t code_size = 8;
+    size_t image_size = sizeof(LatNativeImageHeaderV2) + 8 + code_size +
+        2 * sizeof(LatNativeTbV1) + 2 * sizeof(LatNativePcMapV2);
+    uint8_t *image = g_malloc0(image_size);
+    LatNativeImageHeaderV2 *header = (void *)image;
+    memcpy(header->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
+    header->version = LAT_NATIVE_IMAGE_VERSION;
+    header->header_size = sizeof(*header);
+    header->flags = LAT_NATIVE_IMAGE_X86_STATIC_EXEC;
+    header->preferred_guest_base = 0x400000;
+    header->guest_image_offset = sizeof(*header);
+    header->guest_image_size = 1;
+    header->code_offset = header->guest_image_offset + 8;
+    header->code_size = code_size;
+    header->tb_table_offset = header->code_offset + code_size;
+    header->tb_count = 2;
+    header->relocation_offset = header->tb_table_offset +
+                                2 * sizeof(LatNativeTbV1);
+    header->pc_map_offset = header->relocation_offset;
+    header->pc_map_count = 2;
+    memset(header->guest_sha256, 0x6b, sizeof(header->guest_sha256));
+    strcpy(header->lat_build_id, "profile-layout-fallback-test");
+
+    uint32_t *code = (void *)(image + header->code_offset);
+    code[0] = 0x50000000u;
+    code[1] = 0x03400000u;
+    LatNativeTbV1 *tbs = (void *)(image + header->tb_table_offset);
+    tbs[0] = (LatNativeTbV1) {
+        .guest_pc = 0x401000, .code_offset = 0, .code_size = 4, .flags = 3,
+    };
+    tbs[1] = (LatNativeTbV1) {
+        .guest_pc = 0x402000, .code_offset = 4, .code_size = 4, .flags = 3,
+    };
+    LatNativePcMapV2 *maps = (void *)(image + header->pc_map_offset);
+    for (unsigned int i = 0; i < 2; i++) {
+        maps[i] = (LatNativePcMapV2) {
+            .guest_pc = tbs[i].guest_pc,
+            .host_offset_begin = tbs[i].code_offset,
+            .host_offset_end = tbs[i].code_offset + tbs[i].code_size,
+            .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+        };
+    }
+
+    CfgProgram program = {0};
+    program.tb_count = 2;
+    program.tbs = g_new0(CfgTb, 2);
+    for (unsigned int i = 0; i < 2; i++) {
+        program.tbs[i] = (CfgTb) {
+            .start = tbs[i].guest_pc,
+            .end = tbs[i].guest_pc + 1,
+            .semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL,
+            .observed = true,
+        };
+    }
+
+    char *image_path = g_build_filename(
+        directory, "profile-layout-fallback.native", NULL);
+    char *text_path = g_build_filename(directory, "text.bin", NULL);
+    char *tbs_path = g_build_filename(directory, "tbs.bin", NULL);
+    char error[256] = {0};
+    gchar *text = NULL, *tb_data = NULL;
+    gsize text_size = 0, tb_size = 0;
+    int failed = !g_file_set_contents(
+        image_path, (const char *)image, image_size, NULL) ||
+        lat_aot_v2_emit_module_sources_with_cfg(
+            image_path, directory, &program, header->guest_sha256,
+            error, sizeof(error)) ||
+        !g_file_get_contents(text_path, &text, &text_size, NULL) ||
+        !g_file_get_contents(tbs_path, &tb_data, &tb_size, NULL);
+    const LatAotTbV2 *output_tbs = (const void *)tb_data;
+    if (!failed) {
+        failed = text_size != code_size ||
+                 memcmp(text, code, code_size) ||
+                 tb_size != 2 * sizeof(*output_tbs) ||
+                 output_tbs[0].host_offset != 0 ||
+                 output_tbs[1].host_offset != 4;
+    }
+    if (failed) {
+        fprintf(stderr, "tight profiled layout did not fall back: %s\n",
+                error[0] ? error : "invalid output");
+    }
+    g_free(tb_data);
+    g_free(text);
+    g_free(program.tbs);
+    g_remove(image_path);
+    g_free(tbs_path);
+    g_free(text_path);
+    g_free(image_path);
+    g_free(image);
+    return failed ? -1 : 0;
+}
+
 static int write_large_guest_table_fixture(const char *path,
                                            size_t address_count,
                                            int local_dispatch)
@@ -1343,7 +1591,8 @@ int main(void)
     }
     g_free(text);
     if (test_conditional_exits(directory) || test_indirect_exits(directory) ||
-        test_return_guards(directory)) {
+        test_return_guards(directory) || test_profiled_layout(directory) ||
+        test_profiled_layout_fallback(directory)) {
         return 1;
     }
     g_remove(text_path);

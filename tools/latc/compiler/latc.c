@@ -29,7 +29,7 @@ static void usage(const char *name)
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
     fprintf(stderr, "  %s merge-native BASE DELTA -o OUTPUT\n", name);
     fprintf(stderr, "  %s emit-aot-v2 NATIVE_IMAGE OUTPUT_DIRECTORY"
-                    " [X86_ELF]\n",
+                    " [X86_ELF [TBSET]]\n",
             name);
     fprintf(stderr,
             "  %s compile-module X86_ELF -o MODULE --runner RUNNER"
@@ -471,7 +471,10 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "emit-aot-v2") == 0) {
         char error[256] = {0};
-        if (argc != 4 && argc != 5) { usage(argv[0]); return 2; }
+        if (argc < 4 || argc > 6) {
+            usage(argv[0]);
+            return 2;
+        }
         int result;
         if (argc == 4) {
             result = lat_aot_v2_emit_module_sources(
@@ -480,11 +483,22 @@ int main(int argc, char **argv)
             CfgProgram program;
             CfgAnalyzeOptions options = {.resolve_jump_tables = true};
             uint8_t digest[32];
-            if (file_digest(argv[4], digest, error, sizeof(error)) ||
-                cfg_analyze_elf(argv[4], &options, &program,
-                                error, sizeof(error))) {
+            if (cfg_analyze_elf(argv[4], &options, &program,
+                                error, sizeof(error)) ||
+                (argc == 5 && file_digest(argv[4], digest,
+                                          error, sizeof(error)))) {
                 fprintf(stderr, "latc: %s\n", error);
                 return 1;
+            }
+            if (argc == 6) {
+                size_t matched, unmatched, ignored;
+                if (latc_tbset_apply(argv[5], argv[4], &program, true,
+                                     &matched, &unmatched, &ignored, digest,
+                                     error, sizeof(error))) {
+                    fprintf(stderr, "latc: %s\n", error);
+                    cfg_program_destroy(&program);
+                    return 1;
+                }
             }
             result = lat_aot_v2_emit_module_sources_with_cfg(
                 argv[2], argv[3], &program, digest, error, sizeof(error));

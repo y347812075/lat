@@ -531,6 +531,7 @@ static int expand_bounded_parallel_functions(CfgProgram *program,
              * a one-byte observed or synthetic placeholder. */
             CfgTb real_entry = program->tbs[fn->first_tb];
             real_entry.selected = true;
+            real_entry.observed = entry->observed;
             real_entry.semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
                                         CFG_TB_BOUNDED;
             real_entry.first_edge = 0;
@@ -538,6 +539,7 @@ static int expand_bounded_parallel_functions(CfgProgram *program,
             if (entry->start == fn->start) {
                 *entry = real_entry;
             } else if (!pc_set_contains(&parallel_pcs, real_entry.start)) {
+                real_entry.observed = false;
                 program->tbs[program->tb_count++] = real_entry;
                 pc_set_add(&parallel_pcs, real_entry.start);
             }
@@ -548,6 +550,7 @@ static int expand_bounded_parallel_functions(CfgProgram *program,
                 }
                 CfgTb added = *source;
                 added.selected = true;
+                added.observed = false;
                 added.semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
                                        CFG_TB_BOUNDED;
                 added.first_edge = 0;
@@ -595,6 +598,7 @@ static int select_all_parallel_cfg(CfgProgram *program, size_t template_count,
         }
         CfgTb added = program->tbs[i];
         added.selected = true;
+        added.observed = false;
         added.semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
                                CFG_TB_BOUNDED;
         added.first_edge = 0;
@@ -782,6 +786,7 @@ int latc_tbset_apply(const char *path, const char *source_path,
          * templates can match; entries appended by this loop cannot. */
         if (found) {
             program->tbs[exact_index].selected = true;
+            program->tbs[exact_index].observed = true;
         }
         if (found) {
             hit++;
@@ -794,6 +799,7 @@ int latc_tbset_apply(const char *path, const char *source_path,
                     .terminator = CFG_TB_FALLTHROUGH,
                 };
             added.selected = true;
+            added.observed = true;
             added.semantic_flags = key->flags;
             added.first_edge = 0;
             added.edge_count = 0;

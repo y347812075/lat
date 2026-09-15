@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
-    echo "usage: $0 LATC NATIVE_IMAGE RUNTIME_DIRECTORY OUTPUT [X86_GUEST]" >&2
+if [ "$#" -lt 4 ] || [ "$#" -gt 6 ]; then
+    echo "usage: $0 LATC NATIVE_IMAGE RUNTIME_DIRECTORY OUTPUT [X86_GUEST [TBSET]]" >&2
     exit 2
 fi
 
@@ -11,6 +11,7 @@ native_image=$2
 runtime_dir=$3
 output=$4
 guest=${5:-}
+tbset=${6:-}
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 include_dir=$(dirname "$script_dir")/aot-v2/include
 case "$runtime_dir" in /*) ;; *) runtime_dir="$(pwd)/$runtime_dir";; esac
@@ -18,7 +19,9 @@ case "$output" in /*) ;; *) output="$(pwd)/$output";; esac
 work=$(mktemp -d "${TMPDIR:-/tmp}/latc-aot-v2-link.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-if [ -n "$guest" ]; then
+if [ -n "$tbset" ]; then
+    "$latc" emit-aot-v2 "$native_image" "$work" "$guest" "$tbset" >/dev/null
+elif [ -n "$guest" ]; then
     "$latc" emit-aot-v2 "$native_image" "$work" "$guest" >/dev/null
 else
     "$latc" emit-aot-v2 "$native_image" "$work" >/dev/null
