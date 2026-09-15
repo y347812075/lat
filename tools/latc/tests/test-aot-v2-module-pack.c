@@ -23,6 +23,38 @@ static const uint32_t indirect_dispatch[] = {
     0x28c021cb, 0x4c000160,
 };
 
+static int test_indirect_register_renaming(void)
+{
+    static const uint8_t register_fields[LAT_NATIVE_INDIRECT_EXIT_WORDS] = {
+        2, 3, 2, 3, 2, 2, 2, 2, 2, 2, 2, 3, 2, 2, 3, 2, 2, 2, 2,
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    };
+    static const uint8_t renamed_scratch[] = {13, 14, 15, 16, 1};
+    uint32_t renamed[LAT_NATIVE_INDIRECT_EXIT_WORDS];
+    memcpy(renamed, indirect_dispatch, sizeof(renamed));
+
+    for (unsigned int i = 0; i < LAT_NATIVE_INDIRECT_EXIT_WORDS; i++) {
+        for (unsigned int field = 0; field < register_fields[i]; field++) {
+            unsigned int shift = field * 5;
+            unsigned int reg = (renamed[i] >> shift) & 31;
+            if (reg >= 12 && reg <= 16) {
+                renamed[i] &= ~(31u << shift);
+                renamed[i] |= (uint32_t)renamed_scratch[reg - 12] << shift;
+            }
+        }
+    }
+    if (!lat_native_indirect_exit_valid(renamed)) {
+        fprintf(stderr, "renamed indirect dispatch rejected\n");
+        return -1;
+    }
+    renamed[17] ^= 1u;
+    if (lat_native_indirect_exit_valid(renamed)) {
+        fprintf(stderr, "inconsistent indirect register accepted\n");
+        return -1;
+    }
+    return 0;
+}
+
 static int write_fixture(const char *path, int overlap, int incomplete_map,
                          int missing_target, int exit_variant)
 {
@@ -261,6 +293,9 @@ static int test_conditional_exits(const char *directory)
 
 static int test_indirect_exits(const char *directory)
 {
+    if (test_indirect_register_renaming()) {
+        return -1;
+    }
     char *path = g_build_filename(directory, "fixture.native", NULL);
     char *assembly_path = g_build_filename(directory, "module.S", NULL);
     char *text_path = g_build_filename(directory, "text.bin", NULL);
