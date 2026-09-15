@@ -215,6 +215,7 @@ void tri_avoid_leading_label(void)
 #endif
 }
 
+#ifdef CONFIG_LATX_OPT_PUSH_POP
 static int ir2_get_addi_rsp_offs(IR2_INST *ir2)
 {
     int rsp = reg_gpr_map[esp_index];
@@ -525,6 +526,7 @@ static void ir2_opt_push_pop(TranslationBlock *tb)
                     "patch_off = %-5d\n", curr_id, 0);
     }
 }
+#endif
 
 void tr_ir2_optimize(TranslationBlock *tb)
 {
@@ -545,6 +547,7 @@ void tr_ir2_optimize(TranslationBlock *tb)
     } */
 }
 
+#ifdef CONFIG_LATX_OPT_PUSH_POP
 extern void ir1_optimization(TranslationBlock *tb);
 
 void ir2_opt_push_pop_fix(TranslationBlock *tb, CPUState *cpu, int i)
@@ -704,3 +707,4 @@ void ir2_opt_push_pop_fix(TranslationBlock *tb, CPUState *cpu, int i)
     env->regs[R_ESP] += patch_off;
     tr_fini(false);
 }
+#endif

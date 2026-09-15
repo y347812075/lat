@@ -590,6 +590,7 @@ static int append_tb_pc_map(GArray *output, const uint8_t *code,
     const uint8_t *cursor = code + search_offset;
     const uint8_t *end = code + search_limit;
     uint64_t current_guest_pc = guest_pc;
+    int64_t current_state = 0;
     uint64_t encoded_host_end = 0;
     guint first_map = output->len;
     bool truncated_unlink_stub = false;
@@ -601,11 +602,17 @@ static int append_tb_pc_map(GArray *output, const uint8_t *code,
         if (decode_sleb128_checked(&cursor, end, &guest_delta) ||
             decode_sleb128_checked(&cursor, end, &state_delta) ||
             decode_sleb128_checked(&cursor, end, &host_delta) ||
-            state_delta != 0 || host_delta < 0 ||
+            host_delta < 0 ||
             add_signed_u64(&current_guest_pc, guest_delta) ||
             (uint64_t)host_delta > UINT64_MAX - encoded_host_end) {
             return -1;
         }
+        if (state_delta > INT32_MAX || state_delta < INT32_MIN ||
+            (state_delta > 0 && current_state > INT32_MAX - state_delta) ||
+            (state_delta < 0 && current_state < INT32_MIN - state_delta)) {
+            return -1;
+        }
+        current_state += state_delta;
         if (!host_delta) {
             continue;
         }
@@ -625,8 +632,9 @@ static int append_tb_pc_map(GArray *output, const uint8_t *code,
             .guest_pc = current_guest_pc,
             .host_offset_begin = code_offset + host_begin,
             .host_offset_end = code_offset + host_end,
-            .state_record_offset = 0,
-            .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+            .state_record_offset = (uint32_t)(int32_t)current_state,
+            .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE |
+                (current_state ? LAT_NATIVE_PC_MAP_STACK_POINTER_DELTA : 0),
         };
         g_array_append_val(output, map);
     }

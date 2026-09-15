@@ -23,6 +23,7 @@
 #include "latx-native-asm.h"
 #include "qemu.h"
 #include "ts.h"
+#include "hbr.h"
 
 extern void *helper_tb_lookup_ptr(CPUArchState *);
 static int ss_generate_match_fail_native_code(void* code_buf);
@@ -110,6 +111,9 @@ void tr_init(void *tb)
               t->curr_tb);
     t->curr_tb = tb;
     t->curr_ir1_inst = NULL;
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+    t->sp_delta = 0;
+#endif
 
     /* Each TB must establish its own native SSE rounding mode. */
     t->sse_rounding_prepared = false;
@@ -154,6 +158,9 @@ void tr_fini(bool check_the_extension)
     /* set current tb and ir1 */
     t->curr_tb = NULL;
     t->curr_ir1_inst = NULL;
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+    t->sp_delta = 0;
+#endif
 
     /* reset ir2 array */
     t->ir2_inst_num_current = 0;
@@ -259,6 +266,14 @@ IR1_INST *get_ir1_list(struct TranslationBlock *tb, ADDRX pc, int max_insns)
         pir1 = &ir1_list[ir1_num];
         /* get next pc */
         pc = ir1_disasm(pir1, inst_cache, pc, ir1_num, pir1_base);
+        if (pir1->info && ir1_static_export_rejected(pir1)) {
+            tb->icount = 0;
+            tb->size = 0;
+#ifdef CONFIG_LATX_TU
+            tb->s_data->tu_tb_mode = TU_TB_MODE_BROKEN;
+#endif
+            return NULL;
+        }
         if (pir1->info == NULL) {
             fprintf(stderr, "invalid assembly pc: " TARGET_FMT_lx "\n", pc);
 #if defined(CONFIG_LATX_TU)
@@ -2055,19 +2070,23 @@ bool ir1_translate(IR1_INST *ir1)
 
 static inline void tr_init_for_each_ir1_in_tb(IR1_INST *pir1, int nr, int index)
  {
+    IR2_OPND ir2_opnd_addr;
+
     lsenv->tr_data->curr_ir1_inst = pir1;
     lsenv->tr_data->curr_ir1_count = index;
 
     /* TODO: this addr only stored low 32 bits */
 #ifdef CONFIG_LATX_INSTS_PATTERN
-    if (pir1->instptn.opc == INSTPTN_OPC_NOP_DIV) {}
-    else
-#endif
-    {
-        IR2_OPND ir2_opnd_addr;
-        ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, ir1_addr(pir1));
-        la_x86_inst(ir2_opnd_addr);
+    if (pir1->instptn.opc == INSTPTN_OPC_NOP_DIV) {
+        return;
     }
+#endif
+    if (SHBR_FUSED_MEM64_PAIR(pir1)) {
+        return;
+    }
+
+    ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, ir1_addr(pir1));
+    la_x86_inst(ir2_opnd_addr);
 }
 
 bool need_trace;
@@ -2538,12 +2557,22 @@ int tr_ir2_generate(struct TranslationBlock *tb)
     }
 #endif
     for (i = 0; i < ir1_nr; ++i) {
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+        if (!latx_sp_merge_can_delay(pir1)) {
+            latx_sp_merge_flush();
+        }
+#endif
         /*
          * handle segv scenario, store host pc to gen_insn_data and encode to a BYTE
          * at the end of TB translate cache.
          */
         tcg_ctx->gen_insn_data[i][0] = pir1->info->address;
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+        tcg_ctx->gen_insn_data[i][1] =
+            (target_ulong)(target_long)lsenv->tr_data->sp_delta;
+#else
         tcg_ctx->gen_insn_data[i][1] = 0;
+#endif
 
 #ifdef CONFIG_LATX_IMM_REG
         imm_cache->curr_ir1_index = i;
@@ -2611,6 +2640,9 @@ int tr_ir2_generate(struct TranslationBlock *tb)
     if (x87_fcsr_active) {
         gen_softfpu_x87_fcsr_exit();
     }
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+    latx_sp_merge_flush();
+#endif
 #ifdef CONFIG_LATX_DEBUG
     if (option_dump_ir1) {
         pir1 = tb_ir1_inst(tb, 0);
@@ -2819,8 +2851,6 @@ static void generate_indirect_goto(void *code_buf)
 #if defined(CONFIG_LATX_FAST_JMPCACHE) && !defined(CONFIG_LATX_GLUE_MASK)
     IR2_OPND label_aot_v2_lookup = ra_alloc_label();
     IR2_OPND label_aot_v2_context_ready = ra_alloc_label();
-    IR2_OPND label_aot_v2_slots_done = ra_alloc_label();
-    IR2_OPND label_aot_v2_slot_loop = ra_alloc_label();
 #endif
 
     /* indirect jmp */
@@ -2889,28 +2919,9 @@ static void generate_indirect_goto(void *code_buf)
             offsetof(LatxAotV2FastTB, context));
     la_ld_d(next_tb, env_ir2_opnd,
             lsenv_offset_of_aot_v2_current_context(lsenv));
-    la_beq(jmp_entry, next_tb, label_aot_v2_context_ready);
-
-    IR2_OPND aot_v2_slot_dest = ra_alloc_itemp();
-    IR2_OPND aot_v2_slot_value = ra_alloc_itemp();
-    la_ld_d(aot_v2_cache_addr, aot_v2_entry,
-            offsetof(LatxAotV2FastTB, guest_slots_end));
-    la_ld_d(next_tb, aot_v2_entry,
-            offsetof(LatxAotV2FastTB, guest_slot_count));
-    la_beq(next_tb, zero_ir2_opnd, label_aot_v2_slots_done);
-    la_or(aot_v2_slot_dest, jmp_cache_addr, zero_ir2_opnd);
-    la_label(label_aot_v2_slot_loop);
-    la_addi_d(aot_v2_cache_addr, aot_v2_cache_addr, -8);
-    la_addi_d(aot_v2_slot_dest, aot_v2_slot_dest, -8);
-    la_ld_d(aot_v2_slot_value, aot_v2_cache_addr, 0);
-    la_st_d(aot_v2_slot_value, aot_v2_slot_dest, 0);
-    la_addi_d(next_tb, next_tb, -1);
-    la_bne(next_tb, zero_ir2_opnd, label_aot_v2_slot_loop);
-    la_label(label_aot_v2_slots_done);
-    la_st_d(jmp_entry, env_ir2_opnd,
-            lsenv_offset_of_aot_v2_current_context(lsenv));
-    ra_free_temp(aot_v2_slot_value);
-    ra_free_temp(aot_v2_slot_dest);
+    /* A cross-instance transition must return to the C dispatcher so it can
+     * transfer the execution reader before entering the new module. */
+    la_bne(jmp_entry, next_tb, label_miss);
 
     la_label(label_aot_v2_context_ready);
     la_ld_d(next_tb, aot_v2_entry,

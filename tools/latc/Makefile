@@ -562,6 +562,23 @@ $(BUILD)/aot-v2/fixture-bad-pc-map.so: aot-v2/tests/fixture.c \
 	  aot-v2/tests/fixture.c aot-v2/tests/fixture-entry.S
 	chmod go-w $@
 
+$(BUILD)/aot-v2/fixture-stack-delta.so: aot-v2/tests/fixture.c \
+		aot-v2/tests/fixture-entry.S aot-v2/tests/module.map \
+		$(BUILD)/aot-v2/liblat-aot-runtime.so.2
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -O2 -fPIC -shared -nostdlib \
+	  -DLAT_AOT_FIXTURE_STACK_DELTA=1 \
+		  -Wl,-z,defs -Wl,-z,now -Wl,-z,relro \
+		  -Wl,--unique=.rodata.lat.tb \
+		  -Wl,--unique=.rodata.lat.map \
+		  -Wl,--unique=.data.rel.ro.lat.module \
+	  -Wl,--version-script=aot-v2/tests/module.map \
+	  -Wl,--build-id=sha1 \
+	  -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
+	  -l:liblat-aot-runtime.so.2 -o $@ \
+	  aot-v2/tests/fixture.c aot-v2/tests/fixture-entry.S
+	chmod go-w $@
+
 $(BUILD)/tests/test-aot-v2-loader: aot-v2/tests/test-loader.c \
 		$(BUILD)/aot-v2/runtime/module-loader.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o \
@@ -601,6 +618,7 @@ AOT_V2_NATIVE_TESTS := $(BUILD)/aot-v2/liblat-aot-runtime.so.2 \
 	$(BUILD)/aot-v2/fixture.so \
 	$(BUILD)/aot-v2/fixture-bad-descriptor.so \
 	$(BUILD)/aot-v2/fixture-bad-pc-map.so \
+	$(BUILD)/aot-v2/fixture-stack-delta.so \
 	$(BUILD)/tests/test-aot-v2-loader
 endif
 
@@ -627,6 +645,9 @@ ifeq ($(HOST_ARCH),loongarch64)
 	LD_LIBRARY_PATH=$(abspath $(BUILD)/aot-v2) \
 	  $(BUILD)/tests/test-aot-v2-loader \
 	  $(abspath $(BUILD)/aot-v2/fixture.so)
+	LD_LIBRARY_PATH=$(abspath $(BUILD)/aot-v2) \
+	  $(BUILD)/tests/test-aot-v2-loader \
+	  $(abspath $(BUILD)/aot-v2/fixture-stack-delta.so)
 	LD_LIBRARY_PATH=$(abspath $(BUILD)/aot-v2) \
 	  $(BUILD)/tests/test-aot-v2-loader --expect-reject \
 	  $(abspath $(BUILD)/aot-v2/fixture-bad-descriptor.so)

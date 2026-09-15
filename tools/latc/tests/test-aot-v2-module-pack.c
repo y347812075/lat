@@ -107,7 +107,9 @@ static int write_fixture(const char *path, int overlap, int incomplete_map,
         .guest_pc = 0x401000,
         .host_offset_begin = 0,
         .host_offset_end = incomplete_map ? 20 : 24,
-        .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+        .state_record_offset = (uint32_t)(int32_t)-8,
+        .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE |
+                 LAT_NATIVE_PC_MAP_STACK_POINTER_DELTA,
     };
     if (!missing_target) {
         maps[1] = (LatNativePcMapV2){
@@ -997,6 +999,23 @@ int main(void)
         g_free(image_path);
         return 1;
     }
+    gchar *maps = NULL;
+    gsize maps_size = 0;
+    if (!g_file_get_contents(maps_path, &maps, &maps_size, NULL) ||
+        maps_size != 2 * sizeof(LatAotPcMapV2) ||
+        (int32_t)((LatAotPcMapV2 *)maps)[0].state_record_offset != -8 ||
+        ((LatAotPcMapV2 *)maps)[0].flags !=
+            (LAT_AOT_PC_MAP_DYNAMIC_STATE |
+             LAT_AOT_PC_MAP_STACK_POINTER_DELTA)) {
+        fprintf(stderr, "stack delta PC map was not preserved\n");
+        g_free(maps);
+        g_free(text);
+        g_free(text_path);
+        g_free(metadata_path);
+        g_free(image_path);
+        return 1;
+    }
+    g_free(maps);
     char *assembly_path = g_build_filename(directory, "module.S", NULL);
     for (int variant = 1; variant <= 3; variant++) {
         gchar *variant_text = NULL;

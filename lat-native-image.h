@@ -53,6 +53,8 @@ enum LatNativeImageFlags {
 
 enum LatNativePcMapFlagV2 {
     LAT_NATIVE_PC_MAP_DYNAMIC_STATE = 1u << 0,
+    /* state_record_offset contains a signed 32-bit stack-pointer delta. */
+    LAT_NATIVE_PC_MAP_STACK_POINTER_DELTA = 1u << 1,
 };
 
 enum LatNativeRelocationKind {

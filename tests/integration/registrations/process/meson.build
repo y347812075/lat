@@ -174,6 +174,15 @@ if 'x86_64-linux-user' in target_dirs
     ],
   }]
   latx_integration_tests += [{
+    'name': 'test-push-pop-sp',
+    'runner': find_program('../../test-push-pop-sp.sh'),
+    'args': [
+      emulators['latx-x86_64'],
+      files('../../push-pop-sp.S'),
+      files('../../push-pop-sp-file.S'),
+    ],
+  }]
+  latx_integration_tests += [{
     'name': 'test-softfpu-helper-store-gpr-x86_64',
     'runner': find_program('../../test-softfpu-helper-store-gpr-x86_64.sh'),
     'args': [
@@ -229,6 +238,14 @@ if 'i386-linux-user' in target_dirs
       files('../../futex-private-leader-exit-shim.c'),
     ],
     'timeout': 45,
+  }]
+  latx_integration_tests += [{
+    'name': 'test-push-pop-sp-i386',
+    'runner': find_program('../../test-push-pop-sp-i386.sh'),
+    'args': [
+      emulators['latx-i386'],
+      files('../../push-pop-sp-i386.S'),
+    ],
   }]
   latx_integration_tests += [{
     'name': 'test-async-sigill-i386',

@@ -2590,9 +2590,14 @@ bool latc_aot_v2_diagnose_host_pc(CPUState *cpu, uintptr_t host_pc,
         goto miss;
     }
     const LatAotPcMapV2 *map = &module->pc_map_begin[left - 1];
+    const uint32_t known_map_flags = LAT_AOT_PC_MAP_DYNAMIC_STATE |
+        LAT_AOT_PC_MAP_STACK_POINTER_DELTA;
+    const bool has_stack_delta = map->flags &
+        LAT_AOT_PC_MAP_STACK_POINTER_DELTA;
     if (host_offset >= map->host_offset_end ||
-        map->flags != LAT_AOT_PC_MAP_DYNAMIC_STATE ||
-        map->state_record_offset) {
+        !(map->flags & LAT_AOT_PC_MAP_DYNAMIC_STATE) ||
+        (map->flags & ~known_map_flags) ||
+        (!!map->state_record_offset != has_stack_delta)) {
         goto miss;
     }
     if (map->guest_rva > UINT64_MAX - instance->guest_load_bias) {
@@ -2610,6 +2615,8 @@ bool latc_aot_v2_diagnose_host_pc(CPUState *cpu, uintptr_t host_pc,
     diagnostic->generation = execution_generation;
     diagnostic->guest_begin = instance->guest_begin;
     diagnostic->guest_end = instance->guest_end;
+    diagnostic->stack_pointer_delta = has_stack_delta ?
+        (int32_t)map->state_record_offset : 0;
     atomic_store(&signal_last_guest_pc, guest_pc);
     atomic_store(&signal_last_generation, execution_generation);
     atomic_store(&signal_last_guest_begin, instance->guest_begin);
@@ -2660,5 +2667,9 @@ bool latc_aot_v2_restore_state(CPUState *cpu, uintptr_t host_pc)
         .pc = data[0],
     };
     restore_state_to_opc(cpu->env_ptr, &tb, data);
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+    ((CPUX86State *)cpu->env_ptr)->regs[R_ESP] +=
+        diagnostic.stack_pointer_delta;
+#endif
     return true;
 }

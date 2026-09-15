@@ -16,6 +16,9 @@
 _Static_assert((unsigned int)LAT_NATIVE_PC_MAP_DYNAMIC_STATE ==
                (unsigned int)LAT_AOT_PC_MAP_DYNAMIC_STATE,
                "native and AOT PC map flags differ");
+_Static_assert((unsigned int)LAT_NATIVE_PC_MAP_STACK_POINTER_DELTA ==
+               (unsigned int)LAT_AOT_PC_MAP_STACK_POINTER_DELTA,
+               "native and AOT stack delta flags differ");
 
 typedef struct ModulePack {
     const LatNativeImageHeaderV2 *header;
@@ -193,10 +196,15 @@ static void compute_pc_map_completeness(ModulePack *pack)
             continue;
         }
         const LatNativeTbV1 *tb = &pack->tbs[owner];
+        const uint32_t known_flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE |
+            LAT_NATIVE_PC_MAP_STACK_POINTER_DELTA;
+        const int has_stack_delta = map->flags &
+            LAT_NATIVE_PC_MAP_STACK_POINTER_DELTA;
         if (!pc_map_in_tb(map, tb) ||
             map->guest_pc < pack->header->preferred_guest_base ||
-            map->state_record_offset != 0 ||
-            map->flags != LAT_NATIVE_PC_MAP_DYNAMIC_STATE ||
+            !(map->flags & LAT_NATIVE_PC_MAP_DYNAMIC_STATE) ||
+            (map->flags & ~known_flags) ||
+            (!!map->state_record_offset != !!has_stack_delta) ||
             map->host_offset_begin != expected[owner]) {
             pack->pc_maps_complete[owner] = 0;
         }
