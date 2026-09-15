@@ -25,13 +25,43 @@ static inline int lat_native_indirect_exit_valid(const void *code)
         0x29c001f0u, 0x02fffd6bu, 0x5fffed60u, 0x29c003ecu,
         0x28c021cbu, 0x4c000160u,
     };
+    static const uint8_t register_fields[LAT_NATIVE_INDIRECT_EXIT_WORDS] = {
+        2, 3, 2, 3, 2, 2, 2, 2, 2, 2, 2, 3, 2, 2, 3, 2, 2, 2, 2,
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    };
+    int8_t scratch_map[5] = {-1, -1, -1, -1, -1};
+    uint32_t mapped_registers = 0;
+
     for (unsigned int i = 0; i < LAT_NATIVE_INDIRECT_EXIT_WORDS; i++) {
         uint32_t word;
         memcpy(&word, (const uint8_t *)code + i * 4, 4);
         uint32_t mask = i == 8 || i == 23 || i == 35 ?
             0xffc003ffu : UINT32_MAX;
-        if ((word & mask) != expected[i]) {
+        uint32_t register_mask = register_fields[i] == 3 ? 0x7fffu : 0x3ffu;
+        if ((word & mask & ~register_mask) !=
+            (expected[i] & mask & ~register_mask)) {
             return 0;
+        }
+        for (unsigned int field = 0; field < register_fields[i]; field++) {
+            unsigned int shift = field * 5;
+            unsigned int expected_register = (expected[i] >> shift) & 31;
+            unsigned int actual_register = (word >> shift) & 31;
+            if (expected_register >= 12 && expected_register <= 16) {
+                unsigned int index = expected_register - 12;
+                if (scratch_map[index] < 0) {
+                    uint32_t fixed = (1u << 0) | (1u << 11) | (1u << 21) |
+                                     (1u << 22) | (1u << 27);
+                    if ((fixed | mapped_registers) & (1u << actual_register)) {
+                        return 0;
+                    }
+                    scratch_map[index] = actual_register;
+                    mapped_registers |= 1u << actual_register;
+                } else if ((unsigned int)scratch_map[index] != actual_register) {
+                    return 0;
+                }
+            } else if (expected_register != actual_register) {
+                return 0;
+            }
         }
     }
     return 1;
