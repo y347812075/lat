@@ -125,7 +125,7 @@
     },
     {
       "path": "lat/target/i386/latx/include/translate.h",
-      "reason": "preserve standalone translator declarations while exposing delayed stack-pointer update helpers"
+      "reason": "preserve standalone translator declarations while exposing SHBR scalar-chain helpers and delayed stack-pointer update helpers"
     },
     {
       "path": "lat/target/i386/latx/include/optimize-config.h",
@@ -179,6 +179,10 @@
       "path": "lat/target/i386/latx/include/lsenv.h",
       "generated": true,
       "reason": "expose AOT v2 cache fields to generated indirect jump code"
+    },
+    {
+      "path": "lat/target/i386/latx/translator/tr-opnd-process.c",
+      "reason": "preserve standalone operand handling while exposing SHBR scalar-chain lane clearing"
     },
     {
       "path": "lat/target/i386/latx/translator/tr-mov.c",
