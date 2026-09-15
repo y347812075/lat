@@ -656,6 +656,7 @@ static inline void get_ts_queue(CPUState *cpu, target_ulong cs_base,
     target_ulong curr_tb_pc, curr_tb_cflags;
     TranslationBlock *tb;
     uint32_t tb_id = 0;
+    const char *native_output = getenv("LATC_NATIVE_IMAGE_OUT");
     while (untr_tb_id <= curr_seg->last_tb_id && *tb_num_in_tu < MAX_TB_IN_TS) {
         curr_tb_pc = curr_tb_message_vector[untr_tb_id].pc;
         curr_tb_cflags = curr_tb_message_vector[untr_tb_id].cflags;
@@ -669,10 +670,12 @@ static inline void get_ts_queue(CPUState *cpu, target_ulong cs_base,
                 curr_tb_message_vector[untr_tb_id].bool_flags , TU_TB_START_ENTRY);
         tu_push_back(tb);
         untr_tb_id++;
-        /* The offline compiler has already selected the complete CFG set.
-         * Keep each selected TB in its own TU so inferred entry points retain
-         * stable, non-overlapping native PC maps. */
-        if (tb && (tb->bool_flags & IS_AOT_BOUNDED)) {
+        /*
+         * Legacy AOT recovery expects TU members to be contiguous in the
+         * guest-PC-sorted table. Native export records each TU explicitly.
+         */
+        if (tb && (tb->bool_flags & IS_AOT_BOUNDED) &&
+            (!native_output || !*native_output)) {
             break;
         }
         for (; tb_id <  *tb_num_in_tu && *tb_num_in_tu < MAX_TB_IN_TS;  tb_id++) {
