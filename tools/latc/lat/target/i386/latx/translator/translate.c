@@ -23,6 +23,7 @@
 #include "latx-native-asm.h"
 #include "qemu.h"
 #include "ts.h"
+#include "hbr.h"
 
 extern void *helper_tb_lookup_ptr(CPUArchState *);
 static int ss_generate_match_fail_native_code(void* code_buf);
@@ -2039,19 +2040,23 @@ bool ir1_translate(IR1_INST *ir1)
 
 static inline void tr_init_for_each_ir1_in_tb(IR1_INST *pir1, int nr, int index)
  {
+    IR2_OPND ir2_opnd_addr;
+
     lsenv->tr_data->curr_ir1_inst = pir1;
     lsenv->tr_data->curr_ir1_count = index;
 
     /* TODO: this addr only stored low 32 bits */
 #ifdef CONFIG_LATX_INSTS_PATTERN
-    if (pir1->instptn.opc == INSTPTN_OPC_NOP_DIV) {}
-    else
-#endif
-    {
-        IR2_OPND ir2_opnd_addr;
-        ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, ir1_addr(pir1));
-        la_x86_inst(ir2_opnd_addr);
+    if (pir1->instptn.opc == INSTPTN_OPC_NOP_DIV) {
+        return;
     }
+#endif
+    if (SHBR_FUSED_MEM64_PAIR(pir1)) {
+        return;
+    }
+
+    ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, ir1_addr(pir1));
+    la_x86_inst(ir2_opnd_addr);
 }
 
 bool need_trace;
