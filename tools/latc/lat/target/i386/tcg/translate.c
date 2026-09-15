@@ -8652,7 +8652,11 @@ void gen_intermediate_code(CPUState *cpu, TranslationBlock *tb, int max_insns,
 void restore_state_to_opc(CPUX86State *env, TranslationBlock *tb,
                           target_ulong *data)
 {
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+    int cc_op = CC_OP_DYNAMIC;
+#else
     int cc_op = data[1];
+#endif
 
     env->eip = data[0] - tb->cs_base;
     if (cc_op != CC_OP_DYNAMIC) {

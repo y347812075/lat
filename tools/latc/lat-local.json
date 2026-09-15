@@ -105,6 +105,18 @@
       "reason": "classify memory index registers before GPR-only analysis"
     },
     {
+      "path": "lat/target/i386/latx/include/env.h",
+      "reason": "preserve standalone translation state while tracking delayed stack-pointer updates"
+    },
+    {
+      "path": "lat/target/i386/latx/include/translate.h",
+      "reason": "preserve standalone translator declarations while exposing delayed stack-pointer update helpers"
+    },
+    {
+      "path": "lat/target/i386/latx/include/optimize-config.h",
+      "reason": "preserve standalone optimization settings while enabling translation-time PUSH/POP stack-pointer merging"
+    },
+    {
       "path": "lat/target/i386/latx/ir1/ir1.c",
       "generated": true,
       "reason": "distinguish VSIB vector indices from GPR address indices"
@@ -113,6 +125,10 @@
       "path": "lat/target/i386/latx/optimization/hbr.c",
       "generated": true,
       "reason": "exclude VSIB vector indices from GPR high-half analysis"
+    },
+    {
+      "path": "lat/target/i386/latx/optimization/ir2-optimization.c",
+      "reason": "preserve standalone IR2 optimization code while disabling the superseded PUSH/POP pass"
     },
     {
       "path": "lat/target/i386/latx/optimization/tu.c",
@@ -150,9 +166,17 @@
       "reason": "expose AOT v2 cache fields to generated indirect jump code"
     },
     {
+      "path": "lat/target/i386/latx/translator/tr-mov.c",
+      "reason": "preserve standalone move translation while merging consecutive PUSH/POP stack-pointer updates"
+    },
+    {
       "path": "lat/target/i386/latx/translator/translate.c",
       "generated": true,
       "reason": "check module context and generation before an AOT v2 indirect fast jump, allocate per-thread AOT translation scratch buffers, and avoid accessor calls in the AOT translation hot loop"
+    },
+    {
+      "path": "lat/target/i386/tcg/translate.c",
+      "reason": "preserve standalone x86 translation while reserving instruction metadata for delayed stack-pointer recovery"
     },
     {
       "path": "lat/target/i386/latx/ir2/ir2-assemble.c",

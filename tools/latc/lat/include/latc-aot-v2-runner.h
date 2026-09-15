@@ -24,6 +24,7 @@ typedef struct LatcAotV2SignalDiagnostic {
     uint64_t generation;
     target_ulong guest_begin;
     target_ulong guest_end;
+    int32_t stack_pointer_delta;
 } LatcAotV2SignalDiagnostic;
 
 typedef enum LatcAotV2InvalidationReason {

@@ -321,11 +321,16 @@ int lat_native_image_validate(const void *data, size_t size,
     pc_maps = (const void *)((const unsigned char *)data +
                              header->pc_map_offset);
     for (uint64_t i = 0; i < header->pc_map_count; i++) {
+        const uint32_t known_flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE |
+            LAT_NATIVE_PC_MAP_STACK_POINTER_DELTA;
+        const int has_stack_delta = pc_maps[i].flags &
+            LAT_NATIVE_PC_MAP_STACK_POINTER_DELTA;
         if (!pc_maps[i].guest_pc ||
             pc_maps[i].host_offset_begin >= pc_maps[i].host_offset_end ||
             pc_maps[i].host_offset_end > header->code_size ||
-            pc_maps[i].state_record_offset != 0 ||
-            pc_maps[i].flags != LAT_NATIVE_PC_MAP_DYNAMIC_STATE ||
+            !(pc_maps[i].flags & LAT_NATIVE_PC_MAP_DYNAMIC_STATE) ||
+            (pc_maps[i].flags & ~known_flags) ||
+            (!!pc_maps[i].state_record_offset != !!has_stack_delta) ||
             (i && pc_maps[i - 1].host_offset_end >
                   pc_maps[i].host_offset_begin)) {
             return invalid(error, error_size,

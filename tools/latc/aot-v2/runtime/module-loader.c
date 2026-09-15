@@ -112,10 +112,16 @@ static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
     size_t pc_count = (pc_end - pc_begin) / sizeof(LatAotPcMapV2);
     for (size_t i = 0; i < pc_count; i++) {
         const LatAotPcMapV2 *map = &descriptor->pc_map_begin[i];
+        const uint32_t known_flags = LAT_AOT_PC_MAP_DYNAMIC_STATE |
+            LAT_AOT_PC_MAP_STACK_POINTER_DELTA;
+        const int has_stack_delta = map->flags &
+            LAT_AOT_PC_MAP_STACK_POINTER_DELTA;
         if (!map->guest_rva ||
             map->host_offset_begin >= map->host_offset_end ||
-            map->host_offset_end > text_size || map->state_record_offset ||
-            map->flags != LAT_AOT_PC_MAP_DYNAMIC_STATE ||
+            map->host_offset_end > text_size ||
+            !(map->flags & LAT_AOT_PC_MAP_DYNAMIC_STATE) ||
+            (map->flags & ~known_flags) ||
+            (!!map->state_record_offset != !!has_stack_delta) ||
             (i && descriptor->pc_map_begin[i - 1].host_offset_end >
                   map->host_offset_begin)) {
             return fail(error, error_size,

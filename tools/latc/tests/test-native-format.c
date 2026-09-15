@@ -252,6 +252,36 @@ int main(int argc, char **argv)
         fprintf(stderr, "precise PC map rejected: %s\n", error);
         return 1;
     }
+    pc_map->state_record_offset = (uint32_t)(int32_t)-8;
+    pc_map->flags |= LAT_NATIVE_PC_MAP_STACK_POINTER_DELTA;
+    if (lat_native_image_validate(image, image_size, error,
+                                  sizeof(error)) != 0) {
+        fprintf(stderr, "stack delta PC map rejected: %s\n", error);
+        return 1;
+    }
+    pc_map->flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE;
+    if (lat_native_image_validate(image, image_size, error,
+                                  sizeof(error)) == 0 ||
+        !strstr(error, "PC map")) {
+        fprintf(stderr, "unflagged stack delta accepted: %s\n", error);
+        return 1;
+    }
+    pc_map->state_record_offset = 0;
+    pc_map->flags |= LAT_NATIVE_PC_MAP_STACK_POINTER_DELTA;
+    if (lat_native_image_validate(image, image_size, error,
+                                  sizeof(error)) == 0 ||
+        !strstr(error, "PC map")) {
+        fprintf(stderr, "empty stack delta flag accepted: %s\n", error);
+        return 1;
+    }
+    pc_map->flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE | (1u << 31);
+    if (lat_native_image_validate(image, image_size, error,
+                                  sizeof(error)) == 0 ||
+        !strstr(error, "PC map")) {
+        fprintf(stderr, "unknown PC map flag accepted: %s\n", error);
+        return 1;
+    }
+    pc_map->flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE;
     pc_map->host_offset_end = header->code_size + 1;
     if (lat_native_image_validate(image, image_size, error,
                                   sizeof(error)) == 0 ||
