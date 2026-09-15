@@ -390,7 +390,10 @@ static int test_indirect_exits(const char *directory)
             !g_file_get_contents(slots_path, &slots, &slots_size, NULL) ||
             !!strstr(assembly, ".Llat_local_targets:\n") != enabled ||
             text_size != 164 ||
-            (enabled && (!strstr(assembly, "bne $t0,$r21,.Llat_local_end_") ||
+            (enabled && (!strstr(assembly, "beqz $a7,.Llat_local_miss_") ||
+                         !strstr(assembly, "add.d $a7,$a7,$t1\n"
+                                           "jr $a7\n") ||
+                         !strstr(assembly, "bne $t0,$r21,.Llat_local_end_") ||
                          !strstr(assembly, base_words == 1 ? ".rept 20\n" :
                                           base_words == 2 ? ".rept 19\n" :
                                                             ".rept 18\n"))) ||
@@ -1461,6 +1464,8 @@ int main(void)
                  "sub.d $t0,$r21,$t0\n") ||
         !strstr(three_assembly, "pcalau12i $t1,%pc_hi20(.Llat_local_targets)\n") ||
         !strstr(three_assembly, "alsl.d $t2,$t0,$t1,2\n") ||
+        !strstr(three_assembly, "add.d $a7,$a7,$t1\n"
+                                "jr $a7\n") ||
         !strstr(three_assembly, "ld.d $t0,$a7,0\n") ||
         !strstr(three_assembly, "ld.d $a7,$a7,8\n") ||
         !strstr(three_assembly, ".rept 18\n") ||
