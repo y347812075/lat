@@ -761,20 +761,29 @@ static uint32_t *fill_ins_buff(uint64_t insn_table_offset, aot_tb *p_aot_tbs,
 {
     uint32_t *insn_buffer = (uint32_t *)malloc(total_code_cache_size);
     assert(insn_buffer && "insn_buffer malloc failed!");
-    uint32_t *curr_insn = insn_buffer;
 #ifdef CONFIG_LATX_TU
-    uint32_t *new_pos = insn_buffer;
+    uint8_t *new_pos = (uint8_t *)insn_buffer;
+    GHashTable *tu_offsets = g_hash_table_new(g_direct_hash, g_direct_equal);
+
+    for (struct aot_tb *p = p_aot_tbs; p < (aot_tb *)tb_table_end; ++p) {
+        if (!p->is_first_tb) {
+            continue;
+        }
+        g_hash_table_insert(tu_offsets, p->tb_cache_addr, new_pos);
+        memcpy(new_pos, p->tb_cache_addr, p->tu_size);
+        new_pos += p->tu_size;
+    }
+#else
+    uint32_t *curr_insn = insn_buffer;
 #endif
     /* Fixup all tb_cache_offset. */
     for (struct aot_tb *p = p_aot_tbs; p < (aot_tb *)tb_table_end; ++p) {
 #ifdef CONFIG_LATX_TU
-        if (p->is_first_tb) {
-            curr_insn = new_pos;
-            memcpy(curr_insn, p->tb_cache_addr, p->tu_size);
-            new_pos += p->tu_size >> 2;
-        }
-        p->tb_cache_offset = (uintptr_t)curr_insn - (uintptr_t)insn_buffer 
-            + insn_table_offset + p->offset_in_tu;
+        void *tu_address = (uint8_t *)p->tb_cache_addr - p->offset_in_tu;
+        uint8_t *tu_output = g_hash_table_lookup(tu_offsets, tu_address);
+        assert(tu_output);
+        p->tb_cache_offset = tu_output - (uint8_t *)insn_buffer +
+                             insn_table_offset + p->offset_in_tu;
 #else
         memcpy(curr_insn, p->tb_cache_addr, p->tu_size);
         /* TODO! unlink this TB. */
@@ -784,7 +793,8 @@ static uint32_t *fill_ins_buff(uint64_t insn_table_offset, aot_tb *p_aot_tbs,
 #endif
    }
 #ifdef CONFIG_LATX_TU
-    assert((void *)new_pos - (void *)insn_buffer == total_code_cache_size);
+    assert(new_pos - (uint8_t *)insn_buffer == total_code_cache_size);
+    g_hash_table_destroy(tu_offsets);
 #else
     assert((void *)curr_insn - (void *)insn_buffer == total_code_cache_size);
 #endif

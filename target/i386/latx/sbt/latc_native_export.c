@@ -46,6 +46,19 @@ static gint compare_uint64(gconstpointer left, gconstpointer right)
     return a < b ? -1 : a > b;
 }
 
+static gint compare_native_pc_map(gconstpointer left, gconstpointer right)
+{
+    const LatNativePcMapV2 *a = left;
+    const LatNativePcMapV2 *b = right;
+    if (a->host_offset_begin != b->host_offset_begin) {
+        return a->host_offset_begin < b->host_offset_begin ? -1 : 1;
+    }
+    if (a->host_offset_end != b->host_offset_end) {
+        return a->host_offset_end < b->host_offset_end ? -1 : 1;
+    }
+    return 0;
+}
+
 static bool native_tb_target_exists(const GArray *tbs, uint64_t guest_pc,
                                     uint32_t flags)
 {
@@ -646,6 +659,72 @@ static int append_tb_pc_map(GArray *output, const uint8_t *code,
     return 0;
 }
 
+typedef struct NativeTuRange {
+    uint64_t begin;
+    uint64_t end;
+    uint64_t search_begin;
+} NativeTuRange;
+
+static int collect_native_tu_ranges(const aot_tb *tbs, size_t tb_count,
+                                    uint64_t code_size,
+                                    uint64_t aot_code_offset,
+                                    GHashTable **ranges_out,
+                                    GPtrArray **storage_out)
+{
+    GHashTable *ranges = g_hash_table_new(g_int64_hash, g_int64_equal);
+    GPtrArray *storage = g_ptr_array_new_with_free_func(g_free);
+
+    for (size_t i = 0; i < tb_count; i++) {
+        if (!tbs[i].is_first_tb) {
+            continue;
+        }
+        if (tbs[i].tb_cache_offset < aot_code_offset ||
+            tbs[i].offset_in_tu) {
+            goto fail;
+        }
+        uint64_t begin = tbs[i].tb_cache_offset - aot_code_offset;
+        uint64_t end = begin + tbs[i].tu_size;
+        if (begin > code_size || end < begin || end > code_size ||
+            g_hash_table_contains(ranges, &begin)) {
+            goto fail;
+        }
+        NativeTuRange *range = g_new(NativeTuRange, 1);
+        *range = (NativeTuRange) {
+            .begin = begin,
+            .end = end,
+            .search_begin = end,
+        };
+        g_ptr_array_add(storage, range);
+        g_hash_table_insert(ranges, &range->begin, range);
+    }
+    for (size_t i = 0; i < tb_count; i++) {
+        if (tbs[i].tb_cache_offset < aot_code_offset) {
+            goto fail;
+        }
+        uint64_t tb_begin = tbs[i].tb_cache_offset - aot_code_offset;
+        if (tb_begin < tbs[i].offset_in_tu) {
+            goto fail;
+        }
+        uint64_t tu_begin = tb_begin - tbs[i].offset_in_tu;
+        NativeTuRange *range = g_hash_table_lookup(ranges, &tu_begin);
+        uint64_t tb_end = tb_begin + tbs[i].tb_cache_size;
+        uint64_t search_begin = tb_begin + tbs[i].tu_search_addr_offset;
+        if (!range || tb_end < tb_begin || tb_end > range->end ||
+            search_begin < tb_begin || search_begin > range->end) {
+            goto fail;
+        }
+        range->search_begin = MIN(range->search_begin, search_begin);
+    }
+    *ranges_out = ranges;
+    *storage_out = storage;
+    return 0;
+
+fail:
+    g_hash_table_destroy(ranges);
+    g_ptr_array_free(storage, TRUE);
+    return -1;
+}
+
 static int extract_native_pc_maps(GArray *output, const uint8_t *code,
                                   uint64_t code_size, const aot_header *header,
                                   const aot_segment *segments,
@@ -654,50 +733,46 @@ static int extract_native_pc_maps(GArray *output, const uint8_t *code,
                                   uint64_t load_bias)
 {
     size_t skipped = 0;
-    for (size_t i = 0; i < tb_count;) {
-        if (!tbs[i].is_first_tb ||
-            tbs[i].tb_cache_offset < aot_code_offset) {
-            return -1;
-        }
-        uint64_t tu_begin = tbs[i].tb_cache_offset - aot_code_offset;
-        uint64_t tu_end = tu_begin + tbs[i].tu_size;
-        if (tu_begin > code_size || tu_end < tu_begin || tu_end > code_size) {
-            return -1;
-        }
-        size_t next = i + 1;
-        while (next < tb_count && !tbs[next].is_first_tb) {
-            next++;
-        }
-        for (size_t j = i; j < next; j++) {
-            const aot_segment *segment = find_tb_segment(header, segments,
-                                                        &tbs[j]);
-            if (!segment || tbs[j].tb_cache_offset < aot_code_offset) {
-                return -1;
-            }
-            uint64_t code_offset = tbs[j].tb_cache_offset - aot_code_offset;
-            uint64_t guest_pc = segment->details.seg_begin +
-                                tbs[j].offset_in_segment;
-            if (guest_pc < load_bias) {
-                return -1;
-            }
-            guest_pc -= load_bias;
-            guint first_map = output->len;
-            if (append_tb_pc_map(output, code, code_size, &tbs[j],
-                                 code_offset, guest_pc, tu_end)) {
-                g_array_set_size(output, first_map);
-                skipped++;
-            }
-        }
-        i = next;
+    GHashTable *ranges;
+    GPtrArray *storage;
+    if (collect_native_tu_ranges(tbs, tb_count, code_size, aot_code_offset,
+                                 &ranges, &storage)) {
+        return -1;
     }
+    for (size_t j = 0; j < tb_count; j++) {
+        const aot_segment *segment = find_tb_segment(header, segments,
+                                                     &tbs[j]);
+        if (!segment || tbs[j].tb_cache_offset < aot_code_offset) {
+            g_hash_table_destroy(ranges);
+            g_ptr_array_free(storage, TRUE);
+            return -1;
+        }
+        uint64_t code_offset = tbs[j].tb_cache_offset - aot_code_offset;
+        uint64_t tu_begin = code_offset - tbs[j].offset_in_tu;
+        NativeTuRange *range = g_hash_table_lookup(ranges, &tu_begin);
+        uint64_t guest_pc = segment->details.seg_begin +
+                            tbs[j].offset_in_segment;
+        if (!range || guest_pc < load_bias) {
+            g_hash_table_destroy(ranges);
+            g_ptr_array_free(storage, TRUE);
+            return -1;
+        }
+        guest_pc -= load_bias;
+        guint first_map = output->len;
+        if (append_tb_pc_map(output, code, code_size, &tbs[j], code_offset,
+                             guest_pc, range->end)) {
+            g_array_set_size(output, first_map);
+            skipped++;
+        }
+    }
+    g_hash_table_destroy(ranges);
+    g_ptr_array_free(storage, TRUE);
     if (skipped) {
         fprintf(stderr,
                 "latc: skipped %zu native TBs without stable PC maps\n",
                 skipped);
     }
-    /* TB code is emitted in increasing host-offset order, and each TB's map
-     * decoder appends entries in instruction order.  Keep the linear check
-     * below as the invariant instead of sorting an already ordered table. */
+    g_array_sort(output, compare_native_pc_map);
     for (guint i = 1; i < output->len; i++) {
         const LatNativePcMapV2 *previous = &g_array_index(
             output, LatNativePcMapV2, i - 1);
@@ -714,38 +789,20 @@ static int strip_process_local_search_data(uint8_t *code, uint64_t code_size,
         const aot_tb *tbs, size_t tb_count, uint64_t aot_code_offset)
 {
 #ifdef CONFIG_LATX_TU
-    for (size_t i = 0; i < tb_count; i++) {
-        if (!tbs[i].is_first_tb) {
-            continue;
-        }
-        if (tbs[i].tb_cache_offset < aot_code_offset) {
-            fprintf(stderr, "latc: invalid TU code offset at TB %zu\n", i);
-            return -1;
-        }
-        uint64_t tu_begin = tbs[i].tb_cache_offset - aot_code_offset;
-        uint64_t tu_end = tu_begin + tbs[i].tu_size;
-        uint64_t search_begin = tu_end;
-        for (size_t j = i; j < tb_count; j++) {
-            if (j != i && tbs[j].is_first_tb) {
-                break;
-            }
-            if (tbs[j].tb_cache_offset < aot_code_offset) {
-                fprintf(stderr, "latc: invalid TU code offset at TB %zu\n", j);
-                return -1;
-            }
-            uint64_t tb_begin = tbs[j].tb_cache_offset - aot_code_offset;
-            uint64_t candidate = tb_begin + tbs[j].tu_search_addr_offset;
-            if (candidate < search_begin) {
-                search_begin = candidate;
-            }
-        }
-        if (tu_begin > code_size || tu_end > code_size ||
-            search_begin < tu_begin || search_begin > tu_end) {
-            fprintf(stderr, "latc: invalid TU search data range at TB %zu\n", i);
-            return -1;
-        }
-        memset(code + search_begin, 0, tu_end - search_begin);
+    GHashTable *ranges;
+    GPtrArray *storage;
+    if (collect_native_tu_ranges(tbs, tb_count, code_size, aot_code_offset,
+                                 &ranges, &storage)) {
+        fprintf(stderr, "latc: invalid TU search data range\n");
+        return -1;
     }
+    for (guint i = 0; i < storage->len; i++) {
+        const NativeTuRange *range = g_ptr_array_index(storage, i);
+        memset(code + range->search_begin, 0,
+               range->end - range->search_begin);
+    }
+    g_hash_table_destroy(ranges);
+    g_ptr_array_free(storage, TRUE);
 #else
     (void)code;
     (void)code_size;

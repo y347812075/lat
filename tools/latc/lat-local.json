@@ -209,6 +209,7 @@
     },
     {
       "path": "lat/target/i386/latx/optimization/ts.c",
+      "generated": true,
       "reason": "translate disjoint final TB-set partitions concurrently"
     },
     {
