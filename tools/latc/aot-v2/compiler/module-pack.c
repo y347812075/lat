@@ -36,6 +36,7 @@ typedef struct ModulePack {
     bool profiled_layout;
     bool dense_profile;
     bool compact_layout;
+    bool local_dispatch_sentinel;
     GArray *code_order;
     GArray *guest_rvas;
     GHashTable *guest_rva_indexes;
@@ -1905,8 +1906,14 @@ static int emit_local_dispatch(FILE *file, const ModulePack *pack,
         "bgeu $t0,$t2,.Llat_local_miss_%llu\n"
         "pcalau12i $t1,%%pc_hi20(.Llat_local_targets)\n"
         "alsl.d $t2,$t0,$t1,2\n"
-        "ld.w $a7,$t2,0\n"
-        "beqz $a7,.Llat_local_miss_%llu\n"
+        "ld.w $a7,$t2,0\n",
+        (unsigned long long)(pack->local_size >> 12),
+        (unsigned long long)index);
+    if (!pack->local_dispatch_sentinel) {
+        fprintf(file, "beqz $a7,.Llat_local_miss_%llu\n",
+                (unsigned long long)index);
+    }
+    fprintf(file,
         "add.d $a7,$a7,$t1\n"
         "jr $a7\n"
         ".Llat_local_miss_%llu:\n"
@@ -1920,13 +1927,25 @@ static int emit_local_dispatch(FILE *file, const ModulePack *pack,
         "jr $a7\n"
         ".rept %u\nnop\n.endr\n"
         ".Llat_local_end_%llu:\n",
-        (unsigned long long)(pack->local_size >> 12),
         (unsigned long long)index, (unsigned long long)index,
-        (unsigned long long)index, (unsigned long long)index,
-        21 - pack->local_base_words -
+        21 + pack->local_dispatch_sentinel - pack->local_base_words -
             4 * pack->return_guard_count[index],
         (unsigned long long)index);
     return 0;
+}
+
+static void emit_local_dispatch_gap(FILE *file, const ModulePack *pack,
+                                    uint64_t entries)
+{
+    if (pack->local_dispatch_sentinel) {
+        fprintf(file, ".rept %llu\n"
+                      ".word .Llat_aot_runtime_%u-.Llat_local_targets\n"
+                      ".endr\n",
+                (unsigned long long)entries,
+                LAT_NATIVE_SYMBOL_EPILOGUE_RET_0);
+    } else {
+        fprintf(file, ".zero %llu\n", (unsigned long long)(entries * 4));
+    }
 }
 
 static int emit_assembly(const char *path, const ModulePack *pack,
@@ -2021,16 +2040,15 @@ static int emit_assembly(const char *path, const ModulePack *pack,
                 continue;
             }
             if (tb->guest_pc > next) {
-                fprintf(file, ".zero %llu\n",
-                        (unsigned long long)((tb->guest_pc - next) * 4));
+                emit_local_dispatch_gap(file, pack, tb->guest_pc - next);
             }
             fprintf(file, ".word lat_aot_generated_text_begin+%llu"
                           "-.Llat_local_targets\n",
                     (unsigned long long)tb->code_offset);
             next = tb->guest_pc + 1;
         }
-        fprintf(file, ".zero %llu\n", (unsigned long long)(
-            (pack->local_base + pack->local_size - next) * 4));
+        emit_local_dispatch_gap(
+            file, pack, pack->local_base + pack->local_size - next);
     }
     int result = 0;
     if (fclose(file)) {
@@ -2129,6 +2147,7 @@ static int emit_module_sources(const char *native_image,
     }
     compute_pc_map_completeness(&pack);
     configure_local_dispatch(&pack);
+    pack.local_dispatch_sentinel = pack.local_size && pack.dense_profile;
     select_supported_tbs(&pack);
     size_t supported_count = 0;
     for (uint64_t i = 0; i < header->tb_count; i++) {
