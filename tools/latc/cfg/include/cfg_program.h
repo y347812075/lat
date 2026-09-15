@@ -59,6 +59,7 @@ typedef struct {
     uint64_t end;
     uint64_t terminator_pc;
     bool selected;
+    bool observed;
     uint32_t semantic_flags;
     CfgTbTerm terminator;
     size_t first_edge;

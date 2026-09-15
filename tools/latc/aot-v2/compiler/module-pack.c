@@ -22,9 +22,9 @@ _Static_assert((unsigned int)LAT_NATIVE_PC_MAP_STACK_POINTER_DELTA ==
 
 typedef struct ModulePack {
     const LatNativeImageHeaderV2 *header;
-    const LatNativeTbV1 *tbs;
-    const LatNativeRelocationV1 *relocations;
-    const LatNativePcMapV2 *pc_maps;
+    LatNativeTbV1 *tbs;
+    LatNativeRelocationV1 *relocations;
+    LatNativePcMapV2 *pc_maps;
     int *relocation_owners;
     int *relocation_targets;
     int *pc_map_owners;
@@ -33,6 +33,9 @@ typedef struct ModulePack {
     size_t tb_hash_mask;
     unsigned char *code;
     unsigned char *supported;
+    bool profiled_layout;
+    bool dense_profile;
+    bool compact_layout;
     GArray *code_order;
     GArray *guest_rvas;
     GHashTable *guest_rva_indexes;
@@ -53,6 +56,22 @@ static gint compare_tb_code(gconstpointer left, gconstpointer right)
     const LatNativeTbV1 *b = *(const LatNativeTbV1 *const *)right;
     if (a->code_offset != b->code_offset) {
         return a->code_offset < b->code_offset ? -1 : 1;
+    }
+    return 0;
+}
+
+static gint compare_pc_map_code(gconstpointer left, gconstpointer right)
+{
+    const LatNativePcMapV2 *a = *(const LatNativePcMapV2 *const *)left;
+    const LatNativePcMapV2 *b = *(const LatNativePcMapV2 *const *)right;
+    if (a->host_offset_begin != b->host_offset_begin) {
+        return a->host_offset_begin < b->host_offset_begin ? -1 : 1;
+    }
+    if (a->host_offset_end != b->host_offset_end) {
+        return a->host_offset_end < b->host_offset_end ? -1 : 1;
+    }
+    if (a->guest_pc != b->guest_pc) {
+        return a->guest_pc < b->guest_pc ? -1 : 1;
     }
     return 0;
 }
@@ -447,6 +466,359 @@ static int find_tb(const ModulePack *pack, uint64_t guest_pc, uint32_t flags)
            pack->tbs[left].guest_pc == guest_pc &&
            (left + 1 == pack->header->tb_count ||
             pack->tbs[left + 1].guest_pc != guest_pc) ? (int)left : -1;
+}
+
+typedef struct LayoutComponent {
+    GArray *members;
+    uint64_t guest_pc;
+    uint64_t original_offset;
+    int loop_anchor;
+    bool observed;
+    bool observed_in_loop;
+} LayoutComponent;
+
+#define PROFILED_COMPONENT_ALIGNMENT 32u
+#define PROFILED_LOOP_ALIGNMENT 32u
+#define DENSE_PROFILE_TB_DIVISOR 10u
+#define COMPACT_LAYOUT_SPLIT_PER_MILLE 19u
+
+static bool cfg_layout_tb_in_loop(const CfgProgram *program, size_t tb_index);
+
+static int layout_find(int *parents, int index)
+{
+    int root = index;
+    while (parents[root] != root) {
+        root = parents[root];
+    }
+    while (parents[index] != index) {
+        int next = parents[index];
+        parents[index] = root;
+        index = next;
+    }
+    return root;
+}
+
+static void layout_union(int *parents, int left, int right)
+{
+    left = layout_find(parents, left);
+    right = layout_find(parents, right);
+    if (left != right) {
+        parents[right] = left;
+    }
+}
+
+static size_t layout_component_count(int *parents, uint64_t tb_count)
+{
+    size_t count = 0;
+
+    for (uint64_t i = 0; i < tb_count; i++) {
+        count += layout_find(parents, (int)i) == (int)i;
+    }
+    return count;
+}
+
+static int instruction_has_short_branch_range(uint32_t instruction)
+{
+    uint32_t opcode = instruction & 0xfc000000u;
+    uint32_t opcode20 = instruction & 0xfc000100u;
+    return (opcode >= 0x58000000u && opcode <= 0x6c000000u) ||
+           opcode == 0x40000000u || opcode == 0x44000000u ||
+           opcode20 == 0x48000000u || opcode20 == 0x48000100u;
+}
+
+static gint compare_layout_component(gconstpointer left, gconstpointer right)
+{
+    const LayoutComponent *a = left;
+    const LayoutComponent *b = right;
+    if (a->observed_in_loop != b->observed_in_loop) {
+        return a->observed_in_loop ? -1 : 1;
+    }
+    if (a->observed != b->observed) {
+        return a->observed ? -1 : 1;
+    }
+    if (a->guest_pc != b->guest_pc) {
+        return a->guest_pc < b->guest_pc ? -1 : 1;
+    }
+    if (a->original_offset != b->original_offset) {
+        return a->original_offset < b->original_offset ? -1 : 1;
+    }
+    return 0;
+}
+
+static void reorder_profiled_code(ModulePack *pack, const CfgProgram *program)
+{
+    if (!program || !program->tb_count || !pack->header->tb_count) {
+        return;
+    }
+    uint64_t tb_count = pack->header->tb_count;
+    unsigned char *observed = g_malloc0(tb_count);
+    unsigned char *observed_in_loop = g_malloc0(tb_count);
+    size_t observed_count = 0;
+    const uint32_t semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL;
+    for (size_t i = 0; i < program->tb_count; i++) {
+        const CfgTb *cfg_tb = &program->tbs[i];
+        if (!cfg_tb->observed) {
+            continue;
+        }
+        uint32_t flags = cfg_tb->semantic_flags & semantic_flags;
+        int index = find_tb(pack, cfg_tb->start, flags);
+        if (index >= 0 && pack->tbs[index].guest_pc == cfg_tb->start &&
+            pack->tbs[index].flags == flags) {
+            if (!observed[index]) {
+                observed[index] = 1;
+                observed_count++;
+            }
+            observed_in_loop[index] |= cfg_layout_tb_in_loop(program, i);
+        }
+    }
+    if (!observed_count) {
+        g_free(observed_in_loop);
+        g_free(observed);
+        return;
+    }
+    pack->dense_profile = tb_count >= 128 &&
+        observed_count >= (tb_count + DENSE_PROFILE_TB_DIVISOR - 1) /
+                          DENSE_PROFILE_TB_DIVISOR;
+    if (pack->dense_profile) {
+        memset(observed_in_loop, 0, tb_count);
+    }
+
+    int *parents = g_new(int, tb_count);
+    int *component_indexes = g_new(int, tb_count);
+    uint64_t *old_offsets = g_new(uint64_t, tb_count);
+    uint64_t *new_offsets = g_new(uint64_t, tb_count);
+    for (uint64_t i = 0; i < tb_count; i++) {
+        parents[i] = (int)i;
+        component_indexes[i] = -1;
+        old_offsets[i] = pack->tbs[i].code_offset;
+    }
+    for (guint i = 1; i < pack->code_order->len; i++) {
+        const LatNativeTbV1 *left = g_array_index(
+            pack->code_order, const LatNativeTbV1 *, i - 1);
+        const LatNativeTbV1 *right = g_array_index(
+            pack->code_order, const LatNativeTbV1 *, i);
+        uint32_t last_instruction = 0;
+        int falls_through = left->code_size < sizeof(last_instruction) ||
+            left->code_offset > pack->header->code_size ||
+            left->code_size > pack->header->code_size - left->code_offset;
+        if (!falls_through) {
+            memcpy(&last_instruction, pack->code + left->code_offset +
+                   left->code_size - sizeof(last_instruction),
+                   sizeof(last_instruction));
+            falls_through = instruction_falls_through(last_instruction);
+        }
+        if (right->code_offset == left->code_offset + left->code_size &&
+            falls_through) {
+            layout_union(parents, (int)(left - pack->tbs),
+                         (int)(right - pack->tbs));
+        }
+    }
+    for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
+        int owner = pack->relocation_owners[i];
+        int target = pack->relocation_targets[i];
+        const LatNativeRelocationV1 *relocation = &pack->relocations[i];
+        if (owner < 0 || target < 0 ||
+            (relocation->kind != LAT_NATIVE_RELOC_TB_TARGET &&
+             relocation->kind != LAT_NATIVE_RELOC_JRRA_TARGET) ||
+            pack->header->code_size < 4 ||
+            relocation->code_offset > pack->header->code_size - 4) {
+            continue;
+        }
+        uint32_t instruction;
+        memcpy(&instruction, pack->code + relocation->code_offset,
+               sizeof(instruction));
+        if (instruction_has_short_branch_range(instruction)) {
+            layout_union(parents, owner, target);
+        }
+    }
+
+    if (pack->dense_profile) {
+        int *compact_parents = g_new(int, tb_count);
+        memcpy(compact_parents, parents,
+               tb_count * sizeof(*compact_parents));
+        for (guint i = 1; i < pack->code_order->len; i++) {
+            const LatNativeTbV1 *left = g_array_index(
+                pack->code_order, const LatNativeTbV1 *, i - 1);
+            const LatNativeTbV1 *right = g_array_index(
+                pack->code_order, const LatNativeTbV1 *, i);
+            if (right->code_offset == left->code_offset + left->code_size) {
+                layout_union(compact_parents, (int)(left - pack->tbs),
+                             (int)(right - pack->tbs));
+            }
+        }
+        size_t sparse_count = layout_component_count(parents, tb_count);
+        size_t compact_count = layout_component_count(compact_parents,
+                                                       tb_count);
+        pack->compact_layout =
+            (sparse_count - compact_count) * 1000 <=
+            compact_count * COMPACT_LAYOUT_SPLIT_PER_MILLE;
+        if (pack->compact_layout) {
+            memcpy(parents, compact_parents,
+                   tb_count * sizeof(*compact_parents));
+        }
+        g_free(compact_parents);
+    }
+
+    GArray *components = g_array_new(FALSE, FALSE,
+                                     sizeof(LayoutComponent));
+    for (guint i = 0; i < pack->code_order->len; i++) {
+        const LatNativeTbV1 *tb = g_array_index(
+            pack->code_order, const LatNativeTbV1 *, i);
+        int tb_index = (int)(tb - pack->tbs);
+        int root = layout_find(parents, tb_index);
+        int component_index = component_indexes[root];
+        if (component_index < 0) {
+            LayoutComponent component = {
+                .members = g_array_new(FALSE, FALSE, sizeof(int)),
+                .guest_pc = UINT64_MAX,
+                .original_offset = tb->code_offset,
+                .loop_anchor = -1,
+            };
+            g_array_append_val(components, component);
+            component_index = (int)components->len - 1;
+            component_indexes[root] = component_index;
+        }
+        LayoutComponent *component = &g_array_index(
+            components, LayoutComponent, component_index);
+        g_array_append_val(component->members, tb_index);
+        component->observed |= observed[tb_index] != 0;
+        component->observed_in_loop |= observed_in_loop[tb_index] != 0;
+        if (observed_in_loop[tb_index] && component->loop_anchor < 0) {
+            component->loop_anchor = tb_index;
+        }
+        component->guest_pc = MIN(component->guest_pc, tb->guest_pc);
+        component->original_offset = MIN(component->original_offset,
+                                         tb->code_offset);
+    }
+    g_array_sort(components, compare_layout_component);
+
+    uint64_t cursor = 0;
+    int layout_valid = 1;
+    for (guint i = 0; i < components->len && layout_valid; i++) {
+        LayoutComponent *component = &g_array_index(
+            components, LayoutComponent, i);
+        if (component->loop_anchor >= 0) {
+            uint64_t relative = 0;
+            uint64_t previous_end = 0;
+            for (guint j = 0; j < component->members->len; j++) {
+                int index = g_array_index(component->members, int, j);
+                const LatNativeTbV1 *tb = &pack->tbs[index];
+                if (j && tb->code_offset != previous_end) {
+                    relative += 4;
+                }
+                if (index == component->loop_anchor) {
+                    break;
+                }
+                relative += tb->code_size;
+                previous_end = tb->code_offset + tb->code_size;
+            }
+            uint64_t padding = (-(cursor + relative)) &
+                (PROFILED_LOOP_ALIGNMENT - 1);
+            if (padding > pack->header->code_size - cursor) {
+                layout_valid = 0;
+                break;
+            }
+            cursor += padding;
+        }
+        uint64_t previous_end = 0;
+        for (guint j = 0; j < component->members->len; j++) {
+            int index = g_array_index(component->members, int, j);
+            const LatNativeTbV1 *tb = &pack->tbs[index];
+            if (j && tb->code_offset != previous_end) {
+                if (cursor > pack->header->code_size ||
+                    pack->header->code_size - cursor < 4) {
+                    layout_valid = 0;
+                    break;
+                }
+                cursor += 4;
+            }
+            if (tb->code_size > pack->header->code_size - cursor) {
+                layout_valid = 0;
+                break;
+            }
+            new_offsets[index] = cursor;
+            cursor += tb->code_size;
+            previous_end = tb->code_offset + tb->code_size;
+        }
+        if (layout_valid) {
+            if (cursor > pack->header->code_size ||
+                pack->header->code_size - cursor < 4) {
+                layout_valid = 0;
+            } else {
+                cursor += 4;
+                uint64_t alignment = pack->compact_layout ? 4 :
+                    PROFILED_COMPONENT_ALIGNMENT;
+                uint64_t padding = (-cursor) & (alignment - 1);
+                if (padding > pack->header->code_size - cursor) {
+                    layout_valid = 0;
+                } else {
+                    cursor += padding;
+                }
+            }
+        }
+    }
+    if (!layout_valid) {
+        for (guint i = 0; i < components->len; i++) {
+            LayoutComponent *component = &g_array_index(
+                components, LayoutComponent, i);
+            g_array_free(component->members, TRUE);
+        }
+        g_array_free(components, TRUE);
+        g_free(new_offsets);
+        g_free(old_offsets);
+        g_free(component_indexes);
+        g_free(parents);
+        g_free(observed_in_loop);
+        g_free(observed);
+        pack->compact_layout = false;
+        return;
+    }
+
+    unsigned char *old_code = pack->code;
+    unsigned char *new_code = g_malloc0(pack->header->code_size);
+    for (uint64_t i = 0; i < tb_count; i++) {
+        memcpy(new_code + new_offsets[i], old_code + old_offsets[i],
+               pack->tbs[i].code_size);
+        pack->tbs[i].code_offset = new_offsets[i];
+    }
+    pack->code = new_code;
+    pack->profiled_layout = true;
+    g_free(old_code);
+    for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
+        int owner = pack->relocation_owners[i];
+        if (owner >= 0) {
+            int64_t delta = (int64_t)new_offsets[owner] -
+                            (int64_t)old_offsets[owner];
+            pack->relocations[i].code_offset = (uint64_t)(
+                (int64_t)pack->relocations[i].code_offset + delta);
+        }
+    }
+    for (uint64_t i = 0; i < pack->header->pc_map_count; i++) {
+        int owner = pack->pc_map_owners[i];
+        if (owner >= 0) {
+            int64_t delta = (int64_t)new_offsets[owner] -
+                            (int64_t)old_offsets[owner];
+            pack->pc_maps[i].host_offset_begin = (uint64_t)(
+                (int64_t)pack->pc_maps[i].host_offset_begin + delta);
+            pack->pc_maps[i].host_offset_end = (uint64_t)(
+                (int64_t)pack->pc_maps[i].host_offset_end + delta);
+        }
+    }
+    g_array_sort(pack->code_order, compare_tb_code);
+
+    for (guint i = 0; i < components->len; i++) {
+        LayoutComponent *component = &g_array_index(
+            components, LayoutComponent, i);
+        g_array_free(component->members, TRUE);
+    }
+    g_array_free(components, TRUE);
+    g_free(new_offsets);
+    g_free(old_offsets);
+    g_free(component_indexes);
+    g_free(parents);
+    g_free(observed_in_loop);
+    g_free(observed);
+    return;
 }
 
 static int guest_slot(ModulePack *pack, uint64_t guest_rva);
@@ -1155,6 +1527,9 @@ static int emit_tables(const char *directory, const ModulePack *pack,
     FILE *tb_file = fopen(tb_path, "wb");
     FILE *map_file = fopen(map_path, "wb");
     FILE *slot_file = fopen(slot_path, "wb");
+    GArray *map_order = g_array_sized_new(
+        FALSE, FALSE, sizeof(const LatNativePcMapV2 *),
+        selected_pc_map_count(pack));
     int result = 0;
     if (!tb_file || !map_file || !slot_file) {
         result = fail(error, error_size, "cannot create binary module tables");
@@ -1182,13 +1557,22 @@ static int emit_tables(const char *directory, const ModulePack *pack,
             !pc_map_in_tb(&pack->pc_maps[i], &pack->tbs[owner])) {
             continue;
         }
+        const LatNativePcMapV2 *map = &pack->pc_maps[i];
+        g_array_append_val(map_order, map);
+    }
+    if (pack->profiled_layout) {
+        g_array_sort(map_order, compare_pc_map_code);
+    }
+    for (guint i = 0; i < map_order->len; i++) {
+        const LatNativePcMapV2 *native_map = g_array_index(
+            map_order, const LatNativePcMapV2 *, i);
         LatAotPcMapV2 map = {
-            .guest_rva = pack->pc_maps[i].guest_pc -
+            .guest_rva = native_map->guest_pc -
                          pack->header->preferred_guest_base,
-            .host_offset_begin = pack->pc_maps[i].host_offset_begin,
-            .host_offset_end = pack->pc_maps[i].host_offset_end,
-            .state_record_offset = pack->pc_maps[i].state_record_offset,
-            .flags = pack->pc_maps[i].flags,
+            .host_offset_begin = native_map->host_offset_begin,
+            .host_offset_end = native_map->host_offset_end,
+            .state_record_offset = native_map->state_record_offset,
+            .flags = native_map->flags,
         };
         if (fwrite(&map, sizeof(map), 1, map_file) != 1) {
             result = fail(error, error_size, "cannot write binary PC map");
@@ -1221,6 +1605,7 @@ out:
     g_free(tb_path);
     g_free(map_path);
     g_free(slot_path);
+    g_array_free(map_order, TRUE);
     return result;
 }
 
@@ -1311,6 +1696,43 @@ static const CfgProgramFunction *cfg_function_for_tb(
         }
     }
     return NULL;
+}
+
+static bool cfg_layout_tb_in_loop(const CfgProgram *program, size_t tb_index)
+{
+    const CfgProgramFunction *function = cfg_function_for_tb(program,
+                                                              tb_index);
+    uint64_t pc = program->tbs[tb_index].start;
+    if (!function) {
+        for (size_t i = 0; i < program->function_count && !function; i++) {
+            const CfgProgramFunction *candidate = &program->functions[i];
+            for (size_t j = 0; j < candidate->tb_count; j++) {
+                if (program->tbs[candidate->first_tb + j].start == pc) {
+                    function = candidate;
+                    break;
+                }
+            }
+        }
+    }
+    if (!function) {
+        return false;
+    }
+    for (size_t i = 0; i < function->tb_count; i++) {
+        const CfgTb *tb = &program->tbs[function->first_tb + i];
+        for (size_t j = 0; j < tb->edge_count; j++) {
+            const CfgProgramEdge *edge =
+                &program->edges[tb->first_edge + j];
+            if (edge->resolution == CFG_EDGE_STATIC &&
+                edge->kind != CFG_EDGE_CALL &&
+                edge->kind != CFG_EDGE_CALL_RETURN &&
+                edge->to >= function->start &&
+                edge->to < function->start + function->size &&
+                edge->to <= pc && pc <= edge->from) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 static unsigned int return_candidate_score(const CfgProgram *program,
@@ -1648,9 +2070,10 @@ static int emit_module_sources(const char *native_image,
     }
     ModulePack pack = {
         .header = header,
-        .tbs = (const void *)(image + header->tb_table_offset),
-        .relocations = (const void *)(image + header->relocation_offset),
-        .pc_maps = (const void *)(image + header->pc_map_offset),
+        .tbs = g_new(LatNativeTbV1, header->tb_count),
+        .relocations = g_new(LatNativeRelocationV1,
+                             header->relocation_count),
+        .pc_maps = g_new(LatNativePcMapV2, header->pc_map_count),
         .relocation_owners = g_new(int, header->relocation_count),
         .relocation_targets = g_new(int, header->relocation_count),
         .pc_map_owners = g_new(int, header->pc_map_count),
@@ -1669,6 +2092,12 @@ static int emit_module_sources(const char *native_image,
             g_int64_hash, g_int64_equal, g_free, NULL),
         .runtime_trampolines = (header->code_size + 3) & ~(uint64_t)3,
     };
+    memcpy(pack.tbs, image + header->tb_table_offset,
+           header->tb_count * sizeof(*pack.tbs));
+    memcpy(pack.relocations, image + header->relocation_offset,
+           header->relocation_count * sizeof(*pack.relocations));
+    memcpy(pack.pc_maps, image + header->pc_map_offset,
+           header->pc_map_count * sizeof(*pack.pc_maps));
     pack.pf_table = pack.runtime_trampolines +
                     LAT_NATIVE_SYMBOL_COUNT * sizeof(uint32_t);
     for (uint64_t i = 0; i < header->tb_count; i++) {
@@ -1685,7 +2114,6 @@ static int emit_module_sources(const char *native_image,
                        header->pc_map_count,
                        sizeof(*pack.pc_maps),
                        offsetof(LatNativePcMapV2, host_offset_begin));
-    compute_pc_map_completeness(&pack);
     for (uint64_t i = 0; i < header->relocation_count; i++) {
         const LatNativeRelocationV1 *relocation = &pack.relocations[i];
         pack.relocation_targets[i] =
@@ -1696,6 +2124,10 @@ static int emit_module_sources(const char *native_image,
     }
     memcpy(pack.code, image + header->code_offset, header->code_size);
     int all_ranges_valid = all_tb_ranges_valid(&pack);
+    if (all_ranges_valid) {
+        reorder_profiled_code(&pack, program);
+    }
+    compute_pc_map_completeness(&pack);
     configure_local_dispatch(&pack);
     select_supported_tbs(&pack);
     size_t supported_count = 0;
@@ -1750,6 +2182,9 @@ static int emit_module_sources(const char *native_image,
     g_free(pack.return_guard_count);
     g_free(pack.return_guard_targets);
     g_free(pack.code);
+    g_free(pack.pc_maps);
+    g_free(pack.relocations);
+    g_free(pack.tbs);
     g_free(image);
     return result;
 }
