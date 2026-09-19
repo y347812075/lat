@@ -16,6 +16,7 @@ typedef struct LatcAotV2Target {
     uint32_t cflags;
     const uint64_t *guest_slots_end;
     uint64_t guest_slot_count;
+    bool reader_held;
 } LatcAotV2Target;
 
 typedef struct LatcAotV2SignalDiagnostic {
@@ -71,9 +72,14 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
 void latc_aot_v2_note_cached_miss(const LatcAotV2Target *target);
 bool latc_aot_v2_activate_target(CPUState *cpu,
                                  const LatcAotV2Target *target);
+void latc_aot_v2_release_target(CPUState *cpu, LatcAotV2Target *target);
+void latc_aot_v2_release_current_execution(CPUState *cpu);
 bool latc_aot_v2_contains_host_pc(uintptr_t host_pc);
 bool latc_aot_v2_diagnose_host_pc(CPUState *cpu, uintptr_t host_pc,
                                   LatcAotV2SignalDiagnostic *diagnostic);
 bool latc_aot_v2_restore_state(CPUState *cpu, uintptr_t host_pc);
+bool latc_aot_v2_defer_signal_recovery(CPUState *cpu, uintptr_t host_pc,
+                                       target_ulong *guest_pc);
+void latc_aot_v2_drain_signal_recovery(CPUState *cpu);
 
 #endif

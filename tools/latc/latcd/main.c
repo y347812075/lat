@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <glib.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <pthread.h>
 #include <poll.h>
 #include <signal.h>
@@ -27,6 +28,9 @@
 #include <sys/socket.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <time.h>
+
+static long superseded_grace_seconds(void);
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -46,6 +50,7 @@
 #define LATCD_DEFAULT_OPEN_FILES 256u
 #define LATCD_BATCH_QUIET_US (INT64_C(100) * 1000)
 #define LATCD_BATCH_MAX_US (INT64_C(500) * 1000)
+#define LATCD_SUPERSEDED_DIRNAME ".superseded"
 
 typedef struct LatcdConfig {
     const char *socket_path;
@@ -1232,6 +1237,210 @@ static bool cache_index_points_to(const char *path, const char *module_name)
     return matches;
 }
 
+static bool cache_grace_elapsed(time_t now, time_t then, long grace)
+{
+    return now >= then && (uint64_t)(now - then) >= (uint64_t)grace;
+}
+
+static uint64_t cache_add_regular_file_size(uint64_t total, const char *path)
+{
+    struct stat status;
+    if (lstat(path, &status) || !S_ISREG(status.st_mode) ||
+        status.st_size < 0) {
+        return total;
+    }
+    uint64_t size = (uint64_t)status.st_size;
+    return size > UINT64_MAX - total ? UINT64_MAX : total + size;
+}
+
+static uint64_t superseded_generations_size(const LatcdConfig *config,
+                                            uint64_t total)
+{
+    char *root = g_build_filename(config->cache_dir,
+                                  LATCD_SUPERSEDED_DIRNAME, NULL);
+    GDir *directory = g_dir_open(root, 0, NULL);
+    if (!directory) {
+        g_free(root);
+        return total;
+    }
+    const char *batch_name;
+    while ((batch_name = g_dir_read_name(directory))) {
+        char *batch = g_build_filename(root, batch_name, NULL);
+        GDir *batch_directory = g_dir_open(batch, 0, NULL);
+        if (batch_directory) {
+            const char *name;
+            while ((name = g_dir_read_name(batch_directory))) {
+                char *path = g_build_filename(batch, name, NULL);
+                total = cache_add_regular_file_size(total, path);
+                g_free(path);
+            }
+            g_dir_close(batch_directory);
+        }
+        g_free(batch);
+    }
+    g_dir_close(directory);
+    g_free(root);
+    return total;
+}
+
+static bool cache_current_generation_name(const LatcdConfig *config,
+                                          const char *name)
+{
+    if (!cache_generated_name(name)) {
+        return false;
+    }
+    char source_hex[65];
+    memcpy(source_hex, name, 64);
+    source_hex[64] = '\0';
+    LatcdCurrentManifest manifest = {0};
+    int manifest_result = current_manifest_read(config, source_hex, &manifest);
+    if (manifest_result) {
+        current_manifest_clear(&manifest);
+        /* A malformed or unreadable current manifest is not evidence that
+         * generated files are orphaned.  Preserve them until the manifest
+         * can be read again; only ENOENT means no current generation. */
+        return manifest_result > 0 ? false : true;
+    }
+    bool current = !strcmp(name, manifest.module) ||
+                   !strcmp(name, manifest.native) ||
+                   (*manifest.tbset && !strcmp(name, manifest.tbset));
+    current_manifest_clear(&manifest);
+    return current;
+}
+
+static void prune_superseded_generations(const LatcdConfig *config)
+{
+    char *root = g_build_filename(config->cache_dir,
+                                  LATCD_SUPERSEDED_DIRNAME, NULL);
+    GDir *directory = g_dir_open(root, 0, NULL);
+    if (!directory) {
+        g_free(root);
+        return;
+    }
+    long grace = superseded_grace_seconds();
+    time_t now = time(NULL);
+    const char *batch_name;
+    while ((batch_name = g_dir_read_name(directory))) {
+        char *batch = g_build_filename(root, batch_name, NULL);
+        struct stat status;
+        if (lstat(batch, &status) || !S_ISDIR(status.st_mode)) {
+            g_free(batch);
+            continue;
+        }
+        if (now < status.st_mtime) {
+            struct timespec times[2] = {
+                { .tv_nsec = UTIME_OMIT },
+                { .tv_nsec = UTIME_NOW },
+            };
+            if (utimensat(AT_FDCWD, batch, times, AT_SYMLINK_NOFOLLOW)) {
+                fprintf(stderr,
+                        "latcd: cannot normalize superseded batch time %s: %s\n",
+                        batch, strerror(errno));
+                g_free(batch);
+                continue;
+            }
+            status.st_mtime = now;
+        }
+        if (!cache_grace_elapsed(now, status.st_mtime, grace)) {
+            g_free(batch);
+            continue;
+        }
+        GDir *batch_directory = g_dir_open(batch, 0, NULL);
+        if (batch_directory) {
+            const char *name;
+            while ((name = g_dir_read_name(batch_directory))) {
+                char *path = g_build_filename(batch, name, NULL);
+                if (unlink(path) && errno != ENOENT) {
+                    fprintf(stderr,
+                            "latcd: cannot remove superseded file %s: %s\n",
+                            path, strerror(errno));
+                }
+                g_free(path);
+            }
+            g_dir_close(batch_directory);
+        }
+        if (rmdir(batch) && errno != ENOENT) {
+            fprintf(stderr, "latcd: cannot remove superseded batch %s: %s\n",
+                    batch, strerror(errno));
+        }
+        g_free(batch);
+    }
+    g_dir_close(directory);
+    g_free(root);
+}
+
+static char *create_superseded_batch(const LatcdConfig *config,
+                                     const char *source_hex)
+{
+    char *root = g_build_filename(config->cache_dir,
+                                  LATCD_SUPERSEDED_DIRNAME, NULL);
+    if (mkdir(root, 0700) && errno != EEXIST) {
+        fprintf(stderr, "latcd: cannot create superseded directory %s: %s\n",
+                root, strerror(errno));
+        g_free(root);
+        return NULL;
+    }
+    time_t now = time(NULL);
+    for (unsigned int attempt = 0; attempt < 1000; attempt++) {
+        char *batch = g_strdup_printf("%s/%s-%lld-%ld-%u", root, source_hex,
+                                      (long long)now, (long)getpid(), attempt);
+        if (!mkdir(batch, 0700)) {
+            g_free(root);
+            return batch;
+        }
+        if (errno != EEXIST) {
+            fprintf(stderr, "latcd: cannot create superseded batch %s: %s\n",
+                    batch, strerror(errno));
+            g_free(batch);
+            g_free(root);
+            return NULL;
+        }
+        g_free(batch);
+    }
+    g_free(root);
+    return NULL;
+}
+
+static void reconcile_superseded_generations(const LatcdConfig *config)
+{
+    GDir *directory = g_dir_open(config->cache_dir, 0, NULL);
+    if (!directory) {
+        return;
+    }
+    char *batch = NULL;
+    unsigned int moved = 0;
+    const char *name;
+    while ((name = g_dir_read_name(directory))) {
+        if (!cache_generated_name(name) ||
+            cache_current_generation_name(config, name)) {
+            continue;
+        }
+        if (!batch) {
+            batch = create_superseded_batch(config, "reconcile");
+        }
+        if (!batch) {
+            break;
+        }
+        char *path = g_build_filename(config->cache_dir, name, NULL);
+        char *retired = g_build_filename(batch, name, NULL);
+        if (rename(path, retired)) {
+            if (errno != ENOENT) {
+                fprintf(stderr, "latcd: cannot reconcile superseded file %s: %s\n",
+                        path, strerror(errno));
+            }
+        } else {
+            moved++;
+        }
+        g_free(retired);
+        g_free(path);
+    }
+    g_dir_close(directory);
+    if (batch && !moved) {
+        rmdir(batch);
+    }
+    g_free(batch);
+}
+
 static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
                            const char *incoming_name, char *error,
                            size_t error_size)
@@ -1240,6 +1449,8 @@ static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
         return fail(error, error_size,
                     "compiled module exceeds cache capacity");
     }
+    reconcile_superseded_generations(config);
+    prune_superseded_generations(config);
     GError *directory_error = NULL;
     GDir *directory = g_dir_open(config->cache_dir, 0, &directory_error);
     if (!directory) {
@@ -1249,7 +1460,7 @@ static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
         g_clear_error(&directory_error);
         return result;
     }
-    uint64_t total = 0;
+    uint64_t total = superseded_generations_size(config, 0);
     GPtrArray *entries = g_ptr_array_new_with_free_func(cache_entry_free);
     const char *name;
     while ((name = g_dir_read_name(directory))) {
@@ -1476,6 +1687,25 @@ static int current_manifest_read(const LatcdConfig *config, const char *hex,
     return result;
 }
 
+/*
+ * 被取代的模块代在宽限期内不得删除：运行中的进程可能仍映射并执行它们。
+ * 默认 600 秒，可用 LATCD_SUPERSEDED_GRACE_SECONDS 调整（0 表示立即删除）。
+ */
+static long superseded_grace_seconds(void)
+{
+    const char *text = getenv("LATCD_SUPERSEDED_GRACE_SECONDS");
+    if (text && *text) {
+        char *end = NULL;
+        errno = 0;
+        long parsed = strtol(text, &end, 10);
+        if (!errno && end && *end == '\0' && parsed >= 0 &&
+            parsed <= INT_MAX) {
+            return parsed;
+        }
+    }
+    return 600;
+}
+
 static void remove_superseded_generation(const LatcdConfig *config,
                                          const char *source_hex,
                                          const char *module_name,
@@ -1486,6 +1716,8 @@ static void remove_superseded_generation(const LatcdConfig *config,
     if (!directory) return;
     char prefix[66];
     snprintf(prefix, sizeof(prefix), "%s-", source_hex);
+    char *batch = NULL;
+    unsigned int moved = 0;
     const char *name;
     while ((name = g_dir_read_name(directory))) {
         bool generated = g_str_has_suffix(name, ".so") ||
@@ -1497,13 +1729,31 @@ static void remove_superseded_generation(const LatcdConfig *config,
             continue;
         }
         char *path = g_build_filename(config->cache_dir, name, NULL);
-        if (unlink(path) && errno != ENOENT) {
-            fprintf(stderr, "latcd: cannot remove superseded file %s: %s\n",
-                    path, strerror(errno));
+        if (!batch) {
+            batch = create_superseded_batch(config, source_hex);
         }
+        if (!batch) {
+            g_free(path);
+            break;
+        }
+        char *retired = g_build_filename(batch, name, NULL);
+        if (rename(path, retired)) {
+            if (errno != ENOENT) {
+                fprintf(stderr, "latcd: cannot retire superseded file %s: %s\n",
+                        path, strerror(errno));
+            }
+        } else {
+            moved++;
+        }
+        g_free(retired);
         g_free(path);
     }
     g_dir_close(directory);
+    if (batch && !moved) {
+        rmdir(batch);
+    }
+    g_free(batch);
+    prune_superseded_generations(config);
 }
 
 /* Publish a newer complete observed-key set when the current module already
@@ -1738,6 +1988,8 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
                     "latcd: committed cache-hit manifest sync failed: %s\n",
                     sync_error);
         }
+        remove_superseded_generation(config, hex, module_name, native_name,
+                                     tbset_name);
         utimensat(AT_FDCWD, final_module, NULL, AT_SYMLINK_NOFOLLOW);
         pthread_mutex_unlock(&cache_lock);
         snprintf(error, sizeof(error), "cache hit: %s", final_module);

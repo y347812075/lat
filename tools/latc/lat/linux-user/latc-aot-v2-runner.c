@@ -145,6 +145,8 @@ static LatAotV2PendingMapping **pending_mapping_tail = &pending_mapping_head;
 static LatAotV2SourceMapping *source_mappings;
 static __thread LatAotModuleInstanceV2 *aot_v2_current_instance;
 static __thread uint64_t aot_v2_current_generation;
+static __thread bool aot_v2_execution_active;
+static __thread LatAotModuleInstanceV2 *aot_v2_execution_instance;
 static __thread LatAotV2TargetCacheEntry *aot_v2_target_cache;
 static _Atomic uint64_t direct_targets;
 static _Atomic uint64_t file_dispatch_misses;
@@ -208,6 +210,17 @@ static _Atomic uint64_t invalidation_reasons[4];
 static _Atomic uint64_t signal_pc_lookups;
 static _Atomic uint64_t signal_pc_hits;
 static _Atomic uint64_t signal_pc_misses;
+
+typedef struct LatAotV2SignalRecovery {
+    uintptr_t host_pc;
+    target_ulong guest_begin;
+    target_ulong guest_end;
+    int32_t stack_pointer_delta;
+    bool invalidate_all;
+} LatAotV2SignalRecovery;
+
+static _Thread_local LatAotV2SignalRecovery signal_recovery;
+static _Thread_local volatile sig_atomic_t signal_recovery_pending;
 static _Atomic uint64_t signal_invalidation_overlaps;
 static _Atomic uint64_t signal_last_guest_pc;
 static _Atomic uint64_t signal_last_generation;
@@ -268,7 +281,10 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
     }
     aot_v2_current_instance = NULL;
     aot_v2_current_generation = 0;
+    aot_v2_execution_active = false;
+    aot_v2_execution_instance = NULL;
     aot_v2_target_cache = NULL;
+    signal_recovery_pending = 0;
     submission_thread_started = false;
 #ifdef CONFIG_LATX_FAST_JMPCACHE
     if (cpu) {
@@ -1859,50 +1875,75 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
     if (!module) {
         char source_hex[65];
         digest_hex(info->source_sha256, source_hex);
-        GPtrArray *basenames = read_module_manifest(
-            cache, source_hex, error, error_size);
-        if (!basenames) {
-            if (errno == ENOENT) error[0] = '\0';
-            return 0;
-        }
         LatAotExpectedV2 expected = {0};
         memcpy(expected.source_sha256, info->source_sha256,
                sizeof(expected.source_sha256));
         digest_bytes(LATC_BUILD_ID, strlen(LATC_BUILD_ID),
                      expected.codegen_id);
         expected.available_features = available_aot_features();
-        for (guint i = 0; i < basenames->len; i++) {
-            const char *basename = g_ptr_array_index(basenames, i);
-            char *path = g_build_filename(cache, basename, NULL);
-            module = g_new0(LatAotV2RuntimeModule, 1);
-            if (!path || !module) {
-                g_free(module);
-                g_free(path);
-                g_ptr_array_free(basenames, TRUE);
-                errno = ENOMEM;
-                return -1;
-            }
-            errno = 0;
-            if (lat_aot_v2_module_open(path, &expected, &module->loaded,
-                                       error, error_size) ||
-                register_host_module(module)) {
-                int saved_errno = errno;
-                if (!error[0]) {
-                    snprintf(error, error_size,
-                             "cannot index AOT v2 host module: %s",
-                             strerror(saved_errno));
+        for (unsigned int attempt = 0; attempt < 2; attempt++) {
+            GPtrArray *basenames = read_module_manifest(
+                cache, source_hex, error, error_size);
+            if (!basenames) {
+                if (errno == ENOENT) {
+                    error[0] = '\0';
+                    return 0;
                 }
-                g_free(module);
-                g_free(path);
-                g_ptr_array_free(basenames, TRUE);
-                errno = saved_errno;
                 return -1;
             }
-            module->path = path;
-            module->next = runtime_modules;
-            runtime_modules = module;
+            bool retry_manifest = false;
+            for (guint i = 0; i < basenames->len; i++) {
+                const char *basename = g_ptr_array_index(basenames, i);
+                char *path = g_build_filename(cache, basename, NULL);
+                module = g_new0(LatAotV2RuntimeModule, 1);
+                if (!path || !module) {
+                    g_free(module);
+                    g_free(path);
+                    g_ptr_array_free(basenames, TRUE);
+                    errno = ENOMEM;
+                    return -1;
+                }
+                errno = 0;
+                if (lat_aot_v2_module_open(path, &expected, &module->loaded,
+                                           error, error_size)) {
+                    int saved_errno = errno;
+                    g_free(module);
+                    g_free(path);
+                    if (saved_errno == ENOENT && attempt == 0) {
+                        retry_manifest = true;
+                        break;
+                    }
+                    g_ptr_array_free(basenames, TRUE);
+                    errno = saved_errno;
+                    return -1;
+                }
+                if (register_host_module(module)) {
+                    int saved_errno = errno;
+                    if (!error[0]) {
+                        snprintf(error, error_size,
+                                 "cannot index AOT v2 host module: %s",
+                                 strerror(saved_errno));
+                    }
+                    g_free(module);
+                    g_free(path);
+                    g_ptr_array_free(basenames, TRUE);
+                    errno = saved_errno;
+                    return -1;
+                }
+                module->path = path;
+                module->next = runtime_modules;
+                runtime_modules = module;
+            }
+            g_ptr_array_free(basenames, TRUE);
+            if (!retry_manifest) {
+                break;
+            }
+            error[0] = '\0';
+            if (attempt == 1) {
+                errno = ENOENT;
+                return -1;
+            }
         }
-        g_ptr_array_free(basenames, TRUE);
     }
     if (info->load_bias > UINT64_MAX - info->preferred_base) {
         snprintf(error, error_size, "AOT v2 descriptor load bias overflows");
@@ -2033,6 +2074,11 @@ bool latc_aot_v2_revalidate_range(uint64_t guest_start,
         }
         if (result < 0 && errno != EEXIST) {
             atomic_fetch_add(&revalidation_failures, 1);
+            if (getenv("LATX_AOT_V2_REPORT")) {
+                fprintf(stderr,
+                        "latx: AOT v2 revalidation rejected source: %s\n",
+                        error[0] ? error : strerror(errno));
+            }
         }
     }
     pthread_mutex_unlock(&elf_tracker_lock);
@@ -2435,10 +2481,12 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
     result->guest_slots_end = runtime_instance->guest_slots +
         LAT_AOT_V2_CONTEXT_GUEST_SLOT_LIMIT;
     result->guest_slot_count = runtime_instance->guest_slot_count;
+    result->reader_held = target_held;
     if (!latc_aot_v2_activate_target(cpu, result)) {
         if (target_held) {
             atomic_fetch_sub_explicit(&instance->readers, 1,
                                       memory_order_seq_cst);
+            result->reader_held = false;
         }
         note_dispatch_miss(stats, guest_pc, cflags);
         if (aot_v2_reject_miss) {
@@ -2451,10 +2499,6 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
         }
         latc_aot_v2_note_jit_key(guest_pc, cflags);
         return false;
-    }
-    if (target_held) {
-        atomic_fetch_sub_explicit(&instance->readers, 1,
-                                  memory_order_seq_cst);
     }
     if (stats) {
         atomic_fetch_add(&stats->aot_lookups, 1);
@@ -2478,10 +2522,20 @@ bool latc_aot_v2_activate_target(CPUState *cpu,
     if (!cpu || !instance) {
         return false;
     }
+    bool acquired = false;
+    if (!target->reader_held) {
+        atomic_fetch_add_explicit(&instance->readers, 1,
+                                  memory_order_seq_cst);
+        acquired = true;
+    }
     CPUArchState *env = (CPUArchState *)cpu->env_ptr;
     if (!atomic_load_explicit(&instance->active, memory_order_acquire) ||
         target->generation != atomic_load_explicit(
             &instance->generation, memory_order_acquire)) {
+        if (acquired) {
+            atomic_fetch_sub_explicit(&instance->readers, 1,
+                                      memory_order_seq_cst);
+        }
         return false;
     }
     const void *slot_context = aot_v2_current_instance;
@@ -2496,6 +2550,8 @@ bool latc_aot_v2_activate_target(CPUState *cpu,
     }
     aot_v2_current_instance = instance;
     aot_v2_current_generation = target->generation;
+    aot_v2_execution_instance = instance;
+    aot_v2_execution_active = true;
 #ifdef CONFIG_LATX_FAST_JMPCACHE
     latx_aot_v2_fast_jmp_cache_set_context(cpu, instance);
     if (getenv("LATX_AOT_V2_CACHE_DIR")) {
@@ -2508,6 +2564,52 @@ bool latc_aot_v2_activate_target(CPUState *cpu,
     }
 #endif
     return true;
+}
+
+void latc_aot_v2_release_current_execution(CPUState *cpu)
+{
+    LatAotModuleInstanceV2 *instance = aot_v2_execution_instance;
+    if (!aot_v2_execution_active || !instance) {
+        return;
+    }
+    atomic_fetch_sub_explicit(&instance->readers, 1,
+                              memory_order_seq_cst);
+    aot_v2_execution_instance = NULL;
+    aot_v2_current_instance = NULL;
+    aot_v2_current_generation = 0;
+    aot_v2_execution_active = false;
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+    if (cpu) {
+        latx_aot_v2_fast_jmp_cache_set_context(cpu, NULL);
+    }
+#else
+    (void)cpu;
+#endif
+}
+
+void latc_aot_v2_release_target(CPUState *cpu, LatcAotV2Target *target)
+{
+    if (!target || !target->reader_held || !target->context) {
+        return;
+    }
+    LatAotModuleInstanceV2 *instance = (void *)target->context;
+    if (aot_v2_execution_active &&
+        aot_v2_execution_instance == instance) {
+        atomic_fetch_sub_explicit(&instance->readers, 1,
+                                  memory_order_seq_cst);
+        aot_v2_execution_instance = NULL;
+    }
+    aot_v2_current_instance = NULL;
+    aot_v2_current_generation = 0;
+    target->reader_held = false;
+    aot_v2_execution_active = false;
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+    if (cpu) {
+        latx_aot_v2_fast_jmp_cache_set_context(cpu, NULL);
+    }
+#else
+    (void)cpu;
+#endif
 }
 
 bool latc_aot_v2_contains_host_pc(uintptr_t host_pc)
@@ -2532,11 +2634,7 @@ bool latc_aot_v2_diagnose_host_pc(CPUState *cpu, uintptr_t host_pc,
     if (!runtime_module) {
         goto miss;
     }
-    LatAotModuleInstanceV2 *instance = aot_v2_current_instance;
-#ifdef CONFIG_LATX_FAST_JMPCACHE
-    instance = (LatAotModuleInstanceV2 *)
-        ((CPUArchState *)cpu->env_ptr)->aot_v2_current_context;
-#endif
+    LatAotModuleInstanceV2 *instance = aot_v2_execution_instance;
     if (!instance) {
         goto miss;
     }
@@ -2672,4 +2770,58 @@ bool latc_aot_v2_restore_state(CPUState *cpu, uintptr_t host_pc)
         diagnostic.stack_pointer_delta;
 #endif
     return true;
+}
+
+/*
+ * The signal handler only records an AOT host PC.  Module lookup, PC-map
+ * diagnosis, state restoration, and invalidation run after returning to the
+ * normal execution context in drain_signal_recovery().
+ */
+bool latc_aot_v2_defer_signal_recovery(CPUState *cpu, uintptr_t host_pc,
+                                       target_ulong *guest_pc)
+{
+    if (!cpu || !guest_pc || !aot_v2_execution_active ||
+        !aot_v2_execution_instance) {
+        return false;
+    }
+    signal_recovery.host_pc = host_pc;
+    signal_recovery_pending = 1;
+    *guest_pc = 0;
+    return true;
+}
+
+void latc_aot_v2_drain_signal_recovery(CPUState *cpu)
+{
+    if (!signal_recovery_pending) {
+        return;
+    }
+    signal_recovery_pending = 0;
+
+    LatcAotV2SignalDiagnostic diagnostic;
+    LatAotModuleInstanceV2 *instance = aot_v2_execution_instance;
+    if (!instance || !instance->module ||
+        signal_recovery.host_pc <
+            (uintptr_t)instance->module->descriptor->text_begin ||
+        signal_recovery.host_pc >=
+            (uintptr_t)instance->module->descriptor->text_end ||
+        signal_recovery.host_pc > UINTPTR_MAX - GETPC_ADJ ||
+        !latc_aot_v2_diagnose_host_pc(
+            cpu, signal_recovery.host_pc + GETPC_ADJ, &diagnostic)) {
+        latc_aot_v2_release_current_execution(cpu);
+        abort();
+    }
+    target_ulong data[TARGET_INSN_START_WORDS] = {
+        diagnostic.guest_pc,
+        CC_OP_DYNAMIC,
+    };
+    TranslationBlock tb = { .pc = data[0] };
+    restore_state_to_opc(cpu->env_ptr, &tb, data);
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+    ((CPUX86State *)cpu->env_ptr)->regs[R_ESP] +=
+        diagnostic.stack_pointer_delta;
+#endif
+    latc_aot_v2_invalidate_range(
+        cpu, diagnostic.guest_begin,
+        diagnostic.guest_end - diagnostic.guest_begin,
+        LATC_AOT_V2_INVALIDATE_CODE_WRITE);
 }

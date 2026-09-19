@@ -138,6 +138,17 @@ bool latc_aot_v2_activate_target(CPUState *cpu,
     return false;
 }
 
+void latc_aot_v2_release_target(CPUState *cpu, LatcAotV2Target *target)
+{
+    (void)cpu;
+    (void)target;
+}
+
+void latc_aot_v2_release_current_execution(CPUState *cpu)
+{
+    (void)cpu;
+}
+
 bool latc_aot_v2_contains_host_pc(uintptr_t host_pc)
 {
     (void)host_pc;
@@ -158,4 +169,18 @@ bool latc_aot_v2_restore_state(CPUState *cpu, uintptr_t host_pc)
     (void)cpu;
     (void)host_pc;
     return false;
+}
+
+bool latc_aot_v2_defer_signal_recovery(CPUState *cpu, uintptr_t host_pc,
+                                       target_ulong *guest_pc)
+{
+    (void)cpu;
+    (void)host_pc;
+    (void)guest_pc;
+    return false;
+}
+
+void latc_aot_v2_drain_signal_recovery(CPUState *cpu)
+{
+    (void)cpu;
 }
