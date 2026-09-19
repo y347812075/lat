@@ -2705,8 +2705,6 @@ static void generate_indirect_goto(void *code_buf)
 #if defined(CONFIG_LATX_FAST_JMPCACHE) && !defined(CONFIG_LATX_GLUE_MASK)
     IR2_OPND label_aot_v2_lookup = ra_alloc_label();
     IR2_OPND label_aot_v2_context_ready = ra_alloc_label();
-    IR2_OPND label_aot_v2_slots_done = ra_alloc_label();
-    IR2_OPND label_aot_v2_slot_loop = ra_alloc_label();
 #endif
 
     /* indirect jmp */
@@ -2775,28 +2773,9 @@ static void generate_indirect_goto(void *code_buf)
             offsetof(LatxAotV2FastTB, context));
     la_ld_d(next_tb, env_ir2_opnd,
             lsenv_offset_of_aot_v2_current_context(lsenv));
-    la_beq(jmp_entry, next_tb, label_aot_v2_context_ready);
-
-    IR2_OPND aot_v2_slot_dest = ra_alloc_itemp();
-    IR2_OPND aot_v2_slot_value = ra_alloc_itemp();
-    la_ld_d(aot_v2_cache_addr, aot_v2_entry,
-            offsetof(LatxAotV2FastTB, guest_slots_end));
-    la_ld_d(next_tb, aot_v2_entry,
-            offsetof(LatxAotV2FastTB, guest_slot_count));
-    la_beq(next_tb, zero_ir2_opnd, label_aot_v2_slots_done);
-    la_or(aot_v2_slot_dest, jmp_cache_addr, zero_ir2_opnd);
-    la_label(label_aot_v2_slot_loop);
-    la_addi_d(aot_v2_cache_addr, aot_v2_cache_addr, -8);
-    la_addi_d(aot_v2_slot_dest, aot_v2_slot_dest, -8);
-    la_ld_d(aot_v2_slot_value, aot_v2_cache_addr, 0);
-    la_st_d(aot_v2_slot_value, aot_v2_slot_dest, 0);
-    la_addi_d(next_tb, next_tb, -1);
-    la_bne(next_tb, zero_ir2_opnd, label_aot_v2_slot_loop);
-    la_label(label_aot_v2_slots_done);
-    la_st_d(jmp_entry, env_ir2_opnd,
-            lsenv_offset_of_aot_v2_current_context(lsenv));
-    ra_free_temp(aot_v2_slot_value);
-    ra_free_temp(aot_v2_slot_dest);
+    /* A cross-instance transition must return to the C dispatcher so it can
+     * transfer the execution reader before entering the new module. */
+    la_bne(jmp_entry, next_tb, label_miss);
 
     la_label(label_aot_v2_context_ready);
     la_ld_d(next_tb, aot_v2_entry,

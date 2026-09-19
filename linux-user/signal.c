@@ -1178,6 +1178,24 @@ static void host_signal_handler(int host_signum, siginfo_t *info,
         }
     }
 #endif
+
+#ifdef CONFIG_LATX
+    /*
+     * AOT v2: 非法指令落在 AOT 模块代码里（既不是 TB 代码，也不是 JRRA /
+     * FAST_JMPCACHE 哨兵）时，说明该处的 AOT 代码已经失效（模块被替换或区间
+     * 被作废）。信号处理器只登记恢复请求并回到调度器；失效和动态状态修正必须
+     * 在普通执行上下文中完成，避免在异步信号栈上获取运行时锁或分配内存。
+     */
+    if (host_signum == SIGILL && info->si_code > 0) {
+        target_ulong guest_pc;
+        if (latc_aot_v2_defer_signal_recovery(cpu, UC_PC(uc), &guest_pc)) {
+            UC_GR(uc)[reg_statics_map[S_UD1]] = guest_pc;
+            UC_PC(uc) = context_switch_native_to_bt_ret_0;
+            return;
+        }
+    }
+#endif
+
 #ifdef CONFIG_LATX
     if (option_fork_unlink && host_signum == SIGRTMIN + 1 &&
         info->si_code == SI_QUEUE &&

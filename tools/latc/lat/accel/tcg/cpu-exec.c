@@ -269,6 +269,7 @@ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
 
     env->fpu_clobber = false;
     ret = tcg_qemu_tb_exec(env, tb_ptr);
+    latc_aot_v2_drain_signal_recovery(cpu);
 
     int tbexit = ret & TB_EXIT_MASK;
     ret = (ret & ~TB_EXIT_MASK) - 4;
@@ -392,6 +393,8 @@ cpu_aot_v2_exec(CPUState *cpu, const LatcAotV2Target *target, int *tb_exit)
     qemu_thread_jit_execute();
     env->fpu_clobber = false;
     ret = tcg_qemu_tb_exec(env, target->host_address);
+    latc_aot_v2_drain_signal_recovery(cpu);
+    latc_aot_v2_release_target(cpu, (LatcAotV2Target *)target);
 
     int tbexit = ret & TB_EXIT_MASK;
     uintptr_t return_host_pc = (ret & ~TB_EXIT_MASK) - 4;
@@ -848,6 +851,9 @@ static inline TranslationBlock *tb_find(CPUState *cpu,
                  * go stale.
                  */
                 aot_v2 = latc_aot_v2_activate_target(cpu, cached);
+                if (aot_v2) {
+                    aot_target->reader_held = true;
+                }
                 lookup_target = !aot_v2;
             } else {
                 /* A registry generation change invalidates this miss. */
@@ -866,6 +872,7 @@ static inline TranslationBlock *tb_find(CPUState *cpu,
                 }
                 if (cpu_aot_v2_target_cache) {
                     cpu_aot_v2_target_cache[hash] = *aot_target;
+                    cpu_aot_v2_target_cache[hash].reader_held = false;
                 }
             }
         }
@@ -1274,6 +1281,9 @@ int cpu_exec(CPUState *cpu)
 
     /* prepare setjmp context for exception handling */
     if (sigsetjmp(cpu->jmp_env, 0) != 0) {
+#ifdef CONFIG_LATX
+        latc_aot_v2_release_current_execution(cpu);
+#endif
 #if defined(__clang__)
         /*
          * Some compilers wrongly smash all local variables after
