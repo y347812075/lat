@@ -28,6 +28,41 @@ static int write_image(const char *path, const void *image, size_t size)
     return !output || fwrite(image, size, 1, output) != 1 || fclose(output);
 }
 
+static int test_branch_target_decode(void)
+{
+    uint32_t words[2] = {0};
+    uint64_t target = 0;
+
+    words[0] = 0x58000400u;
+    if (!lat_native_decode_local_branch_target(
+            words, 1, 8, 32, &target) || target != 12) {
+        return 1;
+    }
+    words[0] = 0x48000000u | (0xffffu << 10) | (0x1fu << 16);
+    if (!lat_native_decode_local_branch_target(
+            words, 1, 8, 32, &target) || target != 4) {
+        return 1;
+    }
+    words[0] = 0x50000000u | (0xfffeu << 10) | (0x3ffu << 16);
+    if (!lat_native_decode_local_branch_target(
+            words, 1, 8, 32, &target) || target != 0) {
+        return 1;
+    }
+    words[0] = 0x58000000u | (0xffffu << 10);
+    if (!lat_native_decode_local_branch_target(
+            words, 1, 8, 32, &target) || target != 4) {
+        return 1;
+    }
+    words[0] = 0x1e000000u;
+    words[1] = 0x4c000000u;
+    if (!lat_native_decode_local_branch_target(
+            words, 2, 8, 32, &target) || target != 8) {
+        return 1;
+    }
+    return lat_native_decode_local_branch_target(
+               words, 1, 8, 4, &target);
+}
+
 int main(int argc, char **argv)
 {
     unsigned char image[1024] = {0};
@@ -36,6 +71,7 @@ int main(int argc, char **argv)
     LatNativeRelocationV1 *relocation;
     char error[128] = {0};
     size_t image_size;
+    if (test_branch_target_decode()) return 1;
 
     memcpy(header->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
     header->version = LAT_NATIVE_IMAGE_VERSION;
