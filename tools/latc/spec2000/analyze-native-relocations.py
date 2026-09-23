@@ -50,21 +50,30 @@ def parse_image(path):
     if data[:8] != b"LATNAT2\0":
         raise ValueError("%s: invalid LAT native image magic" % path)
     version, header_size = struct.unpack_from("<II", data, 8)
-    if version not in (2, 3, 4, 5, 6) or header_size != 224 or len(data) < header_size:
+    expected_header = 240 if version == 7 else 224
+    if version not in (2, 3, 4, 5, 6, 7) or header_size != expected_header or len(data) < header_size:
         raise ValueError("%s: unsupported LAT native image header" % path)
     flags = struct.unpack_from("<I", data, 16)[0]
     code_offset, code_size, tb_offset, tb_count, reloc_offset, reloc_count = \
         struct.unpack_from("<QQQQQQ", data, 56)
     pc_map_offset, pc_map_count = struct.unpack_from("<QQ", data, 104)
-    if (reloc_offset + reloc_count * 32 != pc_map_offset or
-            pc_map_offset + pc_map_count * 32 != len(data)):
+    tu_offset = tu_count = 0
+    if version == 7:
+        tu_offset, tu_count = struct.unpack_from("<QQ", data, 120)
+    tb_stride = 56 if version == 7 else {2: 24, 3: 32, 4: 40, 5: 48, 6: 48}[version]
+    reloc_stride = 40 if version == 7 else 32
+    pc_map_end = pc_map_offset + pc_map_count * 32
+    if not tu_count and not tu_offset:
+        tu_offset = pc_map_end
+    if (reloc_offset + reloc_count * reloc_stride != pc_map_offset or
+            pc_map_end != tu_offset or
+            tu_offset + tu_count * 32 != len(data)):
         raise ValueError("%s: invalid LAT native PC map" % path)
 
     exact_targets = set()
     pc_counts = collections.Counter()
     tu_heads = 0
     tu_members = 0
-    tb_stride = {2: 24, 3: 32, 4: 40, 5: 48, 6: 48}[version]
     for index in range(tb_count):
         guest_pc, _code, size, tb_flags = struct.unpack_from(
             "<QQII", data, tb_offset + index * tb_stride)
@@ -77,7 +86,7 @@ def parse_image(path):
 
     counts = collections.Counter()
     for index in range(reloc_count):
-        offset = reloc_offset + index * 32
+        offset = reloc_offset + index * reloc_stride
         code, addend, kind, target, slots, reserved = struct.unpack_from(
             "<QqIIII", data, offset)
         kind_name = RELOCATION_NAMES.get(kind, "kind_%d" % kind)

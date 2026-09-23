@@ -27,8 +27,10 @@ typedef struct ModulePack {
     LatNativePcMapV2 *pc_maps;
     int *relocation_owners;
     int *relocation_targets;
+    int *relocation_patch_targets;
     int *pc_map_owners;
     unsigned char *pc_maps_complete;
+    int *tb_primary_index;
     int *tb_hash;
     size_t tb_hash_mask;
     unsigned char *code;
@@ -36,6 +38,7 @@ typedef struct ModulePack {
     bool profiled_layout;
     bool dense_profile;
     bool compact_layout;
+    bool preserve_native_layout;
     bool local_dispatch_sentinel;
     GArray *code_order;
     GArray *guest_rvas;
@@ -145,11 +148,22 @@ static int pc_map_in_tb(const LatNativePcMapV2 *map,
            map->host_offset_end <= tb->code_offset + tb->code_size;
 }
 
+static int pc_map_range_valid(const ModulePack *pack,
+                              const LatNativePcMapV2 *map)
+{
+    return map->host_offset_begin < map->host_offset_end &&
+           map->host_offset_end <= pack->header->code_size;
+}
+
 static size_t selected_pc_map_count(const ModulePack *pack)
 {
     size_t count = 0;
     for (uint64_t i = 0; i < pack->header->pc_map_count; i++) {
         int owner = pack->pc_map_owners[i];
+        if (pack->preserve_native_layout) {
+            count += pc_map_range_valid(pack, &pack->pc_maps[i]);
+            continue;
+        }
         if (owner >= 0 && pack->supported[owner] &&
             pc_map_in_tb(&pack->pc_maps[i], &pack->tbs[owner])) {
             count++;
@@ -422,6 +436,19 @@ static size_t tb_hash_slot(uint64_t guest_pc, uint32_t flags, size_t mask)
     return value & mask;
 }
 
+static void build_tb_primary_index(ModulePack *pack)
+{
+    pack->tb_primary_index = g_new(int, pack->header->tb_count);
+    int primary = 0;
+    for (uint64_t i = 0; i < pack->header->tb_count; i++) {
+        if (i && (pack->tbs[i - 1].guest_pc != pack->tbs[i].guest_pc ||
+                  pack->tbs[i - 1].flags != pack->tbs[i].flags)) {
+            primary = (int)i;
+        }
+        pack->tb_primary_index[i] = primary;
+    }
+}
+
 static void build_tb_hash(ModulePack *pack)
 {
     size_t capacity = 1;
@@ -432,6 +459,9 @@ static void build_tb_hash(ModulePack *pack)
     memset(pack->tb_hash, 0xff, capacity * sizeof(*pack->tb_hash));
     pack->tb_hash_mask = capacity - 1;
     for (uint64_t i = 0; i < pack->header->tb_count; i++) {
+        if (pack->tb_primary_index[i] != (int)i) {
+            continue;
+        }
         const LatNativeTbV1 *tb = &pack->tbs[i];
         size_t slot = tb_hash_slot(tb->guest_pc, tb->flags,
                                    pack->tb_hash_mask);
@@ -904,6 +934,14 @@ static void select_supported_tbs(ModulePack *pack)
         g_array_set_size(pack->guest_rvas, 0);
         g_hash_table_remove_all(pack->guest_rva_indexes);
         pack->three_level_guest_slots = 0;
+        for (uint64_t i = 0; i < pack->header->tb_count; i++) {
+            int primary = pack->tb_primary_index[i];
+            if (primary != (int)i && !pack->supported[primary] &&
+                pack->supported[i]) {
+                pack->supported[i] = 0;
+                changed = 1;
+            }
+        }
         if (pack->header->flags & LAT_NATIVE_IMAGE_PIE) {
             for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
                 const LatNativeRelocationV1 *relocation =
@@ -975,25 +1013,46 @@ static void select_supported_tbs(ModulePack *pack)
                 changed = 1;
                 continue;
             }
-            uint32_t instructions[3] = {0};
-            memcpy(instructions, pack->code + relocation->code_offset,
-                   relocation->slots * sizeof(*instructions));
-            int patchable;
-            if (target < 0) {
+            int candidates[2];
+            size_t candidate_count = 0;
+            if (target >= 0 && pack->supported[target]) {
+                candidates[candidate_count++] = target;
+            }
+            uint32_t physical = relocation->physical_target_plus_one;
+            if (physical && pack->supported[physical - 1] &&
+                (physical - 1) != (uint32_t)target) {
+                candidates[candidate_count++] = (int)(physical - 1);
+            }
+            int patchable = 0;
+            for (size_t candidate_index = 0;
+                 candidate_index < candidate_count; candidate_index++) {
+                int candidate = candidates[candidate_index];
+                uint32_t instructions[3] = {0};
+                memcpy(instructions, pack->code + relocation->code_offset,
+                       relocation->slots * sizeof(*instructions));
+                bool candidate_patchable = relocation->slots == 2 ?
+                    !patch_tb_target_pair(instructions,
+                        relocation->code_offset,
+                        pack->tbs[candidate].code_offset,
+                        relocation->reserved) :
+                    !patch_runtime_target(instructions, relocation->slots,
+                        relocation->code_offset,
+                        pack->tbs[candidate].code_offset);
+                if (candidate_patchable) {
+                    pack->relocation_patch_targets[i] = candidate;
+                    patchable = 1;
+                    break;
+                }
+            }
+            if (!candidate_count && target < 0) {
+                uint32_t instructions[3] = {0};
+                memcpy(instructions, pack->code + relocation->code_offset,
+                       relocation->slots * sizeof(*instructions));
                 patchable = runtime_entry(relocation->reserved) &&
                     !patch_runtime_target(
                         instructions, relocation->slots,
                         relocation->code_offset,
                         pack->runtime_trampolines + relocation->reserved * 4);
-            } else {
-                patchable = relocation->slots == 2 ?
-                    !patch_tb_target_pair(instructions,
-                        relocation->code_offset,
-                        pack->tbs[target].code_offset,
-                        relocation->reserved) :
-                    !patch_runtime_target(instructions, relocation->slots,
-                        relocation->code_offset,
-                        pack->tbs[target].code_offset);
             }
             if (!patchable) {
                 pack->supported[owner] = 0;
@@ -1411,7 +1470,7 @@ static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
                 instructions, relocation->slots, relocation->code_offset,
                 pack->runtime_trampolines + relocation->target * 4);
         } else if (relocation->kind == LAT_NATIVE_RELOC_TB_TARGET) {
-            int target = pack->relocation_targets[i];
+            int target = pack->relocation_patch_targets[i];
             if (target >= 0 && pack->supported[target]) {
                 result = relocation->slots == 2 ?
                     patch_tb_target_pair(
@@ -1537,7 +1596,8 @@ static int emit_tables(const char *directory, const ModulePack *pack,
         goto out;
     }
     for (uint64_t i = 0; i < pack->header->tb_count; i++) {
-        if (!pack->supported[i]) {
+        if (!pack->supported[i] ||
+            pack->tb_primary_index[i] != (int)i) {
             continue;
         }
         LatAotTbV2 tb = {
@@ -1554,11 +1614,15 @@ static int emit_tables(const char *directory, const ModulePack *pack,
     }
     for (uint64_t i = 0; i < pack->header->pc_map_count; i++) {
         int owner = pack->pc_map_owners[i];
-        if (owner < 0 || !pack->supported[owner] ||
-            !pc_map_in_tb(&pack->pc_maps[i], &pack->tbs[owner])) {
+        if (!pack->preserve_native_layout &&
+            (owner < 0 || !pack->supported[owner] ||
+             !pc_map_in_tb(&pack->pc_maps[i], &pack->tbs[owner]))) {
             continue;
         }
         const LatNativePcMapV2 *map = &pack->pc_maps[i];
+        if (!pc_map_range_valid(pack, map)) {
+            continue;
+        }
         g_array_append_val(map_order, map);
     }
     if (pack->profiled_layout) {
@@ -1641,7 +1705,8 @@ static int prepare_local_dispatch(ModulePack *pack)
         }
     }
     for (uint64_t i = 0; i < pack->header->tb_count; i++) {
-        if (!pack->local_dispatch[i]) {
+        if (!pack->local_dispatch[i] ||
+            pack->tb_primary_index[i] != (int)i) {
             continue;
         }
         uint64_t site = pack->tbs[i].code_offset +
@@ -2036,6 +2101,7 @@ static int emit_assembly(const char *path, const ModulePack *pack,
         for (uint64_t i = 0; i < pack->header->tb_count; i++) {
             const LatNativeTbV1 *tb = &pack->tbs[i];
             if (!pack->supported[i] ||
+                pack->tb_primary_index[i] != (int)i ||
                 tb->flags != (LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL)) {
                 continue;
             }
@@ -2094,6 +2160,7 @@ static int emit_module_sources(const char *native_image,
         .pc_maps = g_new(LatNativePcMapV2, header->pc_map_count),
         .relocation_owners = g_new(int, header->relocation_count),
         .relocation_targets = g_new(int, header->relocation_count),
+        .relocation_patch_targets = g_new(int, header->relocation_count),
         .pc_map_owners = g_new(int, header->pc_map_count),
         .pc_maps_complete = g_new(unsigned char, header->tb_count),
         .code = g_malloc(header->code_size),
@@ -2123,6 +2190,7 @@ static int emit_module_sources(const char *native_image,
         g_array_append_val(pack.code_order, tb);
     }
     g_array_sort(pack.code_order, compare_tb_code);
+    build_tb_primary_index(&pack);
     build_tb_hash(&pack);
     assign_code_owners(&pack, pack.relocations, pack.relocation_owners,
                        header->relocation_count,
@@ -2139,10 +2207,12 @@ static int emit_module_sources(const char *native_image,
             relocation->kind == LAT_NATIVE_RELOC_JRRA_TARGET ?
             find_tb(&pack, (uint64_t)relocation->addend,
                     relocation->target) : -1;
+        pack.relocation_patch_targets[i] = pack.relocation_targets[i];
     }
     memcpy(pack.code, image + header->code_offset, header->code_size);
     int all_ranges_valid = all_tb_ranges_valid(&pack);
-    if (all_ranges_valid) {
+    pack.preserve_native_layout = header->tu_count != 0;
+    if (all_ranges_valid && !pack.preserve_native_layout) {
         reorder_profiled_code(&pack, program);
     }
     compute_pc_map_completeness(&pack);
@@ -2193,8 +2263,10 @@ static int emit_module_sources(const char *native_image,
     g_array_free(pack.code_order, TRUE);
     g_free(pack.pc_map_owners);
     g_free(pack.pc_maps_complete);
+    g_free(pack.tb_primary_index);
     g_free(pack.tb_hash);
     g_free(pack.relocation_targets);
+    g_free(pack.relocation_patch_targets);
     g_free(pack.relocation_owners);
     g_free(pack.supported);
     g_free(pack.local_dispatch);

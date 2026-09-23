@@ -168,6 +168,123 @@ static int write_fixture(const char *path, int overlap, int incomplete_map,
     return 0;
 }
 
+static int test_primary_tb_aliases(const char *directory)
+{
+    unsigned char image[1024] = {0};
+    LatNativeImageHeaderV2 *header = (void *)image;
+    memcpy(header->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
+    header->version = LAT_NATIVE_IMAGE_VERSION;
+    header->header_size = sizeof(*header);
+    header->flags = LAT_NATIVE_IMAGE_NO_PRECISE_SIGNAL_MAP;
+    header->guest_entry = 0x401000;
+    header->preferred_guest_base = 0x400000;
+    header->guest_image_offset = sizeof(*header);
+    header->guest_image_size = 1;
+    header->code_offset = header->guest_image_offset + 8;
+    header->code_size = 24;
+    header->tb_table_offset = header->code_offset + header->code_size;
+    header->tb_count = 3;
+    header->relocation_offset = header->tb_table_offset +
+                                3 * sizeof(LatNativeTbV1);
+    header->relocation_count = 1;
+    header->pc_map_offset = header->relocation_offset +
+                            sizeof(LatNativeRelocationV1);
+    header->pc_map_count = 3;
+    header->tu_table_offset = header->pc_map_offset +
+                              3 * sizeof(LatNativePcMapV2);
+    header->tu_count = 1;
+    strcpy(header->lat_build_id, "aot-v2-primary-alias-test");
+
+    uint32_t *code = (void *)(image + header->code_offset);
+    code[0] = 0x03400000;
+    code[1] = 0x03400000;
+    code[2] = 0x1e00000c;
+    code[3] = 0x4c000184;
+    code[4] = 0x03400000;
+    code[5] = 0x03400000;
+
+    LatNativeTbV1 *tbs = (void *)(image + header->tb_table_offset);
+    tbs[0] = (LatNativeTbV1){
+        .guest_pc = 0x401000, .code_offset = 0, .code_size = 8,
+        .flags = LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL,
+    };
+    tbs[1] = (LatNativeTbV1){
+        .guest_pc = 0x401000, .code_offset = 8, .code_size = 8,
+        .flags = LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL,
+    };
+    tbs[2] = (LatNativeTbV1){
+        .guest_pc = 0x402000, .code_offset = 16, .code_size = 8,
+        .flags = LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL,
+    };
+
+    LatNativeRelocationV1 *relocation =
+        (void *)(image + header->relocation_offset);
+    *relocation = (LatNativeRelocationV1){
+        .code_offset = 8,
+        .addend = 0x402000,
+        .kind = LAT_NATIVE_RELOC_TB_TARGET,
+        .slots = 2,
+        .reserved = LAT_NATIVE_SYMBOL_JIRL_EPILOGUE_RET_ID_0,
+    };
+
+    LatNativePcMapV2 *maps = (void *)(image + header->pc_map_offset);
+    maps[0] = (LatNativePcMapV2){
+        .guest_pc = 0x401000, .host_offset_begin = 0,
+        .host_offset_end = 8, .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+    };
+    maps[1] = (LatNativePcMapV2){
+        .guest_pc = 0x401000, .host_offset_begin = 8,
+        .host_offset_end = 16, .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+    };
+    maps[2] = (LatNativePcMapV2){
+        .guest_pc = 0x402000, .host_offset_begin = 16,
+        .host_offset_end = 24, .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+    };
+    LatNativeTuV1 *tu = (void *)(image + header->tu_table_offset);
+    *tu = (LatNativeTuV1){
+        .code_offset = 0, .code_size = header->code_size,
+        .search_offset = header->code_size,
+    };
+
+    size_t size = header->tu_table_offset + sizeof(*tu);
+    char *image_path = g_build_filename(directory, "primary-alias.native", NULL);
+    char *text_path = g_build_filename(directory, "text.bin", NULL);
+    char *tbs_path = g_build_filename(directory, "tbs.bin", NULL);
+    char error[256] = {0};
+    gchar *text = NULL;
+    gchar *tb_data = NULL;
+    gsize text_size = 0;
+    gsize tb_size = 0;
+    int failed = !g_file_set_contents(image_path, (const char *)image,
+                                      size, NULL) ||
+        lat_aot_v2_emit_module_sources(image_path, directory,
+                                       error, sizeof(error)) ||
+        !g_file_get_contents(text_path, &text, &text_size, NULL) ||
+        !g_file_get_contents(tbs_path, &tb_data, &tb_size, NULL);
+    const LatAotTbV2 *output_tbs = (const void *)tb_data;
+    const uint32_t *words = (const void *)text;
+    if (!failed) {
+        failed = text_size != header->code_size ||
+            tb_size != 2 * sizeof(*output_tbs) ||
+            output_tbs[0].guest_rva != 0x1000 ||
+            output_tbs[0].host_offset != 0 ||
+            output_tbs[1].guest_rva != 0x2000 ||
+            output_tbs[1].host_offset != 16 ||
+            words[2] != 0x50000800 ||
+            words[3] != 0x03400000;
+    }
+    if (failed) {
+        fprintf(stderr, "physical TB alias was not packed: %s\n",
+                error[0] ? error : "invalid output");
+    }
+    g_free(tb_data);
+    g_free(text);
+    g_free(tbs_path);
+    g_free(text_path);
+    g_free(image_path);
+    return failed ? -1 : 0;
+}
+
 static int test_conditional_exits(const char *directory)
 {
     const struct {
@@ -1262,6 +1379,10 @@ int main(void)
         return 1;
     }
     char *image_path = g_build_filename(directory, "fixture.latnative", NULL);
+    if (test_primary_tb_aliases(directory)) {
+        g_free(image_path);
+        return 1;
+    }
     test_edge_flags(directory);
     char error[256] = {0};
     if (write_fixture(image_path, 0, 0, 0, 0) ||

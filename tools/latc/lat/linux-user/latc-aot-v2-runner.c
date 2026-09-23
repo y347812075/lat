@@ -231,6 +231,100 @@ static _Atomic(LatAotModuleInstanceV2 *) signal_invalidation_test_instance;
 static _Atomic unsigned int signal_invalidation_test_state;
 static bool signal_invalidation_test;
 static bool signal_invalidation_test_worker_started;
+
+typedef struct LatAotV2SignalDebugSnapshot {
+    const void *instance;
+    const void *instance_module;
+    const void *runtime_module;
+    const void *runtime_loaded;
+    uintptr_t instance_text_begin;
+    uintptr_t instance_text_end;
+    uintptr_t runtime_text_begin;
+    uintptr_t runtime_text_end;
+    uint64_t guest_begin;
+    uint64_t guest_end;
+    uint64_t generation;
+    uint32_t readers;
+    int active;
+    bool execution_active;
+    bool module_match;
+} LatAotV2SignalDebugSnapshot;
+
+static bool signal_diagnostic_enabled(void)
+{
+    return getenv("LATX_AOT_V2_REPORT") ||
+           getenv("LATX_AOT_V2_TEST_SIGNAL_DIAGNOSTIC");
+}
+
+static LatAotV2SignalDebugSnapshot capture_signal_debug_snapshot(
+    LatAotModuleInstanceV2 *instance,
+    LatAotV2RuntimeModule *runtime_module)
+{
+    const LatAotLoadedModuleV2 *instance_module =
+        instance ? instance->module : NULL;
+    const LatAotModuleV2 *instance_descriptor =
+        instance_module ? instance_module->descriptor : NULL;
+    const LatAotModuleV2 *runtime_descriptor =
+        runtime_module ? runtime_module->loaded.descriptor : NULL;
+
+    return (LatAotV2SignalDebugSnapshot) {
+        .instance = instance,
+        .instance_module = instance_module,
+        .runtime_module = runtime_module,
+        .runtime_loaded = runtime_module ? &runtime_module->loaded : NULL,
+        .instance_text_begin = instance_descriptor ?
+            (uintptr_t)instance_descriptor->text_begin : 0,
+        .instance_text_end = instance_descriptor ?
+            (uintptr_t)instance_descriptor->text_end : 0,
+        .runtime_text_begin = runtime_descriptor ?
+            (uintptr_t)runtime_descriptor->text_begin : 0,
+        .runtime_text_end = runtime_descriptor ?
+            (uintptr_t)runtime_descriptor->text_end : 0,
+        .guest_begin = instance ? instance->guest_begin : 0,
+        .guest_end = instance ? instance->guest_end : 0,
+        .generation = instance ? atomic_load_explicit(
+            &instance->generation, memory_order_acquire) : 0,
+        .readers = instance ? atomic_load_explicit(
+            &instance->readers, memory_order_acquire) : 0,
+        .active = instance ? atomic_load_explicit(
+            &instance->active, memory_order_acquire) : 0,
+        .execution_active = aot_v2_execution_active,
+        .module_match = instance_module && runtime_module &&
+            instance_module == &runtime_module->loaded,
+    };
+}
+
+static void report_signal_debug_snapshot(
+    const char *event, const char *reason, uintptr_t host_pc,
+    uintptr_t searched_pc, bool diagnostic_reader_held,
+    const LatAotV2SignalDebugSnapshot *snapshot)
+{
+    fprintf(stderr,
+            "latx: AOT v2 signal %s reason=%s host_pc=0x%llx "
+            "searched_pc=0x%llx execution_active=%d instance=%p "
+            "instance_module=%p instance_active=%d "
+            "instance_generation=%llu instance_readers=%u "
+            "diagnostic_reader_held=%d guest_range=0x%llx-0x%llx "
+            "instance_text=0x%llx-0x%llx runtime_module=%p "
+            "runtime_loaded=%p runtime_text=0x%llx-0x%llx "
+            "module_match=%d\n",
+            event ? event : "unknown", reason ? reason : "unknown",
+            (unsigned long long)host_pc,
+            (unsigned long long)searched_pc, snapshot->execution_active,
+            (void *)snapshot->instance, (void *)snapshot->instance_module,
+            snapshot->active, (unsigned long long)snapshot->generation,
+            snapshot->readers, diagnostic_reader_held,
+            (unsigned long long)snapshot->guest_begin,
+            (unsigned long long)snapshot->guest_end,
+            (unsigned long long)snapshot->instance_text_begin,
+            (unsigned long long)snapshot->instance_text_end,
+            (void *)snapshot->runtime_module,
+            (void *)snapshot->runtime_loaded,
+            (unsigned long long)snapshot->runtime_text_begin,
+            (unsigned long long)snapshot->runtime_text_end,
+            snapshot->module_match);
+}
+
 static uint64_t discovered_elfs;
 
 void latc_aot_v2_fork_start(void)
@@ -2623,27 +2717,52 @@ bool latc_aot_v2_diagnose_host_pc(CPUState *cpu, uintptr_t host_pc,
 {
     bool test_reader = false;
     bool instance_held = false;
+    bool lookup_counted = false;
+    const char *miss_reason = NULL;
+    uintptr_t searched_pc =
+        host_pc >= GETPC_ADJ ? host_pc - GETPC_ADJ : 0;
+    LatAotV2RuntimeModule *runtime_module = NULL;
+    LatAotModuleInstanceV2 *instance = NULL;
+    LatAotModuleInstanceV2 *reported_instance = NULL;
+    LatAotV2SignalDebugSnapshot snapshot = {0};
+    uint64_t execution_generation = 0;
+    bool report = false;
 
-    if (!atomic_load_explicit(&active, memory_order_acquire) || !cpu ||
-        !diagnostic || host_pc < GETPC_ADJ) {
-        return false;
-    }
-    atomic_fetch_add(&signal_pc_lookups, 1);
-    uintptr_t searched_pc = host_pc - GETPC_ADJ;
-    LatAotV2RuntimeModule *runtime_module = find_host_module(searched_pc);
-    if (!runtime_module) {
+    if (!atomic_load_explicit(&active, memory_order_acquire)) {
+        miss_reason = "runtime-inactive";
         goto miss;
     }
-    LatAotModuleInstanceV2 *instance = aot_v2_execution_instance;
+    if (!cpu) {
+        miss_reason = "cpu-null";
+        goto miss;
+    }
+    if (!diagnostic) {
+        miss_reason = "diagnostic-null";
+        goto miss;
+    }
+    if (host_pc < GETPC_ADJ) {
+        miss_reason = "host-pc-underflow";
+        goto miss;
+    }
+    atomic_fetch_add(&signal_pc_lookups, 1);
+    lookup_counted = true;
+    runtime_module = find_host_module(searched_pc);
+    if (!runtime_module) {
+        miss_reason = "host-module-miss";
+        goto miss;
+    }
+    instance = aot_v2_execution_instance;
     if (!instance) {
+        miss_reason = "execution-instance-null";
         goto miss;
     }
     atomic_fetch_add_explicit(&instance->readers, 1,
                               memory_order_seq_cst);
     instance_held = true;
-    uint64_t execution_generation = atomic_load_explicit(
+    execution_generation = atomic_load_explicit(
         &instance->generation, memory_order_acquire);
     if (instance->module != &runtime_module->loaded) {
+        miss_reason = "execution-module-mismatch";
         goto miss;
     }
     if (signal_invalidation_test) {
@@ -2666,6 +2785,7 @@ bool latc_aot_v2_diagnose_host_pc(CPUState *cpu, uintptr_t host_pc,
             if (atomic_load_explicit(&signal_invalidation_test_state,
                                      memory_order_acquire) !=
                 LAT_AOT_V2_SIGNAL_TEST_WRITER) {
+                miss_reason = "signal-invalidation-test-timeout";
                 goto miss;
             }
         }
@@ -2685,6 +2805,7 @@ bool latc_aot_v2_diagnose_host_pc(CPUState *cpu, uintptr_t host_pc,
         }
     }
     if (!left) {
+        miss_reason = "pc-map-before-first";
         goto miss;
     }
     const LatAotPcMapV2 *map = &module->pc_map_begin[left - 1];
@@ -2692,18 +2813,33 @@ bool latc_aot_v2_diagnose_host_pc(CPUState *cpu, uintptr_t host_pc,
         LAT_AOT_PC_MAP_STACK_POINTER_DELTA;
     const bool has_stack_delta = map->flags &
         LAT_AOT_PC_MAP_STACK_POINTER_DELTA;
-    if (host_offset >= map->host_offset_end ||
-        !(map->flags & LAT_AOT_PC_MAP_DYNAMIC_STATE) ||
-        (map->flags & ~known_map_flags) ||
-        (!!map->state_record_offset != has_stack_delta)) {
+    if (host_offset >= map->host_offset_end) {
+        miss_reason = "pc-map-host-range";
+        goto miss;
+    }
+    if (!(map->flags & LAT_AOT_PC_MAP_DYNAMIC_STATE)) {
+        miss_reason = "pc-map-missing-dynamic-state";
+        goto miss;
+    }
+    if (map->flags & ~known_map_flags) {
+        miss_reason = "pc-map-unknown-flags";
+        goto miss;
+    }
+    if (!!map->state_record_offset != has_stack_delta) {
+        miss_reason = "pc-map-stack-state-mismatch";
         goto miss;
     }
     if (map->guest_rva > UINT64_MAX - instance->guest_load_bias) {
+        miss_reason = "guest-rva-overflow";
         goto miss;
     }
     target_ulong guest_pc = instance->guest_load_bias + map->guest_rva;
-    if (!execution_generation || guest_pc < instance->guest_begin ||
-        guest_pc >= instance->guest_end) {
+    if (!execution_generation) {
+        miss_reason = "generation-zero";
+        goto miss;
+    }
+    if (guest_pc < instance->guest_begin || guest_pc >= instance->guest_end) {
+        miss_reason = "guest-pc-out-of-range";
         goto miss;
     }
     memcpy(diagnostic->source_sha256,
@@ -2737,15 +2873,28 @@ bool latc_aot_v2_diagnose_host_pc(CPUState *cpu, uintptr_t host_pc,
     return true;
 
 miss:
+    report = signal_diagnostic_enabled();
+    reported_instance = instance ? instance : aot_v2_execution_instance;
+    if (report) {
+        snapshot = capture_signal_debug_snapshot(reported_instance,
+                                                 runtime_module);
+    }
     if (test_reader) {
         atomic_store_explicit(&signal_invalidation_test_state,
                               LAT_AOT_V2_SIGNAL_TEST_DONE,
                               memory_order_release);
     }
-    atomic_fetch_add(&signal_pc_misses, 1);
+    if (lookup_counted) {
+        atomic_fetch_add(&signal_pc_misses, 1);
+    }
     if (instance_held) {
         atomic_fetch_sub_explicit(&instance->readers, 1,
                                   memory_order_seq_cst);
+    }
+    if (report) {
+        report_signal_debug_snapshot(
+            "diagnose-miss", miss_reason ? miss_reason : "unknown",
+            host_pc, searched_pc, instance_held, &snapshot);
     }
     return false;
 }
@@ -2797,17 +2946,44 @@ void latc_aot_v2_drain_signal_recovery(CPUState *cpu)
     }
     signal_recovery_pending = 0;
 
+    const char *abort_reason = NULL;
+    uintptr_t saved_host_pc = signal_recovery.host_pc;
     LatcAotV2SignalDiagnostic diagnostic;
     LatAotModuleInstanceV2 *instance = aot_v2_execution_instance;
-    if (!instance || !instance->module ||
-        signal_recovery.host_pc <
-            (uintptr_t)instance->module->descriptor->text_begin ||
-        signal_recovery.host_pc >=
-            (uintptr_t)instance->module->descriptor->text_end ||
-        signal_recovery.host_pc > UINTPTR_MAX - GETPC_ADJ ||
-        !latc_aot_v2_diagnose_host_pc(
-            cpu, signal_recovery.host_pc + GETPC_ADJ, &diagnostic)) {
+
+    if (!instance) {
+        abort_reason = "execution-instance-null";
+    } else if (!instance->module) {
+        abort_reason = "execution-module-null";
+    } else if (saved_host_pc <
+               (uintptr_t)instance->module->descriptor->text_begin) {
+        abort_reason = "saved-host-pc-before-text";
+    } else if (saved_host_pc >=
+               (uintptr_t)instance->module->descriptor->text_end) {
+        abort_reason = "saved-host-pc-after-text";
+    } else if (saved_host_pc > UINTPTR_MAX - GETPC_ADJ) {
+        abort_reason = "saved-host-pc-overflow";
+    } else if (!latc_aot_v2_diagnose_host_pc(
+                   cpu, saved_host_pc + GETPC_ADJ, &diagnostic)) {
+        abort_reason = "diagnose-host-pc";
+    }
+
+    if (abort_reason) {
+        bool report = signal_diagnostic_enabled();
+        LatAotV2SignalDebugSnapshot snapshot = {0};
+        if (report) {
+            LatAotV2RuntimeModule *runtime_module =
+                find_host_module(saved_host_pc);
+            snapshot = capture_signal_debug_snapshot(instance,
+                                                     runtime_module);
+        }
         latc_aot_v2_release_current_execution(cpu);
+        if (report) {
+            report_signal_debug_snapshot(
+                "recovery-abort",
+                abort_reason ? abort_reason : "unknown",
+                saved_host_pc, saved_host_pc, false, &snapshot);
+        }
         abort();
     }
     target_ulong data[TARGET_INSN_START_WORDS] = {

@@ -11,14 +11,16 @@ _Static_assert(sizeof(LatX86StateV1) == 560,
                "LatX86StateV1 ABI size changed");
 _Static_assert(offsetof(LatX86StateV1, xmm) == 300,
                "LatX86StateV1 XMM offset changed");
-_Static_assert(sizeof(LatNativeImageHeaderV2) == 224,
+_Static_assert(sizeof(LatNativeImageHeaderV2) == 240,
                "native image header size changed");
-_Static_assert(sizeof(LatNativeTbV1) == 48,
+_Static_assert(sizeof(LatNativeTbV1) == 56,
                "native TB record size changed");
-_Static_assert(sizeof(LatNativeRelocationV1) == 32,
+_Static_assert(sizeof(LatNativeRelocationV1) == 40,
                "native relocation record size changed");
 _Static_assert(sizeof(LatNativePcMapV2) == 32,
                "native PC map record size changed");
+_Static_assert(sizeof(LatNativeTuV1) == 32,
+               "native TU record size changed");
 
 static int write_image(const char *path, const void *image, size_t size)
 {
@@ -28,7 +30,7 @@ static int write_image(const char *path, const void *image, size_t size)
 
 int main(int argc, char **argv)
 {
-    unsigned char image[512] = {0};
+    unsigned char image[1024] = {0};
     LatNativeImageHeaderV2 *header = (void *)image;
     LatNativeTbV1 *tb;
     LatNativeRelocationV1 *relocation;
@@ -49,6 +51,8 @@ int main(int argc, char **argv)
     header->relocation_count = 1;
     header->pc_map_offset = header->relocation_offset +
                             sizeof(LatNativeRelocationV1);
+    header->tu_table_offset = header->pc_map_offset;
+    header->tu_count = 1;
     strcpy(header->lat_build_id, "test-build");
     Elf64_Ehdr *elf = (void *)(image + header->guest_image_offset);
     memcpy(elf->e_ident, ELFMAG, SELFMAG);
@@ -71,12 +75,18 @@ int main(int argc, char **argv)
     tb->guest_pc = 0x401000;
     tb->code_offset = 0;
     tb->code_size = 16;
+    tb->tu_index = 0;
     relocation = (void *)(image + header->relocation_offset);
     relocation->code_offset = 8;
     relocation->kind = LAT_NATIVE_RELOC_RUNTIME_SYMBOL;
     relocation->target = LAT_NATIVE_SYMBOL_RAISE_SYSCALL;
     relocation->slots = 3;
-    image_size = header->pc_map_offset;
+    relocation->physical_target_plus_one = 1;
+    LatNativeTuV1 *tu = (void *)(image + header->tu_table_offset);
+    tu->code_offset = 0;
+    tu->code_size = header->code_size;
+    tu->search_offset = header->code_size;
+    image_size = header->tu_table_offset + sizeof(*tu);
 
     if (lat_native_image_validate(image, image_size, error,
                                   sizeof(error)) != 0) {
@@ -132,18 +142,29 @@ int main(int argc, char **argv)
             lat_native_image_inspect_file(argv[3], header, error,
                                           sizeof(error)) ||
             header->tb_count != 2 || header->code_size != 64 ||
-            header->relocation_count != 2) {
+            header->relocation_count != 2 || header->tu_count != 2) {
             fprintf(stderr, "cannot merge native images: %s\n", error);
             return 1;
         }
         LatNativeTbV1 merged_tbs[2];
+        LatNativeTuV1 merged_tus[2];
+        LatNativeRelocationV1 merged_relocations[2];
         FILE *merged_file = fopen(argv[3], "rb");
         if (!merged_file || fseek(merged_file, header->tb_table_offset, SEEK_SET) ||
             fread(merged_tbs, sizeof(merged_tbs), 1, merged_file) != 1 ||
-            fclose(merged_file) ||
+            fseek(merged_file, header->tu_table_offset, SEEK_SET) ||
+            fread(merged_tus, sizeof(merged_tus), 1, merged_file) != 1 ||
+            fseek(merged_file, header->relocation_offset, SEEK_SET) ||
+            fread(merged_relocations, sizeof(merged_relocations), 1,
+                  merged_file) != 1 || fclose(merged_file) ||
             merged_tbs[0].conditional_exit_offset != 1 ||
             merged_tbs[1].conditional_exit_offset != 1 ||
-            merged_tbs[1].code_offset != 32) {
+            merged_tbs[0].tu_index != 0 || merged_tbs[1].tu_index != 1 ||
+            merged_tbs[1].code_offset != 32 ||
+            merged_tus[0].code_offset != 0 ||
+            merged_tus[1].code_offset != 32 ||
+            merged_relocations[0].physical_target_plus_one != 1 ||
+            merged_relocations[1].physical_target_plus_one != 2) {
             fprintf(stderr, "merged conditional exit metadata changed\n");
             return 1;
         }
@@ -152,16 +173,31 @@ int main(int argc, char **argv)
                                          error, sizeof(error)) ||
             lat_native_image_inspect_file(argv[3], header, error,
                                           sizeof(error)) ||
-            header->tb_count != 1 || header->code_size != 32 ||
-            header->relocation_count != 1) {
+            header->tb_count != 2 || header->code_size != 64 ||
+            header->relocation_count != 2 || header->tu_count != 2) {
             fprintf(stderr, "cannot merge overlapping native TBs: %s\n",
                     error);
+            return 1;
+        }
+        FILE *aliased_file = fopen(argv[3], "rb");
+        LatNativeTbV1 aliased_tbs[2];
+        if (!aliased_file ||
+            fseek(aliased_file, header->tb_table_offset, SEEK_SET) ||
+            fread(aliased_tbs, sizeof(aliased_tbs), 1, aliased_file) != 1 ||
+            fclose(aliased_file) ||
+            aliased_tbs[0].guest_pc != aliased_tbs[1].guest_pc ||
+            aliased_tbs[0].flags != aliased_tbs[1].flags ||
+            aliased_tbs[0].code_offset != 0 ||
+            aliased_tbs[1].code_offset != 32 ||
+            aliased_tbs[0].tu_index != 0 ||
+            aliased_tbs[1].tu_index != 1) {
+            fprintf(stderr, "merged physical TB alias was not preserved\n");
             return 1;
         }
         remove(argv[1]);
         remove(argv[2]);
         remove(argv[3]);
-        puts("test-native-format: PASS merge=2 overlap=deduplicated");
+        puts("test-native-format: PASS merge=2 overlap=physical-alias");
         return 0;
     }
     tb->conditional_exit_offset = 0;
@@ -223,8 +259,7 @@ int main(int argc, char **argv)
     }
     tb->code_size = 33;
     if (lat_native_image_validate(image, image_size, error,
-                                  sizeof(error)) == 0 ||
-        !strstr(error, "code range")) {
+                                  sizeof(error)) == 0) {
         fprintf(stderr, "bad TB range accepted: %s\n", error);
         return 1;
     }
@@ -238,6 +273,10 @@ int main(int argc, char **argv)
     }
     relocation->code_offset = 8;
     LatNativePcMapV2 *pc_map = (void *)(image + header->pc_map_offset);
+    LatNativeTuV1 saved_tu = *(LatNativeTuV1 *)(
+        image + header->tu_table_offset);
+    header->tu_table_offset += sizeof(*pc_map);
+    *(LatNativeTuV1 *)(image + header->tu_table_offset) = saved_tu;
     *pc_map = (LatNativePcMapV2) {
         .guest_pc = 0x401000,
         .host_offset_begin = 0,

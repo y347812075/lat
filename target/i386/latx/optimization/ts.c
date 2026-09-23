@@ -808,6 +808,10 @@ static void ts_tb_explore(CPUState *cpu, target_ulong cs_base,
 static void save_tu_to_ts(void) {
     TranslationBlock** tb_list = tu_data->tb_list;
     for (int i = 0; i < tu_data->tb_num; i++){
+        if ((tb_list[i]->bool_flags & IS_AOT_BOUNDED) &&
+            !tb_list[i]->tc.size) {
+            continue;
+        }
 	ts_push_back(tb_list[i]);
     }
 }
@@ -840,6 +844,9 @@ static inline bool need_flush(void)
     return false;
 }
 
+static void translate_absorbed_bounded_tbs(CPUState *cpu,
+        target_ulong cs_base, uint32_t flags);
+
 static inline void gen_tu(CPUState *cpu,
         target_ulong cs_base, uint32_t flags, int cflags)
 {
@@ -860,6 +867,7 @@ static inline void gen_tu(CPUState *cpu,
         return;
     }
     translate_tu(tu_data->tb_num, tu_data->tb_list);
+    translate_absorbed_bounded_tbs(cpu, cs_base, flags);
     save_tu_to_ts();
 }
 
@@ -930,4 +938,54 @@ uint64 translate_lib(seg_info **seg_info_vector, int begin_id,
     }
     in_pre_translate = 0;
     return tb_num_in_ts;
+}
+
+static void translate_absorbed_bounded_tbs(CPUState *cpu,
+        target_ulong cs_base, uint32_t flags)
+{
+    const char *native_output = getenv("LATC_NATIVE_IMAGE_OUT");
+    if (!native_output || !*native_output) {
+        return;
+    }
+
+    int tu_cflags = tu_data->tb_list[0]->cflags;
+    int max_insns = tu_cflags & CF_COUNT_MASK;
+    if (max_insns == 0) {
+        max_insns = CF_COUNT_MASK;
+    }
+    if (max_insns > TCG_MAX_INSNS) {
+        max_insns = TCG_MAX_INSNS;
+    }
+    if (cpu->singlestep_enabled || singlestep) {
+        max_insns = 1;
+    }
+
+    target_ulong curr_page = get_page(tu_data->tb_list[0]->pc);
+    for (int i = curr_seg->first_tb_id; i <= curr_seg->last_tb_id; i++) {
+        tb_tmp_message *message = &curr_tb_message_vector[i];
+        if (!(message->bool_flags & IS_AOT_BOUNDED) ||
+            message->cflags != tu_cflags ||
+            get_page(message->pc) != curr_page) {
+            continue;
+        }
+        TranslationBlock *tb = message->tb;
+        if (tb && tb->tc.size) {
+            continue;
+        }
+        TranslationBlock *single = tb_create(
+            cpu, message->pc, cs_base, flags, message->cflags, max_insns,
+            message->bool_flags, TU_TB_START_ENTRY);
+        if (!single) {
+            continue;
+        }
+        TranslationBlock *single_list[1] = { single };
+        single->s_data->tu_id = single->pc;
+        hbr_opt(single_list, 1);
+        solve_tb_overlap(1, single_list, max_insns);
+        tu_ir1_optimization(single_list, 1);
+        translate_tu(1, single_list);
+        if (single->tc.size) {
+            ts_push_back(single);
+        }
+    }
 }

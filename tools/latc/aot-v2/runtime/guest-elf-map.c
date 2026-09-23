@@ -158,17 +158,6 @@ static int digest_fd(int fd, const struct stat *initial, uint8_t digest[32])
         char *path = digest_cache_path(&before);
         int cache_result = path ? read_cached_digest(path, digest) : 1;
         int cached = cache_result == 0;
-        const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
-        if (path && cache_result == 1 && (!socket || !*socket)) {
-            /*
-             * This product build's latcd publishes an identity before it
-             * publishes a module.  In offline warm mode, a missing identity
-             * therefore proves that no compatible cached module exists.
-             */
-            g_free(path);
-            errno = ENOENT;
-            return -1;
-        }
         if (!cached && digest_fd_uncached(fd, digest)) {
             g_free(path);
             return -1;
