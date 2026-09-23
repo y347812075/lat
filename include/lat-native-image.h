@@ -10,6 +10,62 @@
 
 #define LAT_NATIVE_INDIRECT_EXIT_WORDS 38u
 
+static inline int lat_native_decode_local_branch_target(
+    const uint32_t *words, uint32_t slots, uint64_t code_offset,
+    uint64_t code_size, uint64_t *target)
+{
+    if (!words || !target || (slots != 1 && slots != 2)) {
+        return 0;
+    }
+
+    int64_t offset;
+    if (slots == 2) {
+        if ((words[0] & 0xfe000000u) != 0x1e000000u ||
+            (words[1] & 0xfc000000u) != 0x4c000000u) {
+            return 0;
+        }
+        int64_t upper = (int32_t)(words[0] >> 5) & 0xfffff;
+        if (upper & (1 << 19)) {
+            upper -= 1 << 20;
+        }
+        int64_t lower = (int16_t)(words[1] >> 10);
+        offset = (upper << 18) + lower * 4;
+    } else {
+        uint32_t word = words[0];
+        uint32_t opcode = word & 0xfc000000u;
+        uint32_t opcode20 = word & 0xfc000100u;
+        if (opcode == 0x50000000u || opcode == 0x54000000u) {
+            uint32_t raw = ((word >> 10) & 0xffffu) |
+                           (((word >> 16) & 0x3ffu) << 16);
+            offset = (int64_t)((int32_t)(raw << 6) >> 6) * 4;
+        } else if (opcode == 0x40000000u || opcode == 0x44000000u ||
+                   opcode20 == 0x48000000u || opcode20 == 0x48000100u) {
+            uint32_t raw = ((word >> 10) & 0xffffu) |
+                           (((word >> 16) & 0x1fu) << 16);
+            offset = (int64_t)((int32_t)(raw << 12) >> 12) * 4;
+        } else if (opcode >= 0x58000000u && opcode <= 0x6c000000u) {
+            offset = (int64_t)(int16_t)(word >> 10) * 4;
+        } else {
+            return 0;
+        }
+    }
+
+    if (offset < 0) {
+        uint64_t magnitude = (uint64_t)(-offset);
+        if (magnitude > code_offset) {
+            return 0;
+        }
+        *target = code_offset - magnitude;
+    } else {
+        uint64_t magnitude = (uint64_t)offset;
+        if (magnitude > code_size || code_offset > code_size - magnitude) {
+            return 0;
+        }
+        *target = code_offset + magnitude;
+    }
+    return 1;
+}
+
 /* The ordinary FAST_JMPCACHE dispatch window, excluding its runtime exit. */
 static inline int lat_native_indirect_exit_valid(const void *code)
 {

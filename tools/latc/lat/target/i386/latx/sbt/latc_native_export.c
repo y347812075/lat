@@ -1131,28 +1131,17 @@ int latc_native_export(const char *path, const char *guest_path,
         uint32_t words[2] = {0};
         memcpy(words, native_code + relocation->code_offset,
                relocation->slots * sizeof(uint32_t));
-        int64_t local_target = -1;
-        if (relocation->slots == 1) {
-            local_target = (int64_t)relocation->code_offset +
-                (int16_t)(words[0] >> 10) * 4;
-        } else if ((words[0] & 0xfe000000u) == 0x1e000000u) {
-            int64_t upper = (int32_t)(words[0] >> 5) & 0xfffff;
-            if (upper & (1 << 19)) {
-                upper -= 1 << 20;
-            }
-            int64_t lower = (int16_t)(words[1] >> 10);
-            local_target = (int64_t)relocation->code_offset +
-                (upper << 18) + (lower * 4);
-        }
-        if (local_target < 0 ||
-            local_target >= (int64_t)code_size) {
+        uint64_t local_target = 0;
+        if (!lat_native_decode_local_branch_target(
+                words, relocation->slots, relocation->code_offset,
+                code_size, &local_target)) {
             continue;
         }
         int target_index = native_tb_index_for_code(
-            native_tbs, native_tb_code, (uint64_t)local_target);
+            native_tbs, native_tb_code, local_target);
         if (target_index >= 0 &&
             g_array_index(native_tbs, LatNativeTbV1, target_index).code_offset ==
-                (uint64_t)local_target) {
+                local_target) {
             relocation->physical_target_plus_one =
                 (uint32_t)target_index + 1;
         }
