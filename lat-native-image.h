@@ -5,7 +5,7 @@
 #include <string.h>
 
 #define LAT_NATIVE_IMAGE_MAGIC "LATNAT2"
-#define LAT_NATIVE_IMAGE_VERSION 6u
+#define LAT_NATIVE_IMAGE_VERSION 7u
 #define LAT_NATIVE_BUILD_ID_SIZE 65u
 
 #define LAT_NATIVE_INDIRECT_EXIT_WORDS 38u
@@ -179,6 +179,8 @@ typedef struct LatNativeImageHeaderV2 {
     uint64_t relocation_count;
     uint64_t pc_map_offset;
     uint64_t pc_map_count;
+    uint64_t tu_table_offset;
+    uint64_t tu_count;
     uint8_t guest_sha256[32];
     char lat_build_id[LAT_NATIVE_BUILD_ID_SIZE];
     uint8_t reserved_tail[7];
@@ -198,6 +200,8 @@ typedef struct LatNativeTbV1 {
     uint32_t conditional_exit_offset;
     /* TB-relative ordinary indirect dispatch offset plus one, or zero. */
     uint32_t indirect_exit_offset;
+    /* Index into the physical translation-unit table. */
+    uint32_t tu_index;
 } LatNativeTbV1;
 
 enum LatNativeTbOptimizationFlags {
@@ -211,6 +215,8 @@ typedef struct LatNativeRelocationV1 {
     uint32_t target;
     uint32_t slots;
     uint32_t reserved;
+    /* Physical TB index plus one for a local TB/JRRA edge; zero is none. */
+    uint32_t physical_target_plus_one;
 } LatNativeRelocationV1;
 
 typedef struct LatNativePcMapV2 {
@@ -220,5 +226,13 @@ typedef struct LatNativePcMapV2 {
     uint32_t state_record_offset;
     uint32_t flags;
 } LatNativePcMapV2;
+
+typedef struct LatNativeTuV1 {
+    uint64_t code_offset;
+    uint64_t code_size;
+    uint64_t search_offset;
+    uint32_t flags;
+    uint32_t reserved;
+} LatNativeTuV1;
 
 #endif

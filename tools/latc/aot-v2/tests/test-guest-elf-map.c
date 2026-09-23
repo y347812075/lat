@@ -164,7 +164,9 @@ static int test_identity_cache(const char *source)
         return -1;
     }
     int fd = copy_file(source, copy);
-    uint8_t before[32], cached[32], changed[32];
+    char relocated[PATH_MAX] = {0};
+    int relocated_fd = -1;
+    uint8_t before[32], cached[32], changed[32], relocated_digest[32];
     if (fd < 0 || inspect_once(fd, before) || count_identities(cache) != -1 ||
         publish_identity(cache, fd, before) || count_identities(cache) != 1 ||
         inspect_once(fd, cached) || memcmp(before, cached, 32) ||
@@ -174,6 +176,24 @@ static int test_identity_cache(const char *source)
         unlink(copy);
         return -1;
     }
+    /* A copied executable has the same contents but a new identity cache key. */
+    relocated_fd = copy_file(source, relocated);
+    struct stat original_status, relocated_status;
+    if (relocated_fd < 0 || fstat(fd, &original_status) ||
+        fstat(relocated_fd, &relocated_status) ||
+        relocated_status.st_ino == original_status.st_ino ||
+        unsetenv("LATX_AOT_V2_LATCD_SOCKET") ||
+        inspect_once(relocated_fd, relocated_digest) ||
+        memcmp(before, relocated_digest, 32)) {
+        if (relocated_fd >= 0) close(relocated_fd);
+        if (fd >= 0) close(fd);
+        unlink(relocated);
+        unlink(copy);
+        return -1;
+    }
+    close(relocated_fd);
+    relocated_fd = -1;
+    unlink(relocated);
     struct stat status;
     unsigned char byte;
     if (fstat(fd, &status) || status.st_size < 1 ||
@@ -189,7 +209,7 @@ static int test_identity_cache(const char *source)
     }
     byte ^= 1;
     if (pwrite(fd, &byte, 1, status.st_size - 1) != 1 || fsync(fd) ||
-        futimens(fd, times) || !inspect_once(fd, changed) ||
+        futimens(fd, times) || inspect_once(fd, changed) ||
         setenv("LATX_AOT_V2_LATCD_SOCKET", "unused-test-socket", 1) ||
         inspect_once(fd, changed) || unsetenv("LATX_AOT_V2_LATCD_SOCKET") ||
         !memcmp(before, changed, 32) || count_identities(cache) != 1 ||
