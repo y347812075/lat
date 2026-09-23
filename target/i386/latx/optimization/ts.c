@@ -832,15 +832,8 @@ static inline gint tmp_message_sort_cmp(const void *ap, const void *bp)
 
 static inline bool need_flush(void)
 {
-    const char *native_output = getenv("LATC_NATIVE_IMAGE_OUT");
-    uint64_t tu_reserve = MAX_TU_SIZE;
-    uint64_t tb_reserve = MAX_TB_IN_CACHE * sizeof(TranslationBlock);
-    if (native_output && *native_output) {
-        tu_reserve *= 2;
-        tb_reserve *= 2;
-    }
-    if (unlikely((tcg_ctx->code_gen_ptr + tu_reserve >= tcg_ctx->code_gen_highwater)
-                || (tcg_ctx->tb_gen_ptr + tb_reserve
+    if (unlikely((tcg_ctx->code_gen_ptr + MAX_TU_SIZE >= tcg_ctx->code_gen_highwater)
+                || (tcg_ctx->tb_gen_ptr + MAX_TB_IN_CACHE * sizeof(TranslationBlock)
                     >= tcg_ctx->tb_gen_highwater))) {
         if (aot_parallel_translate && !tcg_region_alloc_aot(tcg_ctx)) {
             return false;
