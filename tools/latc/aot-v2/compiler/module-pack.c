@@ -511,7 +511,7 @@ typedef struct LayoutComponent {
 #define PROFILED_COMPONENT_ALIGNMENT 32u
 #define PROFILED_LOOP_ALIGNMENT 32u
 #define DENSE_PROFILE_TB_DIVISOR 10u
-#define COMPACT_LAYOUT_SPLIT_PER_MILLE 19u
+#define COMPACT_LAYOUT_SPLIT_PER_MILLE 0u
 
 static bool cfg_layout_tb_in_loop(const CfgProgram *program, size_t tb_index);
 
@@ -610,10 +610,20 @@ static void reorder_profiled_code(ModulePack *pack, const CfgProgram *program)
     pack->dense_profile = tb_count >= 128 &&
         observed_count >= (tb_count + DENSE_PROFILE_TB_DIVISOR - 1) /
                           DENSE_PROFILE_TB_DIVISOR;
-    if (pack->dense_profile) {
-        memset(observed_in_loop, 0, tb_count);
+    size_t loop_count = 0;
+    for (uint64_t i = 0; i < tb_count; i++) {
+        loop_count += observed_in_loop[i] != 0;
     }
-
+    /*
+     * If nearly every observed TB is already part of a loop, the original
+     * layout already has the useful locality. Global profile reordering can
+     * split fall-through regions in this case and regress hot code.
+     */
+    if (pack->dense_profile && loop_count * 4 > observed_count * 3) {
+        g_free(observed_in_loop);
+        g_free(observed);
+        return;
+    }
     int *parents = g_new(int, tb_count);
     int *component_indexes = g_new(int, tb_count);
     uint64_t *old_offsets = g_new(uint64_t, tb_count);
@@ -2212,7 +2222,7 @@ static int emit_module_sources(const char *native_image,
     memcpy(pack.code, image + header->code_offset, header->code_size);
     int all_ranges_valid = all_tb_ranges_valid(&pack);
     pack.preserve_native_layout = header->tu_count != 0;
-    if (all_ranges_valid && !pack.preserve_native_layout) {
+    if (all_ranges_valid) {
         reorder_profiled_code(&pack, program);
     }
     compute_pc_map_completeness(&pack);
