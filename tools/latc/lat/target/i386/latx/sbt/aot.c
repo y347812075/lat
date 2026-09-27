@@ -1087,6 +1087,16 @@ static void *aot_translate_worker(void *opaque)
 
 static int configured_aot_threads(void)
 {
+    /*
+     * Legacy runtime AOT starts after TCG initialization.  Without
+     * LATC_EMIT_AOT, tcg_aot_thread_count() deliberately creates only the
+     * shared guest context, so additional compiler workers would race on
+     * tcg_init_ctx and corrupt generated code.  Standalone export starts
+     * with LATC_EMIT_AOT and has one private TCG context per worker.
+     */
+    if (!getenv("LATC_EMIT_AOT")) {
+        return 1;
+    }
     const char *value = getenv("LATC_AOT_THREADS");
     unsigned long threads;
     if (value && *value) {

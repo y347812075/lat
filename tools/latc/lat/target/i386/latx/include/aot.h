@@ -39,9 +39,9 @@ extern  const char *aot_left_file_minsize_optarg;
  * +--------------+
  */
 #ifdef CONFIG_LATX_DEBUG
-#define AOT_VERSION "Version: "LATX_VERSION"-debug"
+#define AOT_VERSION "Version: "LATX_VERSION"-debug-aotctx2"
 #else
-#define AOT_VERSION "Version: "LATX_VERSION"-release"
+#define AOT_VERSION "Version: "LATX_VERSION"-release-aotctx2"
 #endif
 typedef struct aot_header {
     uint32_t lib_size;
