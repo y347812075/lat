@@ -21,6 +21,12 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#if GLIB_CHECK_VERSION(2, 64, 0)
+#define LATCD_SPAWN_CHECK_EXIT_STATUS g_spawn_check_wait_status
+#else
+#define LATCD_SPAWN_CHECK_EXIT_STATUS g_spawn_check_exit_status
+#endif
+
 #define CACHE_NEW_MAGIC "glibc-ld.so.cache"
 #define CACHE_NEW_VERSION "1.1"
 #define CACHE_NEW_HEADER_SIZE 48u
@@ -600,7 +606,7 @@ static void analyze_dependency(gpointer data, gpointer user_data)
     if (!g_spawn_sync(NULL, (char **)arguments, NULL, 0, NULL, NULL,
                       &standard_output, &standard_error,
                       &wait_status, &gerror) ||
-        !g_spawn_check_wait_status(wait_status, &gerror)) {
+        !LATCD_SPAWN_CHECK_EXIT_STATUS(wait_status, &gerror)) {
         dependency->analysis_status = 1;
         dependency->analysis_error = g_strdup(
             gerror ? gerror->message : standard_error);

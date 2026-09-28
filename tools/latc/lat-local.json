@@ -110,6 +110,11 @@
       "reason": "expose relocation table checkpoint and rollback for TU retries"
     },
     {
+      "path": "lat/target/i386/latx/include/aot_recover_tu.h",
+      "generated": true,
+      "reason": "share standalone-versus-TU recovery grouping rules between LAT and their deterministic fixture"
+    },
+    {
       "path": "lat/target/i386/latx/include/ir1.h",
       "generated": true,
       "reason": "classify memory index registers before GPR-only analysis"
