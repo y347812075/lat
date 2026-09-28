@@ -36,6 +36,12 @@ static long superseded_grace_seconds(void);
 #include <sys/wait.h>
 #include <unistd.h>
 
+#if GLIB_CHECK_VERSION(2, 64, 0)
+#define LATCD_SPAWN_CHECK_EXIT_STATUS g_spawn_check_wait_status
+#else
+#define LATCD_SPAWN_CHECK_EXIT_STATUS g_spawn_check_exit_status
+#endif
+
 #define LATCD_DEFAULT_MAX_INPUT (UINT64_C(1) << 30)
 #define LATCD_DEFAULT_MAX_JOBS 64u
 #define LATCD_DEFAULT_MAX_QUEUE_BYTES (UINT64_C(4) << 30)
@@ -3124,7 +3130,7 @@ static void precompile_request_worker(gpointer data, gpointer user_data)
         bool spawned = executable && g_spawn_sync(
             NULL, arguments, NULL, G_SPAWN_STDOUT_TO_DEV_NULL,
             NULL, NULL, NULL, &standard_error, &wait_status, &gerror);
-        if (spawned && g_spawn_check_wait_status(wait_status, &gerror)) {
+        if (spawned && LATCD_SPAWN_CHECK_EXIT_STATUS(wait_status, &gerror)) {
             response.status = LATCD_STATUS_OK;
             g_strlcpy(response.message, "precompile published",
                       sizeof(response.message));

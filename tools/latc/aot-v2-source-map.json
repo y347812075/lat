@@ -20,6 +20,7 @@
     {"source": "target/i386/latx/sbt/aot_recover_tb.c", "target": "tools/latc/lat/target/i386/latx/sbt/aot_recover_tb.c"},
     {"source": "target/i386/latx/sbt/aot.c", "target": "tools/latc/lat/target/i386/latx/sbt/aot.c"},
     {"source": "target/i386/latx/include/aot.h", "target": "tools/latc/lat/target/i386/latx/include/aot.h"},
+    {"source": "target/i386/latx/include/aot_recover_tu.h", "target": "tools/latc/lat/target/i386/latx/include/aot_recover_tu.h"},
     {"source": "target/i386/latx/include/ir1.h", "target": "tools/latc/lat/target/i386/latx/include/ir1.h"},
     {"source": "target/i386/latx/include/hbr.h", "target": "tools/latc/lat/target/i386/latx/include/hbr.h"},
     {"source": "target/i386/latx/include/hbr-semantic.h", "target": "tools/latc/lat/target/i386/latx/include/hbr-semantic.h"},

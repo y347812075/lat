@@ -277,6 +277,7 @@ $(BUILD)/tests/test-cfg: tests/test-cfg.c $(BUILD)/liblatc_cfg.a
 test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-fallback-loader $(BUILD)/tests/test-native-format \
 	$(BUILD)/tests/test-native-relocate $(BUILD)/tests/test-native-dispatch \
+	$(BUILD)/tests/test-aot-recover-tu \
 	$(BUILD)/tests/test-aot-v2-module-pack \
 	$(BUILD)/tests/test-latcd-protocol \
 	$(BUILD)/tests/test-latcd-client \
@@ -334,6 +335,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  tests/test-latcd-runner.sh tests/test-aot-v2-real-app.sh \
 	  tests/test-aot-v2-complex-apps.sh tests/test-compile-native-one-pass.sh \
 	  tests/test-compile-aot-native-direct.sh \
+	  tests/test-old-aot-tu-replay-space.sh \
 	  scripts/prepare-complex-rootfs.sh
 	sh tests/test-compile-aot-native-direct.sh scripts/compile-aot.sh
 	sh tests/test-compile-native-one-pass.sh scripts/compile-native-image.sh
@@ -347,6 +349,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  $(BUILD)/tests/delta.native $(BUILD)/tests/merged.native
 	$(BUILD)/tests/test-native-relocate
 	$(BUILD)/tests/test-native-dispatch
+	$(BUILD)/tests/test-aot-recover-tu
+	tests/test-old-aot-tu-replay-space.sh
 	$(BUILD)/tests/test-aot-v2-module-pack
 	$(BUILD)/tests/test-latcd-protocol
 	$(BUILD)/tests/test-latcd-client
@@ -438,6 +442,12 @@ $(BUILD)/tests/test-latcd-protocol: \
 		aot-v2/tests/test-latcd-protocol.c $(BUILD)/latcd/protocol.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+
+$(BUILD)/tests/test-aot-recover-tu: tests/test-aot-recover-tu.c \
+		../../target/i386/latx/include/aot_recover_tu.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I$(abspath ../../target/i386/latx/include) \
+	  -o $@ $<
 
 $(BUILD)/tests/test-latcd-client: aot-v2/tests/test-latcd-client.c \
 		aot-v2/runtime/latcd-client.c $(BUILD)/latcd/protocol.o
