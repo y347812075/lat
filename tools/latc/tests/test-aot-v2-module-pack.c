@@ -23,8 +23,50 @@ static const uint32_t indirect_dispatch[] = {
     0x28c021cb, 0x4c000160,
 };
 
+static const uint32_t aot_v2_indirect_dispatch[2][27] = {
+    {
+        0x004542ab, 0x0015aeab, 0x00cf016b, 0x002dd96b,
+        0x28c0016c, 0x5c000d95, 0x28c0216b, 0x4c000160,
+        0x28c543ed, 0x580049a0, 0x004542ae, 0x0015baae,
+        0x00cf01ce, 0x004119ce, 0x0010b5ce, 0x28c001cc,
+        0x5c002d95, 0x28c061cc, 0x58002580, 0x28c0018b,
+        0x28c081cc, 0x5c00198b, 0x28c041cc, 0x28c563eb,
+        0x5c000d8b, 0x28c021cb, 0x4c000160,
+    },
+    {
+        0x004542ab, 0x0015aeab, 0x00cf016b, 0x002dd96b,
+        0x28c0016d, 0x5c000db5, 0x28c0216b, 0x4c000160,
+        0x28c543ee, 0x580049c0, 0x004542af, 0x0015beaf,
+        0x00cf01ef, 0x004119ef, 0x0010b9ef, 0x28c001ed,
+        0x5c002db5, 0x28c061ed, 0x580025a0, 0x28c001ab,
+        0x28c081ed, 0x5c0019ab, 0x28c041ed, 0x28c563eb,
+        0x5c000dab, 0x28c021eb, 0x4c000160,
+    },
+};
+
 static int test_indirect_register_renaming(void)
 {
+    for (unsigned int variant = 0; variant < 2; variant++) {
+        uint32_t window[28] = {0};
+        memcpy(window, aot_v2_indirect_dispatch[variant],
+               sizeof(aot_v2_indirect_dispatch[variant]));
+        window[27] = 0x29c001f0u;
+        if (lat_native_indirect_exit_words(window, sizeof(window)) != 27 ||
+            lat_native_indirect_exit_words(window, 107) != 0) {
+            fprintf(stderr, "current indirect window rejected\n");
+            return -1;
+        }
+        window[24] ^= 1u;
+        if (lat_native_indirect_exit_words(window, sizeof(window))) {
+            fprintf(stderr, "modified current indirect window accepted\n");
+            return -1;
+        }
+    }
+    if (lat_native_indirect_exit_words(indirect_dispatch,
+                                      sizeof(indirect_dispatch)) != 38) {
+        fprintf(stderr, "legacy indirect window rejected\n");
+        return -1;
+    }
     static const uint8_t register_fields[LAT_NATIVE_INDIRECT_EXIT_WORDS] = {
         2, 3, 2, 3, 2, 2, 2, 2, 2, 2, 2, 3, 2, 2, 3, 2, 2, 2, 2,
         2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2,
@@ -417,7 +459,7 @@ static int test_indirect_exits(const char *directory)
     char *assembly_path = g_build_filename(directory, "module.S", NULL);
     char *text_path = g_build_filename(directory, "text.bin", NULL);
     char *slots_path = g_build_filename(directory, "guest-slots.bin", NULL);
-    for (unsigned int test = 0; test < 9; test++) {
+    for (unsigned int test = 0; test < 11; test++) {
         unsigned char image[1024] = {0};
         LatNativeImageHeaderV2 *h = (void *)image;
         memcpy(h->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
@@ -443,6 +485,11 @@ static int test_indirect_exits(const char *directory)
         strcpy(h->lat_build_id, "indirect-dispatch-test");
         memcpy(image + h->code_offset + 4, indirect_dispatch,
                sizeof(indirect_dispatch));
+        if (test >= 9) {
+            memcpy(image + h->code_offset + 4,
+                   aot_v2_indirect_dispatch[test - 9],
+                   sizeof(aot_v2_indirect_dispatch[0]));
+        }
         uint32_t runtime_exit = 0x50000000u;
         memcpy(image + h->code_offset + 156, &runtime_exit, 4);
         LatNativeTbV1 *tbs = (void *)(image + h->tb_table_offset);
@@ -499,7 +546,7 @@ static int test_indirect_exits(const char *directory)
         gchar *assembly = NULL, *text = NULL, *slots = NULL;
         gsize text_size, slots_size;
         int enabled = test == 0 || test == 1 || test == 6 ||
-                      test == 7 || test == 8;
+                      test == 7 || test == 8 || test >= 9;
         unsigned base_words = test == 1 || test == 7 ? 2 :
                               test == 8 ? 3 : 1;
         if (!g_file_get_contents(assembly_path, &assembly, NULL, NULL) ||
@@ -511,9 +558,14 @@ static int test_indirect_exits(const char *directory)
                          !strstr(assembly, "add.d $a7,$a7,$t1\n"
                                            "jr $a7\n") ||
                          !strstr(assembly, "bne $t0,$r21,.Llat_local_end_") ||
-                         !strstr(assembly, base_words == 1 ? ".rept 20\n" :
-                                          base_words == 2 ? ".rept 19\n" :
-                                                            ".rept 18\n"))) ||
+                         !strstr(assembly, "la.pcrel $t1,.Llat_local_targets\n") ||
+                         !strstr(assembly, test >= 9 ? ".rept 9\n" :
+                             base_words == 1 ? ".rept 20\n" :
+                             base_words == 2 ? ".rept 19\n" :
+                                               ".rept 18\n"))) ||
+            (test >= 9 && (!strstr(assembly,
+                ".incbin \"text.bin\",112,52\n") ||
+                memcmp(text + 112, image + h->code_offset + 112, 52))) ||
             (test == 6 && strstr(assembly, "lat_aot_generated_text_begin+160-"))) {
             fprintf(stderr, "indirect output case %u failed\n", test);
             return -1;
@@ -1583,7 +1635,7 @@ int main(void)
                  ".word 0x28c0018c\n"
                  ".word 0x28c0018c\n"
                  "sub.d $t0,$r21,$t0\n") ||
-        !strstr(three_assembly, "pcalau12i $t1,%pc_hi20(.Llat_local_targets)\n") ||
+        !strstr(three_assembly, "la.pcrel $t1,.Llat_local_targets\n") ||
         !strstr(three_assembly, "alsl.d $t2,$t0,$t1,2\n") ||
         !strstr(three_assembly, "add.d $a7,$a7,$t1\n"
                                 "jr $a7\n") ||

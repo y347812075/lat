@@ -9,6 +9,7 @@
 #define LAT_NATIVE_BUILD_ID_SIZE 65u
 
 #define LAT_NATIVE_INDIRECT_EXIT_WORDS 38u
+#define LAT_NATIVE_AOT_V2_INDIRECT_EXIT_WORDS 27u
 
 static inline int lat_native_decode_local_branch_target(
     const uint32_t *words, uint32_t slots, uint64_t code_offset,
@@ -121,6 +122,51 @@ static inline int lat_native_indirect_exit_valid(const void *code)
         }
     }
     return 1;
+}
+
+/* Match the current AOT v2 fast-cache window without reading its runtime exit. */
+static inline int lat_native_aot_v2_indirect_exit_valid(const void *code)
+{
+    static const uint32_t expected[2][LAT_NATIVE_AOT_V2_INDIRECT_EXIT_WORDS] = {
+        {
+            0x004542ab, 0x0015aeab, 0x00cf016b, 0x002dd96b,
+            0x28c0016c, 0x5c000d95, 0x28c0216b, 0x4c000160,
+            0x28c543ed, 0x580049a0, 0x004542ae, 0x0015baae,
+            0x00cf01ce, 0x004119ce, 0x0010b5ce, 0x28c001cc,
+            0x5c002d95, 0x28c061cc, 0x58002580, 0x28c0018b,
+            0x28c081cc, 0x5c00198b, 0x28c041cc, 0x28c563eb,
+            0x5c000d8b, 0x28c021cb, 0x4c000160,
+        },
+        {
+            0x004542ab, 0x0015aeab, 0x00cf016b, 0x002dd96b,
+            0x28c0016d, 0x5c000db5, 0x28c0216b, 0x4c000160,
+            0x28c543ee, 0x580049c0, 0x004542af, 0x0015beaf,
+            0x00cf01ef, 0x004119ef, 0x0010b9ef, 0x28c001ed,
+            0x5c002db5, 0x28c061ed, 0x580025a0, 0x28c001ab,
+            0x28c081ed, 0x5c0019ab, 0x28c041ed, 0x28c563eb,
+            0x5c000dab, 0x28c021eb, 0x4c000160,
+        },
+    };
+    for (unsigned int variant = 0; variant < 2; variant++) {
+        if (!memcmp(code, expected[variant], sizeof(expected[variant]))) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static inline unsigned int lat_native_indirect_exit_words(const void *code,
+                                                            size_t available)
+{
+    if (available >= LAT_NATIVE_INDIRECT_EXIT_WORDS * 4 &&
+        lat_native_indirect_exit_valid(code)) {
+        return LAT_NATIVE_INDIRECT_EXIT_WORDS;
+    }
+    if (available >= LAT_NATIVE_AOT_V2_INDIRECT_EXIT_WORDS * 4 &&
+        lat_native_aot_v2_indirect_exit_valid(code)) {
+        return LAT_NATIVE_AOT_V2_INDIRECT_EXIT_WORDS;
+    }
+    return 0;
 }
 
 enum LatNativeImageFlags {

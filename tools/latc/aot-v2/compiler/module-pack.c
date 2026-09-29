@@ -50,6 +50,7 @@ typedef struct ModulePack {
     uint64_t local_size;
     uint32_t local_base_words;
     unsigned char *local_dispatch;
+    unsigned char *local_dispatch_words;
     unsigned char *return_guard_count;
     int (*return_guard_targets)[5];
 } ModulePack;
@@ -1708,9 +1709,11 @@ static int prepare_local_dispatch(ModulePack *pack)
             continue;
         }
         uint64_t site = tb->code_offset + tb->indirect_exit_offset - 1;
+        unsigned int words = lat_native_indirect_exit_words(
+            pack->code + site, tb->code_size - (tb->indirect_exit_offset - 1));
         if ((map->flags & LAT_NATIVE_PC_MAP_DYNAMIC_STATE) &&
             map->host_offset_begin <= site && map->host_offset_end >=
-                site + LAT_NATIVE_INDIRECT_EXIT_WORDS * 4) {
+                site + words * 4) {
             pack->local_dispatch[owner] = 1;
         }
     }
@@ -1721,10 +1724,14 @@ static int prepare_local_dispatch(ModulePack *pack)
         }
         uint64_t site = pack->tbs[i].code_offset +
                         pack->tbs[i].indirect_exit_offset - 1;
-        if (!lat_native_indirect_exit_valid(pack->code + site)) {
+        unsigned int words = lat_native_indirect_exit_words(
+            pack->code + site,
+            pack->tbs[i].code_size - (pack->tbs[i].indirect_exit_offset - 1));
+        if (!words) {
             pack->local_dispatch[i] = 0;
             continue;
         }
+        pack->local_dispatch_words[i] = words;
         uint32_t base[3] = {0x1400000cu, 0x0380018cu, 0x1600000cu};
         memcpy(pack->code + site, base, sizeof(base));
         LatNativeRelocationV1 relocation = {
@@ -1936,6 +1943,10 @@ static void configure_return_guards(ModulePack *pack,
                     !pack->local_dispatch[owner]) {
                     continue;
                 }
+                if (pack->local_dispatch_words[owner] !=
+                    LAT_NATIVE_INDIRECT_EXIT_WORDS) {
+                    continue;
+                }
                 for (unsigned int n = 0; n < 2; n++) {
                     pack->return_guard_targets[owner][n] = targets[n];
                 }
@@ -1947,7 +1958,8 @@ static void configure_return_guards(ModulePack *pack,
 }
 
 static int emit_local_dispatch(FILE *file, const ModulePack *pack,
-                               uint64_t index, uint64_t site)
+                               uint64_t index, uint64_t site,
+                               unsigned int words)
 {
     uint32_t base[3];
     memcpy(base, pack->code + site, sizeof(base));
@@ -1979,7 +1991,7 @@ static int emit_local_dispatch(FILE *file, const ModulePack *pack,
     fprintf(file,
         "lu12i.w $t2,%llu\n"
         "bgeu $t0,$t2,.Llat_local_miss_%llu\n"
-        "pcalau12i $t1,%%pc_hi20(.Llat_local_targets)\n"
+        "la.pcrel $t1,.Llat_local_targets\n"
         "alsl.d $t2,$t0,$t1,2\n"
         "ld.w $a7,$t2,0\n",
         (unsigned long long)(pack->local_size >> 12),
@@ -2003,7 +2015,7 @@ static int emit_local_dispatch(FILE *file, const ModulePack *pack,
         ".rept %u\nnop\n.endr\n"
         ".Llat_local_end_%llu:\n",
         (unsigned long long)index, (unsigned long long)index,
-        21 + pack->local_dispatch_sentinel - pack->local_base_words -
+        words - 17 + pack->local_dispatch_sentinel - pack->local_base_words -
             4 * pack->return_guard_count[index],
         (unsigned long long)index);
     return 0;
@@ -2046,17 +2058,18 @@ static int emit_assembly(const char *path, const ModulePack *pack,
             continue;
         }
         uint64_t site = tb->code_offset + tb->indirect_exit_offset - 1;
+        unsigned int words = pack->local_dispatch_words[index];
         if (site > cursor) {
             fprintf(file, ".incbin \"text.bin\",%llu,%llu\n",
                     (unsigned long long)cursor,
                     (unsigned long long)(site - cursor));
         }
-        if (emit_local_dispatch(file, pack, index, site)) {
+        if (emit_local_dispatch(file, pack, index, site, words)) {
             fclose(file);
             return fail(error, error_size,
                         "cannot encode local return guard");
         }
-        cursor = site + LAT_NATIVE_INDIRECT_EXIT_WORDS * 4;
+        cursor = site + words * 4;
         have_local_dispatch = 1;
     }
     fprintf(file, ".incbin \"text.bin\",%llu,%llu\n.align 2\n",
@@ -2176,6 +2189,7 @@ static int emit_module_sources(const char *native_image,
         .code = g_malloc(header->code_size),
         .supported = g_malloc0(header->tb_count),
         .local_dispatch = g_malloc0(header->tb_count),
+        .local_dispatch_words = g_malloc0(header->tb_count),
         .return_guard_count = g_malloc0(header->tb_count),
         .return_guard_targets = g_malloc0_n(
             header->tb_count, sizeof(*pack.return_guard_targets)),
@@ -2280,6 +2294,7 @@ static int emit_module_sources(const char *native_image,
     g_free(pack.relocation_owners);
     g_free(pack.supported);
     g_free(pack.local_dispatch);
+    g_free(pack.local_dispatch_words);
     g_free(pack.return_guard_count);
     g_free(pack.return_guard_targets);
     g_free(pack.code);

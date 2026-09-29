@@ -241,11 +241,14 @@ int lat_native_image_validate(const void *data, size_t size,
         }
         if (tbs[i].indirect_exit_offset) {
             uint32_t offset = tbs[i].indirect_exit_offset - 1;
-            uint32_t length = LAT_NATIVE_INDIRECT_EXIT_WORDS * 4;
-            if (offset % 4 || tbs[i].code_size <= length ||
-                offset >= tbs[i].code_size - length ||
-                !lat_native_indirect_exit_valid((const uint8_t *)data +
-                    header->code_offset + tbs[i].code_offset + offset)) {
+            if (offset % 4 || offset >= tbs[i].code_size) {
+                return invalid(error, error_size, "invalid native indirect exit");
+            }
+            uint32_t remaining = tbs[i].code_size - offset;
+            unsigned int words = lat_native_indirect_exit_words(
+                (const uint8_t *)data + header->code_offset +
+                    tbs[i].code_offset + offset, remaining);
+            if (!words || remaining <= words * 4) {
                 return invalid(error, error_size, "invalid native indirect exit");
             }
         }

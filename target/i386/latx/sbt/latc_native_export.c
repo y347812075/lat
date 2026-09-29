@@ -368,12 +368,15 @@ static int find_guest_load_bias(const GByteArray *guest,
 
 static uint32_t native_indirect_exit(const aot_tb *tb, const uint8_t *code)
 {
-    uint32_t size = LAT_NATIVE_INDIRECT_EXIT_WORDS * 4;
     if (!(tb->bool_flags & IS_INDIRECT_JMP) ||
         (tb->bool_flags & IS_TU_JMP) || tb->jmp_indirect % 4 ||
-        tb->tb_cache_size <= size ||
-        tb->jmp_indirect >= tb->tb_cache_size - size ||
-        !lat_native_indirect_exit_valid(code + tb->jmp_indirect)) {
+        tb->jmp_indirect >= tb->tb_cache_size) {
+        return 0;
+    }
+    uint32_t remaining = tb->tb_cache_size - tb->jmp_indirect;
+    unsigned int words = lat_native_indirect_exit_words(
+        code + tb->jmp_indirect, remaining);
+    if (!words || remaining <= words * 4) {
         return 0;
     }
     return tb->jmp_indirect + 1;
