@@ -31,7 +31,8 @@ fi
     umask 022
     "${CC:-cc}" -I"$include_dir" -O2 -fPIC -c -o module-meta.o module.c
     "${CC:-cc}" -I"$include_dir" -fPIC -c -o module-text.o module.S
-    "${CC:-cc}" -shared -nostdlib \
+    # Linker relaxation changes local-dispatch windows and PC-map offsets.
+    "${CC:-cc}" -shared -nostdlib -Wl,--no-relax \
       -Wl,-z,defs -Wl,-z,now -Wl,-z,relro -Wl,-z,separate-code \
       -Wl,--unique=.text.lat.tu -Wl,--unique=.rodata.lat.tb \
       -Wl,--unique=.rodata.lat.guest \
