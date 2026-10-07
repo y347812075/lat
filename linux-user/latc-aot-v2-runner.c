@@ -36,6 +36,7 @@
 typedef struct LatAotV2RuntimeModule {
     LatAotLoadedModuleV2 loaded;
     char *path;
+    bool legacy_fast_cache;
     struct LatAotV2RuntimeModule *next;
 } LatAotV2RuntimeModule;
 
@@ -1334,6 +1335,9 @@ bool latc_aot_v2_invalidate_range(CPUState *cpu, uint64_t guest_start,
     }
     size_t deactivated = 0;
     size_t deactivated_exec_ranges = 0;
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+    bool clear_legacy_fast_cache = false;
+#endif
     if (registry_initialized &&
         lat_aot_v2_registry_deactivate_range(&registry, guest_start, guest_end,
                                              &deactivated)) {
@@ -1355,6 +1359,10 @@ bool latc_aot_v2_invalidate_range(CPUState *cpu, uint64_t guest_start,
         }
         runtime->handled_invalidation_generation = generation;
         deactivated_exec_ranges += overlaps;
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+        clear_legacy_fast_cache |= runtime->runtime_module &&
+            runtime->runtime_module->legacy_fast_cache;
+#endif
         bool was_current = aot_v2_current_instance == instance;
 #ifdef CONFIG_LATX_FAST_JMPCACHE
         if (cpu) {
@@ -1406,6 +1414,19 @@ bool latc_aot_v2_invalidate_range(CPUState *cpu, uint64_t guest_start,
         atomic_fetch_add(&invalidated_exec_ranges, deactivated_exec_ranges);
         atomic_fetch_add(&invalidation_reasons[reason], 1);
     }
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+    if (clear_legacy_fast_cache) {
+        CPUState *clear_cpu;
+        if (cpu) {
+            latx_fast_jmp_cache_clear_all(cpu);
+        }
+        CPU_FOREACH(clear_cpu) {
+            if (clear_cpu != cpu) {
+                latx_fast_jmp_cache_clear_all(clear_cpu);
+            }
+        }
+    }
+#endif
     recycle_retired_instances_locked();
     pthread_mutex_unlock(&elf_tracker_lock);
     return current_invalidated;
@@ -2030,6 +2051,10 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
                     errno = saved_errno;
                     return -1;
                 }
+                /* The untagged legacy cache is only safe for immutable
+                 * non-PIE ET_EXEC mappings. */
+                module->legacy_fast_cache =
+                    info->elf_type == ET_EXEC && info->load_bias == 0;
                 module->path = path;
                 module->next = runtime_modules;
                 runtime_modules = module;
@@ -2395,6 +2420,7 @@ int latc_aot_v2_prepare(CPUArchState *env)
         return strict ? -1 : 0;
     }
     module->path = g_strdup(module_path);
+    module->legacy_fast_cache = true;
     if (register_host_module(module)) {
         fprintf(stderr, "latx: cannot index AOT v2 host module: %s\n",
                 strerror(errno));
@@ -2615,7 +2641,12 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
         atomic_fetch_add(&stats->aot_lookups, 1);
     }
 #ifdef CONFIG_LATX_FAST_JMPCACHE
-    if (!getenv("LATX_AOT_V2_CACHE_DIR")) {
+    /* PIE and DSO targets keep using the generation-checked AOT v2 cache. */
+    bool legacy_fast_cache =
+        !getenv("LATX_AOT_V2_CACHE_DIR") ||
+        (runtime_instance->runtime_module &&
+         runtime_instance->runtime_module->legacy_fast_cache);
+    if (legacy_fast_cache) {
         uint32_t jump_hash = tb_jmp_cache_hash_func(guest_pc);
         FastTB *jump_cache = ((CPUArchState *)cpu->env_ptr)->tb_jmp_cache_ptr;
         qatomic_set(&jump_cache[jump_hash].ptr, result->host_address);
