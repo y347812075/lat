@@ -8,6 +8,7 @@
 #include "enter-x86.h"
 #include "guest-loader.h"
 
+#include <errno.h>
 #include <setjmp.h>
 #include <glib.h>
 #include <pthread.h>
@@ -42,17 +43,49 @@ static uint64_t load_u64(const unsigned char *environment, size_t offset)
     return value;
 }
 
+static size_t guest_page_storage_count(const LatAotModuleV2 *module)
+{
+    size_t address_count = module->guest_slot_begin ?
+        (size_t)(module->guest_slot_end - module->guest_slot_begin) : 0;
+    size_t leaf_pages =
+        (address_count + LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT - 1) /
+        LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+    if (!(module->module_flags & LAT_AOT_MODULE_THREE_LEVEL_GUEST_SLOTS)) {
+        return leaf_pages * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+    }
+    size_t root_pages =
+        (leaf_pages + LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT - 1) /
+        LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+    return (root_pages + leaf_pages) * LAT_AOT_V2_GUEST_PAGE_SLOT_COUNT;
+}
+
 static int execute_instance(LatAotRegistryV2 *registry,
                             LatAotModuleInstanceV2 *instance,
                             uint64_t entry_rva, unsigned char *environment,
                             void *stack_top, void *jump_cache)
 {
+    size_t page_storage_count =
+        guest_page_storage_count(instance->module->descriptor);
+    uint64_t *page_storage = calloc(page_storage_count ? page_storage_count : 1,
+                                    sizeof(*page_storage));
+    if (!page_storage) {
+        perror("allocate guest slot pages");
+        return -1;
+    }
     LatAotTargetV2 target;
-    if (lat_aot_v2_context_apply_guest_slots(
+    size_t context_slot_count;
+    int prepare_result = lat_aot_v2_context_apply_guest_table(
             instance->module->descriptor, instance->guest_load_bias,
-            jump_cache) ||
-        lat_aot_v2_registry_lookup(registry,
-            instance->guest_load_bias + entry_rva, 0, &target)) {
+            jump_cache, page_storage, page_storage_count, &context_slot_count);
+    if (!prepare_result) {
+        prepare_result = lat_aot_v2_registry_lookup(
+            registry, instance->guest_load_bias + entry_rva,
+            LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL, &target);
+    }
+    int saved_errno = errno;
+    free(page_storage);
+    if (prepare_result) {
+        errno = saved_errno;
         perror("prepare translated module execution");
         return -1;
     }
