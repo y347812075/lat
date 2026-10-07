@@ -459,7 +459,7 @@ static int test_indirect_exits(const char *directory)
     char *assembly_path = g_build_filename(directory, "module.S", NULL);
     char *text_path = g_build_filename(directory, "text.bin", NULL);
     char *slots_path = g_build_filename(directory, "guest-slots.bin", NULL);
-    for (unsigned int test = 0; test < 11; test++) {
+    for (unsigned int test = 0; test < 12; test++) {
         unsigned char image[1024] = {0};
         LatNativeImageHeaderV2 *h = (void *)image;
         memcpy(h->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
@@ -476,7 +476,7 @@ static int test_indirect_exits(const char *directory)
         h->guest_image_offset = sizeof(*h);
         h->guest_image_size = 1;
         h->code_offset = sizeof(*h) + 8;
-        h->code_size = 164;
+        h->code_size = test == 11 ? 320 : 164;
         h->tb_table_offset = h->code_offset + h->code_size;
         h->tb_count = 2;
         h->relocation_offset = h->tb_table_offset + 2 * sizeof(LatNativeTbV1);
@@ -487,7 +487,12 @@ static int test_indirect_exits(const char *directory)
                sizeof(indirect_dispatch));
         if (test >= 9) {
             memcpy(image + h->code_offset + 4,
-                   aot_v2_indirect_dispatch[test - 9],
+                   aot_v2_indirect_dispatch[test == 11 ? 0 : test - 9],
+                   sizeof(aot_v2_indirect_dispatch[0]));
+        }
+        if (test == 11) {
+            memcpy(image + h->code_offset + 164,
+                   aot_v2_indirect_dispatch[0],
                    sizeof(aot_v2_indirect_dispatch[0]));
         }
         uint32_t runtime_exit = 0x50000000u;
@@ -499,8 +504,10 @@ static int test_indirect_exits(const char *directory)
             .indirect_exit_offset = test == 2 ? 0 : 5,
         };
         tbs[1] = (LatNativeTbV1){
-            .guest_pc = test == 3 ? 0x1000000 : target_pc,
-            .code_offset = 160, .code_size = 4, .flags = 3,
+            .guest_pc = test == 11 ? source_pc :
+                        test == 3 ? 0x1000000 : target_pc,
+            .code_offset = 160, .code_size = test == 11 ? 160 : 4,
+            .flags = 3, .indirect_exit_offset = test == 11 ? 5 : 0,
         };
         LatNativePcMapV2 *maps = (void *)(image + h->pc_map_offset);
         maps[0] = (LatNativePcMapV2){
@@ -516,7 +523,8 @@ static int test_indirect_exits(const char *directory)
         if (test != 6) {
             maps[h->pc_map_count - 1] = (LatNativePcMapV2){
                 .guest_pc = tbs[1].guest_pc, .host_offset_begin = 160,
-                .host_offset_end = 164, .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+                .host_offset_end = h->code_size,
+                .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
             };
         }
         size_t size = h->pc_map_offset + h->pc_map_count * sizeof(*maps);
@@ -553,21 +561,29 @@ static int test_indirect_exits(const char *directory)
             !g_file_get_contents(text_path, &text, &text_size, NULL) ||
             !g_file_get_contents(slots_path, &slots, &slots_size, NULL) ||
             !!strstr(assembly, ".Llat_local_targets:\n") != enabled ||
-            text_size != 164 ||
+            text_size != h->code_size ||
             (enabled && (!strstr(assembly, "beqz $a7,.Llat_local_miss_") ||
                          !strstr(assembly, "add.d $a7,$a7,$t1\n"
                                            "jr $a7\n") ||
                          !strstr(assembly, "bne $t0,$r21,.Llat_local_end_") ||
                          !strstr(assembly, "la.pcrel $t1,.Llat_local_targets\n") ||
-                         !strstr(assembly, test >= 9 ? ".rept 9\n" :
-                             base_words == 1 ? ".rept 20\n" :
-                             base_words == 2 ? ".rept 19\n" :
-                                               ".rept 18\n"))) ||
-            (test >= 9 && (!strstr(assembly,
+                         !strstr(assembly, test >= 9 ? ".rept 8\n" :
+                             base_words == 1 ? ".rept 19\n" :
+                             base_words == 2 ? ".rept 18\n" :
+                                               ".rept 17\n"))) ||
+            (test >= 9 && test < 11 && (!strstr(assembly,
                 ".incbin \"text.bin\",112,52\n") ||
                 memcmp(text + 112, image + h->code_offset + 112, 52))) ||
             (test == 6 && strstr(assembly, "lat_aot_generated_text_begin+160-"))) {
             fprintf(stderr, "indirect output case %u failed\n", test);
+            return -1;
+        }
+        if (test == 11 &&
+            (strstr(assembly, ".Llat_local_miss_1:\n") ||
+             strstr(assembly, ".rept 4294967") ||
+             !strstr(assembly, ".incbin \"text.bin\",112,208\n") ||
+             memcmp(text + 160, image + h->code_offset + 160, 160))) {
+            fprintf(stderr, "non-primary indirect exit was dispatched\n");
             return -1;
         }
         if (test == 1) {
@@ -789,7 +805,7 @@ static int test_return_guards(const char *directory)
                           "bne $t0,$t2,.Llat_return_next_0_1\n") ||
         strstr(assembly, "ori $t2,$t2,1029\n") ||
         !strstr(assembly, ".Llat_return_next_0_1:\n") ||
-        !strstr(assembly, ".rept 12\n")) {
+        !strstr(assembly, ".rept 11\n")) {
         fprintf(stderr, "ranked return guards were not emitted: %s\n", error);
         result = -1;
         goto out;
@@ -812,7 +828,7 @@ static int test_return_guards(const char *directory)
                                        error, sizeof(error)) ||
         !g_file_get_contents(assembly_path, &assembly, NULL, NULL) ||
         strstr(assembly, ".Llat_return_next_") ||
-        !strstr(assembly, ".rept 20\n")) {
+        !strstr(assembly, ".rept 19\n")) {
         fprintf(stderr, "CFG-free return fallback changed: %s\n", error);
         result = -1;
         goto out;
@@ -830,7 +846,7 @@ static int test_return_guards(const char *directory)
             path, directory, &program, digest, error, sizeof(error)) ||
         !g_file_get_contents(assembly_path, &assembly, NULL, NULL) ||
         strstr(assembly, ".Llat_return_next_") ||
-        !strstr(assembly, ".rept 20\n")) {
+        !strstr(assembly, ".rept 19\n")) {
         fprintf(stderr, "large return set did not fall back: %s\n", error);
         result = -1;
     }
@@ -1641,7 +1657,7 @@ int main(void)
                                 "jr $a7\n") ||
         !strstr(three_assembly, "ld.d $t0,$a7,0\n") ||
         !strstr(three_assembly, "ld.d $a7,$a7,8\n") ||
-        !strstr(three_assembly, ".rept 18\n") ||
+        !strstr(three_assembly, ".rept 17\n") ||
         three_slots_size !=
             (LAT_AOT_V2_TWO_LEVEL_GUEST_ADDRESS_LIMIT + 1) *
             sizeof(LatAotGuestSlotV2) ||

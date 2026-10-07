@@ -1699,7 +1699,8 @@ static int prepare_local_dispatch(ModulePack *pack)
     }
     for (uint64_t i = 0; i < pack->header->pc_map_count; i++) {
         int owner = pack->pc_map_owners[i];
-        if (owner < 0 || !pack->supported[owner]) {
+        if (owner < 0 || !pack->supported[owner] ||
+            pack->tb_primary_index[owner] != owner) {
             continue;
         }
         const LatNativeTbV1 *tb = &pack->tbs[owner];
@@ -1711,7 +1712,7 @@ static int prepare_local_dispatch(ModulePack *pack)
         uint64_t site = tb->code_offset + tb->indirect_exit_offset - 1;
         unsigned int words = lat_native_indirect_exit_words(
             pack->code + site, tb->code_size - (tb->indirect_exit_offset - 1));
-        if ((map->flags & LAT_NATIVE_PC_MAP_DYNAMIC_STATE) &&
+        if (words && (map->flags & LAT_NATIVE_PC_MAP_DYNAMIC_STATE) &&
             map->host_offset_begin <= site && map->host_offset_end >=
                 site + words * 4) {
             pack->local_dispatch[owner] = 1;
@@ -1988,6 +1989,8 @@ static int emit_local_dispatch(FILE *file, const ModulePack *pack,
             (unsigned long long)index, i, branch,
             (unsigned long long)index, i);
     }
+    /* la.pcrel expands to two instructions; keep the replacement window
+       exact. */
     fprintf(file,
         "lu12i.w $t2,%llu\n"
         "bgeu $t0,$t2,.Llat_local_miss_%llu\n"
@@ -2015,7 +2018,7 @@ static int emit_local_dispatch(FILE *file, const ModulePack *pack,
         ".rept %u\nnop\n.endr\n"
         ".Llat_local_end_%llu:\n",
         (unsigned long long)index, (unsigned long long)index,
-        words - 17 + pack->local_dispatch_sentinel - pack->local_base_words -
+        words - 18 + pack->local_dispatch_sentinel - pack->local_base_words -
             4 * pack->return_guard_count[index],
         (unsigned long long)index);
     return 0;
@@ -2059,6 +2062,18 @@ static int emit_assembly(const char *path, const ModulePack *pack,
         }
         uint64_t site = tb->code_offset + tb->indirect_exit_offset - 1;
         unsigned int words = pack->local_dispatch_words[index];
+        unsigned int used = 18 - pack->local_dispatch_sentinel +
+            pack->local_base_words +
+            4 * pack->return_guard_count[index];
+        if (pack->tb_primary_index[index] != (int)index ||
+            (words != LAT_NATIVE_INDIRECT_EXIT_WORDS &&
+             words != LAT_NATIVE_AOT_V2_INDIRECT_EXIT_WORDS) ||
+            words < used ||
+            site < cursor || site > pack->header->code_size ||
+            (uint64_t)words * 4 > pack->header->code_size - site) {
+            fclose(file);
+            return fail(error, error_size, "invalid local dispatch window");
+        }
         if (site > cursor) {
             fprintf(file, ".incbin \"text.bin\",%llu,%llu\n",
                     (unsigned long long)cursor,
