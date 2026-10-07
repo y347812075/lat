@@ -164,11 +164,14 @@ static _Atomic uint64_t precompile_failures;
 static _Atomic uint64_t precompile_request_sequence;
 static bool aot_v2_strict;
 static bool aot_v2_reject_miss;
+/* Collect keys without loading provisional modules into the live process. */
+static bool aot_v2_collect_only;
 
 void latc_aot_v2_consume_environment(void)
 {
     aot_v2_strict = getenv("LATX_AOT_V2_STRICT") != NULL;
     aot_v2_reject_miss = getenv("LATC_STRICT_AOT") != NULL;
+    aot_v2_collect_only = getenv("LATX_AOT_V2_COLLECT_ONLY") != NULL;
 }
 
 bool latc_aot_v2_strict_enabled(void)
@@ -1965,6 +1968,9 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
                  strerror(errno));
         return -1;
     }
+    if (aot_v2_collect_only) {
+        return 0;
+    }
     LatAotV2RuntimeModule *module = find_runtime_module(info->source_sha256);
     if (!module) {
         char source_hex[65];
@@ -2451,6 +2457,17 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
                              uint32_t cflags, LatcAotV2Target *result)
 {
     if (!registry_initialized || !result) {
+        if (aot_v2_reject_miss) {
+            fprintf(stderr,
+                    "latc: strict AOT rejected runtime TB generation at "
+                    "0x%llx cflags=0x%x file=%d program=0\n",
+                    (unsigned long long)guest_pc, cflags,
+                    latc_aot_v2_is_file_pc(guest_pc));
+            _exit(125);
+        }
+        return false;
+    }
+    if (aot_v2_collect_only) {
         if (aot_v2_reject_miss) {
             fprintf(stderr,
                     "latc: strict AOT rejected runtime TB generation at "
