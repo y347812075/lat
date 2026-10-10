@@ -16,6 +16,7 @@ dynamic_guest=$7
 work=$8
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 export LATC_FAKE_REAL=$latc
+export LATX_AOT=0
 rm -rf "$work"
 mkdir -m 700 -p "$work"
 daemon_pid=
@@ -136,25 +137,38 @@ chmod 0644 "$cache/$static_source_sha.current"
 printf '{broken current index\n' >"$cache/$static_source_sha.current"
 chmod 0444 "$cache/$static_source_sha.current"
 LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$cache" \
-LATX_AOT_V2_LATCD_SOCKET="$work/missing.sock" LATX_AOT_V2_STRICT=1 \
+LATX_AOT_V2_LATCD_SOCKET="$work/missing.sock" \
+LATC_STATS_OUT="$work/corrupt-current.stats.json" \
 LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 \
   timeout 60 "$runner" "$static_guest" \
   >"$work/corrupt-current.stdout" 2>"$work/corrupt-current.stderr"
 test "$(cat "$work/corrupt-current.stdout")" = "Hello, LATC!"
-grep -q 'module=missing' "$work/corrupt-current.stderr"
+grep -q 'module=rejected reason=AOT v2 module manifest is invalid' \
+  "$work/corrupt-current.stderr"
 grep -Eq 'aot_lookups=0 jit_fallbacks=[1-9][0-9]*' \
   "$work/corrupt-current.stderr"
 grep -q 'compiler_submissions=0 compiler_submission_failures=1' \
   "$work/corrupt-current.stderr"
+python3 - "$work/corrupt-current.stats.json" <<'PY'
+import json
+import sys
+
+stats = json.load(open(sys.argv[1]))
+assert stats["runtime_file_tb_gen_calls"] > 0, stats
+assert stats["runtime_file_tb_gen_attempts"] > 0, stats
+PY
 set +e
 LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$cache" \
 LATX_AOT_V2_LATCD_SOCKET="$work/missing.sock" \
-LATC_DISABLE_PRETRANSLATE=1 LATC_STRICT_AOT=1 \
+LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 LATC_STRICT_AOT=1 \
   timeout 60 "$runner" "$static_guest" \
   >"$work/strict-no-stats.stdout" 2>"$work/strict-no-stats.stderr"
 strict_no_stats_status=$?
 set -e
 test "$strict_no_stats_status" -eq 125
+test ! -s "$work/strict-no-stats.stdout"
+grep -q 'module=rejected reason=AOT v2 module manifest is invalid' \
+  "$work/strict-no-stats.stderr"
 grep -q 'strict AOT rejected runtime TB generation' \
   "$work/strict-no-stats.stderr"
 

@@ -642,12 +642,16 @@ static int send_request(const char *socket_path, uint32_t operation,
         goto failed;
     }
     struct sockaddr_un address = { .sun_family = AF_UNIX };
-    if (strlen(socket_path) >= sizeof(address.sun_path)) {
-        fail(error, error_size, "socket path is too long");
+    int directory_fd;
+    if (latcd_socket_address(socket_path, &address, &directory_fd,
+                             error, error_size)) {
         goto failed;
     }
-    g_strlcpy(address.sun_path, socket_path, sizeof(address.sun_path));
-    if (connect(client, (const void *)&address, sizeof(address))) {
+    int connected = connect(client, (const void *)&address, sizeof(address));
+    int connect_error = errno;
+    if (directory_fd >= 0) close(directory_fd);
+    errno = connect_error;
+    if (connected) {
         fail(error, error_size, "cannot connect to latcd: %s",
              strerror(errno));
         goto failed;

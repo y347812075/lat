@@ -131,6 +131,35 @@ int main(void)
         !WIFEXITED(submit_status) || WEXITSTATUS(submit_status)) {
         return fail("precompile was not acknowledged");
     }
+    for (int variant = 0; variant < 3; variant++) {
+        pid_t greeter = fork();
+        if (greeter < 0) return fail("cannot fork handshake client");
+        if (!greeter) {
+            char error[128] = {0};
+            uint8_t digest[32] = { 7 };
+            int result = latcd_client_hello(path, "test-build", digest,
+                                            error, sizeof(error));
+            _exit(variant ? !(result && errno == EPROTO) : !!result);
+        }
+        client = accept4(server, NULL, NULL, SOCK_CLOEXEC);
+        int no_source = -1, no_keys = -1;
+        char error[128];
+        if (client < 0 || latcd_receive_request(client, &request,
+                &no_source, &no_keys, error, sizeof(error)) ||
+            request.operation != LATCD_OP_HELLO || no_source >= 0 || no_keys >= 0)
+            return fail("invalid handshake request");
+        response.request_id = request.request_id;
+        snprintf(response.message, sizeof(response.message), "%s",
+                 variant == 1 ? "wrong-build" : "test-build");
+        memset(response.source_sha256, 0, sizeof(response.source_sha256));
+        response.source_sha256[0] = variant == 2 ? 8 : 7;
+        if (send(client, &response, sizeof(response), MSG_NOSIGNAL) != sizeof(response))
+            return fail("cannot acknowledge handshake");
+        close(client);
+        if (waitpid(greeter, &submit_status, 0) != greeter ||
+            !WIFEXITED(submit_status) || WEXITSTATUS(submit_status))
+            return fail("handshake identity validation failed");
+    }
     close(source);
     close(server);
     unlink(path);

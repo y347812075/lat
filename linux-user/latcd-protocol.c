@@ -5,6 +5,8 @@
 #include "latcd-protocol.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -22,12 +24,48 @@ static int fail(char *error, size_t error_size, const char *format, ...)
     return -1;
 }
 
+int latcd_socket_address(const char *path, struct sockaddr_un *address,
+                         int *directory_fd, char *error, size_t error_size)
+{
+    *directory_fd = -1;
+    memset(address, 0, sizeof(*address));
+    address->sun_family = AF_UNIX;
+    if (!path || !*path) {
+        errno = EINVAL;
+        return fail(error, error_size, "empty socket path");
+    }
+    if (strlen(path) < sizeof(address->sun_path)) {
+        strcpy(address->sun_path, path);
+        return 0;
+    }
+    const char *slash = strrchr(path, '/');
+    if (!slash || !slash[1]) {
+        errno = ENAMETOOLONG;
+        return fail(error, error_size, "invalid long socket path");
+    }
+    char *parent = strndup(path, slash - path);
+    if (!parent) return fail(error, error_size, "cannot allocate socket parent");
+    int fd = open(parent, O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    free(parent);
+    if (fd < 0) return fail(error, error_size, "cannot open socket parent: %s", strerror(errno));
+    int length = snprintf(address->sun_path, sizeof(address->sun_path),
+                          "/proc/self/fd/%d/%s", fd, slash + 1);
+    if (length < 0 || (size_t)length >= sizeof(address->sun_path)) {
+        close(fd);
+        errno = ENAMETOOLONG;
+        return fail(error, error_size, "socket basename is too long");
+    }
+    *directory_fd = fd;
+    return 0;
+}
+
 static int expected_descriptors(const LatcdRequestV2 *request)
 {
     if (request->operation == LATCD_OP_SUBMIT_KEYS) return 2;
     if (request->operation == LATCD_OP_FLUSH_SOURCE) return 1;
     if (request->operation == LATCD_OP_FLUSH_ALL) return 0;
     if (request->operation == LATCD_OP_PRECOMPILE_SOURCE) return 1;
+    if (request->operation == LATCD_OP_HELLO) return 0;
     return -1;
 }
 

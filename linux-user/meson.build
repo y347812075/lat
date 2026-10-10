@@ -9,6 +9,7 @@ linux_user_ss.add(files(
   'latc-bundle-loader.c',
   'guest-elf-map.c',
   'latcd-client.c',
+  'auto-config.c',
   'latcd-protocol.c',
   'tb-key-set.c',
   'latc-aot-v2-runner.c',

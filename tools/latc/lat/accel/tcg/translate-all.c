@@ -31,6 +31,7 @@
 #include "qemu.h"
 #if defined(CONFIG_LATX) && defined(TARGET_X86_64)
 #include "latc-aot-v2-runner.h"
+#include "auto-config.h"
 #endif
 #if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
 #include <sys/param.h>
@@ -2391,8 +2392,8 @@ static void latc_collect_existing_tb(void *opaque, uint32_t hash, void *userp)
 void latc_aot_v2_collect_existing_jit_tbs(target_ulong guest_begin,
                                           target_ulong guest_end)
 {
-    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
-    const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
+    const char *socket = lat_aot_socket_path();
+    const char *cache = lat_aot_cache_path();
     if (!socket || !*socket || (cache && *cache)) {
         return;
     }

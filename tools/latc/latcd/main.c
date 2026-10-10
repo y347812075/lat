@@ -20,6 +20,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,6 +79,7 @@ typedef struct LatcdConfig {
     uint32_t cpu_seconds;
     uint32_t open_files;
     bool flush_only;
+    uint32_t idle_seconds;
 } LatcdConfig;
 
 typedef struct LatcdCurrentManifest {
@@ -95,6 +97,7 @@ static int persisted_manifest_valid(const LatcdConfig *config,
                                     const uint8_t digest[32]);
 static int cached_module_inspect(const char *path, const uint8_t digest[32],
                                  LatAotModuleInfoV2 *info);
+static _Atomic unsigned int active_precompiles;
 
 static uint32_t default_worker_count(void)
 {
@@ -412,18 +415,19 @@ static int acquire_cache_owner(const LatcdConfig *config, char *error,
         g_free(path);
         return -1;
     }
-    char owner[256];
-    int length = snprintf(owner, sizeof(owner),
-                          "pid=%ld\nsocket=%s\nbuild_id=%s\n",
-                          (long)getpid(), config->socket_path, LATC_BUILD_ID);
-    if (ftruncate(fd, 0) || pwrite(fd, owner, length, 0) != length ||
+    char *owner = g_strdup_printf("pid=%ld\nsocket=%s\nbuild_id=%s\n",
+                                  (long)getpid(), config->socket_path, LATC_BUILD_ID);
+    size_t length = strlen(owner);
+    if (ftruncate(fd, 0) || pwrite(fd, owner, length, 0) != (ssize_t)length ||
         fsync(fd)) {
         fail(error, error_size, "cannot record cache owner in %s: %s", path,
              strerror(errno));
         close(fd);
+        g_free(owner);
         g_free(path);
         return -1;
     }
+    g_free(owner);
     g_free(path);
     return fd;
 }
@@ -3019,9 +3023,6 @@ static int service_flush_request(LatcdService *service, int source_fd,
 
 static int make_server(const char *path, char *error, size_t error_size)
 {
-    if (strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
-        return fail(error, error_size, "socket path is too long");
-    }
     char *parent = g_path_get_dirname(path);
     struct stat parent_status;
     if (lstat(parent, &parent_status) || !S_ISDIR(parent_status.st_mode) ||
@@ -3047,9 +3048,16 @@ static int make_server(const char *path, char *error, size_t error_size)
                     strerror(errno));
     }
     struct sockaddr_un address = { .sun_family = AF_UNIX };
-    g_strlcpy(address.sun_path, path, sizeof(address.sun_path));
+    int directory_fd;
+    if (latcd_socket_address(path, &address, &directory_fd, error, error_size)) {
+        close(fd);
+        return -1;
+    }
     mode_t old_mask = umask(0077);
     int result = bind(fd, (const void *)&address, sizeof(address));
+    int bind_error = errno;
+    if (directory_fd >= 0) close(directory_fd);
+    errno = bind_error;
     umask(old_mask);
     if (result || listen(fd, 64)) {
         fail(error, error_size, "cannot listen on %s: %s", path,
@@ -3155,6 +3163,7 @@ static void precompile_request_worker(gpointer data, gpointer user_data)
     close(work->client_fd);
     g_free(guest);
     g_free(work);
+    atomic_fetch_sub(&active_precompiles, 1);
 }
 
 static int run_once(const LatcdConfig *config)
@@ -3316,6 +3325,7 @@ static int run_service(const LatcdConfig *config)
         g_clear_error(&pool_error);
         stop_requested = 1;
     }
+    int64_t last_activity = g_get_monotonic_time();
     while (!stop_requested) {
         struct pollfd poll_fd = { .fd = server, .events = POLLIN };
         int available = poll(&poll_fd, 1, 250);
@@ -3323,12 +3333,25 @@ static int run_service(const LatcdConfig *config)
             continue;
         }
         if (available <= 0 || !(poll_fd.revents & POLLIN)) {
+            pthread_mutex_lock(&service.lock);
+            bool busy = service.queue->len ||
+                g_hash_table_size(service.running_sources);
+            pthread_mutex_unlock(&service.lock);
+            busy |= atomic_load(&active_precompiles) ||
+                (precompile_pool && g_thread_pool_unprocessed(precompile_pool));
+            if (busy) last_activity = g_get_monotonic_time();
+            if (config->idle_seconds &&
+                g_get_monotonic_time() - last_activity >=
+                (int64_t)config->idle_seconds * G_USEC_PER_SEC) {
+                break;
+            }
             continue;
         }
         int client = accept4(server, NULL, NULL, SOCK_CLOEXEC);
         if (client < 0) {
             continue;
         }
+        last_activity = g_get_monotonic_time();
         LatcdRequestV2 request = {0};
         LatcdResponseV2 response;
         response_init(&response, 0);
@@ -3343,6 +3366,20 @@ static int run_service(const LatcdConfig *config)
                                          error, sizeof(error))) {
             response.status = LATCD_STATUS_BAD_REQUEST;
             g_strlcpy(response.message, error, sizeof(response.message));
+        } else if (request.operation == LATCD_OP_HELLO) {
+            response.request_id = request.request_id;
+            g_strlcpy(response.message, LATC_BUILD_ID, sizeof(response.message));
+            char *canonical = realpath(config->cache_dir, NULL);
+            if (canonical) {
+                GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+                g_checksum_update(checksum, (const guchar *)canonical, strlen(canonical));
+                gsize size = sizeof(response.source_sha256);
+                g_checksum_get_digest(checksum, response.source_sha256, &size);
+                g_checksum_free(checksum);
+                free(canonical);
+            } else {
+                response.status = LATCD_STATUS_IO_ERROR;
+            }
         } else if (request.operation == LATCD_OP_SUBMIT_KEYS) {
             service_queue_request(&service, source, tbset, &request,
                                   &response);
@@ -3356,9 +3393,11 @@ static int run_service(const LatcdConfig *config)
                     .source_fd = source,
                     .request_id = request.request_id,
                 };
+                atomic_fetch_add(&active_precompiles, 1);
                 if (g_thread_pool_push(precompile_pool, work, NULL)) {
                     handed_off = true;
                 } else {
+                    atomic_fetch_sub(&active_precompiles, 1);
                     g_free(work);
                     response.status = LATCD_STATUS_QUEUE_FULL;
                     g_strlcpy(response.message,
@@ -3444,15 +3483,21 @@ static int run_client_request(const char *socket_path, uint32_t operation,
         return 1;
     }
     struct sockaddr_un address = { .sun_family = AF_UNIX };
-    if (strlen(socket_path) >= sizeof(address.sun_path)) {
-        fprintf(stderr, "latcd: socket path is too long\n");
+    int directory_fd;
+    char address_error[256];
+    if (latcd_socket_address(socket_path, &address, &directory_fd,
+                             address_error, sizeof(address_error))) {
+        fprintf(stderr, "latcd: %s\n", address_error);
         if (source >= 0) close(source);
         if (tbset >= 0) close(tbset);
         close(client);
         return 1;
     }
-    g_strlcpy(address.sun_path, socket_path, sizeof(address.sun_path));
-    if (connect(client, (const void *)&address, sizeof(address))) {
+    int connected = connect(client, (const void *)&address, sizeof(address));
+    int connect_error = errno;
+    if (directory_fd >= 0) close(directory_fd);
+    errno = connect_error;
+    if (connected) {
         fprintf(stderr, "latcd: cannot connect: %s\n", strerror(errno));
         if (source >= 0) close(source);
         if (tbset >= 0) close(tbset);
@@ -3504,7 +3549,7 @@ static void usage(const char *name)
             " [--x86-rootfs DIR]"
             " [--max-jobs N] [--negative-ms N] [--max-negative N]"
             " [--max-queue-bytes BYTES] [--max-cache-bytes BYTES]"
-            " [--workers N] [--flush-only]"
+            " [--workers N] [--flush-only] [--idle-seconds N] [--daemonize]"
             " [--cpu-seconds N] [--address-space BYTES]"
             " [--file-size BYTES] [--open-files N]\n"
             "  %s --submit --socket PATH --tbset FILE [--priority N] X86_ELF\n"
@@ -3523,7 +3568,7 @@ int main(int argc, char **argv)
         return 0;
     }
     int once = 0, serve = 0, submit = 0, flush_source = 0, flush_all = 0;
-    int precompile = 0;
+    int precompile = 0, daemonize = 0;
     uint32_t precompile_jobs = 0;
     const char *source = NULL;
     const char *tbset = NULL;
@@ -3543,12 +3588,19 @@ int main(int argc, char **argv)
     };
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--once")) once = 1;
+        else if (!strcmp(argv[i], "--daemonize")) daemonize = 1;
         else if (!strcmp(argv[i], "--serve")) serve = 1;
         else if (!strcmp(argv[i], "--submit")) submit = 1;
         else if (!strcmp(argv[i], "--flush-source")) flush_source = 1;
         else if (!strcmp(argv[i], "--flush-all")) flush_all = 1;
         else if (!strcmp(argv[i], "--precompile")) precompile = 1;
         else if (!strcmp(argv[i], "--flush-only")) config.flush_only = true;
+        else if (!strcmp(argv[i], "--idle-seconds") && i + 1 < argc) {
+            char *end = NULL;
+            uint64_t seconds = g_ascii_strtoull(argv[++i], &end, 10);
+            if (!end || *end || seconds > UINT32_MAX) return 2;
+            config.idle_seconds = seconds;
+        }
         else if (!strcmp(argv[i], "--socket") && i + 1 < argc)
             config.socket_path = argv[++i];
         else if (!strcmp(argv[i], "--cache-dir") && i + 1 < argc)
@@ -3656,9 +3708,25 @@ int main(int argc, char **argv)
         return 2;
     }
     char error[512] = {0};
+    if (daemonize && !serve) {
+        fprintf(stderr, "latcd: --daemonize requires --serve\n");
+        return 2;
+    }
     if (validate_toolchain(&config, error, sizeof(error))) {
         fprintf(stderr, "latcd: %s\n", error);
         return 1;
+    }
+    if (daemonize) {
+        pid_t child = fork();
+        if (child < 0) return 1;
+        if (child > 0) return 0;
+        if (setsid() < 0) _exit(1);
+        child = fork();
+        if (child < 0) _exit(1);
+        if (child > 0) _exit(0);
+        if (chdir("/")) _exit(1);
+        long maximum = sysconf(_SC_OPEN_MAX);
+        for (int fd = 3; fd < maximum; fd++) close(fd);
     }
     int cache_owner = acquire_cache_owner(&config, error, sizeof(error));
     if (cache_owner < 0) {

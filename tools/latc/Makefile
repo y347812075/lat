@@ -278,6 +278,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-fallback-loader $(BUILD)/tests/test-native-format \
 	$(BUILD)/tests/test-native-relocate $(BUILD)/tests/test-native-dispatch \
 	$(BUILD)/tests/test-aot-recover-tu \
+	$(BUILD)/tests/test-auto-config \
 	$(BUILD)/tests/test-aot-v2-module-pack \
 	$(BUILD)/tests/test-latcd-protocol \
 	$(BUILD)/tests/test-latcd-client \
@@ -354,6 +355,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-aot-v2-module-pack
 	$(BUILD)/tests/test-latcd-protocol
 	$(BUILD)/tests/test-latcd-client
+	mkdir -p "$${TMPDIR:-$$HOME/tmp}"
+	TMPDIR="$${TMPDIR:-$$HOME/tmp}" $(BUILD)/tests/test-auto-config
 	$(BUILD)/tests/test-precompile
 	$(BUILD)/tests/test-aot-v2-guest-elf-map \
 	  $(BUILD)/tests/x86-pie-exit42 $(BUILD)/tests/x86-pie-exit42 \
@@ -911,6 +914,11 @@ $(BUILD)/tests/test-aot-v2-module-pack: \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+$(BUILD)/tests/test-auto-config: aot-v2/tests/test-auto-config.c \
+		aot-v2/runtime/auto-config.c aot-v2/runtime/latcd-client.c $(BUILD)/latcd/protocol.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
 $(BUILD)/tests/test-aot-v2-guest-elf-map: \
 		aot-v2/tests/test-guest-elf-map.c \
 		aot-v2/runtime/guest-elf-map.c
@@ -1075,6 +1083,12 @@ test-invalidation-stats:
 test: test-invalidation-stats
 
 .PHONY: test-aot-v2-thread-env
+.PHONY: test-aot-v2-autostart
+test-aot-v2-autostart:
+	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)"
+	sh tests/test-aot-v2-autostart.sh "$(INSTALL_PREFIX)" "$(X86_GUEST)" \
+	  "$$(mktemp -d "$${TMPDIR:-$$HOME/tmp}/lat-aa.XXXXXX")"
+
 .PHONY: test-aot-v2-source-fd
 test-aot-v2-source-fd:
 	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \

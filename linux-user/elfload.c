@@ -6,6 +6,7 @@
 #include <sys/shm.h>
 
 #include "qemu.h"
+#include "auto-config.h"
 #include "disas/disas.h"
 #include "qemu/bitops.h"
 #include "qemu/path.h"
@@ -3450,7 +3451,7 @@ int load_elf_binary(struct linux_binprm *bprm, struct image_info *info)
 #ifndef TARGET_X86_64
     const VdsoImageInfo *vdso = NULL;
 #else
-    const VdsoImageInfo *vdso = getenv("LATX_AOT_V2_MODULE") ?
+    const VdsoImageInfo *vdso = lat_aot_module_path() ?
                                 NULL : vdso_image_info();
 #endif
     if (vdso) {
