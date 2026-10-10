@@ -372,4 +372,7 @@ case $ret in
     ;;
 esac
 
-exit "$ret"
+# Meson reserves exit 77 for the prerequisite checks above, not guest failures.
+if [ "$ret" -ne 0 ]; then
+    exit 1
+fi
