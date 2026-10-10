@@ -1375,7 +1375,9 @@ int target_munmap(abi_ulong start, abi_ulong len, int rlimit_as_account)
     }
 
     mmap_lock();
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
     latc_aot_v2_note_munmap(thread_cpu, start, len);
+#endif
     ret = mmap_unmap_host_range(start, len);
 
     if (ret == 0) {
