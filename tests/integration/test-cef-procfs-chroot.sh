@@ -343,6 +343,30 @@ case $ret in
 123)
     echo "FAIL: root race did not exercise both root views" >&2
     ;;
+124)
+    echo "FAIL: long relative fstatat failed" >&2
+    ;;
+125)
+    echo "FAIL: long relative fstatat exposed translator threads" >&2
+    ;;
+126)
+    echo "FAIL: long relative statx failed" >&2
+    ;;
+127)
+    echo "FAIL: long relative statx exposed translator threads" >&2
+    ;;
+128)
+    echo "FAIL: long relative fstatat on another task failed" >&2
+    ;;
+129)
+    echo "FAIL: long relative fstatat rewrote another task" >&2
+    ;;
+130)
+    echo "FAIL: long relative statx on another task failed" >&2
+    ;;
+131)
+    echo "FAIL: long relative statx rewrote another task" >&2
+    ;;
 *)
     echo "FAIL: unexpected guest exit status $ret" >&2
     ;;

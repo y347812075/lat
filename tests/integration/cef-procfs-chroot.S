@@ -44,6 +44,12 @@ chroot_path:
     .asciz "/proc/self/fdinfo"
 relative_task:
     .asciz "self/task"
+/* Below PATH_MAX, but without enough room for an identity suffix. */
+long_relative_task:
+    .rept 2041
+    .ascii "./"
+    .endr
+    .asciz "self/task"
 self_path:
     .asciz "self"
 task_path:
@@ -62,6 +68,8 @@ statxbuf:
     .space 256
 other_task_path:
     .space 64
+long_other_task_path:
+    .space 4096
 self_fd:
     .long 0
 .align 16
@@ -115,6 +123,17 @@ _start:
     movb $'s', 3(%rdi)
     movb $'k', 4(%rdi)
     movb $0, 5(%rdi)
+
+    lea long_other_task_path(%rip), %rdi
+    mov $2041, %ecx
+    mov $0x2f2e, %eax
+    rep stosw
+    lea other_task_path(%rip), %rsi
+.Lcopy_long_other_path:
+    lodsb
+    stosb
+    test %al, %al
+    jne .Lcopy_long_other_path
 
     xor %r15d, %r15d
     mov 24(%rsp), %rsi
@@ -237,6 +256,52 @@ _start:
     /* One guest thread must be reported as '.' + '..' + one task. */
     cmpq $3, statbuf+16(%rip)
     jne task_count_failed
+
+    mov $__NR_newfstatat, %eax
+    mov %r12d, %edi
+    lea long_relative_task(%rip), %rsi
+    lea statbuf(%rip), %rdx
+    xor %r10d, %r10d
+    syscall
+    test %rax, %rax
+    js long_task_stat_failed
+    cmpq $3, statbuf+16(%rip)
+    jne long_task_count_failed
+
+    mov $__NR_statx, %eax
+    mov %r12d, %edi
+    lea long_relative_task(%rip), %rsi
+    xor %edx, %edx
+    mov $STATX_BASIC_STATS, %r10d
+    lea statxbuf(%rip), %r8
+    syscall
+    test %rax, %rax
+    js long_task_statx_failed
+    cmpl $3, statxbuf+16(%rip)
+    jne long_task_statx_count_failed
+
+    mov $__NR_newfstatat, %eax
+    mov %r12d, %edi
+    lea long_other_task_path(%rip), %rsi
+    lea statbuf(%rip), %rdx
+    xor %r10d, %r10d
+    syscall
+    test %rax, %rax
+    js long_other_task_stat_failed
+    cmp %r15, statbuf+16(%rip)
+    jne long_other_task_rewritten
+
+    mov $__NR_statx, %eax
+    mov %r12d, %edi
+    lea long_other_task_path(%rip), %rsi
+    xor %edx, %edx
+    mov $STATX_BASIC_STATS, %r10d
+    lea statxbuf(%rip), %r8
+    syscall
+    test %rax, %rax
+    js long_other_task_statx_failed
+    cmp %r15d, statxbuf+16(%rip)
+    jne long_other_task_statx_rewritten
 
     mov $__NR_fstat, %eax
     mov %r13d, %edi
@@ -980,6 +1045,30 @@ task_stat_failed:
     jmp exit
 task_count_failed:
     mov $34, %edi
+    jmp exit
+long_task_stat_failed:
+    mov $124, %edi
+    jmp exit
+long_task_count_failed:
+    mov $125, %edi
+    jmp exit
+long_task_statx_failed:
+    mov $126, %edi
+    jmp exit
+long_task_statx_count_failed:
+    mov $127, %edi
+    jmp exit
+long_other_task_stat_failed:
+    mov $128, %edi
+    jmp exit
+long_other_task_rewritten:
+    mov $129, %edi
+    jmp exit
+long_other_task_statx_failed:
+    mov $130, %edi
+    jmp exit
+long_other_task_statx_rewritten:
+    mov $131, %edi
     jmp exit
 open_task_failed:
     mov $35, %edi

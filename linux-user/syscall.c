@@ -12800,6 +12800,22 @@ static char *latx_stat_self_task_path(const char *pathname, int flags)
     return g_strdup_printf("%s/../../self/task", target);
 }
 
+static bool latx_stat_task_reference(int dirfd, const char *task_path,
+                                     struct stat *task_st)
+{
+    if (fstatat(dirfd, task_path, task_st, 0) == 0) {
+        return true;
+    }
+
+    /*
+     * Preserve the saved proc-root lookup when a valid guest pathname leaves
+     * no room for the identity suffix.  The caller still compares this inode
+     * with the original result on the same, verified procfs filesystem.
+     */
+    return errno == ENAMETOOLONG &&
+           fstatat(dirfd, "self/task", task_st, 0) == 0;
+}
+
 static bool latx_stat_is_proc_self_task_at(int dirfd, const char *pathname,
                                            int flags,
                                            const struct stat *st)
@@ -12829,7 +12845,7 @@ static bool latx_stat_is_proc_self_task_at(int dirfd, const char *pathname,
     if (!task_path) {
         return false;
     }
-    ret = fstatat(dirfd, task_path, &task_st, 0) == 0 &&
+    ret = latx_stat_task_reference(dirfd, task_path, &task_st) &&
           latx_stat_same_object(st, &task_st);
     g_free(task_path);
     return ret;
@@ -12875,7 +12891,7 @@ static bool latx_statx_is_proc_self_task_at(int dirfd, const char *pathname,
     if (!task_path) {
         return false;
     }
-    ret = fstatat(dirfd, task_path, &task_st, 0) == 0 &&
+    ret = latx_stat_task_reference(dirfd, task_path, &task_st) &&
           stx->stx_dev_major == major(task_st.st_dev) &&
           stx->stx_dev_minor == minor(task_st.st_dev) &&
           stx->stx_ino == task_st.st_ino;
