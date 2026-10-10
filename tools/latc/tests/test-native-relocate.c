@@ -6,7 +6,9 @@
 
 int main(void)
 {
-    unsigned char image[512] = {0};
+    unsigned char image[sizeof(LatNativeImageHeaderV2) + 56 +
+                        sizeof(LatNativeTbV1) +
+                        6 * sizeof(LatNativeRelocationV1)] = {0};
     LatNativeImageHeaderV2 *header = (void *)image;
     uint32_t *instructions;
     LatNativeRelocationV1 *relocations;
