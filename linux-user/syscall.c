@@ -18966,13 +18966,20 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                         host_stx.stx_nlink = latx_guest_thread_count() + 2;
                     }
 #endif
-                    if (host_to_target_statx(&host_stx, arg5) != 0) {
-                        ret = -TARGET_EFAULT;
-                    }
                 }
 
                 if (ret != -TARGET_ENOSYS) {
-                    goto statx_done;
+#ifdef CONFIG_LATX
+                    latx_syscall_fs_unlock();
+                    g_free(pathname_snapshot);
+#else
+                    unlock_user(p, arg2, 0);
+#endif
+                    /* Guest copyout can take mmap_lock(), as fork does. */
+                    if (!is_error(ret)) {
+                        ret = host_to_target_statx(&host_stx, arg5);
+                    }
+                    return ret;
                 }
             }
 #endif
@@ -18983,12 +18990,15 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 latx_adjust_proc_self_task_stat_at(dirfd, pathname, flags,
                                                    &st);
             }
+            latx_syscall_fs_unlock();
+            g_free(pathname_snapshot);
+#else
+            unlock_user(p, arg2, 0);
 #endif
 
             if (!is_error(ret)) {
                 if (!lock_user_struct(VERIFY_WRITE, target_stx, arg5, 0)) {
-                    ret = -TARGET_EFAULT;
-                    goto statx_done;
+                    return -TARGET_EFAULT;
                 }
                 memset(target_stx, 0, sizeof(*target_stx));
                 __put_user(major(st.st_dev), &target_stx->stx_dev_major);
@@ -19008,13 +19018,6 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 __put_user(st.st_ctime, &target_stx->stx_ctime.tv_sec);
                 unlock_user_struct(target_stx, arg5, 1);
             }
-statx_done:
-#ifdef CONFIG_LATX
-            latx_syscall_fs_unlock();
-            g_free(pathname_snapshot);
-#else
-            unlock_user(p, arg2, 0);
-#endif
             return ret;
         }
 #endif
