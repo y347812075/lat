@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/un.h>
 
 #define LATCD_REQUEST_MAGIC UINT32_C(0x4c415444)
 #define LATCD_RESPONSE_MAGIC UINT32_C(0x4c415452)
@@ -20,6 +21,7 @@ enum LatcdOperation {
     LATCD_OP_FLUSH_SOURCE = 2,
     LATCD_OP_FLUSH_ALL = 3,
     LATCD_OP_PRECOMPILE_SOURCE = 4,
+    LATCD_OP_HELLO = 5,
 };
 
 enum LatcdStatus {
@@ -66,6 +68,10 @@ int latcd_send_response(int socket_fd, const LatcdResponseV2 *response,
                         char *error, size_t error_size);
 int latcd_receive_response(int socket_fd, LatcdResponseV2 *response,
                            char *error, size_t error_size);
+
+/* Keep directory_fd open through bind/connect when a pathname exceeds sun_path. */
+int latcd_socket_address(const char *path, struct sockaddr_un *address,
+                         int *directory_fd, char *error, size_t error_size);
 
 _Static_assert(sizeof(LatcdRequestV2) == 32,
                "latcd request ABI size changed");

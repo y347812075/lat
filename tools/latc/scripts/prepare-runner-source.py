@@ -70,6 +70,14 @@ def main() -> None:
                  "  'guest-elf-map.c',\n"
                  "  'latcd-client.c',\n"
                  "  'latc-aot-v2-runner.c',\n")
+    replace_once(source / "linux-user/meson.build",
+                 "  'latcd-client.c',\n",
+                 "  'latcd-client.c',\n  'auto-config.c',\n")
+    if (source / "meson.build").is_file():
+        replace_once(source / "meson.build",
+                     "config_host_data.set_quoted('CONFIG_BINDIR', get_option('prefix') / get_option('bindir'))\n",
+                     "config_host_data.set_quoted('CONFIG_BINDIR', get_option('prefix') / get_option('bindir'))\n"
+                     "config_host_data.set_quoted('CONFIG_LATC_LIBDIR', get_option('prefix') / get_option('libdir'))\n")
     replace_once(source / "target/i386/latx/sbt/meson.build",
                  "  'aot.c',\n", "  'aot.c',\n  'latc_native_export.c',\n")
     # The minimal static linux-user runner uses neither OpenSSL nor zlib.

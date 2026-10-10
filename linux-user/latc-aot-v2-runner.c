@@ -12,6 +12,7 @@
 #include "latc-build-id.h"
 #include "latcd-client.h"
 #include "latcd-protocol.h"
+#include "auto-config.h"
 #include "lat-tb-key-set.h"
 #include "guest-elf-map.h"
 #include "module-loader.h"
@@ -190,7 +191,7 @@ static _Atomic uint64_t invalidated_exec_ranges;
 static _Atomic uint64_t revalidated_instances;
 static _Atomic uint64_t revalidation_failures;
 
-static void submit_runtime_tbsets(void);
+static bool submit_runtime_tbsets(void);
 static void schedule_runtime_tbset_submission(void);
 
 static bool next_compiler_request_id(uint64_t *request_id)
@@ -901,9 +902,9 @@ static void note_dispatch_miss(LatAotV2ModuleStats *stats,
 
 bool latc_aot_v2_mapping_enabled(void)
 {
-    const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
-    const char *module = getenv("LATX_AOT_V2_MODULE");
-    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
+    const char *cache = lat_aot_cache_path();
+    const char *module = lat_aot_module_path();
+    const char *socket = lat_aot_socket_path();
     return (cache && *cache) || (module && *module) || (socket && *socket);
 }
 
@@ -946,7 +947,7 @@ static bool note_jit_key_locked(target_ulong guest_pc, uint32_t cflags)
 
 void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
 {
-    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
+    const char *socket = lat_aot_socket_path();
     if (!socket || !*socket) {
         return;
     }
@@ -967,11 +968,32 @@ static int tbset_entry_compare(gconstpointer left, gconstpointer right)
     return 0;
 }
 
-static void submit_runtime_tbsets(void)
+static bool submit_runtime_tbsets(void)
 {
-    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
-    if (!socket || !*socket) return;
+    const char *socket = lat_aot_socket_path();
+    if (!socket || !*socket) return true;
     pthread_mutex_lock(&submission_lock);
+    bool pending = false;
+    pthread_mutex_lock(&tbset_lock);
+    for (LatAotV2ModuleStats *stats = atomic_load_explicit(
+             &module_stats, memory_order_acquire); stats; stats = stats->next) {
+        if (stats->source_fd >= 0 && stats->pending_tbset &&
+            g_hash_table_size(stats->pending_tbset)) {
+            pending = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&tbset_lock);
+    if (!pending) {
+        pthread_mutex_unlock(&submission_lock);
+        return true;
+    }
+    if (!lat_aot_ensure_daemon()) {
+        atomic_fetch_add(&compiler_submission_failures, 1);
+        pthread_mutex_unlock(&submission_lock);
+        return false;
+    }
+    bool submitted = true;
     for (LatAotV2ModuleStats *stats = atomic_load_explicit(
              &module_stats, memory_order_acquire); stats;
          stats = stats->next) {
@@ -1035,6 +1057,7 @@ static void submit_runtime_tbsets(void)
                 LATCD_PRIORITY_LIBRARY, request_id, request_id,
                 error, sizeof(error))) {
             atomic_fetch_add(&compiler_submission_failures, 1);
+            submitted = false;
             if (getenv("LATX_AOT_V2_REPORT")) {
                 fprintf(stderr,
                         "latx: AOT v2 TB set submission failed source=%s: %s\n",
@@ -1063,6 +1086,7 @@ static void submit_runtime_tbsets(void)
         g_array_free(entries, TRUE);
     }
     pthread_mutex_unlock(&submission_lock);
+    return submitted;
 }
 
 static void *runtime_tbset_submission_thread(void *opaque)
@@ -1089,9 +1113,16 @@ static void *runtime_tbset_submission_thread(void *opaque)
             target = submission_generation;
         }
         pthread_mutex_unlock(&submission_control_lock);
-        submit_runtime_tbsets();
+        bool submitted = submit_runtime_tbsets();
         handled = target;
         pthread_mutex_lock(&submission_control_lock);
+        if (!submitted && submission_generation == handled) {
+            clock_gettime(CLOCK_REALTIME, &deadline);
+            deadline.tv_sec += 5;
+            pthread_cond_timedwait(&submission_control_cond,
+                                  &submission_control_lock, &deadline);
+            handled--;
+        }
     }
     return NULL;
 }
@@ -1120,8 +1151,15 @@ static bool precompile_enabled(void)
 
 static int precompile_source(int source_fd, char *error, size_t error_size)
 {
-    const char *socket = getenv("LATX_AOT_V2_LATCD_SOCKET");
-    const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
+    pthread_mutex_lock(&submission_lock);
+    bool ready = lat_aot_ensure_daemon();
+    pthread_mutex_unlock(&submission_lock);
+    if (!ready) {
+        snprintf(error, error_size, "latcd unavailable for precompile");
+        return -1;
+    }
+    const char *socket = lat_aot_socket_path();
+    const char *cache = lat_aot_cache_path();
     if (!socket || !*socket || !cache || !*cache) {
         snprintf(error, error_size,
                  "LATX_AOT_V2_PRECOMPILE requires cache and latcd socket");
@@ -1158,6 +1196,7 @@ static void drain_mappings(void)
             pending_mapping_tail = &pending_mapping_head;
         }
         if (!elf_tracker) {
+            lat_guest_elf_set_cache_directory_v2(lat_aot_cache_path());
             elf_tracker = lat_guest_elf_tracker_new_v2();
         }
         const LatGuestElfInfoV2 *info = NULL;
@@ -1977,7 +2016,7 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
                                       LatAotV2RuntimeInstance **instance,
                                       char *error, size_t error_size)
 {
-    const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
+    const char *cache = lat_aot_cache_path();
     if (!cache || !*cache) {
         return 0;
     }
@@ -2384,7 +2423,7 @@ static int inspect_source(const char *path, LatAotExpectedV2 *expected,
 
 int latc_aot_v2_prepare(CPUArchState *env)
 {
-    const char *module_path = getenv("LATX_AOT_V2_MODULE");
+    const char *module_path = lat_aot_module_path();
     const char *source_path = getenv("LATX_AOT_V2_SOURCE");
     bool strict = aot_v2_strict;
     signal_invalidation_test =
@@ -2643,7 +2682,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
 #ifdef CONFIG_LATX_FAST_JMPCACHE
     /* PIE and DSO targets keep using the generation-checked AOT v2 cache. */
     bool legacy_fast_cache =
-        !getenv("LATX_AOT_V2_CACHE_DIR") ||
+        !lat_aot_cache_path() ||
         (runtime_instance->runtime_module &&
          runtime_instance->runtime_module->legacy_fast_cache);
     if (legacy_fast_cache) {
@@ -2696,7 +2735,7 @@ bool latc_aot_v2_activate_target(CPUState *cpu,
     aot_v2_execution_active = true;
 #ifdef CONFIG_LATX_FAST_JMPCACHE
     latx_aot_v2_fast_jmp_cache_set_context(cpu, instance);
-    if (getenv("LATX_AOT_V2_CACHE_DIR")) {
+    if (lat_aot_cache_path()) {
         uint32_t hash = tb_jmp_cache_hash_func(target->guest_pc);
         latx_aot_v2_fast_jmp_cache_add(
             cpu, hash, target->guest_pc, target->host_address,

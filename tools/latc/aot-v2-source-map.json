@@ -50,6 +50,8 @@
     {"source": "tools/latc/aot-v2/runtime/guest-elf-map.h", "target": "linux-user/guest-elf-map.h"},
     {"source": "tools/latc/aot-v2/runtime/latcd-client.c", "target": "linux-user/latcd-client.c"},
     {"source": "tools/latc/aot-v2/runtime/latcd-client.h", "target": "linux-user/latcd-client.h"},
+    {"source": "tools/latc/aot-v2/runtime/auto-config.c", "target": "linux-user/auto-config.c"},
+    {"source": "tools/latc/aot-v2/runtime/auto-config.h", "target": "linux-user/auto-config.h"},
     {"source": "tools/latc/latcd/protocol.c", "target": "linux-user/latcd-protocol.c"},
     {"source": "tools/latc/aot-v2/common/tb-key-set.c", "target": "linux-user/tb-key-set.c"},
 

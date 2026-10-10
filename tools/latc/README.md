@@ -8,6 +8,52 @@ and embeds the resulting native code and relocation records.
 
 ## AOT v2 module prototype
 
+### Automatic runtime setup
+
+Legacy `LATX_AOT` remains the default. Set `LATX_AOT_V2=1` to select
+AOT v2 without configuring a cache/socket or starting `latcd` manually.
+An explicitly enabled `LATX_AOT` together with enabled v2 is an error before
+guest execution. `LATX_AOT=0 LATX_AOT_V2=0` selects pure JIT. An explicit
+`LATX_AOT_V2=0` also disables v2 when legacy cache/socket overrides remain.
+Command-line options override environment values, which override LAT config.
+Older explicit cache/socket/module configurations still imply v2 when the
+mode is unset; they are subject to the same mutual exclusion check.
+
+The default cache is `${XDG_CACHE_HOME:-$HOME/.cache}/lat-aot-v2/<build-id>/live`.
+State and `daemon.log` are under
+`${XDG_STATE_HOME:-$HOME/.local/state}/lat-aot-v2/<build-id>`.
+The private socket lives under `$XDG_RUNTIME_DIR/lat-aot-v2`, or the state
+root's `lat-aot-v2/run` directory when a private runtime directory is absent.
+Socket names identify both the toolchain and canonical cache directory.
+Long directory paths use an open directory FD for Unix socket bind/connect,
+without relocating the cache or changing the working directory.
+These paths are application-independent; incompatible builds use separate caches.
+
+The runner starts matching installed tools on demand, checks the daemon's
+user/build/cache identity, and serializes concurrent starts. Compilation
+continues after the guest exits. A managed daemon exits after 60 seconds idle,
+only when queued compilation and precompile requests have completed.
+A fully covered warm run does not start a daemon. Ordinary failures retain
+usable cached modules and fall back to JIT; strict AOT checks still fail.
+Privileged execution does not automatically activate v2.
+
+`LATX_AOT_V2_AUTOSTART=0` disables automatic starts but can still connect to
+an existing matching daemon. Explicit `LATX_AOT_V2_LATCD_SOCKET` or
+`LATX_AOT_V2_MODULE` selects manual operation; the runner never starts or
+replaces that daemon. Explicit cache paths may still use automatic startup.
+Precompile, collect-only and strict diagnostics remain opt-in and are not
+enabled by automatic setup.
+
+Installed tools must share one build identity. System deployment uses normal
+library loader configuration; private install tests use `LD_LIBRARY_PATH`.
+The automatic daemon receives only the configured runtime library directory,
+not the application's loader environment.
+
+```sh
+make -C tools/latc test-aot-v2-autostart \
+  INSTALL_PREFIX=/path/to/install X86_GUEST=/path/to/x86-static-hello
+```
+
 AOT v2 is the new per-x86-ELF module design. It keeps the original x86 program
 as the user-visible launch target and loads cached LoongArch `ET_DYN` modules
 inside LAT. The design and confirmed runtime rules are in

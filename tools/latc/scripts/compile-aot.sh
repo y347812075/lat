@@ -47,7 +47,7 @@ else
         >/dev/null
 fi
 report_timing stage1_bundle
-HOME="$work/home" LATX_AOT=1 LATC_EMIT_AOT=1 \
+HOME="$work/home" LATX_AOT=1 LATX_AOT_V2=0 LATX_AOT_V2_AUTOSTART=0 LATC_EMIT_AOT=1 \
     LATC_NAMED_GUEST="$named_guest" "$work/stage1.la64"
 report_timing translate_export
 if [ -n "${LATC_NATIVE_IMAGE_OUT:-}" ]; then

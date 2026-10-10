@@ -19,6 +19,7 @@
 
 #include "library_private.h"
 #include "qemu/osdep.h"
+#include "auto-config.h"
 #include "qemu-common.h"
 #include "qemu/units.h"
 #include "qemu/accel.h"
@@ -115,6 +116,8 @@ int box64_tcmalloc_minimal = 0;
 #endif
 
 char *exec_path;
+static bool explicit_legacy_aot;
+static int requested_legacy_aot;
 char *real_path;
 #ifdef CONFIG_LATX_AOT
 char *aot_file_path;
@@ -840,10 +843,17 @@ static void handle_arg_latx_fork_unlink(const char *arg)
 #ifdef CONFIG_LATX_AOT
 static void handle_arg_latx_aot(const char *arg)
 {
+    explicit_legacy_aot = true;
     option_aot = strtol(arg, NULL, 0);
+    requested_legacy_aot = option_aot;
     if (option_softfpu || option_mem_test) {
         option_aot = 0;
     }
+}
+
+static void handle_arg_latx_aot_v2(const char *arg)
+{
+    lat_aot_config_option("LATX_AOT_V2", arg);
 }
 
 static void handle_arg_latx_aot_pe_profile(const char *arg)
@@ -971,6 +981,8 @@ static const struct qemu_argument arg_table[] = {
 #ifdef CONFIG_LATX_AOT
     {"latx-aot",    "LATX_AOT",     true,  handle_arg_latx_aot,
     "",           "enable aot"},
+    {"latx-aot-v2", NULL, true, handle_arg_latx_aot_v2,
+    "0|1", "select AOT v2"},
     {"latx-aot-pe-profile", "LATX_AOT_PE_PROFILE", true,
     handle_arg_latx_aot_pe_profile, "", "split libcef PE AOT by process role"},
     {"latx-aot-file-size", "LAT_AOT_FILE_SIZE", false,
@@ -1163,6 +1175,7 @@ void find_option(const char* key, const char* val)
     if (runtime_info_requested && strcmp(key, "LAT_LD_PREFIX")) {
         return;
     }
+    if (lat_aot_config_option(key, val)) return;
 
 #define ENVFUN(NAME, name) \
     else if (!strcmp(key, #NAME)) { \
@@ -1187,6 +1200,7 @@ static void options_set(char **target_argv)
 {
     /* set latx.conf */
     conf_init(target_argv);
+    if (!runtime_info_requested) lat_aot_config_environment();
 
     const char *r;
     const struct qemu_argument *arginfo;
@@ -1558,6 +1572,15 @@ int main(int argc, char **argv, char **envp)
         print_runtime_info();
         return EXIT_SUCCESS;
     }
+    char aot_config_error[256];
+    int aot_selection = explicit_legacy_aot ? requested_legacy_aot : option_aot;
+    if (lat_aot_config_init(&aot_selection, explicit_legacy_aot,
+                            CONFIG_BINDIR, CONFIG_LATC_LIBDIR,
+                            aot_config_error, sizeof(aot_config_error))) {
+        error_report("%s", aot_config_error);
+        return EXIT_FAILURE;
+    }
+    if (!aot_selection) option_aot = 0;
 
     /* Scan interp_prefix dir for replacement files. */
     init_paths(interp_prefix);

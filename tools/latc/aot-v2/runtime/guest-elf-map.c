@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <glib.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,16 @@
 struct LatGuestElfTrackerV2 {
     GPtrArray *entries;
 };
+
+static char *configured_cache;
+static bool cache_configured;
+
+void lat_guest_elf_set_cache_directory_v2(const char *directory)
+{
+    g_free(configured_cache);
+    configured_cache = g_strdup(directory);
+    cache_configured = true;
+}
 
 static int invalid(char *error, size_t error_size, const char *format, ...)
 {
@@ -58,7 +69,8 @@ static int same_identity(const struct stat *left, const struct stat *right)
 
 static char *digest_cache_path(const struct stat *status)
 {
-    const char *cache = getenv("LATX_AOT_V2_CACHE_DIR");
+    const char *cache = cache_configured ? configured_cache :
+                       getenv("LATX_AOT_V2_CACHE_DIR");
     if (!cache || !*cache) {
         return NULL;
     }

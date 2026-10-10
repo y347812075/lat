@@ -34,6 +34,7 @@ int lat_guest_elf_inspect_mapping_v2(int fd, uint64_t guest_start,
                                      char *error, size_t error_size);
 
 LatGuestElfTrackerV2 *lat_guest_elf_tracker_new_v2(void);
+void lat_guest_elf_set_cache_directory_v2(const char *directory);
 void lat_guest_elf_tracker_free_v2(LatGuestElfTrackerV2 *tracker);
 int lat_guest_elf_tracker_note_v2(LatGuestElfTrackerV2 *tracker, int fd,
                                   uint64_t guest_start,
