@@ -529,8 +529,7 @@ static int append_relocation(GArray *output, RelocationOffsetSet *offsets,
             g_hash_table_insert(constant_offsets, key,
                                 GUINT_TO_POINTER(offset + 1));
         }
-        if (source->extra_addend < 0 ||
-            (uint64_t)source->extra_addend >= constant_size) {
+        if ((uint64_t)source->extra_addend >= constant_size) {
             fprintf(stderr, "latc: invalid native constant table addend\n");
             return -1;
         }
