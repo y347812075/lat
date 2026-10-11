@@ -78,6 +78,20 @@ if 'CONFIG_LATX' in config_host and host_machine.cpu_family() == 'loongarch64'
 endif
 
 test(
+  'test-latx-smc-shmm',
+  python,
+  args: [files('test-latx-smc-shmm.py'), project_source_root],
+  suite: 'lat-pr-fast',
+)
+
+test(
+  'test-latx-smc-fallback',
+  python,
+  args: [files('test-latx-smc-fallback.py'), project_source_root],
+  suite: 'lat-pr-fast',
+)
+
+test(
   'test-x11-synchronize-callback',
   python,
   args: [
@@ -111,6 +125,51 @@ test(
   suite: 'lat-pr-fast',
 )
 
+# Keep the SHBR semantic inventory and its static coverage contracts in the
+# ordinary PR suite.  These scripts inspect source files only, so they must
+# not require a LATX target binary or cause one to be built.
+hbr_python_env = environment()
+hbr_python_env.set('PYTHONPATH', project_source_root / 'scripts')
+
+test(
+  'test-latx-hbr-semantics-generated',
+  python,
+  args: [
+    project_source_root / 'scripts/generate_latx_hbr_semantics.py',
+    '--check',
+  ],
+  suite: 'lat-pr-fast',
+)
+
+test(
+  'test-latx-hbr-audit',
+  python,
+  args: [project_source_root / 'scripts/test_latx_hbr_audit.py'],
+  env: hbr_python_env,
+  suite: 'lat-pr-fast',
+)
+
+test(
+  'test-latx-hbr-metrics',
+  python,
+  args: [project_source_root / 'scripts/test_latx_hbr_metrics.py'],
+  env: hbr_python_env,
+  suite: 'lat-pr-fast',
+)
+
+test_hbr_live_transfer = executable(
+  'test-latx-hbr-live-transfer',
+  files('../../target/i386/latx/optimization/tests/hbr-live-transfer-test.c'),
+  include_directories: include_directories('../../target/i386/latx/include'),
+  build_by_default: false,
+)
+
+test(
+  'test-latx-hbr-live-transfer',
+  test_hbr_live_transfer,
+  suite: 'lat-pr-fast',
+)
+
 test_rcu_lazy_thread = executable(
   'test-rcu-lazy-thread',
   files('test-rcu-lazy-thread.c'),
@@ -123,6 +182,25 @@ test(
   test_rcu_lazy_thread,
   suite: 'lat-pr-fast',
 )
+
+if 'CONFIG_POSIX' in config_host
+  test_rcu_fork_queue = executable(
+    'test-rcu-fork-queue',
+    files('test-rcu-fork-queue.c') + genh,
+    include_directories: include_directories('../..'),
+    dependencies: [glib, qemuutil],
+    build_by_default: false,
+  )
+  # QEMU user-mode can strand post-fork worker startup after several emulated
+  # tests have competed.  Run this fork/thread stress test first and isolated.
+  test('test-rcu-fork-queue', test_rcu_fork_queue,
+       suite: 'lat-pr-fast', timeout: 45, is_parallel: false, priority: 100)
+  if 'CONFIG_LATX' in config_host and 'CONFIG_LATX_KZT' in config_host
+    test('test-rcu-fork-queue-held-reader', test_rcu_fork_queue,
+         args: ['--held-reader'], suite: 'lat-pr-fast', timeout: 45,
+         is_parallel: false, priority: 100)
+  endif
+endif
 
 if 'CONFIG_LATX' in config_host
   test_x11_async_handler = executable(
@@ -139,6 +217,24 @@ if 'CONFIG_LATX' in config_host
     suite: 'lat-pr-fast',
   )
 endif
+
+test_kzt_path_collection = executable(
+  'test-kzt-path-collection',
+  files(
+    'kzt/test_kzt_path_collection.c',
+    '../../target/i386/latx/context/pathcoll.c',
+  ) + genh,
+  include_directories: include_directories('../../target/i386/latx/include'),
+  dependencies: [glib],
+)
+test('test-kzt-path-collection', test_kzt_path_collection, suite: 'lat-pr-fast')
+
+test(
+  'test-kzt-elf-lifecycle',
+  python,
+  args: [files('kzt/test-kzt-elf-lifecycle.py'), project_source_root],
+  suite: 'lat-pr-fast',
+)
 
 test_kzt_public_loader_observer = executable(
   'test-kzt-public-loader-observer',
@@ -186,5 +282,44 @@ test_kzt_address_policy = executable(
 test(
   'test-kzt-address-policy',
   test_kzt_address_policy,
+  suite: 'lat-pr-fast',
+)
+
+if 'CONFIG_LATX_CAPSTONE_GIT' in config_host and 'CONFIG_LATX_DEBUG' not in config_host
+  test_ir1_decode = executable(
+    'test-ir1-decode',
+    files('test-ir1-decode.c') + genh,
+    include_directories: include_directories(
+      '../..', '../../target/i386/latx/include',
+    ),
+    dependencies: [glib, qemuutil, capstone_git],
+    build_by_default: false,
+  )
+  test('test-ir1-decode', test_ir1_decode, suite: 'lat-pr-fast', timeout: 30)
+endif
+
+# Each case compiles assertion-enabled and NDEBUG fixtures at runtime.
+# Give these compilations separate test budgets when running under QEMU.
+foreach cleanup_case : ['thread', 'netlink', 'clone', 'publication']
+  test(
+    'test-latx-thread-cleanup-' + cleanup_case,
+    python,
+    args: [files('test-latx-thread-cleanup.py'), '--repo', project_source_root,
+           '--case', cleanup_case],
+    suite: 'lat-pr-fast',
+  )
+endforeach
+
+test(
+  'test-latx-seccomp-lifetime',
+  python,
+  args: [files('test-latx-seccomp-lifetime.py'), project_source_root],
+  suite: 'lat-pr-fast',
+)
+
+test(
+  'test-lat-ci-matrix',
+  python,
+  args: [files('../ci/test_lat_ci_matrix.py'), 'MatrixSelectionTest'],
   suite: 'lat-pr-fast',
 )

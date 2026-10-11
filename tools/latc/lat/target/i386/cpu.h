@@ -1211,6 +1211,15 @@ typedef union {
     MMXReg mmx;
 } FPReg;
 
+#ifdef CONFIG_LATX
+enum {
+    LATX_FPU_MODE_MMX,
+    LATX_FPU_MODE_X87,
+    /* Reload the MMX view on reentry; the restored env stays authoritative. */
+    LATX_FPU_MODE_RESTORED,
+};
+#endif
+
 typedef struct {
     uint64_t base;
     uint64_t mask;
@@ -1426,7 +1435,7 @@ typedef struct CPUX86State {
     int func_index;
     int last_func_index;
  #endif
-    bool mode_fpu;
+    uint8_t mode_fpu;
     bool fpu_clobber;
 #endif
     /* standard registers */
@@ -1936,6 +1945,12 @@ void cpu_x86_fxsave(CPUX86State *s, target_ulong ptr);
 void cpu_x86_fxrstor(CPUX86State *s, target_ulong ptr);
 void cpu_x86_xsave(CPUX86State *s, target_ulong ptr);
 void cpu_x86_xrstor(CPUX86State *s, target_ulong ptr);
+void cpu_x86_init_user_x87(CPUX86State *s);
+#ifdef CONFIG_LATX
+void cpu_x86_canonicalize_latx_mmx_state(CPUX86State *s);
+void cpu_x86_sync_latx_fcsr(CPUX86State *s);
+void cpu_x86_sync_latx_fpu_mode(CPUX86State *s);
+#endif
 
 /* you can call this signal handler from your SIGBUS and SIGSEGV
    signal handlers to inform the virtual CPU of exceptions. non zero

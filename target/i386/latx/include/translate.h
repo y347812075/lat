@@ -1447,6 +1447,13 @@ TRANS_FUNC_DEF(aesenclast);
 TRANS_FUNC_DEF(aesimc);
 TRANS_FUNC_DEF(aeskeygenassist);
 
+void gen_aesenc_ir2(IR2_OPND dest, IR2_OPND key);
+void gen_aesenclast_ir2(IR2_OPND dest, IR2_OPND key);
+void gen_aesenc_ir2_no_key(IR2_OPND dest);
+void gen_aesenclast_ir2_no_key(IR2_OPND dest);
+void gen_vaesenc_lasx_ir2(IR2_OPND dest, IR2_OPND key, bool is_last);
+void load_aes_key_from_mem(IR2_OPND key, IR1_OPND *mem);
+
 #ifdef CONFIG_LATX_AVX_OPT
 TRANS_FUNC_DEF(vaesdec);
 TRANS_FUNC_DEF(vaesdeclast);
@@ -1738,7 +1745,8 @@ void update_fcsr_rm(IR2_OPND control_word, IR2_OPND fcsr);
 bool ir1_need_reserve_h128(IR1_INST *ir1);
 IR2_OPND save_h128_of_ymm(IR1_INST *ir1);
 void restore_h128_of_ymm(IR1_INST *ir1, IR2_OPND temp);
-void gen_test_page_flag(IR2_OPND mem_opnd, int mem_imm, uint32_t flag);
+void gen_test_page_flag(IR2_OPND mem_opnd, int mem_imm, uint32_t flag,
+                        unsigned int mem_size);
 
 void clear_h32(IR2_OPND *opnd);
 

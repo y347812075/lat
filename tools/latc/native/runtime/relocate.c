@@ -200,12 +200,43 @@ int lat_native_code_load(const LatNativeImageHeaderV2 *header,
         (const void *)(image + header->relocation_offset);
     for (uint64_t i = 0; i < header->relocation_count; i++) {
         const LatNativeRelocationV1 *relocation = &relocations[i];
+        if (relocation->kind == LAT_NATIVE_RELOC_IMAGE_DATA &&
+            (relocation->slots < 2 || relocation->slots > 3 ||
+             relocation->code_offset >= header->code_size ||
+             relocation->slots * 4 >
+                 header->code_size - relocation->code_offset ||
+             relocation->addend < 0 || !relocation->reserved ||
+             (uint64_t)relocation->addend >= header->code_size ||
+             relocation->reserved >
+                 header->code_size - (uint64_t)relocation->addend)) {
+            errno = EINVAL;
+            munmap(address, mapped_size);
+            return fail(error, error_size, "invalid native data relocation");
+        }
         uint32_t *instructions =
             (void *)((unsigned char *)address + relocation->code_offset);
         int result;
         if (relocation->kind == LAT_NATIVE_RELOC_GUEST_ADDRESS) {
             result = patch_absolute(instructions, relocation->slots,
                                     (uint64_t)relocation->addend);
+        } else if (relocation->kind == LAT_NATIVE_RELOC_IMAGE_DATA) {
+            uintptr_t target = (uintptr_t)address + relocation->addend;
+            int64_t pages = ((int64_t)(target & ~(uintptr_t)0xfff) -
+                (int64_t)((uintptr_t)instructions & ~(uintptr_t)0xfff)) >> 12;
+            if (pages < -(1 << 19) || pages >= (1 << 19)) {
+                errno = ERANGE;
+                result = -1;
+            } else {
+                uint32_t reg = instructions[0] & 0x1f;
+                instructions[0] = 0x1a000000u |
+                    ((uint32_t)pages & 0xfffff) << 5 | reg;
+                instructions[1] = 0x03800000u |
+                    ((uint32_t)target & 0xfff) << 10 | reg << 5 | reg;
+                if (relocation->slots == 3) {
+                    instructions[2] = 0x03400000u;
+                }
+                result = 0;
+            }
         } else if (relocation->kind == LAT_NATIVE_RELOC_TB_TARGET ||
                    relocation->kind == LAT_NATIVE_RELOC_JRRA_TARGET) {
             const LatNativeTbV1 *target_tb = lat_native_tb_find(

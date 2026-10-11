@@ -6,6 +6,8 @@
 #include "lat-eflags-link.h"
 #include "latc-build-id.h"
 #include "latc-bundle-loader.h"
+#include "crypto/aes.h"
+#include "../translator/tr-vpaes.h"
 
 #include <elf.h>
 #include <glib.h>
@@ -220,9 +222,6 @@ static int runtime_symbol(aot_rel_kind kind)
     case LOAD_HELPER_AESDEC_XMM: return LAT_NATIVE_SYMBOL_AESDEC_XMM;
     case LOAD_HELPER_AESDECLAST_XMM:
         return LAT_NATIVE_SYMBOL_AESDECLAST_XMM;
-    case LOAD_HELPER_AESENC_XMM: return LAT_NATIVE_SYMBOL_AESENC_XMM;
-    case LOAD_HELPER_AESENCLAST_XMM:
-        return LAT_NATIVE_SYMBOL_AESENCLAST_XMM;
     case LOAD_HELPER_SHA1NEXTE: return LAT_NATIVE_SYMBOL_SHA1NEXTE;
     case LOAD_HELPER_SHA1MSG1: return LAT_NATIVE_SYMBOL_SHA1MSG1;
     case LOAD_HELPER_SHA1MSG2: return LAT_NATIVE_SYMBOL_SHA1MSG2;
@@ -239,6 +238,10 @@ static int runtime_symbol(aot_rel_kind kind)
     case LOAD_HELPER_RAISE_INTO: return LAT_NATIVE_SYMBOL_RAISE_INTO;
     case LOAD_HELPER_RAISE_BOUND: return LAT_NATIVE_SYMBOL_RAISE_BOUND;
     case LOAD_HELPER_XGETBV: return LAT_NATIVE_SYMBOL_XGETBV;
+    case LOAD_HELPER_XSAVE: return LAT_NATIVE_SYMBOL_XSAVE;
+    case LOAD_HELPER_XSAVEOPT: return LAT_NATIVE_SYMBOL_XSAVEOPT;
+    case LOAD_HELPER_XRSTOR: return LAT_NATIVE_SYMBOL_XRSTOR;
+    case LOAD_HELPER_XSETBV: return LAT_NATIVE_SYMBOL_XSETBV;
     case LOAD_HELPER_KZT_GET_ALTERNATE:
         return LAT_NATIVE_SYMBOL_KZT_GET_ALTERNATE;
     default: return LAT_NATIVE_SYMBOL_INVALID;
@@ -477,7 +480,27 @@ static void append_native_relocation(GArray *output,
     relocation_offset_add(offsets, relocation.code_offset);
 }
 
+static const void *native_constant_table(aot_rel_kind kind, size_t *size)
+{
+#define CONSTANT_TABLE(rel, table) \
+    case rel: *size = sizeof(table); return table
+    switch (kind) {
+    CONSTANT_TABLE(LOAD_HOST_AES_TE_LATX, AES_Te_latx);
+    CONSTANT_TABLE(LOAD_HOST_AES_SBOX_LATX, AES_sbox_latx);
+    CONSTANT_TABLE(LOAD_HOST_AES_VPAES_LASX, AES_vpaes_lasx);
+    CONSTANT_TABLE(LOAD_VPAES_ENC_TABLES, latx_vpaes_enc_tables);
+    CONSTANT_TABLE(LOAD_VPAES_DEC_TABLES, latx_vpaes_dec_tables);
+    CONSTANT_TABLE(LOAD_VPAES_KEYGEN_TABLES, latx_vpaes_keygen_tables);
+    CONSTANT_TABLE(LOAD_VPAES_ENC_TABLES_XV, latx_vpaes_enc_tables_xv);
+    CONSTANT_TABLE(LOAD_VPAES_DEC_TABLES_XV, latx_vpaes_dec_tables_xv);
+    default: return NULL;
+    }
+#undef CONSTANT_TABLE
+}
+
 static int append_relocation(GArray *output, RelocationOffsetSet *offsets,
+        GByteArray *constant_data, GHashTable *constant_offsets,
+        uint64_t constant_base,
         const aot_rel *source,
         const aot_tb *tb, uint64_t tb_code_offset,
         const aot_segment *segment, uint64_t load_bias)
@@ -488,7 +511,33 @@ static int append_relocation(GArray *output, RelocationOffsetSet *offsets,
         .physical_target_plus_one = 0,
     };
     uint64_t guest_pc;
-    if (source->kind == LOAD_CALL_TARGET) {
+    size_t constant_size = 0;
+    const void *constant = native_constant_table(source->kind, &constant_size);
+    if (constant) {
+        gpointer key = GINT_TO_POINTER(source->kind);
+        gpointer found = g_hash_table_lookup(constant_offsets, key);
+        uint64_t offset;
+        if (found) {
+            offset = GPOINTER_TO_UINT(found) - 1;
+        } else {
+            offset = align_up(constant_data->len, 32);
+            guint previous_size = constant_data->len;
+            g_byte_array_set_size(constant_data, offset + constant_size);
+            memset(constant_data->data + previous_size, 0,
+                   offset - previous_size);
+            memcpy(constant_data->data + offset, constant, constant_size);
+            g_hash_table_insert(constant_offsets, key,
+                                GUINT_TO_POINTER(offset + 1));
+        }
+        if (source->extra_addend < 0 ||
+            (uint64_t)source->extra_addend >= constant_size) {
+            fprintf(stderr, "latc: invalid native constant table addend\n");
+            return -1;
+        }
+        relocation.kind = LAT_NATIVE_RELOC_IMAGE_DATA;
+        relocation.addend = constant_base + offset + source->extra_addend;
+        relocation.reserved = constant_size - source->extra_addend;
+    } else if (source->kind == LOAD_CALL_TARGET) {
         relocation.kind = LAT_NATIVE_RELOC_GUEST_ADDRESS;
         relocation.addend = segment->details.seg_begin + source->extra_addend;
     } else if (direct_tb_target(tb, segment, source->kind, &guest_pc)) {
@@ -930,6 +979,9 @@ int latc_native_export(const char *path, const char *guest_path,
     GArray *native_pc_maps = NULL;
     GArray *native_tus = NULL;
     uint8_t *native_code = NULL;
+    GByteArray *constant_data = g_byte_array_new();
+    GHashTable *constant_offsets = g_hash_table_new(g_direct_hash, g_direct_equal);
+    uint64_t constant_base = align_up(code_size, 32);
     uint64_t guest_entry = 0;
     uint64_t guest_base = 0;
     uint64_t guest_load_bias = 0;
@@ -940,13 +992,13 @@ int latc_native_export(const char *path, const char *guest_path,
         !code || (uintptr_t)tbs > tb_table_end ||
         (tb_table_end - (uintptr_t)tbs) % sizeof(*tbs)) {
         fprintf(stderr, "latc: invalid native export arguments\n");
-        return -1;
+        goto out;
     }
     int digest_verified = latc_bundle_verified_guest_digest(guest_digest);
     if (digest_verified < 0 ||
         copy_guest(guest_path, &guest, &guest_entry, &guest_base,
                    guest_digest, digest_verified == 1)) {
-        return -1;
+        goto out;
     }
     if (find_guest_load_bias(guest, header, segments, &guest_load_bias)) {
         fprintf(stderr, "latc: cannot determine native guest load bias\n");
@@ -1089,6 +1141,7 @@ int latc_native_export(const char *path, const char *guest_path,
         for (int rel = tbs[i].rel_start_index;
              rel <= tbs[i].rel_end_index; rel++) {
             if (append_relocation(native_relocations, &relocation_offsets,
+                                  constant_data, constant_offsets, constant_base,
                                   &source_relocations[rel],
                                   &tbs[i], code_offset, segment,
                                   guest_load_bias)) {
@@ -1241,9 +1294,10 @@ int latc_native_export(const char *path, const char *guest_path,
     native_header.guest_image_size = guest->len;
     native_header.code_offset = align_up(native_header.guest_image_offset +
                                          native_header.guest_image_size, 8);
-    native_header.code_size = code_size;
+    native_header.code_size = constant_data->len ?
+        constant_base + constant_data->len : code_size;
     native_header.tb_table_offset = align_up(native_header.code_offset +
-                                             code_size, 8);
+                                             native_header.code_size, 8);
     native_header.tb_count = native_tbs->len;
     native_header.relocation_offset = native_header.tb_table_offset +
         native_tbs->len * sizeof(LatNativeTbV1);
@@ -1277,7 +1331,16 @@ int latc_native_export(const char *path, const char *guest_path,
     if (fwrite(native_code, code_size, 1, output) != 1) {
         goto write_error;
     }
-    position = native_header.code_offset + code_size;
+    if (constant_data->len) {
+        uint8_t zero = 0;
+        for (uint64_t i = code_size; i < constant_base; i++) {
+            if (fwrite(&zero, 1, 1, output) != 1) goto write_error;
+        }
+        if (fwrite(constant_data->data, constant_data->len, 1, output) != 1) {
+            goto write_error;
+        }
+    }
+    position = native_header.code_offset + native_header.code_size;
     if (native_header.tb_table_offset > position &&
         fwrite(zero, native_header.tb_table_offset - position, 1, output) != 1) {
         goto write_error;
@@ -1307,6 +1370,8 @@ write_error_unclosed:
     unlink(path);
     fprintf(stderr, "latc: cannot write native image %s\n", path);
 out:
+    g_byte_array_unref(constant_data);
+    g_hash_table_destroy(constant_offsets);
     g_free(relocation_offsets.bits);
     if (native_tbs) g_array_free(native_tbs, TRUE);
     if (native_relocations) g_array_free(native_relocations, TRUE);

@@ -3,6 +3,9 @@
 LAT tests are registered with Meson and are configured only when
 `--enable-tests` is passed to `configure`.
 
+See [CI validation tiers](../docs/devel/ci-validation.md) for PR coverage,
+daily full matrices and the pre-release validation entry point.
+
 ## Choose a test suite
 
 - `lat-pr-fast`: deterministic, self-contained regression tests that need no
@@ -104,7 +107,126 @@ and then run tests with the bundled `meson/meson.py`, or vice versa.
 To run the integration suite, replace `lat-pr-fast` with
 `latx-integration`.
 
+The `test-async-sigill-x86_64` and `test-async-sigill-i386` integration tests
+build `tests/integration/async-sigill.S` with Clang/LLD. Alternatively, compile
+that source from the tested checkout on an x86 Linux host with
+`gcc -nostdlib -static -no-pie` (add `-m32` for i386), name the executables
+`async-sigill-x86_64` and `async-sigill-i386`, and set
+`LATX_SIGILL_GUEST_DIR` to their directory when running the tests.
+
+The `test-x87-signal-mode` integration test builds five static x86-64 guests
+with Clang/LLD only when explicitly run. On a target without that compiler,
+build the same source on an x86-64 Linux host:
+
+```sh
+mkdir -p x87-guests
+for case_id in 0 1 2 3 4; do
+  gcc -nostdlib -static -no-pie -DCASE=$case_id \
+    tests/integration/x87-signal-mode.S \
+    -o x87-guests/x87-signal-mode-$case_id
+done
+```
+
+Copy `x87-guests` to the LoongArch target, then run:
+
+```sh
+LATX_X87_SIGNAL_GUEST_DIR=/absolute/path/to/x87-guests \
+  meson test -C build64-tests --suite latx-integration \
+  test-x87-signal-mode --print-errorlogs
+```
+
+The cases cover full x87 stacks of negative NaNs and infinities, a second
+signal after an x87 write, MMX restoration, and x87 handler initialization
+and rounding restoration. Each runs in hard-float and softfpu=1/2, with
+both TB and TU translation. Compile the fixtures from the same checkout
+being tested; a supplied directory with a missing executable is a failure.
+
+The `test-signal-return-bridge` integration test covers RET, POP/JMP and
+stack-memory JMP signal returns with nested handlers and distinct restorers.
+Its CALL probe checks that JRRA stack actually ran. On a build without that
+optimization, the signal-return controls still run, but the test reports
+`SKIP` (77), not a bridge regression pass. Use an O2/O3 build with LSFPU for
+the bridge regression.
+
+If the target has no Clang/LLD, compile the guests from the same checkout on
+an x86-64 Linux host:
+
+```sh
+mkdir -p signal-return-guests
+gcc -nostdlib -static -no-pie -DPROBE_JRRA=1 \
+  tests/integration/signal-return-bridge.S \
+  -o signal-return-guests/signal-return-bridge-probe
+for style in 0 1 2; do
+  gcc -nostdlib -static -no-pie -DRETURN_STYLE=$style \
+    tests/integration/signal-return-bridge.S \
+    -o signal-return-guests/signal-return-bridge-$style
+done
+```
+
+Copy that directory to the LoongArch target and run:
+
+```sh
+LATX_SIGNAL_RETURN_GUEST_DIR=/absolute/path/to/signal-return-guests \
+  meson test -C build64-tests --suite latx-integration \
+  test-signal-return-bridge --print-errorlogs
+```
+
 Before submitting a new test target, verify both of these:
 
 1. A normal product build without `--enable-tests` does not build the test.
 2. A build configured with `--enable-tests` builds and runs the selected suite.
+
+## RCU fork queue regression
+
+`test-rcu-fork-queue` runs on POSIX hosts with `--enable-tests`, including
+non-KZT and non-LATX configurations. It covers empty forks, callbacks that
+queue another callback, and forks with concurrently published callbacks still
+queued. A blocking callback pauses the consumer outside the grace-period lock,
+so the ordinary atfork lock path can proceed. The blocker itself has already
+been dequeued and is outside the queue-preservation contract.
+
+LATX/KZT configurations also register `test-rcu-fork-queue-held-reader`, which
+holds a reader across fork and covers lazy and deferred child startup. This
+scenario depends on KZT's atfork path not waiting for the parent's grace period.
+Both cases check each callback marked published after `call_rcu1()` returns:
+after the child drains, every published callback in its snapshot must have run
+exactly once. A publisher remains active during the forks, and the parent still
+checks all 512 callbacks. Child drains run one at a time and the test is
+scheduled before other suite entries because QEMU user-mode can strand a
+post-fork worker startup when several emulated threaded-fork workloads compete;
+this scheduling does not relax the per-callback assertions.
+
+Run the common case explicitly (the binary is not part of the default build):
+
+```sh
+meson test -C build64-tests test-rcu-fork-queue --print-errorlogs
+```
+
+With LATX/KZT enabled, also run:
+
+```sh
+meson test -C build64-tests test-rcu-fork-queue-held-reader --print-errorlogs
+```
+
+## SMC shared-backing fallback regression
+
+`test-latx-smc-fallback` exercises the production shared-shadow allocator,
+`page_unprotect()`, SMC profiling, TB invalidation/unwind, store interpreter and
+signal dispatch branch with real Linux mappings. Page metadata, the TB index
+and CPU state are modelled. It injects
+`memfd_create`, `ftruncate` and shadow `mmap` failures while a disjoint TB remains,
+then checks that the current store completes by retrying after whole-host-page
+invalidation. It also checks current-TB exit, guest-page boundaries, and both
+orders of partial shared-backing success across host pages, in debug and NDEBUG
+configurations. Modes 2/3/6/7 and counts 253/254/255 cover the store-helper
+retranslation threshold. Assertions require guest-state restoration and the
+next single-instruction TB, as well as the signal-handler exit; returning 2
+without unwinding cannot pass. AOT-enabled builds check the SMC page-state
+marking on both host pages without claiming AOT artifact execution.
+The metadata geometry includes equal host/guest page sizes and,
+on larger-page hosts, multiple guest pages per host page. This seam is separate
+from full guest execution and real-application acceptance.
+
+```sh
+meson test -C build64-tests test-latx-smc-shmm test-latx-smc-fallback --print-errorlogs
+```

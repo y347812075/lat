@@ -23,6 +23,9 @@
 #ifdef CONFIG_LATX
 #include "latx-options.h"
 #include "reg-map.h"
+#if defined(TARGET_X86_64) && defined(CONFIG_LATX_JRRA)
+#include "jrra.h"
+#endif
 #endif
 
 /* from the Linux kernel - /arch/x86/include/uapi/asm/sigcontext.h */
@@ -454,6 +457,7 @@ static void setup_sigcontext(struct target_sigcontext *sc,
     CPUState *cs = env_cpu(env);
 #ifdef CONFIG_LATX
     save_xmm_to_env(env);
+    cpu_x86_canonicalize_latx_mmx_state(env);
 #endif
 #ifndef TARGET_X86_64
     uint16_t magic;
@@ -638,6 +642,8 @@ void setup_frame(int sig, struct target_sigaction *ka,
 
     unlock_user_struct(frame, frame_addr, 1);
 
+    cpu_x86_init_user_x87(env);
+
     return;
 
 give_sigsegv:
@@ -692,8 +698,19 @@ void setup_rt_frame(int sig, struct target_sigaction *ka,
 
     /* Set up to return from userspace.  If provided, use a stub
        already in userspace.  */
+    abi_ulong return_address = ka->sa_restorer;
     if (ka->sa_flags & TARGET_SA_RESTORER) {
-        __put_user(ka->sa_restorer, &frame->pretcode);
+#if defined(TARGET_X86_64) && defined(CONFIG_LATX_JRRA)
+        if (option_jr_ra_stack) {
+            return_address = get_signal_return_bridge(ka->sa_restorer);
+            if (return_address == 0) {
+                /* Do not publish an unusable direct-RET target. */
+                unlock_user_struct(frame, frame_addr, 0);
+                goto give_sigsegv;
+            }
+        }
+#endif
+        __put_user(return_address, &frame->pretcode);
     } else {
 #ifdef TARGET_X86_64
         /* For x86_64, SA_RESTORER is required ABI.  */
@@ -727,6 +744,8 @@ void setup_rt_frame(int sig, struct target_sigaction *ka,
     env->eflags &= ~TF_MASK;
 
     unlock_user_struct(frame, frame_addr, 1);
+
+    cpu_x86_init_user_x87(env);
 
     return;
 
@@ -836,6 +855,10 @@ restore_sigcontext(CPUX86State *env, struct target_sigcontext *sc)
 #endif
         unlock_user_struct(fpstate, fpstate_addr, 0);
 #ifdef CONFIG_LATX
+        if (!err) {
+            cpu_x86_sync_latx_fcsr(env);
+            cpu_x86_sync_latx_fpu_mode(env);
+        }
         load_xmm_from_env(env);
 #endif
     } else {

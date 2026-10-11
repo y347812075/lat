@@ -5,7 +5,7 @@
 #include <string.h>
 
 #define LAT_NATIVE_IMAGE_MAGIC "LATNAT2"
-#define LAT_NATIVE_IMAGE_VERSION 7u
+#define LAT_NATIVE_IMAGE_VERSION 8u
 #define LAT_NATIVE_BUILD_ID_SIZE 65u
 
 #define LAT_NATIVE_INDIRECT_EXIT_WORDS 38u
@@ -194,6 +194,8 @@ enum LatNativeRelocationKind {
     LAT_NATIVE_RELOC_TB_TARGET = 2,
     LAT_NATIVE_RELOC_GUEST_ADDRESS = 3,
     LAT_NATIVE_RELOC_JRRA_TARGET = 4,
+    /* addend is a code-section data offset; reserved is its byte size. */
+    LAT_NATIVE_RELOC_IMAGE_DATA = 5,
 };
 
 enum LatNativeRuntimeSymbolV1 {
@@ -260,6 +262,10 @@ enum LatNativeRuntimeSymbolV1 {
     LAT_NATIVE_SYMBOL_RAISE_BOUND,
     LAT_NATIVE_SYMBOL_XGETBV,
     LAT_NATIVE_SYMBOL_KZT_GET_ALTERNATE,
+    LAT_NATIVE_SYMBOL_XSAVE,
+    LAT_NATIVE_SYMBOL_XSAVEOPT,
+    LAT_NATIVE_SYMBOL_XRSTOR,
+    LAT_NATIVE_SYMBOL_XSETBV,
     LAT_NATIVE_SYMBOL_COUNT,
 };
 

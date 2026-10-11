@@ -75,6 +75,23 @@ int main(void)
     close(received_fd);
     close(received_tbset);
 
+    sent.operation = LATCD_OP_SUBMIT_STATIC_KEYS;
+    if (latcd_send_request(sockets[0], source, source, &sent,
+                            error, sizeof(error)) ||
+        latcd_receive_request(sockets[1], &received, &received_fd,
+                               &received_tbset, error, sizeof(error)) ||
+        received.operation != LATCD_OP_SUBMIT_STATIC_KEYS ||
+        received_fd < 0 || received_tbset < 0) {
+        return fail("static request lost its origin or descriptors");
+    }
+    close(received_fd);
+    close(received_tbset);
+    if (send_raw_request(sockets[0], &sent, &source, 1) ||
+        !latcd_receive_request(sockets[1], &received, &received_fd,
+                                &received_tbset, error, sizeof(error))) {
+        return fail("static request without TB set was accepted");
+    }
+
     sent.operation = LATCD_OP_FLUSH_ALL;
 
     if (send_raw_request(sockets[0], &sent, NULL, 0)) {

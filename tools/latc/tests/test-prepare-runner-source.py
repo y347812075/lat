@@ -39,6 +39,13 @@ def main() -> int:
     script = Path(sys.argv[1]).resolve()
     repository = Path(sys.argv[2]).resolve()
     with tempfile.TemporaryDirectory(prefix="latc-runner-staging-") as temp:
+        current = create_staging(Path(temp) / "source-current")
+        canonical_meson = (repository / "linux-user/meson.build").read_bytes()
+        (current / "linux-user/meson.build").write_bytes(canonical_meson)
+        completed = prepare(script, current)
+        assert completed.returncode == 0, completed.stdout
+        assert (current / "linux-user/meson.build").read_bytes() == canonical_meson
+
         staging = create_staging(Path(temp) / "source")
         completed = prepare(script, staging)
         assert completed.returncode == 0, completed.stdout
@@ -48,19 +55,19 @@ def main() -> int:
             "accel/tcg/cpu-exec.c",
             "include/exec/fasttb.h",
             "target/i386/latx/sbt/latc_native_export.c",
+            "target/i386/latx/ir1/ir1-decode.h",
+            "target/i386/latx/include/latx-config.h",
+            "target/i386/latx/include/env.h",
+            "target/i386/latx/include/translate.h",
+            "target/i386/latx/translator/tr-opnd-process.c",
+            "target/i386/tcg/translate.c",
         ):
             assert (staging / relative).read_bytes() == (
                 repository / relative
             ).read_bytes(), relative
-        build_id = subprocess.check_output(
-            [sys.executable,
-             str(repository / "tools/latc/scripts/compute-aot-v2-build-id.py"),
-             str(repository)],
-            text=True,
-        ).strip()
-        assert f'#define LATC_BUILD_ID "{build_id}"' in (
-            staging / "include/latc-build-id.h"
-        ).read_text()
+        assert (staging / "include/latc-build-id.h").read_bytes() == (
+            repository / "tools/latc/aot-v2/include/latc-build-id.h"
+        ).read_bytes()
 
         without = create_staging(Path(temp) / "source-without-aot-v2")
         completed = prepare(script, without, "--without-aot-v2")

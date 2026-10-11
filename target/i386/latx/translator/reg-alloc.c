@@ -298,6 +298,17 @@ IR2_OPND ra_alloc_itemp(void)
     int itemp_reg_num;
 
     itemp_reg_num = ra_alloc_itemp_num();
+    if (unlikely(itemp_reg_num < 0)) {
+        /*
+         * Do not let a failed allocation propagate as register number -1
+         * into the immediate cache lookup or IR2 operand construction.  It
+         * would otherwise cause undefined behavior or corrupt generated code.
+         */
+        fprintf(stderr,
+                "[LATX] itemp register exhausted, status=0x%x\n",
+                lsenv->tr_data->itemp_status);
+        abort();
+    }
 #ifdef CONFIG_LATX_IMM_REG
     if (option_imm_reg) {
         int itemp_num = reg_itemp_reverse_map[itemp_reg_num];
@@ -315,7 +326,16 @@ IR2_OPND ra_alloc_itemp(void)
 IR2_OPND ra_alloc_ftemp(void)
 {
     IR2_OPND ir2_opnd;
-    ir2_opnd_build(&ir2_opnd, IR2_OPND_FPR, ra_alloc_ftemp_num());
+    int ftemp_reg_num;
+
+    ftemp_reg_num = ra_alloc_ftemp_num();
+    if (unlikely(ftemp_reg_num < 0)) {
+        fprintf(stderr,
+                "[LATX] ftemp register exhausted, status=0x%x\n",
+                lsenv->tr_data->ftemp_status);
+        abort();
+    }
+    ir2_opnd_build(&ir2_opnd, IR2_OPND_FPR, ftemp_reg_num);
     return ir2_opnd;
 }
 

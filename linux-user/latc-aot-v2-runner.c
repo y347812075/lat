@@ -1575,6 +1575,10 @@ static int bind_runtime_targets(void)
     targets.target[LAT_AOT_TARGET_RAISE_BOUND] =
         (uintptr_t)helper_raise_bound;
     targets.target[LAT_AOT_TARGET_XGETBV] = (uintptr_t)helper_xgetbv;
+    targets.target[LAT_AOT_TARGET_XSAVE] = (uintptr_t)helper_xsave;
+    targets.target[LAT_AOT_TARGET_XSAVEOPT] = (uintptr_t)helper_xsaveopt;
+    targets.target[LAT_AOT_TARGET_XRSTOR] = (uintptr_t)helper_xrstor;
+    targets.target[LAT_AOT_TARGET_XSETBV] = (uintptr_t)helper_xsetbv;
 #if defined(CONFIG_LATX_KZT)
     targets.target[LAT_AOT_TARGET_KZT_GET_ALTERNATE] =
         (uintptr_t)kzt_get_alternate_pc;

@@ -1,8 +1,13 @@
 #!/bin/sh
 set -eu
 
+static_tbset=0
+if [ "${1:-}" = "--static-tbset" ]; then
+    static_tbset=1
+    shift
+fi
 if [ "$#" -lt 5 ] || [ "$#" -gt 6 ]; then
-    echo "usage: $0 LATC STATIC_RUNNER X86_GUEST RUNTIME_DIRECTORY OUTPUT [TBSET]" >&2
+    echo "usage: $0 [--static-tbset] LATC STATIC_RUNNER X86_GUEST RUNTIME_DIRECTORY OUTPUT [TBSET]" >&2
     exit 2
 fi
 
@@ -18,7 +23,11 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/latc-aot-v2-compile.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
 if [ -n "$tbset" ]; then
-    "$script_dir/compile-native-image.sh" --module \
+    set -- --module
+    if [ "$static_tbset" -eq 1 ]; then
+        set -- "$@" --static-tbset
+    fi
+    "$script_dir/compile-native-image.sh" "$@" \
         "$latc" "$runner" "$guest" \
         "$work/module.latnative" "$tbset" >/dev/null
 else

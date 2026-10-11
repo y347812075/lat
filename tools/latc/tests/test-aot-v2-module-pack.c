@@ -266,6 +266,7 @@ static int test_primary_tb_aliases(const char *directory)
         .addend = 0x402000,
         .kind = LAT_NATIVE_RELOC_TB_TARGET,
         .slots = 2,
+        .target = LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL,
         .reserved = LAT_NATIVE_SYMBOL_JIRL_EPILOGUE_RET_ID_0,
     };
 
@@ -319,12 +320,142 @@ static int test_primary_tb_aliases(const char *directory)
         fprintf(stderr, "physical TB alias was not packed: %s\n",
                 error[0] ? error : "invalid output");
     }
+    if (!failed) {
+        char *base_path = g_build_filename(directory, "incomplete.native", NULL);
+        char *merged_path = g_build_filename(directory, "repaired.native", NULL);
+        maps[0].host_offset_end = 4;
+        maps[1].host_offset_end = 12;
+        g_free(tb_data);
+        tb_data = NULL;
+        g_free(text);
+        text = NULL;
+        failed = !g_file_set_contents(base_path, (const char *)image,
+                                      size, NULL) ||
+            lat_native_image_merge_files(base_path, image_path, merged_path,
+                                          error, sizeof(error)) ||
+            lat_aot_v2_emit_module_sources(merged_path, directory,
+                                           error, sizeof(error)) ||
+            !g_file_get_contents(tbs_path, &tb_data, &tb_size, NULL) ||
+            !g_file_get_contents(text_path, &text, &text_size, NULL);
+        output_tbs = (const void *)tb_data;
+        words = (const void *)text;
+        if (!failed) {
+            failed = tb_size != 2 * sizeof(*output_tbs) ||
+                output_tbs[0].guest_rva != 0x1000 ||
+                output_tbs[0].host_offset != 32 ||
+                output_tbs[0].flags !=
+                    (LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL) ||
+                output_tbs[1].guest_rva != 0x2000 ||
+                text_size != 56 || words[10] != 0x53ffebff ||
+                words[11] != 0x03400000;
+        }
+        if (failed) {
+            fprintf(stderr, "complete delta alias did not repair key: %s\n",
+                    error[0] ? error : "invalid output");
+        }
+        g_free(merged_path);
+        g_free(base_path);
+    }
     g_free(tb_data);
     g_free(text);
     g_free(tbs_path);
     g_free(text_path);
     g_free(image_path);
     return failed ? -1 : 0;
+}
+
+static int write_alias_dependency(const char *path, bool delta, bool complete)
+{
+    unsigned char image[1024] = {0};
+    LatNativeImageHeaderV2 *h = (void *)image;
+    memcpy(h->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
+    h->version = LAT_NATIVE_IMAGE_VERSION;
+    h->header_size = sizeof(*h);
+    h->guest_entry = 0x401000;
+    h->preferred_guest_base = 0x400000;
+    h->guest_image_offset = sizeof(*h);
+    h->guest_image_size = 1;
+    h->code_offset = sizeof(*h) + 8;
+    h->tb_count = delta ? 1 : 3;
+    h->code_size = h->tb_count * 8;
+    h->tb_table_offset = h->code_offset + h->code_size;
+    h->relocation_offset = h->tb_table_offset +
+                           h->tb_count * sizeof(LatNativeTbV1);
+    h->relocation_count = delta ? 0 : 2;
+    h->pc_map_offset = h->relocation_offset +
+                      h->relocation_count * sizeof(LatNativeRelocationV1);
+    h->pc_map_count = h->tb_count;
+    strcpy(h->lat_build_id, "alias-dependency-test");
+    uint32_t *code = (void *)(image + h->code_offset);
+    LatNativeTbV1 *tbs = (void *)(image + h->tb_table_offset);
+    LatNativePcMapV2 *maps = (void *)(image + h->pc_map_offset);
+    for (uint64_t i = 0; i < h->tb_count; i++) {
+        uint64_t pc = 0x401000 + i * 0x1000;
+        code[i * 2] = 0x50000000;
+        code[i * 2 + 1] = 0x03400000;
+        tbs[i] = (LatNativeTbV1) {
+            .guest_pc = pc, .code_offset = i * 8, .code_size = 8,
+            .flags = LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL,
+        };
+        maps[i] = (LatNativePcMapV2) {
+            .guest_pc = pc, .host_offset_begin = i * 8,
+            .host_offset_end = i * 8 + ((!delta && i == 1) ||
+                                       (delta && !complete) ? 4 : 8),
+            .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+        };
+    }
+    if (!delta) {
+        LatNativeRelocationV1 *rel = (void *)(image + h->relocation_offset);
+        for (unsigned int i = 0; i < 2; i++) {
+            unsigned int offset = i ? 16 : 0;
+            code[offset / 4] = 0x1e00000c;
+            code[offset / 4 + 1] = 0x4c000184;
+            rel[i] = (LatNativeRelocationV1) {
+                .code_offset = offset, .addend = i ? 0x401000 : 0x402000,
+                .kind = LAT_NATIVE_RELOC_TB_TARGET, .slots = 2,
+                .target = LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL,
+                .reserved = LAT_NATIVE_SYMBOL_JIRL_EPILOGUE_RET_ID_0,
+            };
+        }
+    }
+    return g_file_set_contents(path, (const char *)image,
+        h->pc_map_offset + h->pc_map_count * sizeof(*maps), NULL) ? 0 : -1;
+}
+
+static int test_alias_dependency(const char *directory)
+{
+    g_autofree char *base = g_build_filename(directory, "dependency-base", NULL);
+    g_autofree char *delta = g_build_filename(directory, "dependency-delta", NULL);
+    g_autofree char *merged = g_build_filename(directory, "dependency-merge", NULL);
+    g_autofree char *table = g_build_filename(directory, "tbs.bin", NULL);
+    g_autofree char *text_path = g_build_filename(directory, "text.bin", NULL);
+    char error[256] = {0};
+    g_autofree gchar *data = NULL;
+    g_autofree gchar *text = NULL;
+    gsize size = 0, text_size = 0;
+    if (write_alias_dependency(base, false, false) ||
+        write_alias_dependency(delta, true, true) ||
+        lat_native_image_merge_files(base, delta, merged, error, sizeof(error)) ||
+        lat_aot_v2_emit_module_sources(merged, directory, error, sizeof(error)) ||
+        !g_file_get_contents(table, &data, &size, NULL) ||
+        !g_file_get_contents(text_path, &text, &text_size, NULL)) {
+        fprintf(stderr, "cannot repair dependent alias: %s\n", error);
+        return -1;
+    }
+    const LatAotTbV2 *tbs = (const void *)data;
+    if (size != 2 * sizeof(*tbs) || tbs[0].guest_rva != 0x1000 ||
+        tbs[1].guest_rva != 0x3000 || text_size < tbs[1].host_offset + 8 ||
+        ((const uint32_t *)(text + tbs[1].host_offset))[0] != 0x50001000) {
+        fprintf(stderr, "caller lost a usable delta primary\n");
+        return -1;
+    }
+    if (write_alias_dependency(delta, true, false) ||
+        lat_native_image_merge_files(base, delta, merged, error, sizeof(error)) ||
+        !lat_aot_v2_emit_module_sources(merged, directory, error, sizeof(error))) {
+        fprintf(stderr, "incomplete delta alias was accepted\n");
+        return -1;
+    }
+    return 0;
 }
 
 static int test_conditional_exits(const char *directory)
@@ -1438,6 +1569,126 @@ static int test_edge_flags(const char *directory)
     return 0;
 }
 
+static int test_image_data(const char *directory)
+{
+    unsigned char image[1024] = {0};
+    LatNativeImageHeaderV2 *h = (void *)image;
+    memcpy(h->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
+    h->version = LAT_NATIVE_IMAGE_VERSION;
+    h->header_size = sizeof(*h);
+    h->flags = LAT_NATIVE_IMAGE_NO_PRECISE_SIGNAL_MAP;
+    h->guest_image_offset = sizeof(*h);
+    h->guest_image_size = 1;
+    h->code_offset = sizeof(*h) + 8;
+    h->code_size = 96;
+    h->tb_table_offset = h->code_offset + h->code_size;
+    h->tb_count = 2;
+    h->relocation_offset = h->tb_table_offset + 2 * sizeof(LatNativeTbV1);
+    h->relocation_count = 2;
+    h->pc_map_offset = h->relocation_offset + 2 * sizeof(LatNativeRelocationV1);
+    h->pc_map_count = 2;
+    h->tu_table_offset = h->pc_map_offset + 2 * sizeof(LatNativePcMapV2);
+    strcpy(h->lat_build_id, "image-data-test");
+    uint32_t *code = (void *)(image + h->code_offset);
+    LatNativeTbV1 *tbs = (void *)(image + h->tb_table_offset);
+    LatNativeRelocationV1 *rels = (void *)(image + h->relocation_offset);
+    LatNativePcMapV2 *maps = (void *)(image + h->pc_map_offset);
+    CfgTb cfg_tbs[2] = {0};
+    for (int i = 0; i < 2; i++) {
+        code[i * 8] = 0x1400000c;
+        code[i * 8 + 1] = 0x0380018c;
+        code[i * 8 + 2] = 0x1600000c;
+        tbs[i] = (LatNativeTbV1){
+            .guest_pc = 0x401000 + i * 16, .code_offset = i * 32,
+            .code_size = 12, .flags = LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL,
+        };
+        rels[i] = (LatNativeRelocationV1){
+            .code_offset = i * 32, .kind = LAT_NATIVE_RELOC_IMAGE_DATA,
+            .slots = i ? 3 : 2, .addend = 64, .reserved = 32,
+        };
+        cfg_tbs[i] = (CfgTb){
+            .start = tbs[i].guest_pc, .end = tbs[i].guest_pc + 16,
+            .semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL,
+            .observed = i == 1,
+        };
+        maps[i] = (LatNativePcMapV2){
+            .guest_pc = tbs[i].guest_pc,
+            .host_offset_begin = i * 32,
+            .host_offset_end = i * 32 + 12,
+            .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+        };
+    }
+    memset(image + h->code_offset + 64, 0xa5, 32);
+    g_autofree char *path = g_build_filename(directory, "data.native", NULL);
+    g_autofree char *text_path = g_build_filename(directory, "text.bin", NULL);
+    if (!g_file_set_contents(path, (const char *)image, h->tu_table_offset, NULL)) {
+        return 1;
+    }
+    CfgProgram program = {.tbs = cfg_tbs, .tb_count = 2};
+    char error[256] = {0};
+    for (int profile = 0; profile < 2; profile++) {
+        g_autofree gchar *text = NULL;
+        gsize size = 0;
+        if (lat_aot_v2_emit_module_sources_with_cfg(path, directory,
+                profile ? &program : NULL, h->guest_sha256,
+                error, sizeof(error)) ||
+            !g_file_get_contents(text_path, &text, &size, NULL) || size != 96 ||
+            memcmp(text + 64, image + h->code_offset + 64, 32)) {
+            fprintf(stderr, "data module layout failed: %s\n", error);
+            return 1;
+        }
+        const uint32_t *words = (const void *)text;
+        for (int i = 0; i < 2; i++) {
+            if (words[i * 8] != 0x1a00000cu ||
+                words[i * 8 + 1] != (0x0380018cu | 64u << 10) ||
+                (i && words[i * 8 + 2] != 0x03400000u)) {
+                fprintf(stderr, "data module PIC address changed\n");
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int test_xsave_runtime_symbols(const char *directory)
+{
+    static const uint32_t symbols[] = {
+        LAT_NATIVE_SYMBOL_XSAVE, LAT_NATIVE_SYMBOL_XSAVEOPT,
+        LAT_NATIVE_SYMBOL_XRSTOR, LAT_NATIVE_SYMBOL_XSETBV,
+    };
+    static const char *const names[] = {
+        "lat_aot_runtime_xsave", "lat_aot_runtime_xsaveopt",
+        "lat_aot_runtime_xrstor", "lat_aot_runtime_xsetbv",
+    };
+    g_autofree char *path = g_build_filename(directory, "helper.native", NULL);
+    g_autofree char *assembly_path = g_build_filename(directory, "module.S", NULL);
+    for (size_t i = 0; i < G_N_ELEMENTS(symbols); i++) {
+        g_autofree gchar *image = NULL;
+        g_autofree gchar *assembly = NULL;
+        gsize size = 0;
+        char error[256] = {0};
+        if (write_fixture(path, 0, 0, 0, 0) ||
+            !g_file_get_contents(path, &image, &size, NULL)) {
+            return 1;
+        }
+        LatNativeImageHeaderV2 *header = (void *)image;
+        LatNativeRelocationV1 *relocations =
+            (void *)(image + header->relocation_offset);
+        relocations[0].kind = LAT_NATIVE_RELOC_RUNTIME_SYMBOL;
+        relocations[0].target = symbols[i];
+        relocations[0].addend = 0;
+        relocations[0].reserved = 0;
+        if (!g_file_set_contents(path, image, size, NULL) ||
+            lat_aot_v2_emit_module_sources(path, directory, error, sizeof(error)) ||
+            !g_file_get_contents(assembly_path, &assembly, NULL, NULL) ||
+            !strstr(assembly, names[i])) {
+            fprintf(stderr, "XSAVE runtime symbol mapping failed: %s\n", error);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main(void)
 {
     g_autofree char *directory = g_build_filename(g_get_tmp_dir(),
@@ -1446,6 +1697,9 @@ int main(void)
         perror("create test directory");
         return 1;
     }
+    if (test_image_data(directory)) return 1;
+    if (test_xsave_runtime_symbols(directory)) return 1;
+    if (test_alias_dependency(directory)) return 1;
     char *image_path = g_build_filename(directory, "fixture.latnative", NULL);
     if (test_primary_tb_aliases(directory)) {
         g_free(image_path);

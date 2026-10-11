@@ -8,6 +8,9 @@ and embeds the resulting native code and relocation records.
 
 ## AOT v2 module prototype
 
+See [candidate validation](VALIDATION.md) for build, installation and runtime
+gates, evidence requirements, and the boundaries of the tested support.
+
 ### Automatic runtime setup
 
 Legacy `LATX_AOT` remains the default. Set `LATX_AOT_V2=1` to select

@@ -2,12 +2,16 @@
 set -eu
 
 module=0
-if [ "${1:-}" = "--module" ]; then
-    module=1
-    shift
-fi
+static_tbset=0
+while :; do
+    case "${1:-}" in
+        --module) module=1; shift ;;
+        --static-tbset) static_tbset=1; shift ;;
+        *) break ;;
+    esac
+done
 if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
-    echo "usage: $0 [--module] LATC RUNNER X86_GUEST OUTPUT [TBSET]" >&2
+    echo "usage: $0 [--module] [--static-tbset] LATC RUNNER X86_GUEST OUTPUT [TBSET]" >&2
     exit 2
 fi
 
@@ -16,6 +20,11 @@ runner=$2
 guest=$3
 output=$4
 tbset=${5:-}
+
+unset LATC_NATIVE_STATIC_CHECK
+if [ -z "$tbset" ] || [ "$static_tbset" -eq 1 ]; then
+    export LATC_NATIVE_STATIC_CHECK=1
+fi
 
 case "$output" in
     /*) ;;

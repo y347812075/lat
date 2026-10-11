@@ -68,6 +68,112 @@ endif
 latx_string_utils = files('latx-string-utils.c')
 latx_runtime = files('latx-runtime.c')
 
+latx_aot_directories = [
+  'target/i386/latx/translator',
+  'target/i386/latx/ir1',
+  'target/i386/latx/ir2',
+  'target/i386/latx/optimization',
+  'target/i386/latx/sbt',
+  'target/i386/latx/include',
+]
+latx_aot_exclude_directories = [
+  'target/i386/latx/sbt/tests',
+]
+latx_aot_generator = project_source_root / 'scripts/gen-aot-build-id.py'
+latx_aot_generator_file = files('../../../scripts/gen-aot-build-id.py')
+latx_aot_input_names = run_command(
+  python, latx_aot_generator,
+  '--root', project_source_root,
+  '--print-inputs',
+  '--directory', latx_aot_directories[0],
+  '--directory', latx_aot_directories[1],
+  '--directory', latx_aot_directories[2],
+  '--directory', latx_aot_directories[3],
+  '--directory', latx_aot_directories[4],
+  '--directory', latx_aot_directories[5],
+  '--exclude-directory', latx_aot_exclude_directories[0],
+  check: true,
+).stdout().strip().split('\n')
+latx_aot_inputs = []
+foreach input_name : latx_aot_input_names
+  latx_aot_inputs += files('../../../' + input_name)
+endforeach
+
+latx_aot_config_names = [
+  'CONFIG_CAPSTONE_DIET',
+  'CONFIG_DEBUG_TCG',
+  'CONFIG_LATX_AOT',
+  'CONFIG_LATX_AVX_OPT',
+  'CONFIG_LATX_BNE_B',
+  'CONFIG_LATX_CAPSTONE_GIT',
+  'CONFIG_LATX_CAPSTONE_OP_ACCESS',
+  'CONFIG_LATX_DEBUG',
+  'CONFIG_LATX_FAST_JMPCACHE',
+  'CONFIG_LATX_FLAG_REDUCTION',
+  'CONFIG_LATX_FLAG_REDUCTION_EXTEND',
+  'CONFIG_LATX_GLUE_MASK',
+  'CONFIG_LATX_HBR',
+  'CONFIG_LATX_IMM_REG',
+  'CONFIG_LATX_INSTS_PATTERN',
+  'CONFIG_LATX_JRRA',
+  'CONFIG_LATX_JRRA_STACK',
+  'CONFIG_LATX_KZT',
+  'CONFIG_LATX_LARGE_CC',
+  'CONFIG_LATX_LAZYLINK',
+  'CONFIG_LATX_LLSC',
+  'CONFIG_LATX_LOW_MEM_0',
+  'CONFIG_LATX_LOW_MEM_1',
+  'CONFIG_LATX_LOW_MEM_2',
+  'CONFIG_LATX_MONITOR_SHARED_MEM',
+  'CONFIG_LATX_O0',
+  'CONFIG_LATX_O1',
+  'CONFIG_LATX_O2',
+  'CONFIG_LATX_O3',
+  'CONFIG_LATX_OPT_PUSH_POP',
+  'CONFIG_LATX_PROFILER',
+  'CONFIG_LATX_RADICAL_EFLAGS',
+  'CONFIG_LATX_RUNTIME_TRACE_RANGE',
+  'CONFIG_LATX_SMC_OPT',
+  'CONFIG_LATX_SPLIT_TB',
+  'CONFIG_LATX_SSSE3_SSE4',
+  'CONFIG_LATX_SYSCALL_TUNNEL',
+  'CONFIG_LATX_TBLINK',
+  'CONFIG_LATX_TBMINI_ENABLE',
+  'CONFIG_LATX_TS',
+  'CONFIG_LATX_TU',
+  'CONFIG_LATX_TUNNEL_LIB',
+  'CONFIG_LATX_XCOMISX_OPT',
+  'CONFIG_LOONGARCH_NEW_WORLD',
+  'CONFIG_PLUGIN',
+  'CONFIG_USER_ONLY',
+]
+latx_aot_config_args = []
+foreach config_name : latx_aot_config_names
+  config_value = config_name in config_host ? config_host[config_name] : 'n'
+  latx_aot_config_args += ['--config', config_name + '=' + config_value]
+endforeach
+
+latx_aot_build_id = custom_target(
+  'latx-aot-build-id',
+  input: latx_aot_inputs,
+  output: 'latx-aot-build-id.h',
+  command: [
+    python, latx_aot_generator,
+    '--root', project_source_root,
+    '--output', '@OUTPUT@',
+  ] + latx_aot_config_args + [
+    '--directory', latx_aot_directories[0],
+    '--directory', latx_aot_directories[1],
+    '--directory', latx_aot_directories[2],
+    '--directory', latx_aot_directories[3],
+    '--directory', latx_aot_directories[4],
+    '--directory', latx_aot_directories[5],
+    '--exclude-directory', latx_aot_exclude_directories[0],
+  ],
+  depend_files: latx_aot_generator_file,
+)
+i386_ss.add(when: 'CONFIG_LATX', if_true: latx_aot_build_id)
+
 i386_ss.add(when: 'CONFIG_LATX', if_true: files(
   'error.c',
   'mem.c',

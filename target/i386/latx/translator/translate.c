@@ -146,6 +146,7 @@ void tr_init(void *tb)
         t->imm_cache->bucket = (IMM_CACHE_BUCKET *)mm_calloc(
             CACHE_MAX_CAPACITY, sizeof(IMM_CACHE_BUCKET));
     }
+    t->aes_table_kind = 0;
 }
 
 void tr_fini(bool check_the_extension)
@@ -1890,8 +1891,26 @@ static bool (*translate_functions[])(IR1_INST *) = {
     TRANS_FUNC_GEN_REAL(ENDING, NULL),
 };
 
+static void reset_aes_table_cache_for_non_aes(IR1_INST *ir1)
+{
+    TRANSLATION_DATA *t = lsenv->tr_data;
+
+    if (ir1_opcode(ir1) != dt_X86_INS_AESENC &&
+        ir1_opcode(ir1) != dt_X86_INS_AESENCLAST
+#ifdef CONFIG_LATX_AVX_OPT
+        && ir1_opcode(ir1) != dt_X86_INS_VAESENC
+        && ir1_opcode(ir1) != dt_X86_INS_VAESENCLAST
+#endif
+        ) {
+        t->aes_table_kind = 0;
+    }
+}
+
 bool ir1_translate(IR1_INST *ir1)
 {
+    /* Pattern translators also overwrite the cached table's temporary GPR. */
+    reset_aes_table_cache_for_non_aes(ir1);
+
 #ifdef CONFIG_LATX_INSTS_PATTERN
     if (try_translate_instptn(ir1)) {
         ra_free_all();
@@ -2906,7 +2925,8 @@ void tr_generate_exit_tb_to_next(IR1_INST *ir1)
 {
     TranslationBlock *tb = lsenv->tr_data->curr_tb;
     IR2_OPND next_pc = ra_alloc_dbt_arg2();
-    target_ulong call_offset = aot_get_call_offset(ir1_addr_next(ir1));
+    target_ulong call_offset __attribute__((unused)) =
+            aot_get_call_offset(ir1_addr_next(ir1));
 
     aot_load_guest_addr(next_pc, ir1_addr_next(ir1), LOAD_CALL_TARGET,
                         call_offset);
@@ -3004,7 +3024,8 @@ void tr_generate_exit_tb(IR1_INST *branch, int succ_id)
         }
 direct_jmp:
         if (option_anonym && (tb->flags & HF_TF_MASK)) {
-            target_ulong call_offset = aot_get_call_offset(succ_x86_addr);
+            target_ulong call_offset __attribute__((unused)) =
+                    aot_get_call_offset(succ_x86_addr);
 
             aot_load_guest_addr(succ_x86_addr_opnd, succ_x86_addr,
                                 LOAD_CALL_TARGET, call_offset);
@@ -4158,8 +4179,14 @@ void tr_load_registers_from_env(uint8 gpr_to_load, uint8 fpr_to_load,
 
     /* check current mode(mmx/fpu) */
     if (option_softfpu == 2) {
-        la_ld_wu(mode_fpu, env_ir2_opnd, lsenv_offset_of_mode_fpu(lsenv));
-        la_bne(mode_fpu, zero_ir2_opnd, label_fpu);
+        la_ld_bu(mode_fpu, env_ir2_opnd, lsenv_offset_of_mode_fpu(lsenv));
+        if (fpr_to_load == 0xff) {
+            /* A signal restore must initialize MMX without selecting it. */
+            la_xori(mode_fpu, mode_fpu, LATX_FPU_MODE_X87);
+            la_beq(mode_fpu, zero_ir2_opnd, label_fpu);
+        } else {
+            la_bne(mode_fpu, zero_ir2_opnd, label_fpu);
+        }
     }
 
     for (i = 0; i < 8; i++) {
@@ -4407,10 +4434,31 @@ static inline void helper_restore_reg(IR2_OPND opnd)
             lsenv_offset_of_all_gpr(lsenv, ir2_opnd_base_reg_num(&opnd)));
 }
 
-void gen_test_page_flag(IR2_OPND mem_opnd, int mem_imm, uint32_t flag)
+void gen_test_page_flag(IR2_OPND mem_opnd, int mem_imm, uint32_t flag,
+                        unsigned int mem_size)
 {
+#if TARGET_ABI_BITS == 32
+    uint32_t required_flag = flag & PAGE_WRITE ? PAGE_WRITE : PAGE_READ;
+#endif
+
     if (!option_mem_test) {
+#if TARGET_ABI_BITS == 32
+        TranslationBlock *current_tb;
+
+        if (!option_minke_16k_page_check) {
+            return;
+        }
+        current_tb = (TranslationBlock *)lsenv->tr_data->curr_tb;
+        if (!current_tb ||
+            !latx_minke_16k_write_check_pc(current_tb->pc)) {
+            return;
+        }
+        if (!(flag & PAGE_WRITE)) {
+            return;
+        }
+#else
         return;
+#endif
     }
     TranslationBlock *tb __attribute__((unused)) = NULL;
     if (option_aot) {
@@ -4421,6 +4469,10 @@ void gen_test_page_flag(IR2_OPND mem_opnd, int mem_imm, uint32_t flag)
     IR2_OPND label0 = ra_alloc_label();
     IR2_OPND label1 = ra_alloc_label();
     IR2_OPND label2 = ra_alloc_label();
+    IR2_OPND label_fault = ra_alloc_label();
+#if TARGET_ABI_BITS == 32
+    IR2_OPND label_check_end = ra_alloc_label();
+#endif
     bool need_restore0 = false;
     bool need_restore1 = false;
     bool need_restore2 = false;
@@ -4445,37 +4497,90 @@ void gen_test_page_flag(IR2_OPND mem_opnd, int mem_imm, uint32_t flag)
 
     IR2_OPND mem_addr = ra_alloc_statics(S_UD1);
     la_addi_d(mem_addr, mem_opnd, mem_imm);
-    aot_load_host_addr(itemp0, (ADDR)&pageflags_root,
-        LOAD_PAGEFLAGS_ROOT, 0);
-    la_addi_d(itemp0, itemp0,
-            offsetof(IntervalTreeRoot, rb_root) + offsetof(RBRoot, rb_node));
-    la_ld_d(itemp0, itemp0, 0);
-    la_beq(itemp0, zero_ir2_opnd, label_exit);
+#if TARGET_ABI_BITS == 32
+    if (qemu_host_page_size == LATX_HOST_16K_PAGE_SIZE &&
+        (option_mem_test > 0 || option_minke_16k_page_check)) {
+        /*
+         * LATX_MT=1 checks a guest 4K page only when the surrounding host
+         * 16K page has mixed permissions. LATX_MT=2 always checks the cached
+         * guest-page flags. Both avoid the interval-tree walk while preserving
+         * guest read and write permissions.
+         */
+        if (option_mem_test != 2) {
+            li_d(itemp0, (ADDR)latx_16k_page_mixed);
+            la_bstrpick_d(itemp1, mem_addr, TARGET_ABI_BITS - 1,
+                          LATX_HOST_16K_PAGE_BITS);
+            la_ldx_bu(itemp2, itemp0, itemp1);
+            la_andi(itemp2, itemp2, required_flag);
+            la_beq(itemp2, zero_ir2_opnd,
+                   mem_size > 1 ? label_check_end : label_exit);
+        }
+        li_d(itemp0, (ADDR)latx_4k_page_flags);
+        la_bstrpick_d(itemp1, mem_addr, TARGET_ABI_BITS - 1,
+                      TARGET_PAGE_BITS);
+        la_ldx_bu(itemp2, itemp0, itemp1);
+        la_andi(itemp2, itemp2, required_flag);
+        la_bne(itemp2, zero_ir2_opnd,
+               mem_size > 1 ? label_check_end : label_exit);
+        la_b(label_fault);
+        if (mem_size > 1) {
+            la_label(label_check_end);
+            la_addi_d(mem_addr, mem_addr, mem_size - 1);
+            if (option_mem_test != 2) {
+                li_d(itemp0, (ADDR)latx_16k_page_mixed);
+                la_bstrpick_d(itemp1, mem_addr, TARGET_ABI_BITS - 1,
+                              LATX_HOST_16K_PAGE_BITS);
+                la_ldx_bu(itemp2, itemp0, itemp1);
+                la_andi(itemp2, itemp2, required_flag);
+                la_beq(itemp2, zero_ir2_opnd, label_exit);
+            }
+            li_d(itemp0, (ADDR)latx_4k_page_flags);
+            la_bstrpick_d(itemp1, mem_addr, TARGET_ABI_BITS - 1,
+                          TARGET_PAGE_BITS);
+            la_ldx_bu(itemp2, itemp0, itemp1);
+            la_andi(itemp2, itemp2, required_flag);
+            la_bne(itemp2, zero_ir2_opnd, label_exit);
+            /* The first inaccessible byte is the start of the final page. */
+            la_bstrins_d(mem_addr, zero_ir2_opnd, TARGET_PAGE_BITS - 1, 0);
+            /* Fall through to label_fault. */
+        }
+    } else
+#endif
+    {
+        aot_load_host_addr(itemp0, (ADDR) (&pageflags_root),
+                           LOAD_PAGEFLAGS_ROOT, 0);
+        la_addi_d(itemp0, itemp0,
+                 offsetof(IntervalTreeRoot, rb_root) +
+                 offsetof(RBRoot, rb_node));
+        la_ld_d(itemp0, itemp0, 0);
+        la_beq(itemp0, zero_ir2_opnd, label_exit);
 
-    la_label(label0);
-    la_ld_d(itemp1, itemp0, 0x10);
-    la_beq(itemp1, zero_ir2_opnd, label1);
-    la_ld_d(itemp2, itemp1, 0x28);
-    la_bltu(itemp2, mem_addr, label1);
-    la_mov64(itemp0, itemp1);
-    la_b(label0);
+        la_label(label0);
+        la_ld_d(itemp1, itemp0, 0x10);
+        la_beq(itemp1, zero_ir2_opnd, label1);
+        la_ld_d(itemp2, itemp1, 0x28);
+        la_bltu(itemp2, mem_addr, label1);
+        la_mov64(itemp0, itemp1);
+        la_b(label0);
 
-    la_label(label1);
-    la_ld_d(itemp1, itemp0, 0x18);
-    la_bltu(mem_addr, itemp1, label_exit);
-    la_ld_d(itemp1, itemp0, 0x20);
-    la_bgeu(itemp1, mem_addr, label2);
-    la_ld_d(itemp0, itemp0, 0x8);
-    la_beq(itemp0, zero_ir2_opnd, label_exit);
-    la_ld_d(itemp1, itemp0, 0x28);
-    la_bgeu(itemp1, mem_addr, label0);
-    la_b(label_exit);
+        la_label(label1);
+        la_ld_d(itemp1, itemp0, 0x18);
+        la_bltu(mem_addr, itemp1, label_exit);
+        la_ld_d(itemp1, itemp0, 0x20);
+        la_bgeu(itemp1, mem_addr, label2);
+        la_ld_d(itemp0, itemp0, 0x8);
+        la_beq(itemp0, zero_ir2_opnd, label_exit);
+        la_ld_d(itemp1, itemp0, 0x28);
+        la_bgeu(itemp1, mem_addr, label0);
+        la_b(label_exit);
 
-    la_label(label2);
-    la_ld_w(itemp0, itemp0, 0x30);
-    la_andi(itemp0, itemp0, flag & 0xff);
-    la_bne(itemp0, zero_ir2_opnd, label_exit);
+        la_label(label2);
+        la_ld_w(itemp0, itemp0, 0x30);
+        la_andi(itemp0, itemp0, flag & 0xff);
+        la_bne(itemp0, zero_ir2_opnd, label_exit);
+    }
 
+    la_label(label_fault);
     IR2_OPND s_env = ra_alloc_statics(S_ENV);
 #ifdef TARGET_X86_64
     la_st_d(mem_addr, s_env, offsetof(CPUX86State, cr[2]));

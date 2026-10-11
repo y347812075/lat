@@ -37,18 +37,20 @@ genh = []
 target_dirs = config_host['TARGET_DIRS'].split()
 
 python = import('python').find_installation()
-latc_staged_build_id = meson.current_source_dir() / '.latc-build-id'
-if fs.exists(latc_staged_build_id)
-  latc_build_id = run_command('cat', latc_staged_build_id,
-                              check: true).stdout().strip()
-else
-  latc_build_id = run_command(
+latc_source_id_args = []
+latc_staged_source_id = meson.current_source_dir() / '.latc-source-id'
+if fs.exists(latc_staged_source_id)
+  latc_source_id_args = ['--source-id', run_command(
+    'cat', latc_staged_source_id, check: true).stdout().strip()]
+endif
+latc_build_id = run_command(
     python,
     meson.current_source_dir() / 'tools/latc/scripts/compute-aot-v2-build-id.py',
     meson.current_source_dir(),
+    '--config', meson.current_build_dir() / 'config-host.mak',
+    latc_source_id_args,
     check: true,
   ).stdout().strip()
-endif
 add_project_arguments(
   '-DLATC_BUILD_ID="' + latc_build_id + '"',
   language: ['c', 'cpp', 'objc'],
@@ -121,7 +123,11 @@ if latx_version == ''
   latx_version = 'unknown'
 endif
 
-add_project_arguments('-DLATX_VERSION="' + latx_version + '"', language: ['c', 'cpp'])
+# Only version consumers include this header. A global -D changes every
+# compilation command on each revision and defeats ccache's direct mode.
+latx_version_data = configuration_data()
+latx_version_data.set_quoted('LATX_VERSION', latx_version)
+configure_file(output: 'latx-version.h', configuration: latx_version_data)
 
 # The path to glib.h is added to all compilation commands.  This was
 # grandfathered in from the QEMU Makefiles.
@@ -829,10 +835,10 @@ foreach target : target_dirs
         'target/i386/latx/sbt/aot_reader.c',
         'target/i386/latx/sbt/aot_lib.c',
         'target/i386/latx/sbt/file_ctx.c'
-      ) + genh + tcg_trace_genh + [syscall_nr_generated],
+      ) + genh + tcg_trace_genh + [syscall_nr_generated, latx_aot_build_id],
       c_args: smc_reload_test_c_args,
       dependencies: [glib],
-      include_directories: target_inc,
+      include_directories: target_inc + [include_directories('target/i386/latx')],
       link_args: smc_reload_test_link_args + [
         '-Wl,--wrap=fdopen',
         '-Wl,--wrap=fclose'
@@ -877,6 +883,57 @@ foreach target : target_dirs
       aot_pe_load_address_test,
       suite: 'lat-pr-fast',
     )
+
+    aot_shm_syscall_test_body = custom_target(
+      'aot-shm-syscall-test-body',
+      input: files('linux-user/syscall.c'),
+      output: 'aot-shm-syscall-test-body.h',
+      command: [python,
+                files('target/i386/latx/sbt/tests/extract-shm-syscall-test.py'),
+                '@INPUT@', '@OUTPUT@'],
+    )
+    aot_segment_unmap_test = executable(
+      'test-latx-aot-segment-unmap',
+      files(
+        'target/i386/latx/sbt/tests/aot-segment-unmap-test.c',
+        'target/i386/latx/sbt/tests/aot-shm-syscall-test.c',
+        'linux-user/latc-aot-v2-runner-stub.c',
+        'target/i386/latx/sbt/segment.c',
+        'target/i386/latx/sbt/aot_lib.c'
+      ) + genh + tcg_trace_genh + [syscall_nr_generated,
+                                   aot_shm_syscall_test_body],
+      c_args: smc_reload_test_c_args + ['-fdata-sections'],
+      dependencies: [glib],
+      include_directories: target_inc,
+      link_args: smc_reload_test_link_args
+    )
+    test('latx-aot-segment-unmap', aot_segment_unmap_test,
+         suite: 'lat-pr-fast')
+
+    foreach mode : ['hint', 'noreplace', 'tail', 'disabled']
+      test('latx-aot-shm-' + mode, aot_segment_unmap_test,
+           args: ['--shm-' + mode], suite: 'latx-integration')
+    endforeach
+
+    foreach variant : ['', '-no-tu']
+      aot_merge_memory_test = executable(
+        'test-latx-aot-merge-memory' + variant,
+        files(
+          'target/i386/latx/sbt/tests/aot-merge-memory-test.c',
+          'target/i386/latx/sbt/file_ctx.c'
+        ) + genh + tcg_trace_genh + [syscall_nr_generated, latx_aot_build_id],
+        c_args: smc_reload_test_c_args +
+                (variant == '' ? [] : ['-DAOT_MERGE_TEST_NO_TU']),
+        dependencies: [glib],
+        include_directories: target_inc + [include_directories('target/i386/latx')],
+        link_args: smc_reload_test_link_args + [
+          '-Wl,--wrap=malloc', '-Wl,--wrap=free',
+          '-Wl,--wrap=get_aot_path', '-Wl,--wrap=opendir'
+        ]
+      )
+      test('latx-aot-merge-memory' + variant, aot_merge_memory_test,
+           suite: 'lat-pr-fast')
+    endforeach
   endif
 
     execs = [{

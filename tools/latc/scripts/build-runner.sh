@@ -13,6 +13,8 @@ rm -rf "$build_dir" "$staging_dir"
 mkdir -p "$staging_dir"
 rsync -a --delete --exclude 'build*' "$source_dir/" "$staging_dir/"
 touch "$staging_dir/.latc-staging"
+python3 "$(dirname "$0")/compute-aot-v2-build-id.py" "$source_dir" \
+    --source-only >"$staging_dir/.latc-source-id"
 python3 "$(dirname "$0")/prepare-runner-source.py" \
     --without-aot-v2 "$staging_dir"
 mkdir -p "$build_dir"

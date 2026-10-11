@@ -62,6 +62,7 @@ int latcd_socket_address(const char *path, struct sockaddr_un *address,
 static int expected_descriptors(const LatcdRequestV2 *request)
 {
     if (request->operation == LATCD_OP_SUBMIT_KEYS) return 2;
+    if (request->operation == LATCD_OP_SUBMIT_STATIC_KEYS) return 2;
     if (request->operation == LATCD_OP_FLUSH_SOURCE) return 1;
     if (request->operation == LATCD_OP_FLUSH_ALL) return 0;
     if (request->operation == LATCD_OP_PRECOMPILE_SOURCE) return 1;

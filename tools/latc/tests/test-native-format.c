@@ -63,6 +63,88 @@ static int test_branch_target_decode(void)
                words, 1, 8, 4, &target);
 }
 
+static int test_image_data(const unsigned char *source, size_t size,
+                           int argc, char **argv)
+{
+    unsigned char image[1024];
+    memcpy(image, source, sizeof(image));
+    LatNativeImageHeaderV2 *header = (void *)image;
+    LatNativeRelocationV1 *relocation =
+        (void *)(image + header->relocation_offset);
+    LatNativeTuV1 *tu = (void *)(image + header->tu_table_offset);
+    uint32_t *code = (void *)(image + header->code_offset);
+    tu->code_size = 16;
+    tu->search_offset = 16;
+    code[2] = 0x1400000c;
+    code[3] = 0x0380018c;
+    memset(image + header->code_offset + 24, 0xa5, 8);
+    *relocation = (LatNativeRelocationV1){
+        .code_offset = 8, .kind = LAT_NATIVE_RELOC_IMAGE_DATA,
+        .slots = 2, .addend = 24, .reserved = 8,
+    };
+    char error[256] = {0};
+    if (lat_native_image_validate(image, size, error, sizeof(error))) {
+        fprintf(stderr, "valid data relocation rejected: %s\n", error);
+        return 1;
+    }
+    LatNativeRelocationV1 valid = *relocation;
+    for (int bad = 0; bad < 10; bad++) {
+        *relocation = valid;
+        switch (bad) {
+        case 0: relocation->addend = -1; break;
+        case 1: relocation->addend = 32; break;
+        case 2: relocation->reserved = 9; break;
+        case 3: relocation->reserved = 0; break;
+        case 4: relocation->addend = 12; break;
+        case 5: relocation->slots = 1; break;
+        case 6: relocation->target = 1; break;
+        case 7: relocation->physical_target_plus_one = 1; break;
+        case 8: code[3] ^= 1; break;
+        case 9:
+            code[3] ^= 1;
+            relocation->code_offset = 24;
+            code[6] = 0x1400000c;
+            code[7] = 0x0380018c;
+            break;
+        }
+        if (!lat_native_image_validate(image, size, error, sizeof(error))) {
+            fprintf(stderr, "invalid data relocation %d accepted\n", bad);
+            return 1;
+        }
+    }
+    memset(image + header->code_offset + 24, 0xa5, 8);
+    *relocation = valid;
+    if (argc == 4) {
+        if (write_image(argv[1], image, size) ||
+            lat_native_image_merge_files(argv[1], argv[1], argv[3],
+                                         error, sizeof(error))) {
+            fprintf(stderr, "cannot merge data relocations: %s\n", error);
+            return 1;
+        }
+        unsigned char merged[1024];
+        FILE *file = fopen(argv[3], "rb");
+        size_t count = file ? fread(merged, 1, sizeof(merged), file) : 0;
+        if (!file || fclose(file) ||
+            lat_native_image_validate(merged, count, error, sizeof(error))) {
+            fprintf(stderr, "invalid merged data image: %s\n", error);
+            return 1;
+        }
+        const LatNativeImageHeaderV2 *mh = (const void *)merged;
+        const LatNativeRelocationV1 *mr =
+            (const void *)(merged + mh->relocation_offset);
+        if (mh->code_size != 64 || mr[0].addend != 24 ||
+            mr[1].addend != 56 || mr[1].code_offset != 40 ||
+            memcmp(merged + mh->code_offset + 24,
+                   image + header->code_offset + 24, 8) ||
+            memcmp(merged + mh->code_offset + 56,
+                   image + header->code_offset + 24, 8)) {
+            fprintf(stderr, "merged data offset or contents changed\n");
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     unsigned char image[1024] = {0};
@@ -169,6 +251,7 @@ int main(int argc, char **argv)
         return 1;
     }
     header->version = LAT_NATIVE_IMAGE_VERSION;
+    if (test_image_data(image, image_size, argc, argv)) return 1;
     if (argc == 4) {
         if (write_image(argv[1], image, image_size)) return 1;
         tb->guest_pc = 0x401010;

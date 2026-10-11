@@ -197,7 +197,8 @@ void load_ireg_from_ir1_mem(IR2_OPND opnd2, IR1_OPND *opnd1,
         mem_opnd = mem_imm_add_disp(mem_opnd, &mem_imm, 8);
     }
 
-    gen_test_page_flag(mem_opnd, mem_imm, PAGE_READ);
+    gen_test_page_flag(mem_opnd, mem_imm, PAGE_READ,
+                       MIN(ir1_opnd_size(opnd1), 64) / 8);
 
     if ((mem_imm & 0xffff0000) == 0xdead0000) {
         IR2_OPND base, index;
@@ -584,7 +585,8 @@ static void store_ireg_to_ir1_mem(IR2_OPND value_opnd, IR1_OPND *opnd1,
         mem_opnd = mem_imm_add_disp(mem_opnd, &mem_imm, 8);
     }
 
-    gen_test_page_flag(mem_opnd, mem_imm, PAGE_WRITE | PAGE_WRITE_ORG);
+    gen_test_page_flag(mem_opnd, mem_imm, PAGE_WRITE | PAGE_WRITE_ORG,
+                       MIN(ir1_opnd_size(opnd1), 64) / 8);
 
     if((mem_imm&0xffff0000)==0xdead0000) {
         IR2_OPND base,index;
@@ -912,7 +914,9 @@ static void load_freg_from_ir1_mem(IR2_OPND opnd2, IR1_OPND *opnd1,
         mem_opnd = mem_imm_add_disp(mem_opnd, &mem_imm, 8);
     }
 
-    gen_test_page_flag(mem_opnd, mem_imm, PAGE_READ);
+    gen_test_page_flag(mem_opnd, mem_imm, PAGE_READ,
+                       ir1_opnd_size(opnd1) == 80 ? 10 :
+                       MIN(ir1_opnd_size(opnd1), 64) / 8);
 
     if (ir1_opnd_size(opnd1) == 32) {
         la_fld_s(opnd2, mem_opnd, mem_imm);
@@ -1164,7 +1168,9 @@ static void store_freg_to_ir1_mem(IR2_OPND opnd2, IR1_OPND *opnd1,
         mem_opnd = mem_imm_add_disp(mem_opnd, &mem_imm, 8);
     }
 
-    gen_test_page_flag(mem_opnd, mem_imm, PAGE_WRITE | PAGE_WRITE_ORG);
+    gen_test_page_flag(mem_opnd, mem_imm, PAGE_WRITE | PAGE_WRITE_ORG,
+                       ir1_opnd_size(opnd1) == 80 ? 10 :
+                       MIN(ir1_opnd_size(opnd1), 64) / 8);
 
     if (ir1_opnd_size(opnd1) == 32) {
         IR2_OPND ftemp = ra_alloc_ftemp_internal();
@@ -1260,17 +1266,14 @@ void store_freg_to_ir1(IR2_OPND opnd2, IR1_OPND *opnd1, bool is_xmm_hi,
 IR2_OPND set_fpu_fcsr_rounding_field_by_x86(void)
 {
     if (option_set_rounding_opt) return zero_ir2_opnd;
-    CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
-    CPUState *cpu = env_cpu(env);
-    if (!close_latx_parallel && !(cpu->tcg_cflags & CF_PARALLEL)) {
-        return zero_ir2_opnd;
-    }
 
     IR2_OPND fcsr_opnd = ra_alloc_itemp_internal();
     la_movfcsr2gr(fcsr_opnd, fcsr3_ir2_opnd);
 
     /* set fcsr according to x86 MXCSR register */
+    IR2_OPND fcsr_value = ra_alloc_itemp_internal();
     IR2_OPND temp_mxcsr = ra_alloc_itemp_internal();
+    la_movfcsr2gr(fcsr_value, fcsr3_ir2_opnd);
     la_ld_wu(temp_mxcsr, env_ir2_opnd,
         lsenv_offset_of_mxcsr(lsenv));
     la_bstrpick_w(temp_mxcsr, temp_mxcsr, 14, 13);
@@ -1280,9 +1283,10 @@ IR2_OPND set_fpu_fcsr_rounding_field_by_x86(void)
     la_beq(temp_int, zero_ir2_opnd, label1);
     la_xori(temp_mxcsr, temp_mxcsr, 0x2);
     la_label(label1);
-    la_bstrins_w(temp_mxcsr, temp_mxcsr, 9, 8);
-    la_movgr2fcsr(fcsr3_ir2_opnd, temp_mxcsr);
+    la_bstrins_w(fcsr_value, temp_mxcsr, 9, 8);
+    la_movgr2fcsr(fcsr3_ir2_opnd, fcsr_value);
 
+    ra_free_temp(fcsr_value);
     ra_free_temp(temp_mxcsr);
     ra_free_temp(temp_int);
     return fcsr_opnd;
@@ -1291,13 +1295,7 @@ IR2_OPND set_fpu_fcsr_rounding_field_by_x86(void)
 void set_fpu_rounding_mode(IR2_OPND rm)
 {
     if (option_set_rounding_opt) return;
-    CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
-    CPUState *cpu = env_cpu(env);
-    if (close_latx_parallel) {
-        la_movgr2fcsr(fcsr3_ir2_opnd, rm);
-    } else if (cpu->tcg_cflags & CF_PARALLEL) {
-        la_movgr2fcsr(fcsr3_ir2_opnd, rm);
-    }
+    la_movgr2fcsr(fcsr3_ir2_opnd, rm);
 }
 
 void load_freg128_from_ir1_mem(IR2_OPND opnd2, IR1_OPND *opnd1){
@@ -1307,7 +1305,7 @@ void load_freg128_from_ir1_mem(IR2_OPND opnd2, IR1_OPND *opnd1){
     lsassert(ir2_opnd_is_freg(&opnd2));
 
     IR2_OPND mem_opnd = convert_mem(opnd1, &little_disp);
-    gen_test_page_flag(mem_opnd, little_disp, PAGE_READ);
+    gen_test_page_flag(mem_opnd, little_disp, PAGE_READ, 16);
     la_vld(opnd2, mem_opnd, little_disp);
     return;
 }
@@ -1319,7 +1317,8 @@ void store_freg128_to_ir1_mem(IR2_OPND opnd2, IR1_OPND *opnd1){
     lsassert(ir2_opnd_is_freg(&opnd2));
 
     IR2_OPND mem_opnd = convert_mem(opnd1, &little_disp);
-    gen_test_page_flag(mem_opnd, little_disp, PAGE_WRITE | PAGE_WRITE_ORG);
+    gen_test_page_flag(mem_opnd, little_disp, PAGE_WRITE | PAGE_WRITE_ORG,
+                       16);
     la_vst(opnd2, mem_opnd, little_disp);
     return;
 }
@@ -1354,7 +1353,8 @@ void store_freg256_to_ir1_mem(IR2_OPND opnd2, IR1_OPND * opnd1) {
     lsassert(ir1_opnd_is_mem(opnd1));
     lsassert(ir2_opnd_is_freg( & opnd2));
     IR2_OPND mem_opnd = convert_mem(opnd1, & little_disp);
-    gen_test_page_flag(mem_opnd, little_disp, PAGE_WRITE | PAGE_WRITE_ORG);
+    gen_test_page_flag(mem_opnd, little_disp, PAGE_WRITE | PAGE_WRITE_ORG,
+                       32);
     la_xvst(opnd2, mem_opnd, little_disp);
 }
 
@@ -1364,7 +1364,7 @@ void load_freg256_from_ir1_mem(IR2_OPND opnd2, IR1_OPND * opnd1) {
     lsassert(ir2_opnd_is_freg( & opnd2));
 
     IR2_OPND mem_opnd = convert_mem(opnd1, & little_disp);
-    gen_test_page_flag(mem_opnd, little_disp, PAGE_READ);
+    gen_test_page_flag(mem_opnd, little_disp, PAGE_READ, 32);
     la_xvld(opnd2, mem_opnd, little_disp);
 }
 
@@ -1400,4 +1400,234 @@ void set_high128_xreg_to_zero(IR2_OPND opnd2) {
         la_xvinsgr2vr_d(opnd2, zero_ir2_opnd, 2);
         la_xvinsgr2vr_d(opnd2, zero_ir2_opnd, 3);
     }
+}
+
+static IR2_OPND get_ymm_high128_shadow_addr(int index)
+{
+#ifdef TARGET_X86_64
+    lsassert(index >= 0 && index < 16);
+#else
+    lsassert(index >= 0 && index < 8);
+#endif
+
+    IR2_OPND addr = ra_alloc_itemp();
+    li_d(addr, lsenv_offset_of_ymmh(lsenv, index));
+    la_add_d(addr, env_ir2_opnd, addr);
+    return addr;
+}
+
+IR2_OPND load_ymm_high128_shadow(int index)
+{
+    IR2_OPND dest = ra_alloc_ftemp();
+    IR2_OPND addr = get_ymm_high128_shadow_addr(index);
+
+    la_vld(dest, addr, 0);
+    ra_free_temp(addr);
+    return dest;
+}
+
+void store_ymm_high128_shadow(IR2_OPND src, int index)
+{
+    IR2_OPND addr = get_ymm_high128_shadow_addr(index);
+
+    la_vst(src, addr, 0);
+    ra_free_temp(addr);
+}
+
+void clear_ymm_high128_shadow(int index)
+{
+    IR2_OPND zero = ra_alloc_ftemp();
+
+    la_vxor_v(zero, zero, zero);
+    store_ymm_high128_shadow(zero, index);
+    ra_free_temp(zero);
+}
+
+void clear_all_ymm_high128_shadows(void)
+{
+#ifdef TARGET_X86_64
+    const int ymm_count = 16;
+#else
+    const int ymm_count = 8;
+#endif
+    IR2_OPND zero = ra_alloc_ftemp();
+
+    la_vxor_v(zero, zero, zero);
+    for (int i = 0; i < ymm_count; ++i) {
+        store_ymm_high128_shadow(zero, i);
+    }
+    ra_free_temp(zero);
+}
+
+IR2_OPND load_u64_from_ir1_mem_exact(IR1_OPND *opnd)
+{
+    IR2_OPND value = ra_alloc_itemp();
+
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 64);
+    load_ireg_from_ir1_mem(value, opnd, ZERO_EXTENSION, false);
+    return value;
+}
+
+void store_u64_to_ir1_mem_exact(IR2_OPND value, IR1_OPND *opnd)
+{
+    lsassert(ir2_opnd_is_ireg(&value));
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 64);
+    store_ireg_to_ir1_mem(value, opnd, false);
+}
+
+IR2_OPND load_u16_from_ir1_mem_exact(IR1_OPND *opnd)
+{
+    IR2_OPND value = ra_alloc_itemp();
+
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 16);
+    load_ireg_from_ir1_mem(value, opnd, ZERO_EXTENSION, false);
+    return value;
+}
+
+void store_u16_to_ir1_mem_exact(IR2_OPND value, IR1_OPND *opnd)
+{
+    lsassert(ir2_opnd_is_ireg(&value));
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 16);
+    store_ireg_to_ir1_mem(value, opnd, false);
+}
+
+IR2_OPND load_u8_from_ir1_mem_exact(IR1_OPND *opnd)
+{
+    IR2_OPND value = ra_alloc_itemp();
+
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 8);
+    load_ireg_from_ir1_mem(value, opnd, ZERO_EXTENSION, false);
+    return value;
+}
+
+void store_u8_to_ir1_mem_exact(IR2_OPND value, IR1_OPND *opnd)
+{
+    lsassert(ir2_opnd_is_ireg(&value));
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 8);
+    store_ireg_to_ir1_mem(value, opnd, false);
+}
+
+IR2_OPND load_u32_from_ir1_mem_exact(IR1_OPND *opnd)
+{
+    IR2_OPND value = ra_alloc_itemp();
+
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 32);
+    load_ireg_from_ir1_mem(value, opnd, ZERO_EXTENSION, false);
+    return value;
+}
+
+void store_u32_to_ir1_mem_exact(IR2_OPND value, IR1_OPND *opnd)
+{
+    lsassert(ir2_opnd_is_ireg(&value));
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 32);
+    store_ireg_to_ir1_mem(value, opnd, false);
+}
+
+IR2_OPND load_v128_from_ir1_mem_exact(IR1_OPND *opnd)
+{
+    IR2_OPND address;
+    IR2_OPND value;
+
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 128);
+    address = convert_mem_to_itemp(opnd);
+    value = ra_alloc_ftemp();
+    gen_test_page_flag(address, 0, PAGE_READ, 16);
+    la_vld(value, address, 0);
+    ra_free_temp(address);
+    return value;
+}
+
+IR2_OPND load_v128_from_guest_addr_exact(IR2_OPND address)
+{
+    IR2_OPND value = ra_alloc_ftemp();
+
+    gen_test_page_flag(address, 0, PAGE_READ, 16);
+    la_vld(value, address, 0);
+    return value;
+}
+
+void store_v128_to_ir1_mem_exact(IR2_OPND value, IR1_OPND *opnd)
+{
+    IR2_OPND address;
+
+    lsassert(ir2_opnd_is_freg(&value));
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 128);
+    address = convert_mem_to_itemp(opnd);
+    gen_test_page_flag(address, 0, PAGE_WRITE | PAGE_WRITE_ORG, 16);
+    la_vst(value, address, 0);
+    ra_free_temp(address);
+}
+
+void store_v128_to_guest_addr_exact(IR2_OPND value, IR2_OPND address)
+{
+    lsassert(ir2_opnd_is_freg(&value));
+    gen_test_page_flag(address, 0, PAGE_WRITE | PAGE_WRITE_ORG, 16);
+    la_vst(value, address, 0);
+}
+
+void load_v256_from_ir1_mem_exact(IR1_OPND *opnd,
+                                  IR2_OPND *low, IR2_OPND *high)
+{
+    IR2_OPND address;
+
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 256);
+    address = convert_mem_to_itemp(opnd);
+    *low = ra_alloc_ftemp();
+    *high = ra_alloc_ftemp();
+    gen_test_page_flag(address, 0, PAGE_READ, 32);
+    la_vld(*low, address, 0);
+    la_vld(*high, address, 16);
+    ra_free_temp(address);
+}
+
+IR2_OPND load_v256_high_from_ir1_mem_exact(IR1_OPND *opnd)
+{
+    IR2_OPND address;
+    IR2_OPND high;
+
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 256);
+    address = convert_mem_to_itemp(opnd);
+    high = ra_alloc_ftemp();
+    gen_test_page_flag(address, 16, PAGE_READ, 16);
+    la_vld(high, address, 16);
+    ra_free_temp(address);
+    return high;
+}
+
+void store_v256_to_ir1_mem_exact(IR2_OPND low, IR2_OPND high,
+                                 IR1_OPND *opnd)
+{
+    IR2_OPND address;
+
+    lsassert(ir2_opnd_is_freg(&low) && ir2_opnd_is_freg(&high));
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 256);
+    address = convert_mem_to_itemp(opnd);
+    gen_test_page_flag(address, 0, PAGE_WRITE | PAGE_WRITE_ORG, 32);
+    la_vst(low, address, 0);
+    la_vst(high, address, 16);
+    ra_free_temp(address);
+}
+
+void store_v256_low_to_ir1_mem_exact(IR2_OPND low, IR1_OPND *opnd)
+{
+    IR2_OPND address;
+
+    lsassert(ir2_opnd_is_freg(&low));
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 256);
+    address = convert_mem_to_itemp(opnd);
+    gen_test_page_flag(address, 0, PAGE_WRITE | PAGE_WRITE_ORG, 16);
+    la_vst(low, address, 0);
+    ra_free_temp(address);
+}
+
+void store_v256_high_to_ir1_mem_exact(IR2_OPND high, IR1_OPND *opnd)
+{
+    IR2_OPND address;
+
+    lsassert(ir2_opnd_is_freg(&high));
+    lsassert(ir1_opnd_is_mem(opnd) && ir1_opnd_size(opnd) == 256);
+    address = convert_mem_to_itemp(opnd);
+    gen_test_page_flag(address, 16, PAGE_WRITE | PAGE_WRITE_ORG, 16);
+    la_vst(high, address, 16);
+    ra_free_temp(address);
 }

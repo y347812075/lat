@@ -66,6 +66,7 @@
 #include <linux/in6.h>
 #include <linux/errqueue.h>
 #include <linux/random.h>
+#include <linux/magic.h>
 #include <linux/sctp.h>
 #ifdef CONFIG_TIMERFD
 #include <sys/timerfd.h>
@@ -158,6 +159,7 @@ _Static_assert(sizeof(struct target_sysinfo) == sizeof(LatcX86Sysinfo),
 _Static_assert(sizeof(struct target_rlimit64) == sizeof(LatcX86Rlimit64),
                "LATC x86 rlimit64 ABI drifted from linux-user");
 #endif
+#include "exec/translate-all.h"
 #include "guest-seccomp.h"
 #include "signal-common.h"
 #include "qemu/guest-random.h"
@@ -4588,6 +4590,14 @@ static __thread struct nlmsghdr *pre_nlmh;
 static __thread void* buf;
 static __thread abi_long all_len;
 
+static void reset_16k_buf(void)
+{
+    free(buf);
+    buf = NULL;
+    pre_nlmh = NULL;
+    all_len = 0;
+}
+
 static void set_16k_buf(struct msghdr *msg)
 {
     buf = malloc(BUFF_16K);
@@ -4618,9 +4628,7 @@ static abi_long get_from_16k_buf(struct msghdr *msg)
     if (NLMSG_OK(nlmh, all_len)) {
         pre_nlmh = nlmh;
     } else {
-        pre_nlmh = NULL;
-        free(buf);
-        buf = NULL;
+        reset_16k_buf();
     }
     return curr_nlmh_len;
 }
@@ -4724,12 +4732,12 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
                 size_t iov_len = msg.msg_iov->iov_len;
                 set_16k_buf(&msg);
                 ret = get_errno(safe_recvmsg(fd, &msg, flags));
-                if (is_error(ret)) {
-                    assert(0);
-                    goto out;
-                }
                 msg.msg_iov->iov_base = iov_base;
                 msg.msg_iov->iov_len = iov_len;
+                if (is_error(ret)) {
+                    reset_16k_buf();
+                    goto out;
+                }
                 all_len = ret;
             }
             ret =  get_from_16k_buf(&msg);
@@ -6083,6 +6091,13 @@ static inline abi_long do_shmdt(abi_ulong shmaddr)
             if (shm_regions[i].in_use && shm_regions[i].start == shmaddr) {
 #ifdef TARGET_I386
                 guest_vma_name_reset(shmaddr, shm_regions[i].size);
+#endif
+#ifdef CONFIG_LATX_AOT
+                if (option_aot) {
+                    /* Include padding in the last cleared guest page. */
+                    segment_tree_remove_range(shmaddr,
+                        TARGET_PAGE_ALIGN(shmaddr + shm_regions[i].size));
+                }
 #endif
                 page_set_flags(shmaddr, shmaddr + shm_regions[i].size, 0);
                 shm_regions[i].in_use = false;
@@ -9672,6 +9687,36 @@ static void cleanup_guest_thread_resources(CPUArchState *env)
     target_munmap(env->gdt.base, sizeof(uint64_t) * TARGET_GDT_ENTRIES, 0);
 }
 
+static void cleanup_guest_seccomp(TaskState *ts)
+{
+    /* Keep fork's CPU-list snapshot consistent with the filter references. */
+    cpu_list_lock();
+    ts->seccomp_exiting = true;
+    guest_seccomp_filter_unref(ts->seccomp_filter);
+    ts->seccomp_filter = NULL;
+    cpu_list_unlock();
+}
+
+/* The child has not started; the caller still owns its CPU and TaskState. */
+static void cleanup_failed_guest_thread(CPUArchState *env)
+{
+    CPUState *cpu = env_cpu(env);
+    TaskState *ts = cpu->opaque;
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+    void *fast_jmp_cache = env->tb_jmp_cache_ptr;
+#endif
+
+    cleanup_guest_seccomp(ts);
+    cleanup_guest_thread_resources(env);
+    object_property_set_bool(OBJECT(cpu), "realized", false, NULL);
+    object_unparent(OBJECT(cpu));
+    object_unref(OBJECT(cpu));
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+    latx_fast_jmp_cache_free_rcu(fast_jmp_cache);
+#endif
+    g_free(ts);
+}
+
 /* clone_lock is held and at least one other guest thread exists. */
 static void QEMU_NORETURN exit_guest_thread_locked(CPUArchState *env)
 {
@@ -9682,6 +9727,7 @@ static void QEMU_NORETURN exit_guest_thread_locked(CPUArchState *env)
     void *fast_jmp_cache = x86env->tb_jmp_cache_ptr;
 #endif
 
+    cleanup_guest_seccomp(ts);
     object_property_set_bool(OBJECT(cpu), "realized", false, NULL);
     object_unparent(OBJECT(cpu));
     object_unref(OBJECT(cpu));
@@ -9698,6 +9744,13 @@ static void QEMU_NORETURN exit_guest_thread_locked(CPUArchState *env)
     }
     thread_cpu = NULL;
     g_free(ts);
+    reset_16k_buf();
+#ifdef CONFIG_LATX
+    latx_lsenv_destroy();
+#endif
+#ifdef CONFIG_LATX_SMC_OPT
+    latx_smc_thread_cleanup();
+#endif
     rcu_unregister_thread();
     pthread_exit(NULL);
 }
@@ -9730,11 +9783,19 @@ typedef struct ForkCloneContext {
     jmp_buf jump_buffer;
 } ForkCloneContext;
 
+/*
+ * Fortified longjmp rejects the deliberate jump from a clone child stack.
+ * Bind directly to the unchecked implementation; do_fork() has already
+ * blocked signals and this path does not need to restore a signal mask.
+ */
+extern void fork_clone_longjmp(jmp_buf env, int value)
+    __asm__("_longjmp") __attribute__((noreturn));
+
 static int fork_clone_func(void *opaque)
 {
     ForkCloneContext *context = opaque;
 
-    longjmp(context->jump_buffer, 1);
+    fork_clone_longjmp(context->jump_buffer, 1);
 }
 
 static int fork_with_flags(unsigned int flags)
@@ -9742,7 +9803,7 @@ static int fork_with_flags(unsigned int flags)
     char stack[PTHREAD_STACK_MIN] __attribute__((aligned(16)));
     ForkCloneContext context;
 
-    if (setjmp(context.jump_buffer) == 0) {
+    if (_setjmp(context.jump_buffer) == 0) {
         return clone(fork_clone_func, stack + sizeof(stack), flags, &context);
     }
     return 0;
@@ -9791,6 +9852,7 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         TaskState *parent_ts = (TaskState *)cpu->opaque;
         new_thread_info info;
         pthread_attr_t attr;
+        int thread_errno = 0;
 
         rcu_start_deferred_thread();
 
@@ -9821,11 +9883,9 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         cpu_clone_regs_child(new_env, newsp, flags);
         cpu_clone_regs_parent(env, flags);
         new_cpu = env_cpu(new_env);
-        new_cpu->opaque = ts;
         ts->bprm = parent_ts->bprm;
         ts->info = parent_ts->info;
         ts->signal_mask = parent_ts->signal_mask;
-        ts->seccomp_filter = parent_ts->seccomp_filter;
         ts->ipc_namespace_isolated = parent_ts->ipc_namespace_isolated;
 
         if (flags & CLONE_CHILD_CLEARTID) {
@@ -9836,16 +9896,28 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
             cpu_set_tls (new_env, newtls);
         }
 
+        /* Publish the initialized task together with its inherited root.
+         * TSYNC uses this lock and skips CPUs whose task is not yet visible. */
+        cpu_list_lock();
+        ts->seccomp_filter = guest_seccomp_filter_ref(parent_ts->seccomp_filter);
+        new_cpu->opaque = ts;
+        cpu_list_unlock();
+
+#ifdef CONFIG_LATX_FAST_JMPCACHE
+        /* cpu_copy copied the parent's pointer; it remains parent-owned. */
+        new_env->tb_jmp_cache_ptr = NULL;
+        if (!latx_fast_jmp_cache_init(new_env)) {
+            cleanup_failed_guest_thread(new_env);
+            pthread_mutex_unlock(&clone_lock);
+            errno = ENOMEM;
+            return -1;
+        }
+#endif
         memset(&info, 0, sizeof(info));
         pthread_mutex_init(&info.mutex, NULL);
         pthread_mutex_lock(&info.mutex);
         pthread_cond_init(&info.cond, NULL);
         info.env = new_env;
-#ifdef CONFIG_LATX_FAST_JMPCACHE
-        if(!latx_fast_jmp_cache_init(new_env)) {
-            fprintf(stderr, "[LATX-ERR] latx_fast_jmp_cache_init error!\n");
-        }
-#endif
         if (flags & CLONE_CHILD_SETTID) {
             info.child_tidptr = child_tidptr;
         }
@@ -9863,7 +9935,6 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         cpu->random_seed = qemu_guest_random_seed_thread_part1();
 
         ret = pthread_create(&info.thread, &attr, clone_func, &info);
-        /* TODO: Free new CPU state if thread creation failed.  */
 
         sigprocmask(SIG_SETMASK, &info.sigmask, NULL);
         pthread_attr_destroy(&attr);
@@ -9872,12 +9943,17 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
             pthread_cond_wait(&info.cond, &info.mutex);
             ret = info.tid;
         } else {
+            thread_errno = ret;
+            cleanup_failed_guest_thread(new_env);
             ret = -1;
         }
         pthread_mutex_unlock(&info.mutex);
         pthread_cond_destroy(&info.cond);
         pthread_mutex_destroy(&info.mutex);
         pthread_mutex_unlock(&clone_lock);
+        if (thread_errno) {
+            errno = thread_errno;
+        }
     } else {
         /* if no CLONE_VM, we consider it is a fork */
         if (flags & CLONE_INVALID_FORK_FLAGS) {
@@ -11165,9 +11241,12 @@ static int do_futex(CPUState *cpu, target_ulong uaddr, int op, int val,
                              op, tswap32(val), pts, NULL, val3);
 #ifdef TARGET_X86_64
     case FUTEX_LOCK_PI:
+    case FUTEX_LOCK_PI2:
         if (timeout) {
             pts = &ts;
-            target_to_host_timespec(pts, timeout);
+            if (target_to_host_timespec(pts, timeout)) {
+                return -TARGET_EFAULT;
+            }
         } else {
             pts = NULL;
         }
@@ -12666,12 +12745,65 @@ static int is_proc_myself(const char *filename, const char *entry)
     return 0;
 }
 #ifdef CONFIG_LATX
+static bool latx_stat_same_object(const struct stat *a, const struct stat *b)
+{
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
+}
+
 static bool latx_stat_is_proc_self_task(const struct stat *st)
 {
     struct stat task_st;
 
     return stat("/proc/self/task", &task_st) == 0 &&
-           st->st_dev == task_st.st_dev && st->st_ino == task_st.st_ino;
+           latx_stat_same_object(st, &task_st);
+}
+
+static bool latx_stat_is_proc_self_task_fd(int fd, const struct stat *st)
+{
+    struct stat fd_st;
+    struct stat task_st;
+    struct statfs fs;
+
+    /*
+     * A saved /proc/self/task fd remains usable after a shared chroot makes
+     * the absolute procfs path unreachable.  Verify both the filesystem and
+     * the directory's identity: ../../self/task resolves to the current
+     * process task directory, while another process's task fd does not.
+     */
+    return fd >= 0 && fstatfs(fd, &fs) == 0 &&
+           fs.f_type == PROC_SUPER_MAGIC && fstat(fd, &fd_st) == 0 &&
+           latx_stat_same_object(st, &fd_st) &&
+           fstatat(fd, "../../self/task", &task_st, 0) == 0 &&
+           latx_stat_same_object(st, &task_st);
+}
+
+static bool latx_stat_is_proc_self_task_at(int dirfd, const char *pathname,
+                                           int flags,
+                                           const struct stat *st)
+{
+    struct stat task_st;
+    struct statfs fs;
+
+    if (latx_stat_is_proc_self_task(st)) {
+        return true;
+    }
+
+    if (pathname && pathname[0] == '\0') {
+        return (flags & AT_EMPTY_PATH) &&
+               latx_stat_is_proc_self_task_fd(dirfd, st);
+    }
+
+    /*
+     * Chromium keeps an fd for the procfs root before sharing a sandbox
+     * chroot with CLONE_FS.  At that point /proc/self/task is no longer
+     * reachable by an absolute path, but self/task remains reachable through
+     * the saved procfd.  Verify that the dirfd is procfs before using that
+     * relative reference so an ordinary self/task directory is not rewritten.
+     */
+    return pathname && pathname[0] != '/' && dirfd >= 0 &&
+           fstatfs(dirfd, &fs) == 0 && fs.f_type == PROC_SUPER_MAGIC &&
+           fstatat(dirfd, "self/task", &task_st, 0) == 0 &&
+           latx_stat_same_object(st, &task_st);
 }
 
 static bool latx_statx_is_proc_self_task(const struct target_statx *stx)
@@ -12684,9 +12816,58 @@ static bool latx_statx_is_proc_self_task(const struct target_statx *stx)
            stx->stx_ino == task_st.st_ino;
 }
 
+static bool latx_statx_is_proc_self_task_at(int dirfd, const char *pathname,
+                                            int flags,
+                                            const struct target_statx *stx)
+{
+    struct stat task_st;
+    struct statfs fs;
+
+    if ((stx->stx_mask & STATX_TYPE) && !S_ISDIR(stx->stx_mode)) {
+        return false;
+    }
+
+    if (latx_statx_is_proc_self_task(stx)) {
+        return true;
+    }
+
+    if (pathname && pathname[0] == '\0') {
+        return (flags & AT_EMPTY_PATH) && fstat(dirfd, &task_st) == 0 &&
+               latx_stat_is_proc_self_task_fd(dirfd, &task_st) &&
+               stx->stx_dev_major == major(task_st.st_dev) &&
+               stx->stx_dev_minor == minor(task_st.st_dev) &&
+               stx->stx_ino == task_st.st_ino;
+    }
+
+    return pathname && pathname[0] != '/' && dirfd >= 0 &&
+           fstatfs(dirfd, &fs) == 0 && fs.f_type == PROC_SUPER_MAGIC &&
+           fstatat(dirfd, "self/task", &task_st, 0) == 0 &&
+           stx->stx_dev_major == major(task_st.st_dev) &&
+           stx->stx_dev_minor == minor(task_st.st_dev) &&
+           stx->stx_ino == task_st.st_ino;
+}
+
 static void latx_adjust_proc_self_task_stat(struct stat *st)
 {
-    if (latx_stat_is_proc_self_task(st)) {
+    if (S_ISDIR(st->st_mode) && latx_stat_is_proc_self_task(st)) {
+        st->st_nlink = latx_guest_thread_count() + 2;
+    }
+}
+static void latx_adjust_proc_self_task_fstat(int fd, struct stat *st)
+{
+    if (S_ISDIR(st->st_mode) &&
+        (latx_stat_is_proc_self_task(st) ||
+         latx_stat_is_proc_self_task_fd(fd, st))) {
+        st->st_nlink = latx_guest_thread_count() + 2;
+    }
+}
+
+static void latx_adjust_proc_self_task_stat_at(int dirfd, const char *pathname,
+                                               int flags,
+                                               struct stat *st)
+{
+    if (S_ISDIR(st->st_mode) &&
+        latx_stat_is_proc_self_task_at(dirfd, pathname, flags, st)) {
         st->st_nlink = latx_guest_thread_count() + 2;
     }
 }
@@ -12795,6 +12976,7 @@ CPUID_GROUP_EXT,
 CPUID_GROUP_EXT2,
 CPUID_GROUP_EXT3,
 CPUID_GROUP_EBX,
+CPUID_GROUP_ECX,
 CPUID_GROUP_XSAVE,
 };
 const char *__x86_cpuid_flags_table[] = {
@@ -12825,6 +13007,11 @@ const char *__x86_cpuid_flags_table[] = {
 "avx512f", "avx512dq", "rdseed","adx", "smap", "avx512ifma", "pcommit", "clflushopt",
 "clwb", "intel_pt", "avx512pf", "avx512er", "avx512cd", "sha_ni", "avx512bw", "avx512vl",
 /*xsave*/
+"", "avx512vbmi", "umip", "pku", "ospke", "waitpkg", "avx512vbmi2", "",
+"gfni", "vaes", "vpclmulqdq", "avx512vnni", "avx512bitalg", "", "avx512-vpopcntdq", "",
+"la57", "", "", "", "", "", "rdpid", "",
+"bus-lock-detect", "cldemote", "", "movdiri", "movdir64b", "", "", "pks",
+/*xsave*/
 "xsaveopt", "xsavec", "xgetbv1", "xsaves", "", "", "", "",
 "", "", "", "", "" "", "", "",
 "", "", "", "", "", "", "", "",
@@ -12850,6 +13037,8 @@ static char *cpuinfo_flags(CPUArchState *env)
                 group = CPUID_GROUP_EXT3;
             } else if (i == FEAT_7_0_EBX) {
                 group = CPUID_GROUP_EBX;
+            } else if (i == FEAT_7_0_ECX) {
+                group = CPUID_GROUP_ECX;
             } else if (i == FEAT_XSAVE) {
                 group = CPUID_GROUP_XSAVE;
             } else if (i == FEAT_XSAVE_COMP_LO || i ==FEAT_XSAVE_COMP_HI) {
@@ -15384,6 +15573,15 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         unlock_user(p, arg2, 0);
         return ret;
 #endif
+#ifdef TARGET_NR_faccessat2
+    case TARGET_NR_faccessat2:
+        if (!(p = lock_user_string(arg2))) {
+            return -TARGET_EFAULT;
+        }
+        ret = get_errno(faccessat(arg1, p, arg3, arg4));
+        unlock_user(p, arg2, 0);
+        return ret;
+#endif
 #ifdef TARGET_NR_nice /* not on alpha */
     case TARGET_NR_nice:
         return get_errno(nice(arg1));
@@ -17018,7 +17216,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             }
 #ifdef CONFIG_LATX
             if (!is_error(ret)) {
-                latx_adjust_proc_self_task_stat(&st);
+                latx_adjust_proc_self_task_fstat(arg1, &st);
             }
 #endif
 #if defined(TARGET_NR_stat) || defined(TARGET_NR_lstat)
@@ -18573,7 +18771,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         }
 #ifdef CONFIG_LATX
         if (!is_error(ret)) {
-            latx_adjust_proc_self_task_stat(&st);
+            latx_adjust_proc_self_task_fstat(arg1, &st);
         }
 #endif
         if (!is_error(ret))
@@ -18594,7 +18792,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 
         if (!is_error(ret)) {
 #ifdef CONFIG_LATX
-            latx_adjust_proc_self_task_stat(&st);
+            latx_adjust_proc_self_task_stat_at(arg1, p, arg4, &st);
 #else
             if (rcu_call_thread_is_running() &&
                 (!strcmp((const char *)p, "self/task/") ||
@@ -18631,7 +18829,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 ret = get_errno(sys_statx(dirfd, p, flags, mask, &host_stx));
                 if (!is_error(ret)) {
 #ifdef CONFIG_LATX
-                    if (latx_statx_is_proc_self_task(&host_stx)) {
+                    if (latx_statx_is_proc_self_task_at(dirfd, p, flags,
+                                                        &host_stx)) {
                         host_stx.stx_nlink = latx_guest_thread_count() + 2;
                     }
 #endif
@@ -18651,7 +18850,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 
 #ifdef CONFIG_LATX
             if (!is_error(ret)) {
-                latx_adjust_proc_self_task_stat(&st);
+                latx_adjust_proc_self_task_stat_at(dirfd, p, flags, &st);
             }
 #endif
             unlock_user(p, arg2, 0);
@@ -21142,7 +21341,7 @@ abi_long do_syscall_with_seccomp(void *cpu_env, int num, int seccomp_num,
     }
 
 #ifdef CONFIG_LATX_TUNNEL_LIB
-    suppress_tunnel = ts->seccomp_filter && loader_tunnel;
+    suppress_tunnel = qatomic_read(&ts->seccomp_filter) && loader_tunnel;
 #endif
     if (suppress_tunnel) {
         ret = 0;

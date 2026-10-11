@@ -39,7 +39,6 @@
     {"source": "target/i386/latx/translator/tr-simd.c", "target": "tools/latc/lat/target/i386/latx/translator/tr-simd.c"},
     {"source": "target/i386/latx/translator/translate.c", "target": "tools/latc/lat/target/i386/latx/translator/translate.c"},
     {"source": "target/i386/latx/ir2/ir2-assemble.c", "target": "tools/latc/lat/target/i386/latx/ir2/ir2-assemble.c"},
-
     {"source": "tools/latc/aot-v2/include/lat-aot-v2.h", "target": "include/lat-aot-v2.h"},
     {"source": "tools/latc/aot-v2/include/latcd-protocol.h", "target": "include/latcd-protocol.h"},
     {"source": "tools/latc/aot-v2/include/lat-tb-key-set.h", "target": "include/lat-tb-key-set.h"},
@@ -54,10 +53,26 @@
     {"source": "tools/latc/aot-v2/runtime/auto-config.h", "target": "linux-user/auto-config.h"},
     {"source": "tools/latc/latcd/protocol.c", "target": "linux-user/latcd-protocol.c"},
     {"source": "tools/latc/aot-v2/common/tb-key-set.c", "target": "linux-user/tb-key-set.c"},
-
     {"source": "tools/latc/native/include/lat-native-image.h", "target": "lat-native-image.h"},
     {"source": "tools/latc/native/include/lat-native-image.h", "target": "include/lat-native-image.h"},
-    {"source": "tools/latc/native/include/latc-x86-syscall-abi.h", "target": "include/latc-x86-syscall-abi.h"}
+    {"source": "tools/latc/native/include/latc-x86-syscall-abi.h", "target": "include/latc-x86-syscall-abi.h"},
+    {"source": "target/i386/latx/include/env.h", "target": "tools/latc/lat/target/i386/latx/include/env.h"},
+    {"source": "target/i386/latx/include/translate.h", "target": "tools/latc/lat/target/i386/latx/include/translate.h"},
+    {"source": "target/i386/latx/include/optimize-config.h", "target": "tools/latc/lat/target/i386/latx/include/optimize-config.h"},
+    {"source": "target/i386/latx/optimization/ir2-optimization.c", "target": "tools/latc/lat/target/i386/latx/optimization/ir2-optimization.c"},
+    {"source": "target/i386/latx/translator/tr-opnd-process.c", "target": "tools/latc/lat/target/i386/latx/translator/tr-opnd-process.c"},
+    {"source": "target/i386/latx/translator/tr-mov.c", "target": "tools/latc/lat/target/i386/latx/translator/tr-mov.c"},
+    {"source": "target/i386/latx/translator/tr-simd-mov.c", "target": "tools/latc/lat/target/i386/latx/translator/tr-simd-mov.c"},
+    {"source": "target/i386/tcg/translate.c", "target": "tools/latc/lat/target/i386/tcg/translate.c"},
+    {"source": "target/i386/latx/include/capstone_git.h", "target": "tools/latc/lat/target/i386/latx/include/capstone_git.h"},
+    {"source": "target/i386/latx/include/latx-config.h", "target": "tools/latc/lat/target/i386/latx/include/latx-config.h"},
+    {"source": "target/i386/latx/include/latx-disassemble-trace.h", "target": "tools/latc/lat/target/i386/latx/include/latx-disassemble-trace.h"},
+    {"source": "target/i386/latx/include/ts.h", "target": "tools/latc/lat/target/i386/latx/include/ts.h"},
+    {"source": "target/i386/latx/latx-disassemble-trace/capstone_git.c", "target": "tools/latc/lat/target/i386/latx/latx-disassemble-trace/capstone_git.c"},
+    {"source": "target/i386/latx/optimization/imm-cache.c", "target": "tools/latc/lat/target/i386/latx/optimization/imm-cache.c"},
+    {"source": "target/i386/latx/ir1/ir1-decode.h", "target": "tools/latc/lat/target/i386/latx/ir1/ir1-decode.h"},
+    {"source": "target/i386/latx/include/aot-version.h", "target": "tools/latc/lat/target/i386/latx/include/aot-version.h"},
+    {"source": "linux-user/latc-aot-v2-runner-stub.c", "target": "tools/latc/lat/linux-user/latc-aot-v2-runner-stub.c"}
   ],
   "runner_variants": {
     "without-aot-v2": {

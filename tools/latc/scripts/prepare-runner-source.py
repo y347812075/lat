@@ -51,25 +51,20 @@ def main() -> None:
         destination = source / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(adapter, destination)
-    build_id_script = latc_root / "scripts/compute-aot-v2-build-id.py"
-    build_id = subprocess.check_output(
-        [sys.executable, str(build_id_script), str(latc_root.parents[1])],
-        text=True,
-    ).strip()
-    (source / "include/latc-build-id.h").write_text(
-        "#ifndef LATC_BUILD_ID_H\n#define LATC_BUILD_ID_H\n"
-        f"#define LATC_BUILD_ID \"{build_id}\"\n#endif\n"
-    )
+    shutil.copy2(latc_root / "aot-v2/include/latc-build-id.h",
+                 source / "include/latc-build-id.h")
 
     replace_once(source / "linux-user/meson.build",
                  "  'main.c',\n",
                  "  'main.c',\n  'latc-bundle-loader.c',\n")
-    replace_once(source / "linux-user/meson.build",
-                 "  'latc-bundle-loader.c',\n",
-                 "  'latc-bundle-loader.c',\n"
-                 "  'guest-elf-map.c',\n"
-                 "  'latcd-client.c',\n"
-                 "  'latc-aot-v2-runner.c',\n")
+    if "  'guest-elf-map.c',\n" not in (
+            source / "linux-user/meson.build").read_text():
+        replace_once(source / "linux-user/meson.build",
+                     "  'latc-bundle-loader.c',\n",
+                     "  'latc-bundle-loader.c',\n"
+                     "  'guest-elf-map.c',\n"
+                     "  'latcd-client.c',\n"
+                     "  'latc-aot-v2-runner.c',\n")
     replace_once(source / "linux-user/meson.build",
                  "  'latcd-client.c',\n",
                  "  'latcd-client.c',\n  'auto-config.c',\n")

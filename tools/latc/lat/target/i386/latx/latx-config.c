@@ -19,6 +19,7 @@
 #include "latx-config.h"
 #include "lat-aot-v2.h"
 #include "syscall-tunnel.h"
+#include "imm-cache.h"
 #if defined(CONFIG_LATX_KZT)
 #include "wrappertbbridge.h"
 #endif
@@ -683,6 +684,23 @@ void latx_init_fpu_regs(CPUArchState *env)
             : : :
         );
     }
+}
+
+void latx_lsenv_destroy(void)
+{
+    TRANSLATION_DATA *t = &tr_data_real;
+
+    free(t->ir2_inst_array);
+    if (t->imm_cache) {
+        free(t->imm_cache->bucket);
+        free(t->imm_cache);
+    }
+    memset(t, 0, sizeof(*t));
+#ifdef CONFIG_LATX_TU
+    tu_control_destroy();
+#endif
+    memset(&lsenv_real, 0, sizeof(lsenv_real));
+    lsenv = NULL;
 }
 
 void latx_lsenv_init_translation_thread(CPUArchState *env)

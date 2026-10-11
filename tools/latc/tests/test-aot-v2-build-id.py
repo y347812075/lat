@@ -20,6 +20,8 @@ with tempfile.TemporaryDirectory() as temporary:
     (root / "tools/latc/aot-v2/runtime").mkdir(parents=True)
     (root / "linux-user/main.c").write_text("one\n")
     (root / "tools/latc/aot-v2/runtime/runtime.c").write_text("two\n")
+    config = root / "tools/latc/aot-v2/codegen-default.mak"
+    config.write_text("ARCH=loongarch\nCONFIG_LATX=y\nCONFIG_LATX_O1=y\n")
     first = MODULE.compute(root)
     assert first == MODULE.compute(root)
     assert len(first) == 64
@@ -49,7 +51,37 @@ with tempfile.TemporaryDirectory() as temporary:
     ).splitlines()
     assert listed == [
         "linux-user/main.c",
+        "tools/latc/aot-v2/codegen-default.mak",
         "tools/latc/aot-v2/runtime/runtime.c",
     ]
+
+    profile = root / "profile.mak"
+    profile.write_text("CONFIG_LATX_O1=y\nCONFIG_LATX=y\nARCH=loongarch\n"
+                       "PREFIX=/irrelevant/path\nTARGET_DIRS=x86_64-linux-user\n")
+    assert MODULE.compute(root, profile) == changed
+    profile.write_text(profile.read_text() + "CONFIG_LATX_AVX_OPT=y\n")
+    avx = MODULE.compute(root, profile)
+    assert avx != changed
+    profile.write_text("ARCH=loongarch\nCONFIG_LATX=y\nCONFIG_LATX_O2=y\n")
+    assert MODULE.compute(root, profile) not in (changed, avx)
+    assert MODULE.compute(root, config,
+                          MODULE.source_identity(root)) == changed
+    profile.write_text("ARCH=loongarch\n")
+    assert MODULE.compute(root, profile) != changed
+    for invalid in ("",
+                    "ARCH=loongarch\nCONFIG_LATX=y\nCONFIG_LATX=y\n"):
+        profile.write_text(invalid)
+        try:
+            MODULE.compute(root, profile)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid codegen profile accepted")
+
+    (root / "crypto").mkdir()
+    (root / "crypto/aes.c").write_text("table one\n")
+    aes = MODULE.compute(root)
+    (root / "crypto/aes.c").write_text("table two\n")
+    assert MODULE.compute(root) != aes
 
 print("aot-v2-build-id: PASS")

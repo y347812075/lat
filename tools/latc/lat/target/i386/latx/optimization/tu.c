@@ -22,6 +22,9 @@
 #include "reg-alloc.h"
 #include "latx-options.h"
 #include "aot_page.h"
+#ifdef CONFIG_LATX_AOT
+#include "aot.h"
+#endif
 
 void get_last_info(TranslationBlock *tb, IR1_INST* pir1)
 {
@@ -109,6 +112,16 @@ void tu_control_init(void)
     tu_trees_init();
 
     return;
+}
+
+void tu_control_destroy(void)
+{
+    if (tu_data && tu_data->tree) {
+        /* TranslationBlocks belong to the code cache, not this index. */
+        g_tree_destroy(tu_data->tree);
+    }
+    memset(&tu_data_rel, 0, sizeof(tu_data_rel));
+    tu_data = NULL;
 }
 
 inline void tu_push_back(TranslationBlock *tb)
@@ -1125,6 +1138,9 @@ static void register_tu(uint32 tb_num_in_tu, TranslationBlock **tb_list,
             }
             tb_link_page(tb, phys_pc, phys_page2);
             tcg_tb_insert(tb);
+#ifdef CONFIG_LATX_AOT
+            aot_mark_dynamic_tb(tb);
+#endif
         }
     }
 

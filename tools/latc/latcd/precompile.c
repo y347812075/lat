@@ -634,7 +634,8 @@ static int send_request(const char *socket_path, uint32_t operation,
     int source = source_path ? open(source_path, O_RDONLY | O_CLOEXEC) : -1;
     int tbset = tbset_path ? open(tbset_path, O_RDONLY | O_CLOEXEC) : -1;
     int client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-    int needed = operation == LATCD_OP_SUBMIT_KEYS ? 2 : 1;
+    int needed = operation == LATCD_OP_SUBMIT_KEYS ||
+                 operation == LATCD_OP_SUBMIT_STATIC_KEYS ? 2 : 1;
     if ((needed >= 1 && source < 0) || (needed == 2 && tbset < 0) ||
         client < 0) {
         fail(error, error_size, "cannot open precompile request: %s",
@@ -765,7 +766,7 @@ int latcd_run_precompile(const char *socket_path, const char *rootfs,
         uint32_t priority = i == 0 ? LATCD_PRIORITY_STARTUP :
                                     LATCD_PRIORITY_LIBRARY;
         error[0] = '\0';
-        if (send_request(socket_path, LATCD_OP_SUBMIT_KEYS,
+        if (send_request(socket_path, LATCD_OP_SUBMIT_STATIC_KEYS,
                          dependency->host_path, dependency->tbset_path,
                          priority, &response, error, sizeof(error)) ||
             response.status != LATCD_STATUS_OK) {

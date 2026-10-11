@@ -6,9 +6,9 @@
 
 int main(void)
 {
-    unsigned char image[sizeof(LatNativeImageHeaderV2) + 56 +
+    unsigned char image[sizeof(LatNativeImageHeaderV2) + 96 +
                         sizeof(LatNativeTbV1) +
-                        6 * sizeof(LatNativeRelocationV1)] = {0};
+                        7 * sizeof(LatNativeRelocationV1)] = {0};
     LatNativeImageHeaderV2 *header = (void *)image;
     uint32_t *instructions;
     LatNativeRelocationV1 *relocations;
@@ -16,12 +16,12 @@ int main(void)
     char error[128] = {0};
 
     header->code_offset = sizeof(*header);
-    header->code_size = 56;
+    header->code_size = 96;
     header->tb_table_offset = header->code_offset + header->code_size;
     header->tb_count = 1;
     header->relocation_offset = header->tb_table_offset +
                                 sizeof(LatNativeTbV1);
-    header->relocation_count = 6;
+    header->relocation_count = 7;
     header->pc_map_offset = header->relocation_offset +
                             header->relocation_count *
                             sizeof(LatNativeRelocationV1);
@@ -40,6 +40,10 @@ int main(void)
     instructions[11] = 0x0380018c;
     instructions[12] = 0x00000981;
     instructions[13] = 0x000009a0;
+    instructions[14] = 0x1400000d;
+    instructions[15] = 0x038001ad;
+    instructions[16] = 0x1600000d;
+    memset((unsigned char *)instructions + 80, 0xa5, 16);
     LatNativeTbV1 *tb = (void *)(image + header->tb_table_offset);
     tb->guest_pc = 0x402000;
     tb->code_offset = 0;
@@ -70,6 +74,10 @@ int main(void)
     relocations[5].kind = LAT_NATIVE_RELOC_JRRA_TARGET;
     relocations[5].addend = 0x402000;
     relocations[5].slots = 4;
+    relocations[6] = (LatNativeRelocationV1){
+        .code_offset = 56, .kind = LAT_NATIVE_RELOC_IMAGE_DATA,
+        .slots = 3, .addend = 80, .reserved = 16,
+    };
 
     size_t image_size = header->pc_map_offset;
     if (lat_native_code_load(header, image, image_size, &code,
@@ -78,6 +86,18 @@ int main(void)
         return 1;
     }
     const uint32_t *loaded = code.address;
+    int64_t data_pages = (int32_t)((loaded[14] >> 5) << 12) >> 12;
+    uintptr_t data_target = ((uintptr_t)&loaded[14] & ~(uintptr_t)0xfff) +
+                            data_pages * 4096;
+    data_target |= (loaded[15] >> 10) & 0xfff;
+    if (data_target != (uintptr_t)code.address + 80 ||
+        loaded[16] != 0x03400000u ||
+        memcmp((unsigned char *)code.address + 80,
+               (unsigned char *)instructions + 80, 16)) {
+        fprintf(stderr, "native data address or contents changed\n");
+        lat_native_code_unload(&code);
+        return 1;
+    }
     uint32_t jrra_high = (loaded[10] >> 5) & 0xfffff;
     int64_t jrra_page_delta = (int32_t)(jrra_high << 12) >> 12;
     uintptr_t jrra_target = (((uintptr_t)&loaded[10] >> 12) +

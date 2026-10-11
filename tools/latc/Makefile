@@ -2,11 +2,11 @@ CC ?= cc
 X86_CC ?= $(CC)
 AR ?= ar
 HOST_ARCH := $(shell uname -m)
-AOT_V2_BUILD_ID := $(shell python3 scripts/compute-aot-v2-build-id.py ../..)
+AOT_V2_CONFIG ?= aot-v2/codegen-default.mak
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=c11
 FUZZ_CC ?= clang
 CPPFLAGS += -Icfg/include
-CPPFLAGS += -DLATC_BUILD_ID=\"$(AOT_V2_BUILD_ID)\"
+CPPFLAGS += -include $(IDENTITY_HEADER)
 CPPFLAGS += -Iformat -Ilat/include -Inative/include -Inative/format \
 	-Inative/runtime -Iaot-v2/include -Iaot-v2/runtime \
 	-Iaot-v2/compiler -Iaot-v2/common \
@@ -14,6 +14,7 @@ CPPFLAGS += -Iformat -Ilat/include -Inative/include -Inative/format \
 LDLIBS += $(shell pkg-config --libs glib-2.0)
 
 BUILD := build
+IDENTITY_HEADER := $(abspath $(BUILD)/latc-build-id-generated.h)
 CFG_SRC := \
 	cfg/src/common.c \
 	cfg/src/elf_image.c \
@@ -62,7 +63,12 @@ $(BUILD)/latcd/latcd: $(BUILD)/latcd/main.o $(BUILD)/latcd/protocol.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread -ldl
 
-$(BUILD)/%.o: %.c
+.PHONY: force-aot-v2-identity
+$(IDENTITY_HEADER): force-aot-v2-identity
+	@mkdir -p $(dir $@)
+	python3 scripts/compute-aot-v2-build-id.py ../.. --config $(AOT_V2_CONFIG) --header $@
+
+$(BUILD)/%.o: %.c $(IDENTITY_HEADER)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
 
@@ -517,7 +523,7 @@ test-aot-v2-tsan: $(BUILD)/tests/test-aot-v2-registry-tsan
 ifeq ($(HOST_ARCH),loongarch64)
 $(BUILD)/aot-v2/liblat-aot-runtime.so.2: aot-v2/runtime/runtime-abi.c \
 		aot-v2/runtime/runtime-entry.S \
-		aot-v2/runtime/runtime.map
+		aot-v2/runtime/runtime.map $(IDENTITY_HEADER)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -O2 -fPIC -shared -nostdlib \
 	  -Wl,-soname,liblat-aot-runtime.so.2 \
@@ -709,13 +715,31 @@ test-latcd-once: all
 	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) \
 	  $(BUILD)/latcd-once-test
 
-test-latcd-service: all
+test-latcd-service: all $(BUILD)/tests/x86-exit-call42
+	$(MAKE) test-latcd-runtime-failure AOT_V2_RUNNER=$(AOT_V2_RUNNER) \
+	  AOT_V2_RUNTIME_DIR=$(AOT_V2_RUNTIME_DIR)
+	$(MAKE) test-latcd-static-origin AOT_V2_RUNNER=$(AOT_V2_RUNNER) \
+	  AOT_V2_RUNTIME_DIR=$(AOT_V2_RUNTIME_DIR)
 	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
 	  -a -n "$(X86_GUEST)" || \
 	  { echo "usage: make test-latcd-service AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_GUEST=..."; exit 2; }
 	sh tests/test-latcd-service.sh $(BUILD)/latcd/latcd $(BUILD)/latc \
 	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) \
-	  $(BUILD)/latcd-service-test
+	  $(BUILD)/latcd-service-test $(BUILD)/tests/x86-exit-call42
+
+.PHONY: test-latcd-static-origin
+.PHONY: test-latcd-runtime-failure
+test-latcd-runtime-failure: all $(BUILD)/tests/x86-exit42
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)"
+	sh tests/test-latcd-runtime-failure.sh $(BUILD)/latcd/latcd $(BUILD)/latc \
+	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(BUILD)/tests/x86-exit42 \
+	  $(BUILD)/latcd-runtime-failure-test
+
+test-latcd-static-origin: all $(BUILD)/tests/x86-exit42
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)"
+	sh tests/test-latcd-static-origin.sh $(BUILD)/latcd/latcd $(BUILD)/latc \
+	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(BUILD)/tests/x86-exit42 \
+	  $(BUILD)/latcd-static-origin-test
 
 test-latcd-runner: all $(BUILD)/tests/x86-static-hello \
 		$(BUILD)/tests/x86-dynamic-hello

@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 6 ]; then
-    echo "usage: $0 LATCD LATC RUNNER RUNTIME_DIR X86_GUEST WORKDIR" >&2
+if [ "$#" -ne 7 ]; then
+    echo "usage: $0 LATCD LATC RUNNER RUNTIME_DIR X86_GUEST WORKDIR COVERED_GUEST" >&2
     exit 2
 fi
 
@@ -12,6 +12,7 @@ runner=$3
 runtime_dir=$4
 guest=$5
 work=$6
+covered_guest=$7
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 export LATC_FAKE_REAL=$latc
 rm -rf "$work"
@@ -287,7 +288,7 @@ with open(source_path, "rb") as source:
     assert load_vaddrs and entry >= min(load_vaddrs)
     entry_rva = entry - min(load_vaddrs)
 
-for request_id, flags in ((101, 1), (102, 3)):
+for request_id, offset in ((101, 0), (102, 5)):
     if request_id == 102:
         import time
         time.sleep(0.2)
@@ -295,7 +296,7 @@ for request_id, flags in ((101, 1), (102, 3)):
     try:
         tbset.close()
         write_key_set(Path(source_path), Path(tbset.name),
-                      [(entry_rva, flags)])
+                      [(entry_rva + offset, 3)])
         source_fd = os.open(source_path, os.O_RDONLY)
         tbset_fd = os.open(tbset.name, os.O_RDONLY)
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -357,7 +358,7 @@ entry_rva = entry - min(load_vaddrs)
 tbset = cache / ".tbsets" / f"{source_sha}.tbset"
 digest, sequence, records = read_key_set(tbset)
 assert digest.hex() == source_sha, digest.hex()
-assert records == [(entry_rva, 1), (entry_rva, 3)], records
+assert records == [(entry_rva, 3), (entry_rva + 5, 3)], records
 assert sequence == 2, sequence
 assert not (cache / f"{source_sha}.so").exists()
 current = json.loads((cache / f"{source_sha}.current").read_text())
@@ -417,7 +418,7 @@ with open(source_path, "rb") as source:
             bases.append(struct.unpack_from("<Q", phdr, 16)[0])
 entry_rva = entry - min(bases)
 with tempfile.NamedTemporaryFile() as tbset:
-    write_key_set(Path(source_path), Path(tbset.name), [(entry_rva + 5, 1)])
+    write_key_set(Path(source_path), Path(tbset.name), [(entry_rva + 10, 3)])
     source_fd = os.open(source_path, os.O_RDONLY)
     tbset_fd = os.open(tbset.name, os.O_RDONLY)
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -464,7 +465,8 @@ entry_rva = entry - min(bases)
 current = json.loads((cache / f"{source_sha}.current").read_text())
 _, sequence, records = read_key_set(cache / current["tbset"])
 assert sequence == 3, sequence
-assert records == [(entry_rva, 1), (entry_rva, 3), (entry_rva + 5, 1)], records
+assert records == [(entry_rva, 3), (entry_rva + 5, 3),
+                   (entry_rva + 10, 3)], records
 assert current["version"] == 2, current
 assert (cache / current["native"]).is_file(), current
 assert len(list(cache.glob(f"{source_sha}-*.so"))) == 1
@@ -497,6 +499,9 @@ printf '%s\n' '#!/bin/sh' 'set -eu' \
   "printf 'compile\\n' >>$native_aware_counter" \
   "exec $latc \"\$@\"" >"$native_aware_compiler"
 chmod 755 "$native_aware_compiler"
+native_aware_guest=$guest
+guest=$covered_guest
+test -f "$guest"
 start_service native-aware "$native_aware_compiler" --flush-only
 submit_source "$socket" "$guest" "$phase/initial.client"
 "$latcd" --flush-source --socket "$socket" "$guest" \
@@ -574,6 +579,7 @@ assert len(list(cache.glob(f"{source_sha}-*.tbset"))) == 1
 PY
 stop_service
 
+guest=$native_aware_guest
 atomic_marker=$work/atomic-before-manifest.fail
 export LATCD_TEST_FAIL_BEFORE_MANIFEST=$atomic_marker
 start_service atomic "$latc" --flush-only --negative-ms 10
@@ -610,7 +616,7 @@ source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
 manifest = json.loads((cache / f"{source_sha}.current").read_text())
 _, _, records = read_key_set(cache / manifest["tbset"])
 assert records
-write_key_set(source, output, [(records[0][0], 3)])
+write_key_set(source, output, [(records[0][0] + 5, 3)])
 PY
 "$latcd" --submit --socket "$socket" --tbset "$phase/delta.tbset" \
   "$guest" >"$phase/delta.client"
@@ -659,7 +665,7 @@ from tb_key_set import read_key_set
 source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
 manifest = json.loads((cache / f"{source_sha}.current").read_text())
 _, _, records = read_key_set(cache / manifest["tbset"])
-assert {flags for _, flags in records} == {1, 3}, records
+assert len(records) == 2 and {flags for _, flags in records} == {3}, records
 assert len(list(cache.glob(f"{source_sha}-*.so"))) == 1
 assert len(list(cache.glob(f"{source_sha}-*.native"))) == 1
 assert len(list(cache.glob(f"{source_sha}-*.tbset"))) == 1

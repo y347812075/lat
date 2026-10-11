@@ -5,6 +5,24 @@ latc=$1
 guest=$2
 bundle=$3
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+python3 "$script_dir/make-tbset.py" "$guest" "$bundle.entry.tbset"
+python3 - "$bundle.entry.tbset" "$guest" "$script_dir" <<'PY'
+from pathlib import Path
+import hashlib
+import struct
+import sys
+sys.path.insert(0, sys.argv[3])
+from tb_key_set import read_key_set
+source = Path(sys.argv[2]).read_bytes()
+entry, phoff = struct.unpack_from("<QQ", source, 24)
+size, count = struct.unpack_from("<HH", source, 54)
+bases = [struct.unpack_from("<Q", source, phoff + i * size + 16)[0]
+         for i in range(count)
+         if struct.unpack_from("<I", source, phoff + i * size)[0] == 1]
+digest, sequence, records = read_key_set(Path(sys.argv[1]))
+assert digest == hashlib.sha256(source).digest()
+assert sequence == 0 and records == [(entry - min(bases), 3)], records
+PY
 tbset="$bundle.input.tbset"
 python3 "$script_dir/tb_key_set.py" "$guest" "$tbset" 0x1000:0x3 0x1001:0x3
 
