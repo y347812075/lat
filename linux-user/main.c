@@ -217,13 +217,14 @@ int cpu_get_pic_interrupt(CPUX86State *env)
 /* Make sure everything is in a consistent state for calling fork().  */
 void fork_start(void)
 {
+#ifdef CONFIG_LATX
+    /* Drain fd operations before stopping threads needed to finish them. */
+    latx_syscall_fs_fork_start();
+#endif
     start_exclusive();
     mmap_fork_start();
     sigact_fork_start();
     path_fork_start();
-#ifdef CONFIG_LATX
-    latx_syscall_fs_fork_start();
-#endif
     fd_trans_fork_start();
     cpu_list_lock();
 }
@@ -235,7 +236,7 @@ void fork_end(int child)
     path_fork_end(child);
     fd_trans_fork_end();
 #ifdef CONFIG_LATX
-    latx_syscall_fs_fork_end();
+    latx_syscall_fs_fork_end(child);
 #endif
     if (child) {
         CPUState *cpu, *next_cpu;

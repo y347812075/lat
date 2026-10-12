@@ -12784,14 +12784,37 @@ static bool latx_stat_same_object(const struct stat *a, const struct stat *b)
 
 /*
  * Serialize identity-sensitive stat sequences with guest changes to cwd,
- * root, and descriptor bindings.  The fork hooks keep this lock consistent
- * across a multithreaded fork.
+ * root, and descriptor bindings.  Descriptor mutations may run together:
+ * close(), dup2() and dup3() can wait for another guest thread to close a
+ * peer.  A waiting identity query must not prevent that peer from progressing.
  */
 static pthread_mutex_t latx_syscall_fs_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t latx_syscall_fs_idle = PTHREAD_COND_INITIALIZER;
+static unsigned int latx_syscall_fd_active;
+
+static void latx_syscall_fd_begin(void)
+{
+    pthread_mutex_lock(&latx_syscall_fs_mutex);
+    latx_syscall_fd_active++;
+    pthread_mutex_unlock(&latx_syscall_fs_mutex);
+}
+
+static void latx_syscall_fd_end(void)
+{
+    pthread_mutex_lock(&latx_syscall_fs_mutex);
+    assert(latx_syscall_fd_active);
+    if (--latx_syscall_fd_active == 0) {
+        pthread_cond_broadcast(&latx_syscall_fs_idle);
+    }
+    pthread_mutex_unlock(&latx_syscall_fs_mutex);
+}
 
 static void latx_syscall_fs_lock(void)
 {
     pthread_mutex_lock(&latx_syscall_fs_mutex);
+    while (latx_syscall_fd_active) {
+        pthread_cond_wait(&latx_syscall_fs_idle, &latx_syscall_fs_mutex);
+    }
 }
 
 static void latx_syscall_fs_unlock(void)
@@ -12804,8 +12827,13 @@ void latx_syscall_fs_fork_start(void)
     latx_syscall_fs_lock();
 }
 
-void latx_syscall_fs_fork_end(void)
+void latx_syscall_fs_fork_end(int child)
 {
+    assert(!latx_syscall_fd_active);
+    if (child) {
+        /* Parent waiters do not exist in the child's address space. */
+        latx_syscall_fs_idle = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
+    }
     latx_syscall_fs_unlock();
 }
 
@@ -14839,19 +14867,22 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return ret;
 #endif
     case TARGET_NR_close:
+#ifdef CONFIG_LATX
+        latx_syscall_fd_begin();
+#endif
 #ifdef TARGET_I386
         ret = guest_exe_identity_relocate(cpu_env, arg1);
         if (ret) {
+#ifdef CONFIG_LATX
+            latx_syscall_fd_end();
+#endif
             return ret;
         }
-#endif
-#ifdef CONFIG_LATX
-        latx_syscall_fs_lock();
 #endif
         fd_trans_unregister(arg1);
         ret = get_errno(close(arg1));
 #ifdef CONFIG_LATX
-        latx_syscall_fs_unlock();
+        latx_syscall_fd_end();
 #endif
         return ret;
 
@@ -16072,23 +16103,26 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return ret;
 #ifdef TARGET_NR_dup2
     case TARGET_NR_dup2:
+#ifdef CONFIG_LATX
+        latx_syscall_fd_begin();
+#endif
 #ifdef TARGET_I386
         if (arg1 != arg2) {
             ret = guest_exe_identity_relocate(cpu_env, arg2);
             if (ret) {
+#ifdef CONFIG_LATX
+                latx_syscall_fd_end();
+#endif
                 return ret;
             }
         }
-#endif
-#ifdef CONFIG_LATX
-        latx_syscall_fs_lock();
 #endif
         ret = get_errno(dup2(arg1, arg2));
         if (ret >= 0) {
             fd_trans_dup(arg1, arg2);
         }
 #ifdef CONFIG_LATX
-        latx_syscall_fs_unlock();
+        latx_syscall_fd_end();
 #endif
         return ret;
 #endif
@@ -16101,23 +16135,26 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             return -EINVAL;
         }
         host_flags = target_to_host_bitmask(arg3, fcntl_flags_tbl);
+#ifdef CONFIG_LATX
+        latx_syscall_fd_begin();
+#endif
 #ifdef TARGET_I386
         if (arg1 != arg2) {
             ret = guest_exe_identity_relocate(cpu_env, arg2);
             if (ret) {
+#ifdef CONFIG_LATX
+                latx_syscall_fd_end();
+#endif
                 return ret;
             }
         }
-#endif
-#ifdef CONFIG_LATX
-        latx_syscall_fs_lock();
 #endif
         ret = get_errno(dup3(arg1, arg2, host_flags));
         if (ret >= 0) {
             fd_trans_dup(arg1, arg2);
         }
 #ifdef CONFIG_LATX
-        latx_syscall_fs_unlock();
+        latx_syscall_fd_end();
 #endif
         return ret;
     }

@@ -383,7 +383,7 @@ void fd_trans_fork_start(void);
 void fd_trans_fork_end(void);
 #ifdef CONFIG_LATX
 void latx_syscall_fs_fork_start(void);
-void latx_syscall_fs_fork_end(void);
+void latx_syscall_fs_fork_end(int child);
 #endif
 
 /**

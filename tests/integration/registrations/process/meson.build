@@ -1,6 +1,15 @@
 foreach arch : ['x86_64', 'i386']
   if arch + '-linux-user' in target_dirs
     latx_integration_tests += [{
+      'name': 'test-close-linger-progress-' + arch,
+      'runner': find_program('../../test-close-linger-progress.sh'),
+      'args': [
+        emulators['latx-' + arch],
+        files('../../close-linger-progress.c'),
+        arch,
+      ],
+      'timeout': 120,
+    }, {
       'name': 'test-procfs-fstat-provider-race-' + arch,
       'runner': find_program('../../test-procfs-fstat-provider-race.sh'),
       'args': [
