@@ -24,7 +24,9 @@ if ! command -v unshare >/dev/null 2>&1 || ! unshare -Ur true 2>/dev/null; then
     exit 77
 fi
 
-if command -v clang-19 >/dev/null 2>&1; then
+if [ -n "${LATX_PROCFS_CHROOT_GUEST:-}" ]; then
+    cp "$LATX_PROCFS_CHROOT_GUEST" "$workdir/cef-procfs-chroot"
+elif command -v clang-19 >/dev/null 2>&1; then
     clang=clang-19
 elif command -v clang >/dev/null 2>&1; then
     clang=clang
@@ -33,8 +35,10 @@ else
     exit 77
 fi
 
-"$clang" --target=x86_64-linux-gnu -fuse-ld=lld -nostdlib -static \
-    -Wl,--build-id=none "$source_file" -o "$workdir/cef-procfs-chroot"
+if [ -z "${LATX_PROCFS_CHROOT_GUEST:-}" ]; then
+    "$clang" --target=x86_64-linux-gnu -fuse-ld=lld -nostdlib -static \
+        -Wl,--build-id=none "$source_file" -o "$workdir/cef-procfs-chroot"
+fi
 
 "${CC:-cc}" -Wall -Wextra -Werror -pthread "$helper_source" \
     -o "$workdir/cef-procfs-other-task"
@@ -366,6 +370,18 @@ case $ret in
     ;;
 131)
     echo "FAIL: long relative statx rewrote another task" >&2
+    ;;
+180|182)
+    echo "FAIL: task query exhausted the symlink budget" >&2
+    ;;
+181|183)
+    echo "FAIL: task query at the symlink limit exposed translator threads" >&2
+    ;;
+184|186)
+    echo "FAIL: other-task query exhausted the symlink budget" >&2
+    ;;
+185|187)
+    echo "FAIL: query at the symlink limit rewrote another task" >&2
     ;;
 *)
     echo "FAIL: unexpected guest exit status $ret" >&2

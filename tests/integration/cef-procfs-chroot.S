@@ -50,6 +50,16 @@ long_relative_task:
     .ascii "./"
     .endr
     .asciz "self/task"
+symlink_budget_task:
+    .rept 39
+    .ascii "self/task/../../"
+    .endr
+    .asciz "self/task"
+symlink_budget_other_prefix:
+    .rept 40
+    .ascii "self/task/../../"
+    .endr
+symlink_budget_other_prefix_end:
 self_path:
     .asciz "self"
 task_path:
@@ -70,6 +80,8 @@ other_task_path:
     .space 64
 long_other_task_path:
     .space 4096
+symlink_budget_other_path:
+    .space 1024
 self_fd:
     .long 0
 .align 16
@@ -134,6 +146,17 @@ _start:
     stosb
     test %al, %al
     jne .Lcopy_long_other_path
+
+    lea symlink_budget_other_prefix(%rip), %rsi
+    lea symlink_budget_other_path(%rip), %rdi
+    mov $(symlink_budget_other_prefix_end-symlink_budget_other_prefix), %ecx
+    rep movsb
+    lea other_task_path(%rip), %rsi
+.Lcopy_budget_other_path:
+    lodsb
+    stosb
+    test %al, %al
+    jne .Lcopy_budget_other_path
 
     xor %r15d, %r15d
     mov 24(%rsp), %rsi
@@ -302,6 +325,52 @@ _start:
     js long_other_task_statx_failed
     cmp %r15d, statxbuf+16(%rip)
     jne long_other_task_statx_rewritten
+
+    mov $__NR_newfstatat, %eax
+    mov %r12d, %edi
+    lea symlink_budget_task(%rip), %rsi
+    lea statbuf(%rip), %rdx
+    xor %r10d, %r10d
+    syscall
+    test %rax, %rax
+    js budget_task_stat_failed
+    cmpq $3, statbuf+16(%rip)
+    jne budget_task_count_failed
+
+    mov $__NR_statx, %eax
+    mov %r12d, %edi
+    lea symlink_budget_task(%rip), %rsi
+    xor %edx, %edx
+    mov $STATX_BASIC_STATS, %r10d
+    lea statxbuf(%rip), %r8
+    syscall
+    test %rax, %rax
+    js budget_task_statx_failed
+    cmpl $3, statxbuf+16(%rip)
+    jne budget_task_statx_count_failed
+
+    mov $__NR_newfstatat, %eax
+    mov %r12d, %edi
+    lea symlink_budget_other_path(%rip), %rsi
+    lea statbuf(%rip), %rdx
+    xor %r10d, %r10d
+    syscall
+    test %rax, %rax
+    js budget_other_task_stat_failed
+    cmp %r15, statbuf+16(%rip)
+    jne budget_other_task_rewritten
+
+    mov $__NR_statx, %eax
+    mov %r12d, %edi
+    lea symlink_budget_other_path(%rip), %rsi
+    xor %edx, %edx
+    mov $STATX_BASIC_STATS, %r10d
+    lea statxbuf(%rip), %r8
+    syscall
+    test %rax, %rax
+    js budget_other_task_statx_failed
+    cmp %r15d, statxbuf+16(%rip)
+    jne budget_other_task_statx_rewritten
 
     mov $__NR_fstat, %eax
     mov %r13d, %edi
@@ -1069,6 +1138,30 @@ long_other_task_statx_failed:
     jmp exit
 long_other_task_statx_rewritten:
     mov $131, %edi
+    jmp exit
+budget_task_stat_failed:
+    mov $180, %edi
+    jmp exit
+budget_task_count_failed:
+    mov $181, %edi
+    jmp exit
+budget_task_statx_failed:
+    mov $182, %edi
+    jmp exit
+budget_task_statx_count_failed:
+    mov $183, %edi
+    jmp exit
+budget_other_task_stat_failed:
+    mov $184, %edi
+    jmp exit
+budget_other_task_rewritten:
+    mov $185, %edi
+    jmp exit
+budget_other_task_statx_failed:
+    mov $186, %edi
+    jmp exit
+budget_other_task_statx_rewritten:
+    mov $187, %edi
     jmp exit
 open_task_failed:
     mov $35, %edi

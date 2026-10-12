@@ -12720,6 +12720,57 @@ static int is_proc_myself(const char *filename, const char *entry)
     return 0;
 }
 #ifdef CONFIG_LATX
+/*
+ * Keep this cold buffer out of the common syscall dispatch stack frame.
+ * Copy and test each guest byte once: measuring first and then copying can
+ * report EFAULT if a writer moves the terminator within valid memory.
+ */
+static abi_long __attribute__((noinline))
+latx_copy_stat_pathname(abi_ulong addr, char **pathname)
+{
+    char buffer[PATH_MAX];
+    size_t copied = 0;
+    abi_long ret = -TARGET_ENAMETOOLONG;
+
+    mmap_lock();
+    while (copied < sizeof(buffer)) {
+        abi_ulong current = addr + copied;
+        size_t chunk, i;
+        uint8_t *guest;
+
+        if (current < addr) {
+            ret = -TARGET_EFAULT;
+            break;
+        }
+        chunk = MIN(TARGET_PAGE_SIZE - (current & ~TARGET_PAGE_MASK),
+                    sizeof(buffer) - copied);
+        guest = lock_user(VERIFY_READ, current, chunk, 1);
+        if (!guest) {
+            ret = -TARGET_EFAULT;
+            break;
+        }
+        for (i = 0; i < chunk; i++) {
+            uint8_t byte = qatomic_read(&guest[i]);
+
+            buffer[copied++] = byte;
+            if (!byte) {
+                ret = 0;
+                break;
+            }
+        }
+        unlock_user(guest, current, 0);
+        if (!ret) {
+            break;
+        }
+    }
+    mmap_unlock();
+    if (!ret) {
+        *pathname = g_malloc(copied);
+        memcpy(*pathname, buffer, copied);
+    }
+    return ret;
+}
+
 static bool latx_stat_same_object(const struct stat *a, const struct stat *b)
 {
     return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
@@ -12809,10 +12860,11 @@ static bool latx_stat_task_reference(int dirfd, const char *task_path,
 
     /*
      * Preserve the saved proc-root lookup when a valid guest pathname leaves
-     * no room for the identity suffix.  The caller still compares this inode
-     * with the original result on the same, verified procfs filesystem.
+     * no room or symlink budget for the identity suffix.  The caller still
+     * compares this inode with the original result on the same, verified
+     * procfs filesystem.
      */
-    return errno == ENAMETOOLONG &&
+    return (errno == ENAMETOOLONG || errno == ELOOP) &&
            fstatat(dirfd, "self/task", task_st, 0) == 0;
 }
 
@@ -18901,17 +18953,19 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             const char *host_pathname;
 #endif
 
-            p = lock_user_string(arg2);
-            if (!p) {
-                return -TARGET_EFAULT;
-            }
 #ifdef CONFIG_LATX
-            pathname = g_strdup(p);
-            unlock_user(p, arg2, 0);
+            ret = latx_copy_stat_pathname(arg2, &pathname);
+            if (ret) {
+                return ret;
+            }
             host_pathname = path(pathname);
             latx_syscall_fs_lock();
             ret = get_errno(fstatat(arg1, host_pathname, &st, arg4));
 #else
+            p = lock_user_string(arg2);
+            if (!p) {
+                return -TARGET_EFAULT;
+            }
             ret = get_errno(fstatat(arg1, path(p), &st, arg4));
 #endif
 
@@ -18951,18 +19005,20 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             char *pathname_snapshot;
 #endif
 
+#ifdef CONFIG_LATX
+            ret = latx_copy_stat_pathname(arg2, &pathname_snapshot);
+            if (ret) {
+                return ret;
+            }
+            pathname = pathname_snapshot;
+            host_pathname = path(pathname);
+            latx_syscall_fs_lock();
+#else
             p = lock_user_string(arg2);
             if (p == NULL) {
                 return -TARGET_EFAULT;
             }
             pathname = p;
-#ifdef CONFIG_LATX
-            pathname_snapshot = g_strdup(p);
-            pathname = pathname_snapshot;
-            unlock_user(p, arg2, 0);
-            host_pathname = path(pathname);
-            latx_syscall_fs_lock();
-#else
             host_pathname = path(pathname);
 #endif
 #if defined(__NR_statx)

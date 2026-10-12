@@ -1,3 +1,36 @@
+foreach arch : ['x86_64', 'i386']
+  if arch + '-linux-user' in target_dirs
+    latx_integration_tests += [{
+      'name': 'test-procfs-fstat-provider-race-' + arch,
+      'runner': find_program('../../test-procfs-fstat-provider-race.sh'),
+      'args': [
+        emulators['latx-' + arch],
+        files('../../procfs-fstat-provider-race.c'),
+        arch,
+      ],
+      'timeout': 60,
+    }, {
+      'name': 'test-procfs-path-snapshot-' + arch,
+      'runner': find_program('../../test-procfs-path-snapshot.sh'),
+      'args': [
+        emulators['latx-' + arch],
+        files('../../procfs-path-snapshot.c'),
+        arch,
+      ],
+      'timeout': 90,
+    }, {
+      'name': 'test-procfs-mapped-path-' + arch,
+      'runner': find_program('../../test-procfs-mapped-path.sh'),
+      'args': [
+        emulators['latx-' + arch],
+        files('../../procfs-mapped-path.c'),
+        arch,
+      ],
+      'timeout': 90,
+    }]
+  endif
+endforeach
+
 if 'x86_64-linux-user' in target_dirs
   latx_integration_tests += [{
     'name': 'test-statx-fork-race',
