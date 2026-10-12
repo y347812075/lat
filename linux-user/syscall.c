@@ -12771,6 +12771,12 @@ latx_copy_stat_pathname(abi_ulong addr, char **pathname)
     return ret;
 }
 
+/* proc_fill_super() supplies 1024-byte blocks to proc task inodes. */
+static bool latx_stat_may_be_proc_task(const struct stat *st)
+{
+    return S_ISDIR(st->st_mode) && st->st_blksize == 1024;
+}
+
 static bool latx_stat_same_object(const struct stat *a, const struct stat *b)
 {
     return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
@@ -12963,6 +12969,12 @@ static int latx_stat_path(const char *pathname, struct stat *st, bool follow)
     const char *host_pathname = path(pathname);
     int ret;
 
+    /* A negative result needs no proc identity transaction. */
+    ret = follow ? stat(host_pathname, st) : lstat(host_pathname, st);
+    if (ret || !latx_stat_may_be_proc_task(st)) {
+        return ret;
+    }
+    /* Discard the first result; serialize the complete lookup and proof. */
     latx_syscall_fs_lock();
     ret = follow ? stat(host_pathname, st) : lstat(host_pathname, st);
     if (ret == 0) {
@@ -18954,6 +18966,19 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
 
 #ifdef CONFIG_LATX
+            p = lock_user_string(arg2);
+            if (!p) {
+                return -TARGET_EFAULT;
+            }
+            ret = get_errno(fstatat(arg1, path(p), &st, arg4));
+            unlock_user(p, arg2, 0);
+            if (ret || !latx_stat_may_be_proc_task(&st)) {
+                if (!is_error(ret)) {
+                    ret = host_to_target_stat64(cpu_env, arg3, &st);
+                }
+                return ret;
+            }
+            /* No unlocked result participates in the serialized proof. */
             ret = latx_copy_stat_pathname(arg2, &pathname);
             if (ret) {
                 return ret;
@@ -19006,6 +19031,30 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
 
 #ifdef CONFIG_LATX
+#if defined(__NR_statx)
+            {
+                struct target_statx first;
+                bool candidate;
+
+                p = lock_user_string(arg2);
+                if (!p) {
+                    return -TARGET_EFAULT;
+                }
+                ret = get_errno(sys_statx(dirfd, p, flags, arg4, &first));
+                unlock_user(p, arg2, 0);
+                candidate = !ret &&
+                            (!(first.stx_mask & STATX_TYPE) ||
+                             S_ISDIR(first.stx_mode)) &&
+                            first.stx_blksize == 1024;
+                if (ret != -TARGET_ENOSYS && !candidate) {
+                    if (!is_error(ret)) {
+                        ret = host_to_target_statx(&first, arg5);
+                    }
+                    return ret;
+                }
+            }
+#endif
+            /* The fallback repeats the original primary/reference pair. */
             ret = latx_copy_stat_pathname(arg2, &pathname_snapshot);
             if (ret) {
                 return ret;
