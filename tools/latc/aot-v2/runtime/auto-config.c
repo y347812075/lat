@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "auto-config.h"
 #include "latcd-client.h"
 #include "latc-build-id.h"
@@ -250,19 +252,22 @@ bool lat_aot_ensure_daemon(void)
             posix_spawnattr_setsigdefault(&attributes, &defaults);
             posix_spawnattr_setflags(&attributes,
                                     POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
-            char *arguments[] = { daemon_path, "--serve", "--daemonize",
+            const char *arguments[] = { daemon_path, "--serve", "--daemonize",
                 "--socket", socket_path, "--cache-dir", cache, "--latc", compiler_path,
                 "--runner", runner_path, "--runtime-dir", runtime_path,
                 "--idle-seconds", "60", NULL };
             char *temporary = g_build_filename(state, "tmp", NULL);
             char *tmpenv = g_strconcat("TMPDIR=", temporary, NULL);
             char *loaderenv = g_strconcat("LD_LIBRARY_PATH=", runtime_path, NULL);
-            char *environment[] = { "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C",
+            const char *environment[] = { "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C",
                 "LATX_AOT=0", "LATX_AOT_V2=0", "LATX_AOT_V2_AUTOSTART=0",
                 tmpenv, loaderenv, NULL };
             pid_t child;
+            /* POSIX spawn does not modify argv/envp, despite its mutable API. */
             if (private_directory(temporary) &&
-                !posix_spawn(&child, daemon_path, &actions, &attributes, arguments, environment)) {
+                !posix_spawn(&child, daemon_path, &actions, &attributes,
+                             (char *const *)arguments,
+                             (char *const *)environment)) {
                 int status;
                 for (int i = 0; i < 200; i++) {
                     pid_t result = waitpid(child, &status, WNOHANG);

@@ -938,6 +938,7 @@ $(BUILD)/tests/test-aot-v2-module-pack: \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+$(BUILD)/tests/test-auto-config: CFLAGS += -D_GNU_SOURCE -Wwrite-strings
 $(BUILD)/tests/test-auto-config: aot-v2/tests/test-auto-config.c \
 		aot-v2/runtime/auto-config.c aot-v2/runtime/latcd-client.c $(BUILD)/latcd/protocol.o
 	@mkdir -p $(dir $@)
