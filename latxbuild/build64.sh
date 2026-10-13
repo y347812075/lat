@@ -68,18 +68,22 @@ make_cmd() {
         if [ "$opt_level" = "0" ] ; then
             ../configure --target-list=x86_64-linux-user --enable-latx \
                 --disable-debug-info --optimize-O0 --static --extra-ldflags=-ldl \
+                --prefix=/usr --libdir=/usr/lib --libexecdir=/usr/libexec \
                 --disable-docs ${low_mem_mode} ${avx_support}
         elif [ "$opt_level" = "1" ] ; then
             ../configure --target-list=x86_64-linux-user --enable-latx \
                 --disable-debug-info --optimize-O1 --extra-ldflags=-ldl --enable-kzt \
+                --prefix=/usr --libdir=/usr/lib --libexecdir=/usr/libexec \
                 --disable-docs ${low_mem_mode} ${avx_support}
         elif [ "$opt_level" = "2" ] ; then
             ../configure --target-list=x86_64-linux-user --enable-latx \
                 --disable-debug-info --optimize-O2 --static --extra-ldflags=-ldl \
+                --prefix=/usr --libdir=/usr/lib --libexecdir=/usr/libexec \
                 --disable-docs ${low_mem_mode} ${avx_support}
         elif [ "$opt_level" = "3" ] ; then
             ../configure --target-list=x86_64-linux-user --enable-latx \
                 --disable-debug-info --optimize-O3 --static --extra-ldflags=-ldl \
+                --prefix=/usr --libdir=/usr/lib --libexecdir=/usr/libexec \
                 --disable-docs ${low_mem_mode} ${avx_support}
         else
             echo "invalid options"
