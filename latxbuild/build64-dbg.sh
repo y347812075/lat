@@ -66,7 +66,8 @@ make_cmd() {
     if [ $make_configure -eq 1 ] ; then
         if [ "$opt_level" = "0" ] ; then
             ../configure --target-list=x86_64-linux-user --enable-latx \
-                --enable-debug --optimize-O0 --static --extra-ldflags=-ldl \
+                --enable-debug --optimize-O0 --static --disable-pie \
+                --extra-ldflags=-ldl \
                 --disable-docs ${low_mem_mode} ${avx_support}
         elif [ "$opt_level" = "1" ] ; then
             ../configure --target-list=x86_64-linux-user --enable-latx \
@@ -74,11 +75,13 @@ make_cmd() {
                 --disable-docs ${low_mem_mode} ${avx_support}
         elif [ "$opt_level" = "2" ] ; then
             ../configure --target-list=x86_64-linux-user --enable-latx \
-                --enable-debug --optimize-O2 --static --extra-ldflags=-ldl \
+                --enable-debug --optimize-O2 --static --disable-pie \
+                --extra-ldflags=-ldl \
                 --disable-docs ${low_mem_mode} ${avx_support}
         elif [ "$opt_level" = "3" ] ; then
             ../configure --target-list=x86_64-linux-user --enable-latx \
-                --enable-debug --optimize-O3 --static --extra-ldflags=-ldl \
+                --enable-debug --optimize-O3 --static --disable-pie \
+                --extra-ldflags=-ldl \
                 --disable-docs ${low_mem_mode} ${avx_support}
         else
             echo "invalid options"

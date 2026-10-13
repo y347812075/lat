@@ -69,7 +69,16 @@ add_global_arguments(config_host['QEMU_CFLAGS'].split(),
                      native: false, language: ['c', 'objc'])
 add_global_arguments(config_host['QEMU_CXXFLAGS'].split(),
                      native: false, language: 'cpp')
-add_global_link_arguments(config_host['QEMU_LDFLAGS'].split(),
+qemu_link_args = []
+qemu_static_link_args = []
+foreach arg : config_host['QEMU_LDFLAGS'].split()
+  if arg in ['-static', '-static-pie']
+    qemu_static_link_args += arg
+  else
+    qemu_link_args += arg
+  endif
+endforeach
+add_global_link_arguments(qemu_link_args,
                           native: false, language: ['c', 'cpp', 'objc'])
 
 add_project_arguments('-isystem', meson.current_source_dir() / 'linux-headers',
@@ -537,6 +546,21 @@ if 'CONFIG_LATX' in config_host
     install: true,
   )
   lat_aot_runtime_dep = declare_dependency(link_with: lat_aot_runtime)
+  if enable_static
+    lat_aot_runtime_static = static_library(
+      'lat-aot-runtime-static',
+      files(
+        'tools/latc/aot-v2/runtime/runtime-abi.c',
+        'tools/latc/aot-v2/runtime/runtime-entry.S',
+        'tools/latc/aot-v2/runtime/elf-validate.c',
+        'tools/latc/aot-v2/runtime/module-loader.c',
+        'tools/latc/aot-v2/runtime/registry.c',
+      ),
+      include_directories: lat_aot_runtime_inc,
+      dependencies: [libdl, dependency('threads')],
+    )
+    lat_aot_runtime_dep = declare_dependency(link_with: lat_aot_runtime_static)
+  endif
 
   latc_inc = include_directories(
     'include',
@@ -570,6 +594,7 @@ if 'CONFIG_LATX' in config_host
     ),
     include_directories: latc_inc,
     dependencies: [glib],
+    link_args: qemu_static_link_args,
     c_args: [
       '-DLATC_INSTALLED_SCRIPT_DIR="' + latc_helper_dir / 'scripts' + '"',
     ],
@@ -611,6 +636,7 @@ if 'CONFIG_LATX' in config_host
     ),
     include_directories: latcd_inc,
     dependencies: [glib, libdl, dependency('threads')],
+    link_args: qemu_static_link_args,
     install: true,
   )
 endif
@@ -951,7 +977,7 @@ foreach target : target_dirs
                objects: lib.extract_all_objects(recursive: true),
                link_language: link_language,
                link_depends: exe.get('link_depends', []),
-               link_args: link_args)
+               link_args: link_args + qemu_static_link_args)
 
     emulators += {exe['name']: emulator}
 

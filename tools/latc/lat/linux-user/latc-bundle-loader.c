@@ -162,7 +162,8 @@ typedef struct LatcPendingTb {
 static guint pending_tb_hash(gconstpointer pointer)
 {
     const LatcPendingTb *tb = pointer;
-    return (guint)(tb->pc ^ (tb->pc >> 32) ^
+    uint64_t pc = tb->pc;
+    return (guint)(pc ^ (pc >> 32) ^
                    ((tb->cflags & CF_PARALLEL) ? 0x9e3779b9U : 0));
 }
 
@@ -684,6 +685,7 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
     uint64_t pretranslate_started = monotonic_ns();
 
     if (getenv("LATC_EMIT_AOT")) {
+#ifdef CONFIG_LATX_AOT
         for (uint64_t i = 0; i < header.tb_count; i++) {
             LatcDiskTb disk_tb;
             if (read_cfg(&disk_tb, sizeof(disk_tb),
@@ -715,6 +717,10 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
         pretranslation_complete = true;
         write_stats();
         return;
+#else
+        fprintf(stderr, "latc: this runner was built without AOT export\n");
+        exit(EXIT_FAILURE);
+#endif
     }
 
     /* The TB set is authoritative.  Do not compile the rest of the static CFG. */

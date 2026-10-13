@@ -766,6 +766,16 @@ typedef struct NativeTuRange {
     uint64_t search_begin;
 } NativeTuRange;
 
+static uint32_t native_tb_offset_in_tu(const aot_tb *tb)
+{
+#ifdef CONFIG_LATX_TU
+    return tb->offset_in_tu;
+#else
+    /* Without TU grouping, each TB owns its code and search data. */
+    return 0;
+#endif
+}
+
 static int collect_native_tu_ranges(const aot_tb *tbs, size_t tb_count,
                                     uint64_t code_size,
                                     uint64_t aot_code_offset,
@@ -780,7 +790,7 @@ static int collect_native_tu_ranges(const aot_tb *tbs, size_t tb_count,
             continue;
         }
         if (tbs[i].tb_cache_offset < aot_code_offset ||
-            tbs[i].offset_in_tu) {
+            native_tb_offset_in_tu(&tbs[i])) {
             goto fail;
         }
         uint64_t begin = tbs[i].tb_cache_offset - aot_code_offset;
@@ -803,10 +813,10 @@ static int collect_native_tu_ranges(const aot_tb *tbs, size_t tb_count,
             goto fail;
         }
         uint64_t tb_begin = tbs[i].tb_cache_offset - aot_code_offset;
-        if (tb_begin < tbs[i].offset_in_tu) {
+        if (tb_begin < native_tb_offset_in_tu(&tbs[i])) {
             goto fail;
         }
-        uint64_t tu_begin = tb_begin - tbs[i].offset_in_tu;
+        uint64_t tu_begin = tb_begin - native_tb_offset_in_tu(&tbs[i]);
         NativeTuRange *range = g_hash_table_lookup(ranges, &tu_begin);
         uint64_t tb_end = tb_begin + tbs[i].tb_cache_size;
         uint64_t search_begin = tb_begin + tbs[i].tu_search_addr_offset;
@@ -896,7 +906,7 @@ static int extract_native_pc_maps(GArray *output, const uint8_t *code,
             return -1;
         }
         uint64_t code_offset = tbs[j].tb_cache_offset - aot_code_offset;
-        uint64_t tu_begin = code_offset - tbs[j].offset_in_tu;
+        uint64_t tu_begin = code_offset - native_tb_offset_in_tu(&tbs[j]);
         NativeTuRange *range = g_hash_table_lookup(ranges, &tu_begin);
         uint64_t guest_pc = segment->details.seg_begin +
                             tbs[j].offset_in_segment;

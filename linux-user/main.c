@@ -118,8 +118,10 @@ int box64_tcmalloc_minimal = 0;
 #endif
 
 char *exec_path;
+#if defined(CONFIG_LATX_AOT) || defined(TARGET_X86_64)
 static bool explicit_legacy_aot;
 static int requested_legacy_aot;
+#endif
 char *real_path;
 #ifdef CONFIG_LATX_AOT
 char *aot_file_path;
@@ -1410,6 +1412,7 @@ int main(int argc, char **argv, char **envp)
         return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "--latc-print-x86-env-offsets")) {
+#ifdef TARGET_X86_64
 #define LATC_ENV_OFFSET(name, member) \
         printf("#define LATC_X86_ENV_%s_OFFSET %zu\n", name, \
                offsetof(CPUX86State, member))
@@ -1464,6 +1467,10 @@ int main(int argc, char **argv, char **envp)
         puts("#endif");
 #undef LATC_ENV_OFFSET
         return 0;
+#else
+        fprintf(stderr, "latc: AOT v2 environment offsets require x86_64\n");
+        return EXIT_FAILURE;
+#endif
     }
 
 #ifdef CONFIG_LATX
@@ -1643,6 +1650,7 @@ int main(int argc, char **argv, char **envp)
         print_runtime_info();
         return EXIT_SUCCESS;
     }
+#ifdef TARGET_X86_64
     char aot_config_error[256];
     int aot_selection = explicit_legacy_aot ? requested_legacy_aot : option_aot;
     if (lat_aot_config_init(&aot_selection, explicit_legacy_aot,
@@ -1652,6 +1660,7 @@ int main(int argc, char **argv, char **envp)
         return EXIT_FAILURE;
     }
     if (!aot_selection) option_aot = 0;
+#endif
 
     /* Scan interp_prefix dir for replacement files. */
     init_paths(interp_prefix);
