@@ -11,6 +11,10 @@ and embeds the resulting native code and relocation records.
 See [candidate validation](VALIDATION.md) for build, installation and runtime
 gates, evidence requirements, and the boundaries of the tested support.
 
+The [i386 support assessment](AOT_V2_I386_PLAN.md) records the remaining
+32-bit Linux ELF work, scope, estimates and proposed validation gates.
+It is a planning record, not a claim of implemented i386 AOT v2 support.
+
 ### Automatic runtime setup
 
 Legacy `LATX_AOT` remains the default. Set `LATX_AOT_V2=1` to select
