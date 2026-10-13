@@ -1900,10 +1900,9 @@ void tb_target_set_nop(uintptr_t tc_ptr, uintptr_t jmp_rx,
 void tb_target_set_jmp_pair(uintptr_t jmp_rx, uintptr_t jmp_rw,
                             uint64_t pair)
 {
+#ifdef CONFIG_LATX_FAST_JMPCACHE
     tcg_insn_unit i1 = pair;
     tcg_insn_unit i2 = pair >> 32;
-
-#ifdef CONFIG_LATX_FAST_JMPCACHE
     if ((i1 >> 26) == OPC_B) {
         /*
          * Publish only the direct branch.  Keep the old second instruction
