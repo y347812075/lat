@@ -330,7 +330,7 @@ int lat_native_image_validate(const void *data, size_t size,
             relocations[i].slots * 4 >
                 header->code_size - relocations[i].code_offset ||
             relocations[i].kind < LAT_NATIVE_RELOC_RUNTIME_SYMBOL ||
-            relocations[i].kind > LAT_NATIVE_RELOC_JRRA_TARGET) {
+            relocations[i].kind > LAT_NATIVE_RELOC_IMAGE_DATA) {
             return invalid(error, error_size,
                            "native relocation %llu is invalid "
                            "(kind=%u slots=%u offset=0x%llx)",
@@ -350,6 +350,56 @@ int lat_native_image_validate(const void *data, size_t size,
             return invalid(error, error_size,
                            "native relocation %llu has an invalid guest target",
                            (unsigned long long)i);
+        }
+        if (relocations[i].kind == LAT_NATIVE_RELOC_IMAGE_DATA) {
+            const LatNativeRelocationV1 *relocation = &relocations[i];
+            uint64_t offset = (uint64_t)relocation->addend;
+            uint32_t words[3] = {0};
+            if (relocation->slots < 2 || relocation->slots > 3 ||
+                relocation->target || relocation->physical_target_plus_one ||
+                relocation->addend < 0 || !relocation->reserved ||
+                offset >= header->code_size ||
+                relocation->reserved > header->code_size - offset) {
+                return invalid(error, error_size,
+                               "native data relocation %llu has an invalid range",
+                               (unsigned long long)i);
+            }
+            uint64_t end = offset + relocation->reserved;
+            for (uint64_t j = 0; j < header->relocation_count; j++) {
+                const LatNativeRelocationV1 *patch = &relocations[j];
+                if (patch->code_offset < end &&
+                    (patch->code_offset >= offset ||
+                     (uint64_t)patch->slots * 4 > offset - patch->code_offset)) {
+                    return invalid(error, error_size,
+                                   "native data relocation overlaps a patch window");
+                }
+            }
+            for (uint64_t j = 0; j < header->tb_count; j++) {
+                if (offset < tbs[j].code_offset + tbs[j].code_size &&
+                    tbs[j].code_offset < end) {
+                    return invalid(error, error_size,
+                                   "native data relocation overlaps TB code");
+                }
+            }
+            for (uint64_t j = 0; j < header->tu_count; j++) {
+                if (offset < tus[j].code_offset + tus[j].code_size &&
+                    tus[j].code_offset < end) {
+                    return invalid(error, error_size,
+                                   "native data relocation overlaps TU code");
+                }
+            }
+            memcpy(words, (const unsigned char *)data + header->code_offset +
+                   relocation->code_offset, relocation->slots * 4);
+            uint32_t reg = words[0] & 0x1f;
+            if ((words[0] & 0xfe000000u) != 0x14000000u ||
+                (words[1] & 0xffc00000u) != 0x03800000u ||
+                (words[1] & 0x3ffu) != (reg << 5 | reg) ||
+                (relocation->slots == 3 &&
+                 (words[2] & 0xfe00001fu) != (0x16000000u | reg))) {
+                return invalid(error, error_size,
+                               "native data relocation %llu has invalid instructions",
+                               (unsigned long long)i);
+            }
         }
         if (relocations[i].kind == LAT_NATIVE_RELOC_JRRA_TARGET &&
             relocations[i].slots != 4) {
@@ -438,7 +488,7 @@ int lat_native_image_merge_files(const char *base_path,
         goto out;
     }
 
-    uint64_t delta_code_offset = align_up(base->code_size, 8);
+    uint64_t delta_code_offset = align_up(base->code_size, 32);
     if (delta->code_size > UINT64_MAX - delta_code_offset) {
         invalid(error, error_size, "merged native code is too large");
         goto out;
@@ -573,6 +623,10 @@ int lat_native_image_merge_files(const char *base_path,
         merged_relocations[base->relocation_count + i] = delta_relocations[i];
         merged_relocations[base->relocation_count + i].code_offset +=
             delta_code_offset;
+        if (delta_relocations[i].kind == LAT_NATIVE_RELOC_IMAGE_DATA) {
+            merged_relocations[base->relocation_count + i].addend +=
+                delta_code_offset;
+        }
         uint32_t physical =
             merged_relocations[base->relocation_count + i].physical_target_plus_one;
         if (physical) {

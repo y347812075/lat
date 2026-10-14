@@ -12,29 +12,15 @@ case "$build_dir" in /*) ;; *) build_dir="$(pwd)/$build_dir";; esac
 staging_dir="${build_dir}.source"
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 latc_dir=$(dirname "$script_dir")
-build_id=$(python3 "$script_dir/compute-aot-v2-build-id.py" "$source_dir")
+source_id=$(python3 "$script_dir/compute-aot-v2-build-id.py" "$source_dir" --source-only)
 
 rm -rf "$build_dir" "$staging_dir"
 mkdir -p "$staging_dir"
 rsync -a --delete --exclude 'build*' "$source_dir/" "$staging_dir/"
 touch "$staging_dir/.latc-staging"
-printf '%s\n' "$build_id" >"$staging_dir/.latc-build-id"
+printf '%s\n' "$source_id" >"$staging_dir/.latc-source-id"
 python3 "$script_dir/prepare-runner-source.py" "$staging_dir"
 mkdir -p "$build_dir"
-
-"${CC:-cc}" -I"$latc_dir/aot-v2/include" \
-  -DLATC_BUILD_ID=\"$build_id\" \
-  -I"$latc_dir/aot-v2/runtime" -O2 -fPIC -shared \
-  -Wl,-soname,liblat-aot-runtime.so.2 -Wl,-z,defs \
-  -Wl,-z,now -Wl,-z,relro \
-  -Wl,--version-script="$latc_dir/aot-v2/runtime/runtime.map" \
-  -Wl,--build-id=sha1 \
-  -o "$build_dir/liblat-aot-runtime.so.2" \
-  "$latc_dir/aot-v2/runtime/runtime-abi.c" \
-  "$latc_dir/aot-v2/runtime/runtime-entry.S" \
-  "$latc_dir/aot-v2/runtime/elf-validate.c" \
-  "$latc_dir/aot-v2/runtime/module-loader.c" \
-  "$latc_dir/aot-v2/runtime/registry.c" -ldl -pthread
 
 cd "$build_dir"
 "$staging_dir/configure" --target-list=x86_64-linux-user --enable-latx \
@@ -42,9 +28,8 @@ cd "$build_dir"
     --disable-debug-info --disable-werror --without-default-features \
     --disable-gnutls --disable-nettle --disable-gcrypt --disable-curl \
     --disable-bzip2 --disable-lzo --disable-snappy --disable-libssh \
-    --disable-slirp --disable-capstone \
-    --extra-ldflags="-L$build_dir -Wl,--no-as-needed -l:liblat-aot-runtime.so.2 -ldl"
-ninja latx-x86_64
+    --disable-slirp --disable-capstone
+ninja latx-x86_64 latc latcd
 LD_LIBRARY_PATH="$build_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
   ./latx-x86_64 --latc-print-x86-env-offsets >latc-x86-env-offsets.h
 test -s latc-x86-env-offsets.h

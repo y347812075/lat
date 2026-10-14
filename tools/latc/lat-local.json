@@ -55,7 +55,18 @@
     },
     {
       "path": "lat/linux-user/latc-aot-v2-runner-stub.c",
-      "reason": "disable AOT v2 loading in the static exporter runner without changing shared LAT call sites"
+      "reason": "canonical disabled runtime for unsupported guests and static exporters",
+      "generated": true
+    },
+    {
+      "path": "lat/target/i386/latx/ir1/ir1-decode.h",
+      "generated": true,
+      "reason": "synchronized upstream support for merged decoder and legacy AOT identity"
+    },
+    {
+      "path": "lat/target/i386/latx/include/aot-version.h",
+      "generated": true,
+      "reason": "synchronized upstream support for merged decoder and legacy AOT identity"
     }
   ],
   "modified": [
@@ -121,7 +132,8 @@
     },
     {
       "path": "lat/target/i386/latx/include/env.h",
-      "reason": "preserve standalone translation state while tracking delayed stack-pointer updates"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/include/hbr.h",
@@ -130,11 +142,13 @@
     },
     {
       "path": "lat/target/i386/latx/include/translate.h",
-      "reason": "preserve standalone translator declarations while exposing SHBR scalar-chain helpers and delayed stack-pointer update helpers"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/include/optimize-config.h",
-      "reason": "preserve standalone optimization settings while enabling translation-time PUSH/POP stack-pointer merging"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/ir1/ir1.c",
@@ -148,7 +162,8 @@
     },
     {
       "path": "lat/target/i386/latx/optimization/ir2-optimization.c",
-      "reason": "preserve standalone IR2 optimization code while disabling the superseded PUSH/POP pass"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/optimization/tu.c",
@@ -187,11 +202,13 @@
     },
     {
       "path": "lat/target/i386/latx/translator/tr-opnd-process.c",
-      "reason": "preserve standalone operand handling while exposing SHBR scalar-chain lane clearing"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/translator/tr-mov.c",
-      "reason": "preserve standalone move translation while merging consecutive PUSH/POP stack-pointer updates"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/translator/tr-simd-cvt.c",
@@ -200,7 +217,8 @@
     },
     {
       "path": "lat/target/i386/latx/translator/tr-simd-mov.c",
-      "reason": "preserve standalone SIMD move handling while applying SHBR scalar-load elimination"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/translator/tr-simd.c",
@@ -214,7 +232,8 @@
     },
     {
       "path": "lat/target/i386/tcg/translate.c",
-      "reason": "preserve standalone x86 translation while reserving instruction metadata for delayed stack-pointer recovery"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/ir2/ir2-assemble.c",
@@ -223,27 +242,33 @@
     },
     {
       "path": "lat/target/i386/latx/include/capstone_git.h",
-      "reason": "declare per-thread AOT disassembler initialization"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/include/latx-config.h",
-      "reason": "declare translation-only per-thread LATX state initialization"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/include/latx-disassemble-trace.h",
-      "reason": "expose per-thread disassembler initialization"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/include/ts.h",
-      "reason": "expose parallel AOT translation state and collected TB messages"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/latx-disassemble-trace/capstone_git.c",
-      "reason": "give each AOT translation thread independent Capstone handles and convert only decoded operands"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/optimization/imm-cache.c",
-      "reason": "make immediate-cache translation scratch state thread-local and use insertion sort for its usual small cache"
+      "reason": "synchronized from canonical main LAT source after upstream integration",
+      "generated": true
     },
     {
       "path": "lat/target/i386/latx/optimization/ts.c",

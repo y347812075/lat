@@ -402,6 +402,10 @@ static const char *runtime_entry(uint32_t symbol)
     case LAT_NATIVE_SYMBOL_RAISE_INTO: return "lat_aot_runtime_raise_into";
     case LAT_NATIVE_SYMBOL_RAISE_BOUND: return "lat_aot_runtime_raise_bound";
     case LAT_NATIVE_SYMBOL_XGETBV: return "lat_aot_runtime_xgetbv";
+    case LAT_NATIVE_SYMBOL_XSAVE: return "lat_aot_runtime_xsave";
+    case LAT_NATIVE_SYMBOL_XSAVEOPT: return "lat_aot_runtime_xsaveopt";
+    case LAT_NATIVE_SYMBOL_XRSTOR: return "lat_aot_runtime_xrstor";
+    case LAT_NATIVE_SYMBOL_XSETBV: return "lat_aot_runtime_xsetbv";
     case LAT_NATIVE_SYMBOL_KZT_GET_ALTERNATE:
         return "lat_aot_runtime_kzt_get_alternate";
     default:
@@ -456,7 +460,9 @@ static void build_tb_hash(ModulePack *pack)
     while (capacity < pack->header->tb_count * 2) {
         capacity <<= 1;
     }
-    pack->tb_hash = g_new(int, capacity);
+    if (!pack->tb_hash) {
+        pack->tb_hash = g_new(int, capacity);
+    }
     memset(pack->tb_hash, 0xff, capacity * sizeof(*pack->tb_hash));
     pack->tb_hash_mask = capacity - 1;
     for (uint64_t i = 0; i < pack->header->tb_count; i++) {
@@ -471,6 +477,54 @@ static void build_tb_hash(ModulePack *pack)
         }
         pack->tb_hash[slot] = (int)i;
     }
+}
+
+static void select_supported_primaries(ModulePack *pack)
+{
+    uint64_t first = 0;
+    while (first < pack->header->tb_count) {
+        uint64_t end = first + 1;
+        int primary = (int)first;
+        while (end < pack->header->tb_count &&
+               pack->tbs[end].guest_pc == pack->tbs[first].guest_pc &&
+               pack->tbs[end].flags == pack->tbs[first].flags) {
+            if (!pack->supported[primary] && pack->supported[end]) {
+                primary = (int)end;
+            }
+            end++;
+        }
+        for (uint64_t i = first; i < end; i++) {
+            pack->tb_primary_index[i] = primary;
+        }
+        first = end;
+    }
+    build_tb_hash(pack);
+}
+
+static int supported_primary(ModulePack *pack, int index)
+{
+    int primary = pack->tb_primary_index[index];
+    if (pack->supported[primary]) {
+        return primary;
+    }
+    uint64_t first = index;
+    while (first && pack->tbs[first - 1].guest_pc == pack->tbs[index].guest_pc &&
+           pack->tbs[first - 1].flags == pack->tbs[index].flags) {
+        first--;
+    }
+    uint64_t end = first;
+    while (end < pack->header->tb_count &&
+           pack->tbs[end].guest_pc == pack->tbs[index].guest_pc &&
+           pack->tbs[end].flags == pack->tbs[index].flags) {
+        if (!pack->supported[primary] && pack->supported[end]) {
+            primary = (int)end;
+        }
+        end++;
+    }
+    for (uint64_t i = first; i < end; i++) {
+        pack->tb_primary_index[i] = primary;
+    }
+    return primary;
 }
 
 static int find_tb(const ModulePack *pack, uint64_t guest_pc, uint32_t flags)
@@ -581,6 +635,12 @@ static void reorder_profiled_code(ModulePack *pack, const CfgProgram *program)
 {
     if (!program || !program->tb_count || !pack->header->tb_count) {
         return;
+    }
+    /* Embedded constants retain their native offsets, including after merges. */
+    for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
+        if (pack->relocations[i].kind == LAT_NATIVE_RELOC_IMAGE_DATA) {
+            return;
+        }
     }
     uint64_t tb_count = pack->header->tb_count;
     unsigned char *observed = g_malloc0(tb_count);
@@ -864,6 +924,8 @@ static void reorder_profiled_code(ModulePack *pack, const CfgProgram *program)
 }
 
 static int guest_slot(ModulePack *pack, uint64_t guest_rva);
+static int patch_address(uint32_t *instructions, uint32_t slots,
+                         uint64_t patch, uint64_t target);
 static int patch_tb_target_pair(uint32_t *instructions,
                                 uint64_t patch, uint64_t target,
                                 uint32_t exit_symbol);
@@ -938,21 +1000,31 @@ static void select_supported_tbs(ModulePack *pack)
                 pack->supported[owner] = 0;
             }
         }
+        if (relocation->kind == LAT_NATIVE_RELOC_IMAGE_DATA) {
+            uint32_t instructions[3];
+            memcpy(instructions, pack->code + relocation->code_offset,
+                   relocation->slots * sizeof(*instructions));
+            if (patch_address(instructions, relocation->slots,
+                              relocation->code_offset, relocation->addend)) {
+                pack->supported[owner] = 0;
+            }
+        }
     }
     int changed;
     do {
         changed = 0;
+        /* Logical keys can use a complete delta without discarding physical
+         * aliases referenced by relocations in the base native image. */
+        select_supported_primaries(pack);
+        for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
+            int target = pack->relocation_targets[i];
+            if (target >= 0) {
+                pack->relocation_targets[i] = pack->tb_primary_index[target];
+            }
+        }
         g_array_set_size(pack->guest_rvas, 0);
         g_hash_table_remove_all(pack->guest_rva_indexes);
         pack->three_level_guest_slots = 0;
-        for (uint64_t i = 0; i < pack->header->tb_count; i++) {
-            int primary = pack->tb_primary_index[i];
-            if (primary != (int)i && !pack->supported[primary] &&
-                pack->supported[i]) {
-                pack->supported[i] = 0;
-                changed = 1;
-            }
-        }
         if (pack->header->flags & LAT_NATIVE_IMAGE_PIE) {
             for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
                 const LatNativeRelocationV1 *relocation =
@@ -1014,6 +1086,10 @@ static void select_supported_tbs(ModulePack *pack)
                 continue;
             }
             int target = pack->relocation_targets[i];
+            if (target >= 0) {
+                target = supported_primary(pack, target);
+                pack->relocation_targets[i] = target;
+            }
             if (target >= 0 && !pack->supported[target]) {
                 pack->supported[owner] = 0;
                 changed = 1;
@@ -1470,6 +1546,9 @@ static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
         int result = -1;
         if (relocation->kind == LAT_NATIVE_RELOC_GUEST_ADDRESS) {
             result = patch_guest_address(pack, relocation);
+        } else if (relocation->kind == LAT_NATIVE_RELOC_IMAGE_DATA) {
+            result = patch_address(instructions, relocation->slots,
+                                   relocation->code_offset, relocation->addend);
         } else if (relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL &&
                    relocation->target == LAT_NATIVE_SYMBOL_PFTABLE) {
             result = patch_runtime_target(instructions, relocation->slots,

@@ -37,18 +37,20 @@ genh = []
 target_dirs = config_host['TARGET_DIRS'].split()
 
 python = import('python').find_installation()
-latc_staged_build_id = meson.current_source_dir() / '.latc-build-id'
-if fs.exists(latc_staged_build_id)
-  latc_build_id = run_command('cat', latc_staged_build_id,
-                              check: true).stdout().strip()
-else
-  latc_build_id = run_command(
+latc_source_id_args = []
+latc_staged_source_id = meson.current_source_dir() / '.latc-source-id'
+if fs.exists(latc_staged_source_id)
+  latc_source_id_args = ['--source-id', run_command(
+    'cat', latc_staged_source_id, check: true).stdout().strip()]
+endif
+latc_build_id = run_command(
     python,
     meson.current_source_dir() / 'tools/latc/scripts/compute-aot-v2-build-id.py',
     meson.current_source_dir(),
+    '--config', meson.current_build_dir() / 'config-host.mak',
+    latc_source_id_args,
     check: true,
   ).stdout().strip()
-endif
 add_project_arguments(
   '-DLATC_BUILD_ID="' + latc_build_id + '"',
   language: ['c', 'cpp', 'objc'],
@@ -67,7 +69,16 @@ add_global_arguments(config_host['QEMU_CFLAGS'].split(),
                      native: false, language: ['c', 'objc'])
 add_global_arguments(config_host['QEMU_CXXFLAGS'].split(),
                      native: false, language: 'cpp')
-add_global_link_arguments(config_host['QEMU_LDFLAGS'].split(),
+qemu_link_args = []
+qemu_static_link_args = []
+foreach arg : config_host['QEMU_LDFLAGS'].split()
+  if arg in ['-static', '-static-pie']
+    qemu_static_link_args += arg
+  else
+    qemu_link_args += arg
+  endif
+endforeach
+add_global_link_arguments(qemu_link_args,
                           native: false, language: ['c', 'cpp', 'objc'])
 
 add_project_arguments('-isystem', meson.current_source_dir() / 'linux-headers',
@@ -535,6 +546,21 @@ if 'CONFIG_LATX' in config_host
     install: true,
   )
   lat_aot_runtime_dep = declare_dependency(link_with: lat_aot_runtime)
+  if enable_static
+    lat_aot_runtime_static = static_library(
+      'lat-aot-runtime-static',
+      files(
+        'tools/latc/aot-v2/runtime/runtime-abi.c',
+        'tools/latc/aot-v2/runtime/runtime-entry.S',
+        'tools/latc/aot-v2/runtime/elf-validate.c',
+        'tools/latc/aot-v2/runtime/module-loader.c',
+        'tools/latc/aot-v2/runtime/registry.c',
+      ),
+      include_directories: lat_aot_runtime_inc,
+      dependencies: [libdl, dependency('threads')],
+    )
+    lat_aot_runtime_dep = declare_dependency(link_with: lat_aot_runtime_static)
+  endif
 
   latc_inc = include_directories(
     'include',
@@ -568,6 +594,7 @@ if 'CONFIG_LATX' in config_host
     ),
     include_directories: latc_inc,
     dependencies: [glib],
+    link_args: qemu_static_link_args,
     c_args: [
       '-DLATC_INSTALLED_SCRIPT_DIR="' + latc_helper_dir / 'scripts' + '"',
     ],
@@ -609,6 +636,7 @@ if 'CONFIG_LATX' in config_host
     ),
     include_directories: latcd_inc,
     dependencies: [glib, libdl, dependency('threads')],
+    link_args: qemu_static_link_args,
     install: true,
   )
 endif
@@ -895,6 +923,7 @@ foreach target : target_dirs
       files(
         'target/i386/latx/sbt/tests/aot-segment-unmap-test.c',
         'target/i386/latx/sbt/tests/aot-shm-syscall-test.c',
+        'linux-user/latc-aot-v2-runner-stub.c',
         'target/i386/latx/sbt/segment.c',
         'target/i386/latx/sbt/aot_lib.c'
       ) + genh + tcg_trace_genh + [syscall_nr_generated,
@@ -948,7 +977,7 @@ foreach target : target_dirs
                objects: lib.extract_all_objects(recursive: true),
                link_language: link_language,
                link_depends: exe.get('link_depends', []),
-               link_args: link_args)
+               link_args: link_args + qemu_static_link_args)
 
     emulators += {exe['name']: emulator}
 
@@ -1006,6 +1035,21 @@ if get_option('tests').enabled() and host_machine.system() == 'linux'
     depends: latu_install_depends,
     protocol: 'exitcode',
     suite: 'lat-pr-fast',
+  )
+endif
+
+if get_option('tests').enabled() and host_machine.cpu_family() == 'loongarch64' and \
+   'CONFIG_LATX_O1' in config_host and 'latx-x86_64' in emulators
+  test(
+    'test-aot-v2-static-vector-fallback',
+    find_program('tools/latc/tests/test-aot-v2-static-vector-fallback.sh'),
+    args: [latc.full_path(), emulators['latx-x86_64'].full_path(),
+           meson.current_build_dir(), '-',
+           meson.current_build_dir() / 'static-vector-fallback-test'],
+    depends: [latc, lat_aot_runtime, emulators['latx-x86_64']],
+    env: ['LD_LIBRARY_PATH=' + meson.current_build_dir()],
+    suite: 'latx-integration',
+    timeout: 120,
   )
 endif
 

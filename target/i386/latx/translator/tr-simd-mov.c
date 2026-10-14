@@ -529,7 +529,7 @@ bool translate_movsd(IR1_INST *pir1)
             int offset;
             IR2_OPND mem = convert_mem(src, &offset);
 
-            gen_test_page_flag(mem, offset, PAGE_READ);
+            gen_test_page_flag(mem, offset, PAGE_READ, 8);
             if (SHBR_ON_64(pir1)) {
                 la_fld_d(first_dest, mem, offset);
             } else {
@@ -548,7 +548,7 @@ bool translate_movsd(IR1_INST *pir1)
                            ir1_addr(second));
             la_x86_inst(ir2_opnd_addr);
             mem = mem_imm_add_disp(mem, &offset, 8);
-            gen_test_page_flag(mem, offset, PAGE_READ);
+            gen_test_page_flag(mem, offset, PAGE_READ, 8);
 
             IR2_OPND second_dest = ra_alloc_xmm(
                 ir1_opnd_base_reg_num(ir1_get_opnd(second, 0)));
@@ -573,7 +573,7 @@ bool translate_movsd(IR1_INST *pir1)
             int offset;
             IR2_OPND mem = convert_mem(src, &offset);
 
-            gen_test_page_flag(mem, offset, PAGE_READ);
+            gen_test_page_flag(mem, offset, PAGE_READ, 8);
             la_fld_d(xmm_dest, mem, offset);
 
             IR2_OPND ir2_opnd_addr;
@@ -581,7 +581,7 @@ bool translate_movsd(IR1_INST *pir1)
                            ir1_addr(pir1 + 1));
             la_x86_inst(ir2_opnd_addr);
             mem = mem_imm_add_disp(mem, &offset, 8);
-            gen_test_page_flag(mem, offset, PAGE_READ);
+            gen_test_page_flag(mem, offset, PAGE_READ, 8);
             la_ld_d(high, mem, offset);
             la_vinsgr2vr_d(xmm_dest, high, 1);
             return true;
@@ -704,7 +704,7 @@ bool translate_movlpd(IR1_INST *pir1)
             int offset;
             IR2_OPND mem = convert_mem(dest, &offset);
 
-            gen_test_page_flag(mem, offset, PAGE_WRITE | PAGE_WRITE_ORG);
+            gen_test_page_flag(mem, offset, PAGE_WRITE | PAGE_WRITE_ORG, 8);
             la_fst_d(xmm_src, mem, offset);
 
             IR2_OPND ir2_opnd_addr;
@@ -713,7 +713,7 @@ bool translate_movlpd(IR1_INST *pir1)
             la_x86_inst(ir2_opnd_addr);
             la_vpickve2gr_d(high, xmm_src, 1);
             mem = mem_imm_add_disp(mem, &offset, 8);
-            gen_test_page_flag(mem, offset, PAGE_WRITE | PAGE_WRITE_ORG);
+            gen_test_page_flag(mem, offset, PAGE_WRITE | PAGE_WRITE_ORG, 8);
             la_st_d(high, mem, offset);
             return true;
         }

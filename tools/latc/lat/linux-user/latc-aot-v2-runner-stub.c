@@ -130,6 +130,11 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
     return false;
 }
 
+void latc_aot_v2_note_cached_miss(const LatcAotV2Target *target)
+{
+    (void)target;
+}
+
 bool latc_aot_v2_activate_target(CPUState *cpu,
                                  const LatcAotV2Target *target)
 {

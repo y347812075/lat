@@ -15,6 +15,7 @@ RELOCATION_NAMES = {
     2: "tb_target",
     3: "guest_address",
     4: "jrra_target",
+    5: "image_data",
 }
 
 SYMBOL_NAMES = {
@@ -50,18 +51,18 @@ def parse_image(path):
     if data[:8] != b"LATNAT2\0":
         raise ValueError("%s: invalid LAT native image magic" % path)
     version, header_size = struct.unpack_from("<II", data, 8)
-    expected_header = 240 if version == 7 else 224
-    if version not in (2, 3, 4, 5, 6, 7) or header_size != expected_header or len(data) < header_size:
+    expected_header = 240 if version >= 7 else 224
+    if version not in (2, 3, 4, 5, 6, 7, 8) or header_size != expected_header or len(data) < header_size:
         raise ValueError("%s: unsupported LAT native image header" % path)
     flags = struct.unpack_from("<I", data, 16)[0]
     code_offset, code_size, tb_offset, tb_count, reloc_offset, reloc_count = \
         struct.unpack_from("<QQQQQQ", data, 56)
     pc_map_offset, pc_map_count = struct.unpack_from("<QQ", data, 104)
     tu_offset = tu_count = 0
-    if version == 7:
+    if version >= 7:
         tu_offset, tu_count = struct.unpack_from("<QQ", data, 120)
-    tb_stride = 56 if version == 7 else {2: 24, 3: 32, 4: 40, 5: 48, 6: 48}[version]
-    reloc_stride = 40 if version == 7 else 32
+    tb_stride = 56 if version >= 7 else {2: 24, 3: 32, 4: 40, 5: 48, 6: 48}[version]
+    reloc_stride = 40 if version >= 7 else 32
     pc_map_end = pc_map_offset + pc_map_count * 32
     if not tu_count and not tu_offset:
         tu_offset = pc_map_end

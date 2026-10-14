@@ -106,6 +106,10 @@ static int runtime_import_allowed(const char *name)
         "lat_aot_runtime_raise_into",
         "lat_aot_runtime_raise_bound",
         "lat_aot_runtime_xgetbv",
+        "lat_aot_runtime_xsave",
+        "lat_aot_runtime_xsaveopt",
+        "lat_aot_runtime_xrstor",
+        "lat_aot_runtime_xsetbv",
         "lat_aot_runtime_kzt_get_alternate",
     };
     for (size_t i = 0; i < sizeof(imports) / sizeof(imports[0]); i++) {

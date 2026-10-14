@@ -36,6 +36,7 @@
 
 #ifdef CONFIG_LATX
 #include "reg-map.h"
+#include "latx-options.h"
 #endif
 
 #define PREFIX_REPZ   0x01
@@ -8652,11 +8653,7 @@ void gen_intermediate_code(CPUState *cpu, TranslationBlock *tb, int max_insns,
 void restore_state_to_opc(CPUX86State *env, TranslationBlock *tb,
                           target_ulong *data)
 {
-#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
-    int cc_op = CC_OP_DYNAMIC;
-#else
     int cc_op = data[1];
-#endif
 
     env->eip = data[0] - tb->cs_base;
     if (cc_op != CC_OP_DYNAMIC) {
@@ -8733,10 +8730,18 @@ static void restore_extcontext(CPUX86State *env, ucontext_t *uc)
           UC_GET_LSX(&extctx, reg_xmm_map[i], 0, uint64_t);
       env->xmm_regs[i].ZMM_Q(1) =
           UC_GET_LSX(&extctx, reg_xmm_map[i], 1, uint64_t);
-      env->xmm_regs[i].ZMM_Q(2) =
-          UC_GET_LSX(&extctx, reg_xmm_map[i], 2, uint64_t);
-      env->xmm_regs[i].ZMM_Q(3) =
-          UC_GET_LSX(&extctx, reg_xmm_map[i], 3, uint64_t);
+#ifdef CONFIG_LATX_AVX_OPT
+      if (!option_enable_lasx) {
+        env->xmm_regs[i].ZMM_Q(2) = env->ymmh_regs[i]._q[0];
+        env->xmm_regs[i].ZMM_Q(3) = env->ymmh_regs[i]._q[1];
+      } else
+#endif
+      {
+        env->xmm_regs[i].ZMM_Q(2) =
+            UC_GET_LSX(&extctx, reg_xmm_map[i], 2, uint64_t);
+        env->xmm_regs[i].ZMM_Q(3) =
+            UC_GET_LSX(&extctx, reg_xmm_map[i], 3, uint64_t);
+      }
     }
     /* eflags */
     env->eflags = UC_GET_EFLAGS(&extctx, uint32_t);
@@ -8747,7 +8752,11 @@ static void restore_extcontext(CPUX86State *env, ucontext_t *uc)
 void restore_state_to_opc(CPUX86State *env, TranslationBlock *tb,
                           target_ulong *data)
 {
+#ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
+    int cc_op = CC_OP_DYNAMIC;
+#else
     int cc_op = data[1];
+#endif
 
     /* env->eip = data[0] - tb->cs_base; */
     env->eip = data[0];

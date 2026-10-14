@@ -112,6 +112,7 @@ typedef struct LatcdJob {
     char *snapshot;
     char *tbset;
     bool tbset_canonical;
+    bool static_tbset;
     bool running;
     bool dirty;
     char key[130];
@@ -138,6 +139,13 @@ typedef struct LatcdNegativeEntry {
     int64_t retry_at_us;
 } LatcdNegativeEntry;
 
+typedef struct LatcdStaticBarrier {
+    char source_key[65];
+    uint64_t first_sequence;
+    uint64_t last_sequence;
+    bool failed;
+} LatcdStaticBarrier;
+
 typedef struct LatcdService {
     const LatcdConfig *config;
     pthread_mutex_t lock;
@@ -147,6 +155,7 @@ typedef struct LatcdService {
     GHashTable *running_sources;
     GHashTable *negative;
     GHashTable *source_states;
+    GHashTable *static_barriers;
     pthread_t *workers;
     int stopping;
     uint64_t next_sequence;
@@ -783,15 +792,40 @@ static int merge_tbset(const LatcdConfig *config, const uint8_t digest[32],
             error[0] = '\0';
         }
     }
+    uint64_t original_count = existing.count;
+    uint64_t original_sequence = existing.sequence;
+    if (!result) {
+        LatcdCurrentManifest manifest = {0};
+        if (!current_manifest_read(config, source_hex, &manifest) &&
+            *manifest.tbset &&
+            persisted_manifest_valid(config, source_hex, digest)) {
+            char *published = g_build_filename(config->cache_dir,
+                                                manifest.tbset, NULL);
+            LatTbKeySet published_set = {0}, complete = {0};
+            result = lat_tb_key_set_read_file(published, digest, &published_set,
+                                              error, error_size);
+            if (!result) {
+                result = lat_tb_key_set_union(&existing, &published_set,
+                                               &complete, error, error_size);
+            }
+            if (!result) {
+                lat_tb_key_set_destroy(&existing);
+                existing = complete;
+            }
+            lat_tb_key_set_destroy(&published_set);
+            g_free(published);
+        }
+        current_manifest_clear(&manifest);
+    }
     if (!result) {
         result = lat_tb_key_set_union(&existing, &incoming_set, &merged,
                                       error, error_size);
     }
     char *temporary = NULL;
     if (!result) {
-        bool content_changed = merged.count != existing.count;
-        merged.sequence = content_changed ? existing.sequence + 1 :
-                                            existing.sequence;
+        bool content_changed = merged.count != original_count;
+        merged.sequence = content_changed ? original_sequence + 1 :
+                                            original_sequence;
         if (changed) *changed = content_changed;
         if (!content_changed) goto merged_done;
         temporary = g_build_filename(directory, "tbset-XXXXXX", NULL);
@@ -899,8 +933,72 @@ static int prepare_compile_delta(const LatcdConfig *config,
     return result;
 }
 
+/* Keep failed static discoveries out of the runtime collection, while
+ * retaining keys already collected or published for this ELF. */
+static int prepare_static_tbset(const LatcdConfig *config,
+                                const uint8_t digest[32], const char *incoming,
+                                char **output, char *error, size_t error_size)
+{
+    char hex[65];
+    digest_hex(digest, hex);
+    char *name = g_strdup_printf("%s.tbset", hex);
+    char *known = g_build_filename(config->cache_dir, ".tbsets", name, NULL);
+    LatcdCurrentManifest manifest = {0};
+    LatTbKeySet complete = {0};
+    int result = lat_tb_key_set_read_file(incoming, digest, &complete,
+                                         error, error_size);
+    pthread_mutex_lock(&cache_lock);
+    char *published = NULL;
+    if (!current_manifest_read(config, hex, &manifest) && *manifest.tbset &&
+        persisted_manifest_valid(config, hex, digest)) {
+        published = g_build_filename(config->cache_dir, manifest.tbset, NULL);
+    }
+    const char *paths[] = { known, published };
+    for (size_t i = 0; !result && i < G_N_ELEMENTS(paths); i++) {
+        if (!paths[i]) continue;
+        LatTbKeySet existing = {0}, merged = {0};
+        if (lat_tb_key_set_read_file(paths[i], digest, &existing,
+                                      error, error_size)) {
+            if (errno != ENOENT) result = -1;
+            else error[0] = '\0';
+        } else {
+            result = lat_tb_key_set_union(&complete, &existing, &merged,
+                                          error, error_size);
+            if (!result) {
+                lat_tb_key_set_destroy(&complete);
+                complete = merged;
+            }
+        }
+        lat_tb_key_set_destroy(&existing);
+    }
+    pthread_mutex_unlock(&cache_lock);
+    if (!result) {
+        char *path = g_build_filename(config->cache_dir, ".tmp",
+                                      "static-XXXXXX", NULL);
+        int fd = g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
+        if (fd < 0 || lat_tb_key_set_write_fd(fd, &complete,
+                                              error, error_size)) {
+            result = -1;
+        }
+        if (fd >= 0 && close(fd)) result = -1;
+        if (result) {
+            unlink(path);
+            g_free(path);
+        } else {
+            *output = path;
+        }
+    }
+    lat_tb_key_set_destroy(&complete);
+    current_manifest_clear(&manifest);
+    g_free(published);
+    g_free(known);
+    g_free(name);
+    return result;
+}
+
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *source, const char *tbset,
+                        bool static_tbset,
                         const char *base_native, const char *output_native,
                         const char *output, const uint8_t digest[32],
                         char *error, size_t error_size)
@@ -911,11 +1009,12 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     const char *arguments[] = {
         config->compiler, "compile-module", source,
         "-o", output, "--runner", config->runner,
-        "--runtime-dir", config->runtime_dir, NULL, NULL, NULL,
+        "--runtime-dir", config->runtime_dir, NULL, NULL, NULL, NULL,
     };
     if (tbset) {
         arguments[9] = "--tbset";
         arguments[10] = tbset;
+        if (static_tbset) arguments[11] = "--static-tbset";
     }
     char *library_path = g_strdup_printf("LD_LIBRARY_PATH=%s",
                                          config->runtime_dir);
@@ -1922,6 +2021,7 @@ out:
 static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
                             const char *snapshot, const char *compile_tbset,
                             const char *complete_tbset,
+                            bool static_tbset,
                             const uint8_t digest[32],
                             uint64_t published_sequence,
                             LatcdResponseV2 *response)
@@ -1956,6 +2056,12 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         }
         GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
         g_checksum_update(checksum, (const guchar *)tbset_data, tbset_size);
+        if (static_tbset) {
+            /* A checked compile must stage a fresh generation even when
+             * its keys match the currently published generation. */
+            g_checksum_update(checksum, (const guchar *)snapshot,
+                              strlen(snapshot));
+        }
         g_strlcpy(tbset_hex, g_checksum_get_string(checksum),
                   sizeof(tbset_hex));
         g_checksum_free(checksum);
@@ -1976,7 +2082,8 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
 
     LatAotModuleInfoV2 info;
     pthread_mutex_lock(&cache_lock);
-    bool cache_hit = cached_module_inspect(final_module, digest, &info) &&
+    bool cache_hit = !static_tbset &&
+        cached_module_inspect(final_module, digest, &info) &&
         !access(final_native, R_OK) &&
         (!complete_tbset || !access(final_tbset, R_OK));
     if (cache_hit && complete_tbset) {
@@ -2006,7 +2113,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         status = LATCD_STATUS_OK;
         goto out;
     }
-    if (complete_tbset && compile_tbset &&
+    if (!static_tbset && complete_tbset && compile_tbset &&
         strcmp(compile_tbset, complete_tbset)) {
         LatcdCurrentManifest previous = {0};
         if (!current_manifest_read(config, hex, &previous) &&
@@ -2047,7 +2154,8 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     close(placeholder);
     unlink(native);
     int compiler_result = run_compiler(config, worker_index, snapshot,
-                                       compile_tbset, base_native, native,
+                                       compile_tbset, static_tbset,
+                                       base_native, native,
                                        module, digest, error, sizeof(error));
     if (compiler_result) {
         status = LATCD_STATUS_COMPILE_FAILED;
@@ -2182,7 +2290,7 @@ out:
 }
 
 static int process_request(const LatcdConfig *config, int source_fd,
-                           int tbset_fd,
+                           int tbset_fd, bool static_tbset,
                            LatcdResponseV2 *response)
 {
     char error[sizeof(response->message)] = {0};
@@ -2210,7 +2318,14 @@ static int process_request(const LatcdConfig *config, int source_fd,
         response->status = LATCD_STATUS_BAD_REQUEST;
         goto out;
     }
-    if (tbset && merge_tbset(config, response->source_sha256, tbset,
+    if (tbset && static_tbset &&
+        prepare_static_tbset(config, response->source_sha256, tbset,
+                             &canonical, error, sizeof(error))) {
+        response->status = LATCD_STATUS_BAD_REQUEST;
+        goto out;
+    }
+    if (tbset && !static_tbset &&
+        merge_tbset(config, response->source_sha256, tbset,
                                &canonical, NULL, error, sizeof(error))) {
         response->status = LATCD_STATUS_BAD_REQUEST;
         goto out;
@@ -2218,6 +2333,7 @@ static int process_request(const LatcdConfig *config, int source_fd,
     result = publish_snapshot(config, 0, snapshot,
                               canonical ? canonical : tbset,
                               canonical ? canonical : tbset,
+                              static_tbset,
                               response->source_sha256, 0,
                               response);
 out:
@@ -2486,9 +2602,15 @@ static void *compiler_worker(void *opaque)
         char *stable_tbset = NULL;
         char *compile_delta = NULL;
         bool delta_empty = false;
-        int result = job->tbset && !job->tbset_canonical && merge_tbset(
+        int result = job->tbset && !job->tbset_canonical &&
+            !job->static_tbset && merge_tbset(
             service->config, job->digest, job->tbset, &canonical, NULL,
             error, sizeof(error));
+        if (!result && job->static_tbset) {
+            result = prepare_static_tbset(service->config, job->digest,
+                                           job->tbset, &stable_tbset,
+                                           error, sizeof(error));
+        }
         if (!result && job->tbset_canonical) {
             int tbset_fd = open(job->tbset,
                                   O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -2505,10 +2627,22 @@ static void *compiler_worker(void *opaque)
             }
             if (tbset_fd >= 0) close(tbset_fd);
             g_free(temporary_dir);
+            if (!result) {
+                char *complete = NULL;
+                result = prepare_static_tbset(service->config, job->digest,
+                                               stable_tbset, &complete,
+                                               error, sizeof(error));
+                if (!result) {
+                    unlink(stable_tbset);
+                    g_free(stable_tbset);
+                    stable_tbset = complete;
+                }
+            }
         }
-        const char *compile_tbset = job->tbset_canonical ? stable_tbset :
+        const char *compile_tbset = job->tbset_canonical || job->static_tbset ?
+                                    stable_tbset :
                                     (canonical ? canonical : job->tbset);
-        if (!result && compile_tbset) {
+        if (!result && compile_tbset && !job->static_tbset) {
             result = prepare_compile_delta(service->config, job->digest,
                                            compile_tbset, &compile_delta,
                                            &delta_empty,
@@ -2533,7 +2667,8 @@ static void *compiler_worker(void *opaque)
                                       job->snapshot,
                                       compile_delta ? compile_delta :
                                       compile_tbset,
-                                      compile_tbset, job->digest,
+                                      compile_tbset, job->static_tbset,
+                                      job->digest,
                                       job->compile_sequence, &response);
         } else if (!result) {
             int publish_result = publish_covered_tbset(
@@ -2542,7 +2677,8 @@ static void *compiler_worker(void *opaque)
             if (publish_result > 0) {
                 result = publish_snapshot(
                     service->config, worker->index, job->snapshot,
-                    compile_tbset, compile_tbset, job->digest,
+                    compile_tbset, compile_tbset, job->static_tbset,
+                    job->digest,
                     job->compile_sequence, &response);
             } else {
                 result = publish_result;
@@ -2562,6 +2698,15 @@ static void *compiler_worker(void *opaque)
         g_hash_table_remove(service->running_sources, job->source_key);
         LatcdSourceState *source_state = source_state_locked(
             service, job->source_key);
+        if (job->static_tbset) {
+            LatcdStaticBarrier *barrier = g_hash_table_lookup(
+                service->static_barriers, job->key);
+            if (!result) {
+                g_hash_table_remove(service->static_barriers, job->key);
+            } else if (barrier) {
+                barrier->failed = true;
+            }
+        }
         if (!result) {
             service->compiled++;
             uint64_t published_sequence = job->dirty ?
@@ -2572,8 +2717,11 @@ static void *compiler_worker(void *opaque)
             g_hash_table_remove(service->negative, job->key);
         } else {
             service->failed++;
-            if (job->compile_sequence > source_state->failed_sequence) {
-                source_state->failed_sequence = job->compile_sequence;
+            /* This failed job is removed, including requests accepted while
+             * it was running. None can wait for a nonexistent retry job. */
+            uint64_t failed_sequence = job->accepted_sequence;
+            if (failed_sequence > source_state->failed_sequence) {
+                source_state->failed_sequence = failed_sequence;
             }
             negative_record_locked(service, job->key, response.status);
             fprintf(stderr, "latcd: job %s failed status=%d: %s\n",
@@ -2747,7 +2895,8 @@ static int service_queue_request(LatcdService *service, int source_fd,
     }
     bool tbset_canonical = false;
     bool tbset_changed = false;
-    if (tbset) {
+    bool static_tbset = request->operation == LATCD_OP_SUBMIT_STATIC_KEYS;
+    if (tbset && !static_tbset) {
         char *canonical = NULL;
         if (merge_tbset(service->config, response->source_sha256, tbset,
                         &canonical, &tbset_changed,
@@ -2771,7 +2920,25 @@ static int service_queue_request(LatcdService *service, int source_fd,
     digest_hex(response->source_sha256, key);
     char source_key[65];
     memcpy(source_key, key, 65);
-    if (tbset) {
+    if (static_tbset) {
+        gchar *contents = NULL;
+        gsize size = 0;
+        if (!g_file_get_contents(tbset, &contents, &size, NULL)) {
+            response->status = LATCD_STATUS_IO_ERROR;
+            g_strlcpy(response->message, "cannot hash static TB set",
+                      sizeof(response->message));
+            unlink(snapshot);
+            unlink(tbset);
+            g_free(snapshot);
+            g_free(tbset);
+            return -1;
+        }
+        gchar *hash = g_compute_checksum_for_data(G_CHECKSUM_SHA256,
+                                                   (guchar *)contents, size);
+        snprintf(key + 64, sizeof(key) - 64, "-%s", hash);
+        g_free(hash);
+        g_free(contents);
+    } else if (tbset) {
         snprintf(key + 64, sizeof(key) - 64, "-tbset");
     }
     struct stat snapshot_status;
@@ -2854,6 +3021,11 @@ static int service_queue_request(LatcdService *service, int source_fd,
         if (active && accepted_sequence > active->accepted_sequence) {
             active->accepted_sequence = accepted_sequence;
         }
+        if (static_tbset) {
+            LatcdStaticBarrier *barrier = g_hash_table_lookup(
+                service->static_barriers, key);
+            if (barrier) barrier->last_sequence = accepted_sequence;
+        }
         service->deduplicated++;
         response->status = LATCD_STATUS_OK;
         snprintf(response->message, sizeof(response->message),
@@ -2904,6 +3076,7 @@ static int service_queue_request(LatcdService *service, int source_fd,
     job->snapshot = snapshot;
     job->tbset = tbset;
     job->tbset_canonical = tbset_canonical;
+    job->static_tbset = static_tbset;
     g_strlcpy(job->key, key, sizeof(job->key));
     memcpy(job->source_key, key, 64);
     job->source_key[64] = '\0';
@@ -2915,6 +3088,20 @@ static int service_queue_request(LatcdService *service, int source_fd,
     job->batch_started_at_us = g_get_monotonic_time();
     job->ready_at_us = service->config->flush_only ? INT64_MAX :
                        job->batch_started_at_us + LATCD_BATCH_QUIET_US;
+    if (static_tbset) {
+        LatcdStaticBarrier *barrier = g_hash_table_lookup(
+            service->static_barriers, key);
+        if (!barrier) {
+            barrier = g_new0(LatcdStaticBarrier, 1);
+            g_strlcpy(barrier->source_key, source_key,
+                      sizeof(barrier->source_key));
+            barrier->first_sequence = accepted_sequence;
+            g_hash_table_insert(service->static_barriers, g_strdup(key),
+                                barrier);
+        }
+        barrier->last_sequence = accepted_sequence;
+        barrier->failed = false;
+    }
     g_ptr_array_add(service->queue, job);
     service->queued_bytes += source_size;
     g_hash_table_insert(service->active, g_strdup(key), job);
@@ -2927,9 +3114,24 @@ static int service_queue_request(LatcdService *service, int source_fd,
     return 0;
 }
 
-static int source_flush_state_locked(LatcdSourceState *state,
+static int source_flush_state_locked(LatcdService *service,
+                                     const char *source_key,
+                                     LatcdSourceState *state,
                                      uint64_t target)
 {
+    GHashTableIter iterator;
+    gpointer value;
+    bool pending = false;
+    g_hash_table_iter_init(&iterator, service->static_barriers);
+    while (g_hash_table_iter_next(&iterator, NULL, &value)) {
+        LatcdStaticBarrier *barrier = value;
+        if (!strcmp(barrier->source_key, source_key) &&
+            barrier->first_sequence <= target) {
+            if (barrier->failed) return -1;
+            pending = true;
+        }
+    }
+    if (pending) return 0;
     if (!state || state->published_sequence >= target) return 1;
     if (state->failed_sequence >= target) return -1;
     return 0;
@@ -2943,9 +3145,9 @@ static int all_flush_state_locked(LatcdService *service,
     *accepted = 0;
     *published = 0;
     GHashTableIter iterator;
-    gpointer value;
+    gpointer key, value;
     g_hash_table_iter_init(&iterator, service->source_states);
-    while (g_hash_table_iter_next(&iterator, NULL, &value)) {
+    while (g_hash_table_iter_next(&iterator, &key, &value)) {
         LatcdSourceState *state = value;
         if (state->accepted_sequence > *accepted) {
             *accepted = state->accepted_sequence;
@@ -2953,7 +3155,7 @@ static int all_flush_state_locked(LatcdService *service,
         if (state->published_sequence > *published) {
             *published = state->published_sequence;
         }
-        int current = source_flush_state_locked(state,
+        int current = source_flush_state_locked(service, key, state,
                                                 state->accepted_sequence);
         if (current < 0) return -1;
         if (!current) result = 0;
@@ -2995,7 +3197,8 @@ static int service_flush_request(LatcdService *service, int source_fd,
         LatcdSourceState *state = g_hash_table_lookup(service->source_states,
                                                        source_key);
         uint64_t target = state ? state->accepted_sequence : 0;
-        while (!(state_result = source_flush_state_locked(state, target))) {
+        while (!(state_result = source_flush_state_locked(
+                     service, source_key, state, target))) {
             pthread_cond_wait(&service->ready, &service->lock);
         }
         response->accepted_sequence = target;
@@ -3192,14 +3395,17 @@ static int run_once(const LatcdConfig *config)
         response.status = LATCD_STATUS_BAD_REQUEST;
         g_strlcpy(response.message, error[0] ? error : "accept failed",
                   sizeof(response.message));
-    } else if (request.operation != LATCD_OP_SUBMIT_KEYS) {
+    } else if (request.operation != LATCD_OP_SUBMIT_KEYS &&
+               request.operation != LATCD_OP_SUBMIT_STATIC_KEYS) {
         response.request_id = request.request_id;
         response.status = LATCD_STATUS_BAD_REQUEST;
         g_strlcpy(response.message, "flush requires --serve mode",
                   sizeof(response.message));
     } else {
         response.request_id = request.request_id;
-        process_request(config, source, tbset, &response);
+        process_request(config, source, tbset,
+                        request.operation == LATCD_OP_SUBMIT_STATIC_KEYS,
+                        &response);
     }
     if (client >= 0) {
         latcd_send_response(client, &response, NULL, 0);
@@ -3262,6 +3468,8 @@ static int run_service(const LatcdConfig *config)
                                           g_free),
         .source_states = g_hash_table_new_full(g_str_hash, g_str_equal,
                                                g_free, g_free),
+        .static_barriers = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                g_free, g_free),
         .workers = g_new0(pthread_t, config->workers),
         .stopping = 0,
         .next_sequence = 0,
@@ -3306,6 +3514,7 @@ static int run_service(const LatcdConfig *config)
         g_hash_table_destroy(service.running_sources);
         g_hash_table_destroy(service.negative);
         g_hash_table_destroy(service.source_states);
+        g_hash_table_destroy(service.static_barriers);
         return 1;
     }
     pthread_mutex_lock(&service.lock);
@@ -3380,7 +3589,8 @@ static int run_service(const LatcdConfig *config)
             } else {
                 response.status = LATCD_STATUS_IO_ERROR;
             }
-        } else if (request.operation == LATCD_OP_SUBMIT_KEYS) {
+        } else if (request.operation == LATCD_OP_SUBMIT_KEYS ||
+                   request.operation == LATCD_OP_SUBMIT_STATIC_KEYS) {
             service_queue_request(&service, source, tbset, &request,
                                   &response);
         } else if (request.operation == LATCD_OP_PRECOMPILE_SOURCE) {
@@ -3457,6 +3667,7 @@ static int run_service(const LatcdConfig *config)
     g_hash_table_destroy(service.running_sources);
     g_hash_table_destroy(service.negative);
     g_hash_table_destroy(service.source_states);
+    g_hash_table_destroy(service.static_barriers);
     g_free(worker_args);
     g_free(service.workers);
     pthread_cond_destroy(&service.ready);

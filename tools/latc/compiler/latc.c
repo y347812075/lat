@@ -33,7 +33,7 @@ static void usage(const char *name)
             name);
     fprintf(stderr,
             "  %s compile-module X86_ELF -o MODULE --runner RUNNER"
-            " --runtime-dir DIRECTORY [--tbset FILE]\n",
+            " --runtime-dir DIRECTORY [--tbset FILE [--static-tbset]]\n",
             name);
     fprintf(stderr, "  %s inspect-module [--json] MODULE\n", name);
     fprintf(stderr, "  %s build-id\n", name);
@@ -149,7 +149,8 @@ static int inspect_module(const char *path, int json)
 
 static int compile_module(const char *input, const char *output,
                           const char *runner,
-                          const char *runtime_dir, const char *tbset)
+                          const char *runtime_dir, const char *tbset,
+                          bool static_tbset)
 {
     GError *gerror = NULL;
     gchar *executable = g_file_read_link("/proc/self/exe", &gerror);
@@ -170,7 +171,10 @@ static int compile_module(const char *input, const char *output,
 #endif
     pid_t child = fork();
     if (child == 0) {
-        if (tbset) {
+        if (tbset && static_tbset) {
+            execl(script, script, "--static-tbset", executable, runner,
+                  input, runtime_dir, output, tbset, (char *)NULL);
+        } else if (tbset) {
             execl(script, script, executable, runner, input, runtime_dir, output,
                   tbset, (char *)NULL);
         } else {
@@ -387,6 +391,7 @@ int main(int argc, char **argv)
         const char *runner = getenv("LATC_AOT_RUNNER");
         const char *runtime_dir = getenv("LATC_AOT_RUNTIME_DIR");
         const char *tbset = NULL;
+        bool static_tbset = false;
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
                 output = argv[++i];
@@ -397,16 +402,20 @@ int main(int argc, char **argv)
                 runtime_dir = argv[++i];
             } else if (strcmp(argv[i], "--tbset") == 0 && i + 1 < argc) {
                 tbset = argv[++i];
+            } else if (strcmp(argv[i], "--static-tbset") == 0) {
+                static_tbset = true;
             } else {
                 usage(argv[0]);
                 return 2;
             }
         }
-        if (!output || !runner || !*runner || !runtime_dir || !*runtime_dir) {
+        if (!output || !runner || !*runner || !runtime_dir || !*runtime_dir ||
+            (static_tbset && !tbset)) {
             usage(argv[0]);
             return 2;
         }
-        return compile_module(input, output, runner, runtime_dir, tbset);
+        return compile_module(input, output, runner, runtime_dir, tbset,
+                              static_tbset);
     }
     if (strcmp(argv[1], "inspect") == 0) {
         int json = 0; const char *path = NULL;
