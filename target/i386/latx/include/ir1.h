@@ -245,6 +245,7 @@ extern IR1_OPND esi_mem64_ir1_opnd;
 extern IR1_OPND edi_mem64_ir1_opnd;
 #endif
 
+bool ir1_static_export_rejected(const IR1_INST *ir1);
 ADDRX ir1_disasm(IR1_INST *ir1, uint8_t *addr, ADDRX t_pc,
                     int ir1_num, void *pir1_base);
 

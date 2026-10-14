@@ -553,6 +553,13 @@ static TranslationBlock* create_static_tb(CPUState *cpu, target_ulong pc,
 
     target_disasm(tb, max_insns);
 
+    if (!tb->icount && aot_parallel_translate && getenv("LATC_EMIT_AOT") &&
+        getenv("LATC_NATIVE_STATIC_CHECK") &&
+        getenv("LATC_NATIVE_ALLOW_MISSING")) {
+        free(tb->s_data);
+        free(tb);
+        return NULL;
+    }
     tb->s_data->tu_tb_mode = TU_TB_MODE_STATIC;
     save_static_tb(tb, cpu);
     return tb;

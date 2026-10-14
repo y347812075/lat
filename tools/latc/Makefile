@@ -1084,6 +1084,18 @@ test-invalidation-stats:
 test: test-invalidation-stats
 
 .PHONY: test-aot-v2-thread-env
+.PHONY: test-aot-v2-static-vector-fallback
+test-aot-v2-static-vector-fallback: all $(BUILD)/tests/x86-static-vector-fallback
+	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)"
+	sh tests/test-aot-v2-static-vector-fallback.sh "$(abspath $(BUILD)/latc)" \
+	  "$(AOT_V2_RUNNER)" "$(AOT_V2_RUNTIME_DIR)" \
+	  "$(abspath $(BUILD)/tests/x86-static-vector-fallback)" \
+	  "$(abspath $(BUILD)/aot-v2-static-vector-fallback-test)"
+
+$(BUILD)/tests/x86-static-vector-fallback: tests/x86-static-vector-fallback.S
+	@mkdir -p $(dir $@)
+	$(X86_CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
 .PHONY: test-aot-v2-autostart
 test-aot-v2-autostart:
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)"
