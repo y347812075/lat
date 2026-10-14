@@ -170,6 +170,8 @@ static void init_delay_params(SyncClocks *sc, const CPUState *cpu)
 #include "latx-options.h"
 #include "latx-signal.h"
 #include "reg-map.h"
+
+#define LBT_FCSR_TOP_MODE_MASK (1U << 6)
 #endif
 
 /* Execute a TB, and fix up the CPU state afterwards if necessary */
@@ -832,6 +834,9 @@ static inline TranslationBlock *tb_find(CPUState *cpu,
 
     tb = NULL;
     bool aot_v2 = false;
+#if defined(TARGET_X86_64) && defined(CONFIG_LATX_JRRA)
+retry_guest_lookup:
+#endif
 #ifdef CONFIG_LATX
     if (aot_target) {
         uint32_t hash = tb_jmp_cache_hash_func(pc);
@@ -881,6 +886,19 @@ static inline TranslationBlock *tb_find(CPUState *cpu,
     if (!aot_v2) {
         tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
     }
+#if defined(TARGET_X86_64) && defined(CONFIG_LATX_JRRA)
+    if (tb == NULL && !aot_v2) {
+        target_ulong guest_pc;
+
+        if (resolve_signal_return_bridge(pc, &guest_pc)) {
+            pc = guest_pc;
+            env->eip = pc - cs_base;
+            /* Do not link or cache a host bridge as a guest code address. */
+            last_tb = NULL;
+            goto retry_guest_lookup;
+        }
+    }
+#endif
 #ifdef CONFIG_LATX_AOT
     if (tb == NULL && !aot_v2 && option_aot) {
         mmap_lock();
@@ -1305,6 +1323,21 @@ int cpu_exec(CPUState *cpu)
          * they have the correct value.
          */
         g_assert(cpu == current_cpu);
+#endif
+
+#ifdef CONFIG_LATX
+        CPUArchState *env = cpu->env_ptr;
+
+        /*
+         * Some exits bypass the translated cleanup and siglongjmp restores a
+         * possibly active LBT TOP mapping.  Clear both copies after the jump,
+         * before physical FPRs are loaded on the next entry.
+         */
+        if (!option_softfpu && (env->fcsr & LBT_FCSR_TOP_MODE_MASK)) {
+            env->fcsr &= ~LBT_FCSR_TOP_MODE_MASK;
+            /* x86clrtm: use its encoding for older assemblers. */
+            __asm__ volatile(".word 0x00008028" : : : "memory");
+        }
 #endif
 
 #ifndef CONFIG_SOFTMMU

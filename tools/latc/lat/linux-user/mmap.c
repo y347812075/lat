@@ -30,6 +30,7 @@
 #ifdef TARGET_X86_64
 #include "latc-aot-v2-runner.h"
 #endif
+#include "latx-options.h"
 #endif
 #if defined(CONFIG_LATX_KZT) && defined(TARGET_X86_64)
 #include "kzt_relro_preprotect.h"
@@ -42,7 +43,6 @@
 #include "aot.h"
 #include "aot_smc.h"
 #include "aot_page.h"
-#include "latx-options.h"
 #endif
 #include <elf.h>
 #include <sys/resource.h>
@@ -306,6 +306,11 @@ static int target_mprotect_internal(abi_ulong start, abi_ulong len,
     if (aot_invalidate) {
         latc_aot_v2_invalidate_range(thread_cpu, start, len,
                                      LATC_AOT_V2_INVALIDATE_PROTECTION);
+    }
+#endif
+#if defined(CONFIG_LATX) && defined(TARGET_I386) && TARGET_ABI_BITS == 32
+    if (option_minke_16k_page_check && (target_prot & PROT_EXEC)) {
+        latx_minke_register_16k_tb_range(start, start + len);
     }
 #endif
 
@@ -830,8 +835,9 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
         return start;
     }
 
-    if (start && option_mmap_fixed)
+    if (start && option_mmap_fixed) {
         flags |= MAP_FIXED;
+    }
 
     mmap_lock();
     trace_target_mmap(start, len, target_prot, flags, fd, offset);
@@ -1221,12 +1227,20 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
     if (fd > 2 && (target_prot & PROT_EXEC)) {
         ht_pc_thunk_invalidate(start, start + len);
     }
+#if TARGET_ABI_BITS == 32
+    if (option_minke_16k_page_check && (target_prot & PROT_EXEC)) {
+        latx_minke_register_16k_tb_range(start, start + len);
+    }
+#endif
 #endif
 #endif
 
 #ifdef CONFIG_LATX_AOT
     wine_sec_info * wine_sec = NULL;
     uint64_t aot_offset = offset;
+    if (option_aot) {
+        segment_tree_remove_range(start, start + len);
+    }
     if (option_aot_wine && option_aot) {
         wine_dll_track_sections(start, len, offset, fd);
         wine_sec = wine_sec_tree_lookup(start);
@@ -1383,10 +1397,7 @@ int target_munmap(abi_ulong start, abi_ulong len, int rlimit_as_account)
     if (ret == 0) {
 #ifdef CONFIG_LATX_AOT
         if (option_aot) {
-            seg_info *seg = segment_tree_lookup2(start, start + len);
-            if (seg) {
-                segment_tree_remove(seg);
-            }
+            segment_tree_remove_range(start, start + len);
         }
 #endif
         page_set_flags(start, start + len, 0);
@@ -1762,18 +1773,10 @@ mremap_done:
 
 #ifdef CONFIG_LATX_AOT
         if (option_aot) {
-            seg_info *seg;
-
             if (!keep_old || (flags & MREMAP_DONTUNMAP)) {
-                seg = segment_tree_lookup2(old_addr, old_addr + old_size);
-                if (seg) {
-                    segment_tree_remove(seg);
-                }
+                segment_tree_remove_range(old_addr, old_addr + old_size);
             }
-            seg = segment_tree_lookup2(new_addr, new_addr + new_size);
-            if (seg) {
-                segment_tree_remove(seg);
-            }
+            segment_tree_remove_range(new_addr, new_addr + new_size);
         }
 #endif
     }

@@ -644,7 +644,8 @@ struct TranslationBlock {
 #define IS_TU_SPLIT       0x2000
 #define TBSMC_OPTED       0x4000
 #define IS_AOT_BOUNDED    0x8000
-    uint16_t bool_flags;
+#define AOT_STATS_COUNTED 0x10000
+    uint32_t bool_flags;
     uint8_t  eflag_use;
 #ifdef CONFIG_LATX_INSTS_PATTERN
     /*

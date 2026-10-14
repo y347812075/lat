@@ -13,6 +13,7 @@
 #include "qemu-def.h"
 #include "segment.h"
 #include "aot.h"
+#include "aot-version.h"
 #include "aot_exit.h"
 #include <stdlib.h>
 #include <math.h>
@@ -29,6 +30,7 @@
 #include "latc_native_export.h"
 #include "aot_page.h"
 #include "../translator/tr-vpaes.h"
+#include "crypto/aes.h"
 #include<sys/syscall.h>
 #include "exec/translate-all.h"
 #include "qemu/rcu.h"
@@ -43,6 +45,9 @@ static TranslationBlock **tb_vector;
 static int tb_num;
 static GArray *compile_keys;
 static int curr_lib_tb_num;
+/* TB insertion/recovery is serialized; flush resets under exclusive. */
+static uint64_t aot_dynamic_tb_count;
+static uint64_t aot_total_tb_count;
 /* Compare function used to sort tb_vector. */
 static int tb_cmp(const void *a, const void *b)
 {
@@ -279,6 +284,27 @@ int aot_buffer_all_num;
 aot_rel *aot_rel_table;
 uint32_t aot_rel_entry_num;
 
+/* Integration tests use this marker to reject JIT fallback on hot AOT runs. */
+static void aot_test_mark_loaded(const char *lib_name)
+{
+    const char *marker = getenv("LATX_TEST_AOT_LOAD_MARKER");
+    int fd;
+
+    if (!marker) {
+        return;
+    }
+    fd = open(marker, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) {
+        return;
+    }
+    if (write(fd, lib_name, strlen(lib_name)) < 0 ||
+        write(fd, "\n", 1) < 0) {
+        close(fd);
+        return;
+    }
+    close(fd);
+}
+
 void mk_aot_dir(char * pathname)
 {
     for (int i = 0; i < strlen(pathname); i++) {
@@ -503,7 +529,9 @@ static inline int create_aot_tb(aot_tb *curr_aot_tb, TranslationBlock *tb,
     curr_aot_tb->rel_end_index = tb->s_data->rel_end;
     curr_aot_tb->first_jmp_align = tb->first_jmp_align;
     curr_aot_tb->last_ir1_type = tb->s_data->last_ir1_type;
-    curr_aot_tb->bool_flags = tb->bool_flags | IS_AOT_TB;
+    /* AOT_STATS_COUNTED is runtime-only state. */
+    curr_aot_tb->bool_flags =
+        (tb->bool_flags & ~AOT_STATS_COUNTED) | IS_AOT_TB;
     curr_aot_tb->eflag_use = tb->eflag_use;
     #ifdef CONFIG_LATX_INSTS_PATTERN
     curr_aot_tb->eflags_target_arg[0] = tb->eflags_target_arg[0];
@@ -1695,8 +1723,9 @@ static void* relkind_to_fixup_addr[] = {
     [LOAD_HELPER_AESKEYGENASSIST_XMM] = helper_aeskeygenassist_xmm,
     [LOAD_HELPER_AESDEC_XMM] = helper_aesdec_xmm,
     [LOAD_HELPER_AESDECLAST_XMM] = helper_aesdeclast_xmm,
-    [LOAD_HELPER_AESENC_XMM] = helper_aesenc_xmm,
-    [LOAD_HELPER_AESENCLAST_XMM] = helper_aesenclast_xmm,
+    [LOAD_HOST_AES_TE_LATX] = (void *)AES_Te_latx,
+    [LOAD_HOST_AES_SBOX_LATX] = (void *)AES_sbox_latx,
+    [LOAD_HOST_AES_VPAES_LASX] = (void *)AES_vpaes_lasx,
     [LOAD_HELPER_SHA1NEXTE] = helper_sha1nexte,
     [LOAD_HELPER_SHA1MSG1] = helper_sha1msg1,
     [LOAD_HELPER_SHA1MSG2] = helper_sha1msg2,
@@ -2062,6 +2091,7 @@ void recover_aot_tb(char *lib_name, uint64_t aot_offset, abi_long start,
         seg->buffer = curr_aot_buffer;
         seg->p_segment = p_segment;
         seg->seg_flag |= SEG_AOT_LOADED;
+        aot_test_mark_loaded(lib_name);
     }
     if (p_segment->aot_file_type & ELF_AOT_FILE) {
         aot_guest_code_protect(start, start + len, p_segment, curr_aot_buffer);
@@ -2120,6 +2150,22 @@ static void creat_daemon(bool is_end)
 
 #define AOT_EXIT_EXCLUSIVE_TIMEOUT_MS 1000
 
+#define AOT_GENERATION_RATIO_DENOMINATOR 20
+
+static bool aot_should_generate(void)
+{
+    uint64_t dynamic_tbs = aot_dynamic_tb_count;
+    uint64_t total_tbs = aot_total_tb_count;
+    uint64_t threshold;
+
+    if (dynamic_tbs == 0 || total_tbs == 0) {
+        return false;
+    }
+    threshold = total_tbs / AOT_GENERATION_RATIO_DENOMINATOR;
+    threshold += total_tbs % AOT_GENERATION_RATIO_DENOMINATOR != 0;
+    return dynamic_tbs >= threshold;
+}
+
 void aot_exit_entry(CPUState *cpu, AOTExitReason reason)
 {
     TaskState *ts = cpu->opaque;
@@ -2127,6 +2173,12 @@ void aot_exit_entry(CPUState *cpu, AOTExitReason reason)
         ts && ts->ipc_namespace_isolated);
 
     if (!option_aot) {
+        return;
+    }
+    if (option_aot_generate == 0) {
+        return;
+    }
+    if (option_aot_generate < 0 && !aot_should_generate()) {
         return;
     }
     if (in_pre_translate) {
@@ -2217,6 +2269,54 @@ parent_exit:
 
     aot_generate(cpu);
     _exit(EXIT_SUCCESS);
+}
+
+void aot_mark_dynamic_tb(TranslationBlock *tb)
+{
+    if (!option_aot || option_aot_generate >= 0 || in_pre_translate ||
+        (tb->bool_flags & IS_TUNNEL_LIB) ||
+        page_get_page_state(tb->pc) == PAGE_SMC) {
+        return;
+    }
+    if (tb->bool_flags & AOT_STATS_COUNTED) {
+        return;
+    }
+    tb->bool_flags |= AOT_STATS_COUNTED;
+    aot_dynamic_tb_count++;
+    aot_total_tb_count++;
+}
+
+void aot_mark_recovered_tb(TranslationBlock *tb)
+{
+    (void)tb;
+    if (!option_aot || option_aot_generate >= 0 || in_pre_translate) {
+        return;
+    }
+    if (tb->bool_flags & AOT_STATS_COUNTED) {
+        return;
+    }
+    tb->bool_flags |= AOT_STATS_COUNTED;
+    aot_total_tb_count++;
+}
+
+void aot_unmark_tb(TranslationBlock *tb)
+{
+    if (!(tb->bool_flags & AOT_STATS_COUNTED)) {
+        return;
+    }
+    tb->bool_flags &= ~AOT_STATS_COUNTED;
+    assert(aot_total_tb_count > 0);
+    aot_total_tb_count--;
+    if (!(tb->bool_flags & IS_AOT_TB)) {
+        assert(aot_dynamic_tb_count > 0);
+        aot_dynamic_tb_count--;
+    }
+}
+
+void aot_reset_tb_stats(void)
+{
+    aot_dynamic_tb_count = 0;
+    aot_total_tb_count = 0;
 }
 
 void aot_init(void)

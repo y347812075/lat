@@ -38,11 +38,6 @@ extern  const char *aot_left_file_minsize_optarg;
  * |  code caches |
  * +--------------+
  */
-#ifdef CONFIG_LATX_DEBUG
-#define AOT_VERSION "Version: "LATX_VERSION"-debug-aotctx2"
-#else
-#define AOT_VERSION "Version: "LATX_VERSION"-release-aotctx2"
-#endif
 typedef struct aot_header {
     uint32_t lib_size;
     struct timespec last_modify_time;
@@ -230,8 +225,9 @@ typedef enum aot_rel_kind {
     LOAD_HELPER_AESKEYGENASSIST_XMM,
     LOAD_HELPER_AESDEC_XMM,
     LOAD_HELPER_AESDECLAST_XMM,
-    LOAD_HELPER_AESENC_XMM,
-    LOAD_HELPER_AESENCLAST_XMM,
+    LOAD_HOST_AES_TE_LATX,
+    LOAD_HOST_AES_SBOX_LATX,
+    LOAD_HOST_AES_VPAES_LASX,
     LOAD_HELPER_SHA1NEXTE,
     LOAD_HELPER_SHA1MSG1,
     LOAD_HELPER_SHA1MSG2,
@@ -290,13 +286,22 @@ typedef struct aot_rel {
 
 extern __thread aot_rel *rel_table;
 extern seg_info **seg_info_vector;
+typedef enum AOTTBOrigin {
+    AOT_TB_DYNAMIC,
+    AOT_TB_RECOVERED,
+} AOTTBOrigin;
+
 void mk_aot_dir(char * pathname);
 void aot_set_process_profile(int argc, char **argv);
 void dump_aot_buffer(aot_header *p_header);
 void dump_seg(aot_segment *p_segment, aot_header *p_header);
 lib_info *aot_load(char *lib_name, char *aot_file_name,
                    void **curr_aot_buffer);
-void aot_tb_register(TranslationBlock *tb);
+void aot_tb_register(TranslationBlock *tb, AOTTBOrigin origin);
+void aot_mark_dynamic_tb(TranslationBlock *tb);
+void aot_mark_recovered_tb(TranslationBlock *tb);
+void aot_unmark_tb(TranslationBlock *tb);
+void aot_reset_tb_stats(void);
 void aot_do_tb_reloc(TranslationBlock *tb, struct aot_tb *stb,
     target_ulong seg_begin, target_ulong seg_end);
 int aot_get_file_name(char *aot_file, char *buff, int index);

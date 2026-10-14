@@ -20,6 +20,7 @@
 #include "library_private.h"
 #include "qemu/osdep.h"
 #include "auto-config.h"
+#include "latx-version.h"
 #include "qemu-common.h"
 #include "qemu/units.h"
 #include "qemu/accel.h"
@@ -32,6 +33,7 @@
 
 #include "qapi/error.h"
 #include "qemu.h"
+#include "guest-seccomp.h"
 #include "qemu/path.h"
 #include "qemu/queue.h"
 #include "qemu/config-file.h"
@@ -53,7 +55,7 @@
 #include "cpu_loop-common.h"
 #include "crypto/init.h"
 #ifdef CONFIG_LATX
-#include "pressure-vessel.h"
+#include "steam.h"
 #endif
 int mydebug = 1;
 
@@ -116,8 +118,10 @@ int box64_tcmalloc_minimal = 0;
 #endif
 
 char *exec_path;
+#if defined(CONFIG_LATX_AOT) || defined(TARGET_X86_64)
 static bool explicit_legacy_aot;
 static int requested_legacy_aot;
+#endif
 char *real_path;
 #ifdef CONFIG_LATX_AOT
 char *aot_file_path;
@@ -220,6 +224,10 @@ int cpu_get_pic_interrupt(CPUX86State *env)
 /* Make sure everything is in a consistent state for calling fork().  */
 void fork_start(void)
 {
+#ifdef CONFIG_LATX
+    /* Drain fd operations before stopping threads needed to finish them. */
+    latx_syscall_fs_fork_start();
+#endif
     start_exclusive();
     latc_aot_v2_fork_start();
     mmap_fork_start();
@@ -235,6 +243,9 @@ void fork_end(int child)
     sigact_fork_end(child);
     path_fork_end(child);
     fd_trans_fork_end();
+#ifdef CONFIG_LATX
+    latx_syscall_fs_fork_end(child);
+#endif
     latc_aot_v2_fork_end(thread_cpu, child != 0);
     if (child) {
         CPUState *cpu, *next_cpu;
@@ -242,6 +253,12 @@ void fork_end(int child)
            Discard information about the parent threads.  */
         CPU_FOREACH_SAFE(cpu, next_cpu) {
             if (cpu != thread_cpu) {
+                TaskState *task = cpu->opaque;
+
+                if (task) {
+                    guest_seccomp_filter_unref(task->seccomp_filter);
+                    task->seccomp_filter = NULL;
+                }
                 QTAILQ_REMOVE_RCU(&cpus, cpu, node);
             }
         }
@@ -292,7 +309,7 @@ void qemu_cpu_kick(CPUState *cpu)
 void task_settid(TaskState *ts)
 {
     if (ts->ts_tid == 0) {
-        ts->ts_tid = (pid_t)syscall(SYS_gettid);
+        qatomic_set(&ts->ts_tid, (pid_t)syscall(SYS_gettid));
     }
 }
 
@@ -786,13 +803,40 @@ static void handle_arg_latx_unimp_dump(const char *arg)
 
 static void handle_arg_latx_mem_test(const char *arg)
 {
-    option_mem_test = strtol(arg, NULL, 0);
+    long value;
+
+    if (qemu_strtol(arg, NULL, 0, &value) || value < 0 || value > 2) {
+        option_mem_test = 0;
+    } else {
+        option_mem_test = value;
+    }
     if (option_mem_test) {
-        if (sysconf(_SC_PAGESIZE) != 16384) {
+        if (qemu_real_host_page_size != LATX_HOST_16K_PAGE_SIZE) {
             option_mem_test = 0;
         } else {
             option_aot = 0;
         }
+    }
+}
+
+#define LATX_MINKE_PROGRAM_NAME "Minke.MI.Organ.exe"
+
+static void handle_arg_latx_minke_16k_page_check(const char *arg)
+{
+    long value;
+
+    if (qemu_strtol(arg, NULL, 0, &value)) {
+        value = 0;
+    }
+    option_minke_16k_page_check = value != 0;
+    if (option_minke_16k_page_check) {
+#if TARGET_ABI_BITS == 32
+        if (qemu_real_host_page_size != LATX_HOST_16K_PAGE_SIZE) {
+            option_minke_16k_page_check = 0;
+        }
+#else
+        option_minke_16k_page_check = 0;
+#endif
     }
 }
 
@@ -854,6 +898,17 @@ static void handle_arg_latx_aot(const char *arg)
 static void handle_arg_latx_aot_v2(const char *arg)
 {
     lat_aot_config_option("LATX_AOT_V2", arg);
+}
+
+static void handle_arg_latx_aot_generate(const char *arg)
+{
+    long value;
+
+    if (qemu_strtol(arg, NULL, 0, &value) < 0 || value < -1 || value > 1) {
+        fprintf(stderr, "LATX_AOT_GENERATE must be -1, 0, or 1\n");
+        exit(EXIT_FAILURE);
+    }
+    option_aot_generate = value;
 }
 
 static void handle_arg_latx_aot_pe_profile(const char *arg)
@@ -960,7 +1015,10 @@ static const struct qemu_argument arg_table[] = {
     {"latx-imm-reg",    "LATX_IMM_REG",     true,  handle_arg_latx_imm_reg,
     "",           "enable imm reg optimization"},
     {"latx-mem-test",    "LATX_MT",     true,  handle_arg_latx_mem_test,
-    "",           "test memory right when memory access"},
+    "0|1|2",      "16K checks: sparse fast or strict fast"},
+    {"latx-minke-16k-page-check", "LATX_MINKE_16K_PAGE_CHECK", true,
+    handle_arg_latx_minke_16k_page_check, "0|1",
+    "enable Minke-specific mixed 16K write checks"},
     {"latx-real-maps",    "LATX_REAL_MAPS",     true,  handle_arg_latx_real_maps,
     "",           "enable get real self maps"},
     {"latx-monitor-shared-mem",    "LATX_MONITOR_SHARED_MEM",     true,  handle_arg_latx_monitor_shared_mem,
@@ -983,6 +1041,9 @@ static const struct qemu_argument arg_table[] = {
     "",           "enable aot"},
     {"latx-aot-v2", NULL, true, handle_arg_latx_aot_v2,
     "0|1", "select AOT v2"},
+    {"latx-aot-generate", "LATX_AOT_GENERATE", true,
+    handle_arg_latx_aot_generate, "",
+    "AOT generation: auto (-1), off (0), or force (1)"},
     {"latx-aot-pe-profile", "LATX_AOT_PE_PROFILE", true,
     handle_arg_latx_aot_pe_profile, "", "split libcef PE AOT by process role"},
     {"latx-aot-file-size", "LAT_AOT_FILE_SIZE", false,
@@ -1358,6 +1419,7 @@ int main(int argc, char **argv, char **envp)
         return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "--latc-print-x86-env-offsets")) {
+#ifdef TARGET_X86_64
 #define LATC_ENV_OFFSET(name, member) \
         printf("#define LATC_X86_ENV_%s_OFFSET %zu\n", name, \
                offsetof(CPUX86State, member))
@@ -1412,6 +1474,10 @@ int main(int argc, char **argv, char **envp)
         puts("#endif");
 #undef LATC_ENV_OFFSET
         return 0;
+#else
+        fprintf(stderr, "latc: AOT v2 environment offsets require x86_64\n");
+        return EXIT_FAILURE;
+#endif
     }
 
 #ifdef CONFIG_LATX
@@ -1561,6 +1627,25 @@ int main(int argc, char **argv, char **envp)
     /* set environment variables */
     options_set(target_argv);
 
+#if defined(CONFIG_LATX) && defined(TARGET_I386) && TARGET_ABI_BITS == 32
+    if (option_mem_test) {
+        latx_init_16k_page_checks();
+    }
+    if (option_minke_16k_page_check) {
+        const char *program = guest_program(target_argv);
+        bool enable_minke_checks = program &&
+            !strcasecmp(program, LATX_MINKE_PROGRAM_NAME);
+
+        option_minke_16k_page_check = enable_minke_checks;
+        if (enable_minke_checks) {
+#ifdef CONFIG_LATX_AOT
+            option_aot = 0;
+#endif
+            latx_enable_minke_16k_write_checks();
+        }
+    }
+#endif
+
     if (!latx_options_finalize()) {
 #if defined(CONFIG_LATX_KZT)
         error_report("invalid KZT configuration: %s; KZT disabled",
@@ -1572,6 +1657,7 @@ int main(int argc, char **argv, char **envp)
         print_runtime_info();
         return EXIT_SUCCESS;
     }
+#ifdef TARGET_X86_64
     char aot_config_error[256];
     int aot_selection = explicit_legacy_aot ? requested_legacy_aot : option_aot;
     if (lat_aot_config_init(&aot_selection, explicit_legacy_aot,
@@ -1581,12 +1667,13 @@ int main(int argc, char **argv, char **envp)
         return EXIT_FAILURE;
     }
     if (!aot_selection) option_aot = 0;
+#endif
 
     /* Scan interp_prefix dir for replacement files. */
     init_paths(interp_prefix);
 
 #ifdef CONFIG_LATX
-    latx_pressure_vessel_prepare(exec_path, target_argv, envlist);
+    latx_steam_prepare(exec_path, target_argv, envlist);
 #endif
 
     error_init(argv[0]);
@@ -1740,7 +1827,7 @@ int main(int argc, char **argv, char **envp)
     envlist_free(envlist);
 
 #ifdef CONFIG_LATX
-    latx_pressure_vessel_exec_payload(target_environ);
+    latx_steam_exec_payload(target_environ);
 #endif
 
 #define KERNEL_CONFIG_LSM_MMAP_MIN_ADDR 65536
