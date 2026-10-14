@@ -1100,14 +1100,42 @@ static void select_supported_tbs(ModulePack *pack)
                 changed = 1;
                 continue;
             }
-            int candidates[2];
+            /*
+             * Same-key aliases can live at very different code offsets.
+             * A conditional branch only reaches +-128 KiB, so try every
+             * supported alias before giving up on the owner TB.
+             */
+            int candidates[8];
             size_t candidate_count = 0;
             if (target >= 0 && pack->supported[target]) {
                 candidates[candidate_count++] = target;
+                uint64_t first = (uint64_t)target;
+                while (first &&
+                       pack->tbs[first - 1].guest_pc ==
+                           pack->tbs[target].guest_pc &&
+                       pack->tbs[first - 1].flags ==
+                           pack->tbs[target].flags) {
+                    first--;
+                }
+                for (uint64_t alias = first;
+                     alias < pack->header->tb_count &&
+                     pack->tbs[alias].guest_pc ==
+                         pack->tbs[target].guest_pc &&
+                     pack->tbs[alias].flags == pack->tbs[target].flags;
+                     alias++) {
+                    if ((int)alias == target || !pack->supported[alias]) {
+                        continue;
+                    }
+                    if (candidate_count == G_N_ELEMENTS(candidates)) {
+                        break;
+                    }
+                    candidates[candidate_count++] = (int)alias;
+                }
             }
             uint32_t physical = relocation->physical_target_plus_one;
             if (physical && pack->supported[physical - 1] &&
-                (physical - 1) != (uint32_t)target) {
+                (physical - 1) != (uint32_t)target &&
+                candidate_count < G_N_ELEMENTS(candidates)) {
                 candidates[candidate_count++] = (int)(physical - 1);
             }
             int patchable = 0;
