@@ -21,6 +21,13 @@ int latx_wine;
 __thread CPUState *thread_cpu;
 static GHashTable *page_flags;
 
+#ifdef CONFIG_LATX_KZT
+/* This mapping ownership test does not enable KZT bridging. */
+void kzt_wine_bridge(abi_ulong start, int fd)
+{
+}
+#endif
+
 bool message_with_timestamp;
 int option_aot = 1;
 int option_aot_pe_profile;
