@@ -4,7 +4,8 @@
   "usage": "internal-only",
   "modified": [
     "include/cfg_decoder.h",
-    "src/cfg_decoder.c"
+    "src/cfg_decoder.c",
+    "src/function_symbols.c"
   ],
   "added": [
     "include/cfg_program.h",

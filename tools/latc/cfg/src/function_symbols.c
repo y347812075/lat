@@ -257,6 +257,62 @@ static void dedup_functions(FuncVec *funcs)
     funcs->n = out;
 }
 
+/* A discovered root has no declared extent. Follow its direct control flow
+ * within the next known boundary rather than treating the whole gap as code. */
+static uint64_t infer_root_size(const ElfFile *elf, const FuncSym *fn,
+                                uint64_t limit)
+{
+    uint64_t file_off;
+    if (!elf_function_file_offset(elf, fn->addr, limit, fn->shndx,
+                                 &file_off)) {
+        return limit;
+    }
+    uint8_t *visited = calloc(limit, 1);
+    uint64_t *pending = xmalloc(sizeof(*pending));
+    size_t count = 1, capacity = 1;
+    uint64_t end = 0;
+    if (!visited) die_errno("calloc root instruction map");
+    pending[0] = 0;
+    for (size_t i = 0; i < count; i++) {
+        uint64_t off = pending[i];
+        while (off < limit && !visited[off]) {
+            visited[off] = 1;
+            Insn in = cfg_decode_insn(elf->data + file_off, limit,
+                                      fn->addr, off);
+            if (!in.len || in.len > limit - off) {
+                end = limit;
+                break;
+            }
+            off += in.len;
+            if (off > end) end = off;
+            /* An indirect exit can reach local jump-table cases that this
+             * lightweight walk cannot prove. Keep the conservative range. */
+            if (in.kind == INSN_IJMP) {
+                end = limit;
+                break;
+            }
+            if ((in.kind == INSN_JCC || in.kind == INSN_JMP) &&
+                in.has_target && in.target >= fn->addr &&
+                in.target - fn->addr < limit &&
+                !visited[in.target - fn->addr]) {
+                if (count == capacity) {
+                    capacity *= 2;
+                    uint64_t *next = realloc(pending,
+                                             capacity * sizeof(*next));
+                    if (!next) die_errno("realloc root worklist");
+                    pending = next;
+                }
+                pending[count++] = in.target - fn->addr;
+            }
+            if (in.kind == INSN_RET || in.kind == INSN_STOP ||
+                in.kind == INSN_JMP) break;
+        }
+    }
+    free(pending);
+    free(visited);
+    return end ? end : limit;
+}
+
 static void infer_zero_function_sizes(const ElfFile *elf, FuncVec *funcs)
 {
     for (size_t i = 0; i < funcs->n; i++) {
@@ -275,6 +331,12 @@ static void infer_zero_function_sizes(const ElfFile *elf, FuncVec *funcs)
         }
         if (fn->addr >= section->sh_addr && fn->addr < end) {
             fn->size = end - fn->addr;
+            if (!strncmp(fn->name, "preinit_array_", 14) ||
+                !strncmp(fn->name, "init_array_", 11) ||
+                !strncmp(fn->name, "fini_array_", 11) ||
+                !strncmp(fn->name, "direct_target_", 14)) {
+                fn->size = infer_root_size(elf, fn, fn->size);
+            }
         }
     }
 }

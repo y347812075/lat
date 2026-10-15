@@ -8,3 +8,6 @@
 The imported directory layout is retained. Local changes add a structured
 program/TB interface and make calls and syscalls end translation blocks.
 The CFG code is linked into the compiler only, never into generated programs.
+Synthetic array/direct-target entry ranges follow reachable direct control
+flow, bounded by the next known entry. Unresolved indirect exits retain the
+conservative range so jump-table cases are not silently discarded.

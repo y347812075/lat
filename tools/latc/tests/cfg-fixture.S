@@ -140,6 +140,7 @@ init_array_direct_target:
 
 init_array_only:
     jmp init_array_direct_target
+    .fill 128,1,0xcc
 
 .type init_array_boundary,@function
 init_array_boundary:

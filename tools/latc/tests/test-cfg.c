@@ -184,7 +184,8 @@ static void test_program(const char *path)
             fallthrough_next = &p.functions[i];
         if (strcmp(p.functions[i].name, "zero_sized") == 0)
             zero_sized = &p.functions[i];
-        if (strncmp(p.functions[i].name, "init_array_", 11) == 0)
+        if (strncmp(p.functions[i].name, "init_array_", 11) == 0 &&
+            strcmp(p.functions[i].name, "init_array_boundary"))
             init_array = &p.functions[i];
         if (strncmp(p.functions[i].name, "direct_target_", 14) == 0)
             array_direct_target = &p.functions[i];
@@ -273,8 +274,10 @@ static void test_program(const char *path)
     assert(found_cross_symbol_fallthrough);
     assert(zero_sized && zero_sized->size > 0 && zero_sized->tb_count == 1);
     assert(init_array && init_array->size > 0 && init_array->tb_count == 1);
+    assert(init_array->size <= 5);
     assert(array_direct_target && array_direct_target->size > 0 &&
            array_direct_target->tb_count == 1);
+    assert(array_direct_target->size == 1);
     cfg_program_destroy(&p);
 }
 
