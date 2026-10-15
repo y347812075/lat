@@ -71,6 +71,16 @@
   ],
   "modified": [
     {
+      "path": "lat/util/rcu.c",
+      "generated": true,
+      "reason": "share fork-safe RCU queue and namespace helper-thread deferral"
+    },
+    {
+      "path": "lat/include/qemu/rcu.h",
+      "generated": true,
+      "reason": "share namespace helper-thread deferral state with AOT submissions"
+    },
+    {
       "path": "lat/linux-user/main.c",
       "generated": true,
       "reason": "detect bundles, pretranslate CFG input, and support compile-time AOT emission"

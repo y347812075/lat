@@ -58,6 +58,8 @@ bool latc_aot_v2_note_mremap(CPUState *cpu, uint64_t old_start,
 void latc_aot_v2_report_stats(void);
 /* Preserve pending JIT keys before exec replaces the current process image. */
 void latc_aot_v2_flush_pending_keys(void);
+/* Resume asynchronous collection after namespace setup allows host threads. */
+void latc_aot_v2_start_deferred_submission(void);
 /* Preserve internal source references before a guest closes/overwrites fd. */
 int latc_aot_v2_relocate_source_fd(int fd);
 /* Record a file-backed JIT translation request without execution counters. */

@@ -1,4 +1,5 @@
 #include "qemu/osdep.h"
+#include "qemu/rcu.h"
 
 #include "qemu.h"
 #include "exec/exec-all.h"
@@ -1131,7 +1132,7 @@ static void schedule_runtime_tbset_submission(void)
 {
     pthread_mutex_lock(&submission_control_lock);
     submission_generation++;
-    if (!submission_thread_started) {
+    if (!submission_thread_started && !rcu_atfork_child_is_deferred()) {
         pthread_t thread;
         if (!pthread_create(&thread, NULL,
                             runtime_tbset_submission_thread, NULL)) {
@@ -1141,6 +1142,13 @@ static void schedule_runtime_tbset_submission(void)
     }
     pthread_cond_signal(&submission_control_cond);
     pthread_mutex_unlock(&submission_control_lock);
+}
+
+void latc_aot_v2_start_deferred_submission(void)
+{
+    if (atomic_load_explicit(&active, memory_order_acquire)) {
+        schedule_runtime_tbset_submission();
+    }
 }
 
 static bool precompile_enabled(void)

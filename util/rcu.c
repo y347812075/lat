@@ -423,6 +423,11 @@ void rcu_restore_atfork_child_defer(bool deferred)
     atfork_child_deferred = deferred;
 }
 
+bool rcu_atfork_child_is_deferred(void)
+{
+    return atfork_child_deferred;
+}
+
 void rcu_start_deferred_thread(void)
 {
     if (atfork_child_deferred) {

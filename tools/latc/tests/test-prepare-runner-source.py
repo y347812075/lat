@@ -45,6 +45,8 @@ def main() -> int:
         for relative in (
             "linux-user/main.c",
             "linux-user/latc-aot-v2-runner.c",
+            "util/rcu.c",
+            "include/qemu/rcu.h",
             "accel/tcg/cpu-exec.c",
             "include/exec/fasttb.h",
             "target/i386/latx/sbt/latc_native_export.c",

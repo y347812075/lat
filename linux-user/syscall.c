@@ -9855,6 +9855,7 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         int thread_errno = 0;
 
         rcu_start_deferred_thread();
+        latc_aot_v2_start_deferred_submission();
 
         if (((flags & CLONE_THREAD_FLAGS) != CLONE_THREAD_FLAGS) ||
             (flags & CLONE_INVALID_THREAD_FLAGS)) {
@@ -21715,6 +21716,7 @@ defined(__loongarch__)
         }
         if (arg1 & CLONE_NEWUSER) {
             rcu_start_deferred_thread();
+            latc_aot_v2_start_deferred_submission();
         }
         return ret;
 #endif

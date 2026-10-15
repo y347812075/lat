@@ -1041,6 +1041,16 @@ endif
 if get_option('tests').enabled() and host_machine.cpu_family() == 'loongarch64' and \
    'CONFIG_LATX_O1' in config_host and 'latx-x86_64' in emulators
   test(
+    'test-aot-v2-userns',
+    find_program('tools/latc/tests/test-aot-v2-userns.sh'),
+    args: [emulators['latx-x86_64'].full_path(),
+           meson.current_build_dir() / 'aot-v2-userns-test'],
+    depends: [lat_aot_runtime, emulators['latx-x86_64']],
+    env: ['LD_LIBRARY_PATH=' + meson.current_build_dir()],
+    suite: 'latx-integration',
+    timeout: 150,
+  )
+  test(
     'test-aot-v2-static-vector-fallback',
     find_program('tools/latc/tests/test-aot-v2-static-vector-fallback.sh'),
     args: [latc.full_path(), emulators['latx-x86_64'].full_path(),

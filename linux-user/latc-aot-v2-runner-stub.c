@@ -89,6 +89,10 @@ void latc_aot_v2_flush_pending_keys(void)
 {
 }
 
+void latc_aot_v2_start_deferred_submission(void)
+{
+}
+
 int latc_aot_v2_relocate_source_fd(int fd)
 {
     (void)fd;

@@ -1,5 +1,7 @@
 {
   "generated": [
+    {"source": "util/rcu.c", "target": "tools/latc/lat/util/rcu.c"},
+    {"source": "include/qemu/rcu.h", "target": "tools/latc/lat/include/qemu/rcu.h"},
     {"source": "tools/latc/native/include/lat-eflags-link.h", "target": "include/lat-eflags-link.h"},
     {"source": "tcg/tcg.c", "target": "tools/latc/lat/tcg/tcg.c"},
     {"source": "include/latc-bundle-format.h", "target": "tools/latc/lat/include/latc-bundle-format.h"},

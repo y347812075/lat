@@ -126,6 +126,7 @@ extern void rcu_disable_atfork(void);
 extern bool rcu_defer_atfork_child(void);
 extern void rcu_restore_atfork_child_defer(bool deferred);
 extern void rcu_start_deferred_thread(void);
+extern bool rcu_atfork_child_is_deferred(void);
 extern bool rcu_call_thread_is_running(void);
 extern void rcu_raw_clone_prepare(void);
 extern void rcu_raw_clone_parent(void);

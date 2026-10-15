@@ -21,6 +21,11 @@ int main(void)
 
 #ifdef CONFIG_LATX
     g_assert_false(rcu_call_thread_is_running());
+    g_assert_false(rcu_atfork_child_is_deferred());
+    g_assert_false(rcu_defer_atfork_child());
+    g_assert_true(rcu_atfork_child_is_deferred());
+    rcu_restore_atfork_child_defer(false);
+    g_assert_false(rcu_atfork_child_is_deferred());
 #endif
 
     qemu_event_init(&callback.done, false);
