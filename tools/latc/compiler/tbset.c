@@ -624,6 +624,12 @@ static int close_parallel_targets(const char *path, CfgProgram *program,
     GArray *pending = g_array_new(FALSE, FALSE, sizeof(uint64_t));
     GArray *added = g_array_new(FALSE, FALSE, sizeof(CfgTb));
     int result = 0;
+    uint64_t closure_budget = UINT64_MAX;
+    const char *closure_limit = getenv("LATC_TBSET_CLOSURE_LIMIT");
+    if (closure_limit && *closure_limit) {
+        closure_budget = strtoull(closure_limit, NULL, 0);
+    }
+    int truncated = 0;
 
     for (size_t i = 0; i < program->tb_count; i++) {
         const CfgTb *tb = &program->tbs[i];
@@ -679,6 +685,10 @@ static int close_parallel_targets(const char *path, CfgProgram *program,
                 g_hash_table_contains(seen, &target)) {
                 continue;
             }
+            if (added->len >= closure_budget) {
+                truncated = 1;
+                break;
+            }
             if (pending->len >= 1048576) {
                 result = fail(error, error_size, "direct TB closure too large");
                 goto out;
@@ -698,6 +708,14 @@ static int close_parallel_targets(const char *path, CfgProgram *program,
             };
             g_array_append_val(added, tb);
         }
+        if (truncated) {
+            break;
+        }
+    }
+    if (truncated) {
+        fprintf(stderr,
+                "latc: TB closure truncated at %u added targets\n",
+                added->len);
     }
     if (added->len) {
         CfgTb *next = realloc(program->tbs,
@@ -735,6 +753,8 @@ int latc_tbset_apply(const char *path, const char *source_path,
     }
     size_t hit = 0, miss = 0, skip = 0;
     bool has_parallel = false;
+    const char *closure_limit_env = getenv("LATC_TBSET_CLOSURE_LIMIT");
+    bool bounded_selection = closure_limit_env && *closure_limit_env;
     size_t template_count = program->tb_count;
     if (set.count > (SIZE_MAX / sizeof(*program->tbs)) -
                     program->tb_count) {
@@ -828,43 +848,47 @@ int latc_tbset_apply(const char *path, const char *source_path,
     bool full_parallel_cfg = template_count <= 49152 ||
         (template_count <= 81920 &&
          program->resolved_jump_table_targets >= 1024);
-    if (has_parallel && full_parallel_cfg && select_all_parallel_cfg(
+    if (has_parallel && !bounded_selection && full_parallel_cfg &&
+        select_all_parallel_cfg(
             program, template_count, error, error_size)) {
         free(templates);
         lat_tb_key_set_destroy(&set);
         return -1;
     }
-    GQueue reachable = G_QUEUE_INIT;
-    for (size_t i = 0; i < template_count; i++) {
-        if (program->tbs[i].selected) {
-            g_queue_push_tail(&reachable, GSIZE_TO_POINTER(i + 1));
+    if (!bounded_selection) {
+        GQueue reachable = G_QUEUE_INIT;
+        for (size_t i = 0; i < template_count; i++) {
+            if (program->tbs[i].selected) {
+                g_queue_push_tail(&reachable, GSIZE_TO_POINTER(i + 1));
+            }
+        }
+        while (!g_queue_is_empty(&reachable)) {
+            size_t index = GPOINTER_TO_SIZE(g_queue_pop_head(&reachable)) - 1;
+            const CfgTb *tb = &program->tbs[index];
+            for (size_t edge_index = tb->first_edge;
+                 edge_index < tb->first_edge + tb->edge_count; edge_index++) {
+                const CfgProgramEdge *edge = &program->edges[edge_index];
+                if (edge->resolution != CFG_EDGE_STATIC) {
+                    continue;
+                }
+                size_t target_index;
+                size_t exact_index;
+                template_lookup(templates, template_count, edge->to,
+                                program->tbs[index].semantic_flags,
+                                &target_index, &exact_index);
+                if (target_index == SIZE_MAX ||
+                    program->tbs[target_index].selected) {
+                    continue;
+                }
+                program->tbs[target_index].selected = true;
+                program->tbs[target_index].semantic_flags |= CFG_TB_BOUNDED;
+                g_queue_push_tail(&reachable,
+                                  GSIZE_TO_POINTER(target_index + 1));
+            }
         }
     }
-    while (!g_queue_is_empty(&reachable)) {
-        size_t index = GPOINTER_TO_SIZE(g_queue_pop_head(&reachable)) - 1;
-        const CfgTb *tb = &program->tbs[index];
-        for (size_t edge_index = tb->first_edge;
-             edge_index < tb->first_edge + tb->edge_count; edge_index++) {
-            const CfgProgramEdge *edge = &program->edges[edge_index];
-            if (edge->resolution != CFG_EDGE_STATIC) {
-                continue;
-            }
-            size_t target_index;
-            size_t exact_index;
-            template_lookup(templates, template_count, edge->to,
-                            program->tbs[index].semantic_flags,
-                            &target_index, &exact_index);
-            if (target_index == SIZE_MAX ||
-                program->tbs[target_index].selected) {
-                continue;
-            }
-            program->tbs[target_index].selected = true;
-            program->tbs[target_index].semantic_flags |= CFG_TB_BOUNDED;
-            g_queue_push_tail(&reachable,
-                              GSIZE_TO_POINTER(target_index + 1));
-        }
-    }
-    if (has_parallel && expand_bounded_parallel_functions(
+    if (has_parallel && !bounded_selection &&
+        expand_bounded_parallel_functions(
             program, template_count, error, error_size)) {
         free(templates);
         lat_tb_key_set_destroy(&set);

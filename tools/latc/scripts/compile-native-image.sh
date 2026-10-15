@@ -22,6 +22,9 @@ output=$4
 tbset=${5:-}
 
 unset LATC_NATIVE_STATIC_CHECK
+if [ "$module" -eq 1 ] && [ -z "${LATC_TBSET_CLOSURE_LIMIT+x}" ]; then
+    export LATC_TBSET_CLOSURE_LIMIT=20000
+fi
 if [ -z "$tbset" ] || [ "$static_tbset" -eq 1 ]; then
     export LATC_NATIVE_STATIC_CHECK=1
 fi

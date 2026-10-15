@@ -996,6 +996,55 @@ static int prepare_static_tbset(const LatcdConfig *config,
     return result;
 }
 
+/*
+ * A module may legitimately omit a small number of collected TBs: the
+ * native exporter skips TBs without stable PC maps, and a few relocations
+ * (for example guest addresses below the load bias) can only be served by
+ * the runtime JIT.  Accept such modules when the missing set is small, so
+ * one unsupported TB does not invalidate an otherwise complete module.
+ */
+static int module_missing_is_jit_only(const char *module, const char *tbset,
+                                      const uint8_t digest[32],
+                                      LatAotModuleInfoV2 *info,
+                                      char *error, size_t error_size)
+{
+    LatTbKeySet requested = {0};
+    LatTbKeySet missing = {0};
+    if (lat_tb_key_set_read_file(tbset, digest, &requested,
+                                 error, error_size)) {
+        return -1;
+    }
+    if (lat_aot_v2_module_missing_tbset_file(module, tbset, info, &missing,
+                                             error, error_size)) {
+        lat_tb_key_set_destroy(&requested);
+        return -1;
+    }
+    size_t allowed = requested.count / 100;
+    if (allowed < 1024) {
+        allowed = 1024;
+    }
+    int accepted = missing.count && missing.count <= allowed;
+    if (accepted) {
+        fprintf(stderr,
+                "latcd: module %s covers %zu/%zu TBs; %zu unsupported TBs "
+                "will stay JIT-only (first 0x%" PRIx64 ")\n",
+                module, requested.count - missing.count, requested.count,
+                missing.count, missing.keys[0].guest_rva);
+        if (error && error_size) {
+            error[0] = '\0';
+        }
+    } else if (missing.count) {
+        snprintf(error, error_size,
+                 "TB set is not fully covered: covered=%zu total=%zu "
+                 "first_missing_rva=0x%" PRIx64 " flags=0x%x",
+                 requested.count - missing.count, requested.count,
+                 missing.keys[0].guest_rva, missing.keys[0].flags);
+    }
+    lat_tb_key_set_destroy(&missing);
+    lat_tb_key_set_destroy(&requested);
+    return accepted;
+}
+
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *source, const char *tbset,
                         bool static_tbset,
@@ -1047,7 +1096,13 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     digest_hex(digest, digest_text);
     char *trusted_digest = g_strdup_printf("LATC_TRUSTED_SOURCE_SHA256=%s",
                                             digest_text);
-    const char *environment[13];
+    const char *closure_limit = getenv("LATC_TBSET_CLOSURE_LIMIT");
+    if (!closure_limit || !*closure_limit) {
+        closure_limit = "20000";
+    }
+    char *closure_environment = g_strdup_printf(
+        "LATC_TBSET_CLOSURE_LIMIT=%s", closure_limit);
+    const char *environment[14];
     size_t environment_count = 0;
     environment[environment_count++] = "PATH=/usr/bin:/bin";
     environment[environment_count++] = "LANG=C";
@@ -1060,6 +1115,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (native_base) environment[environment_count++] = native_base;
     environment[environment_count++] = native_output;
     if (compile_timing) environment[environment_count++] = compile_timing;
+    environment[environment_count++] = closure_environment;
     environment[environment_count++] = "LATC_SKIP_FINAL_INSPECT=1";
     environment[environment_count] = NULL;
     pid_t child = fork();
@@ -1093,6 +1149,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         g_free(native_base);
         g_free(native_output);
         g_free(trusted_digest);
+        g_free(closure_environment);
         return fail(error, error_size, "cannot start compiler: %s",
                     strerror(errno));
     }
@@ -2089,6 +2146,14 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     if (cache_hit && complete_tbset) {
         cache_hit = !lat_aot_v2_module_inspect_and_validate_tbset_file(
             final_module, complete_tbset, &info, error, sizeof(error));
+        if (!cache_hit) {
+            int jit_only = module_missing_is_jit_only(
+                final_module, complete_tbset, digest, &info, error,
+                sizeof(error));
+            if (jit_only > 0) {
+                cache_hit = 1;
+            }
+        }
     }
     if (cache_hit) {
         int publish_result = publish_current_index(
@@ -2168,6 +2233,13 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
             module, complete_tbset, &info, error, sizeof(error)) :
         lat_aot_v2_module_inspect_file(module, &info,
                                        error, sizeof(error));
+    if (inspect_result && complete_tbset) {
+        int jit_only = module_missing_is_jit_only(
+            module, complete_tbset, digest, &info, error, sizeof(error));
+        if (jit_only > 0) {
+            inspect_result = 0;
+        }
+    }
     if (inspect_result || memcmp(info.note.source_sha256, digest, 32) ||
         memcmp(info.note.codegen_id, codegen_id, 32)) {
         if (!error[0]) {

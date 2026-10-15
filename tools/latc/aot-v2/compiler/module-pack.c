@@ -29,6 +29,7 @@ _Static_assert((unsigned int)LAT_NATIVE_PC_MAP_STACK_POINTER_DELTA ==
  */
 #define FALLBACK_STUB_WORDS 4u
 #define FALLBACK_STUB_SIZE (FALLBACK_STUB_WORDS * 4u)
+#define FALLBACK_PF_TABLE_SIZE 256u
 
 typedef struct ModulePack {
     const LatNativeImageHeaderV2 *header;
@@ -979,6 +980,9 @@ static void configure_local_dispatch(ModulePack *pack)
     }
 }
 
+static uint64_t fallback_stub_for_relocation(
+    ModulePack *pack, const LatNativeRelocationV1 *relocation);
+
 static void select_supported_tbs(ModulePack *pack)
 {
     memset(pack->supported, 1, pack->header->tb_count);
@@ -1053,6 +1057,7 @@ static void select_supported_tbs(ModulePack *pack)
                 }
                 if ((uint64_t)relocation->addend <
                         pack->header->preferred_guest_base ||
+                    relocation->addend < 0 ||
                     guest_slot(pack, (uint64_t)relocation->addend -
                                pack->header->preferred_guest_base) < 0) {
                     pack->supported[owner] = 0;
@@ -1100,6 +1105,7 @@ static void select_supported_tbs(ModulePack *pack)
                 }
             }
         }
+        guint fallback_before = pack->fallback_targets->len;
         for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
             const LatNativeRelocationV1 *relocation = &pack->relocations[i];
             if (relocation->kind != LAT_NATIVE_RELOC_TB_TARGET) {
@@ -1115,8 +1121,21 @@ static void select_supported_tbs(ModulePack *pack)
                 pack->relocation_targets[i] = target;
             }
             if (target >= 0 && !pack->supported[target]) {
-                pack->supported[owner] = 0;
-                changed = 1;
+                uint64_t stub = pack->fallback_relocations[i];
+                if (!stub) {
+                    stub = fallback_stub_for_relocation(pack, relocation);
+                }
+                uint32_t instructions[3] = {0};
+                memcpy(instructions, pack->code + relocation->code_offset,
+                       relocation->slots * sizeof(*instructions));
+                if (stub && relocation->slots && relocation->slots <= 3 &&
+                    !patch_runtime_target(instructions, relocation->slots,
+                                          relocation->code_offset, stub)) {
+                    pack->fallback_relocations[i] = stub;
+                } else {
+                    pack->supported[owner] = 0;
+                    changed = 1;
+                }
                 continue;
             }
             if (!relocation->slots || relocation->slots > 3) {
@@ -1183,28 +1202,37 @@ static void select_supported_tbs(ModulePack *pack)
                     break;
                 }
             }
-            if (!candidate_count && target < 0) {
+            if (!patchable) {
                 uint32_t instructions[3] = {0};
                 memcpy(instructions, pack->code + relocation->code_offset,
                        relocation->slots * sizeof(*instructions));
                 uint64_t fallback = pack->fallback_relocations[i];
-                if (fallback) {
-                    patchable = !patch_runtime_target(
-                        instructions, relocation->slots,
-                        relocation->code_offset, fallback);
-                } else {
-                    patchable = runtime_entry(relocation->reserved) &&
-                        !patch_runtime_target(
-                            instructions, relocation->slots,
-                            relocation->code_offset,
-                            pack->runtime_trampolines +
-                                relocation->reserved * 4);
+                if (!fallback) {
+                    fallback = fallback_stub_for_relocation(pack, relocation);
+                }
+                if (fallback && relocation->slots && relocation->slots <= 3 &&
+                    !patch_runtime_target(instructions, relocation->slots,
+                                          relocation->code_offset, fallback)) {
+                    pack->fallback_relocations[i] = fallback;
+                    pack->relocation_patch_targets[i] = -1;
+                    patchable = 1;
+                } else if (target < 0 &&
+                           runtime_entry(relocation->reserved) &&
+                           !patch_runtime_target(
+                               instructions, relocation->slots,
+                               relocation->code_offset,
+                               pack->runtime_trampolines +
+                                   relocation->reserved * 4)) {
+                    patchable = 1;
                 }
             }
             if (!patchable) {
                 pack->supported[owner] = 0;
                 changed = 1;
             }
+        }
+        if (pack->fallback_targets->len != fallback_before) {
+            changed = 1;
         }
         for (guint i = 0; i + 1 < pack->code_order->len; i++) {
             const LatNativeTbV1 *owner = g_array_index(
@@ -1467,8 +1495,9 @@ static int fallback_stub_for(ModulePack *pack, uint64_t target)
 
 static void allocate_fallback_stubs(ModulePack *pack)
 {
-    pack->fallback_stubs = pack->runtime_trampolines +
+    pack->pf_table = pack->runtime_trampolines +
         LAT_NATIVE_SYMBOL_COUNT * sizeof(uint32_t);
+    pack->fallback_stubs = pack->pf_table + FALLBACK_PF_TABLE_SIZE;
     for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
         const LatNativeRelocationV1 *relocation = &pack->relocations[i];
         if (relocation->kind != LAT_NATIVE_RELOC_TB_TARGET ||
@@ -1486,9 +1515,20 @@ static void allocate_fallback_stubs(ModulePack *pack)
         pack->fallback_relocations[i] = pack->fallback_stubs +
             (uint64_t)index * FALLBACK_STUB_SIZE;
     }
-    pack->fallback_stub_count = pack->fallback_targets->len;
-    pack->pf_table = pack->fallback_stubs +
-        pack->fallback_stub_count * FALLBACK_STUB_SIZE;
+}
+
+static uint64_t fallback_stub_for_relocation(
+    ModulePack *pack, const LatNativeRelocationV1 *relocation)
+{
+    uint64_t value = fallback_stub_value(pack, relocation->addend);
+    if (value == UINT64_MAX) {
+        return 0;
+    }
+    int index = fallback_stub_for(pack, value);
+    if (index < 0) {
+        return 0;
+    }
+    return pack->fallback_stubs + (uint64_t)index * FALLBACK_STUB_SIZE;
 }
 
 static int patch_absolute_guest_address(uint32_t *instructions,
@@ -1519,7 +1559,8 @@ static int patch_absolute_guest_address(uint32_t *instructions,
 static int patch_guest_address(ModulePack *pack,
                                const LatNativeRelocationV1 *relocation)
 {
-    if ((uint64_t)relocation->addend < pack->header->preferred_guest_base) {
+    if (relocation->addend < 0 ||
+        (uint64_t)relocation->addend < pack->header->preferred_guest_base) {
         return -1;
     }
     uint64_t target = (uint64_t)relocation->addend;
@@ -1695,19 +1736,16 @@ static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
                 if (!result) {
                     eliminate_edge_flags(pack, relocation, owner, target);
                 }
-            } else if (target < 0) {
-                uint64_t fallback = pack->fallback_relocations[i];
-                if (fallback) {
-                    result = patch_runtime_target(
-                        instructions, relocation->slots,
-                        relocation->code_offset, fallback);
-                } else if (runtime_entry(relocation->reserved)) {
-                    result = patch_runtime_target(
-                        instructions, relocation->slots,
-                        relocation->code_offset,
-                        pack->runtime_trampolines +
-                            relocation->reserved * 4);
-                }
+            } else if (pack->fallback_relocations[i]) {
+                result = patch_runtime_target(
+                    instructions, relocation->slots,
+                    relocation->code_offset,
+                    pack->fallback_relocations[i]);
+            } else if (target < 0 && runtime_entry(relocation->reserved)) {
+                result = patch_runtime_target(
+                    instructions, relocation->slots,
+                    relocation->code_offset,
+                    pack->runtime_trampolines + relocation->reserved * 4);
             }
         } else if (relocation->kind == LAT_NATIVE_RELOC_JRRA_TARGET) {
             int target = pack->relocation_targets[i];
@@ -2307,7 +2345,18 @@ static int emit_assembly(const char *path, const ModulePack *pack,
             fprintf(file, "nop\n");
         }
     }
-    for (uint64_t i = 0; i < pack->fallback_stub_count; i++) {
+    fprintf(file, ".Llat_aot_pf_table:\n");
+    for (unsigned int value = 0; value < FALLBACK_PF_TABLE_SIZE; value++) {
+        unsigned int bits = value;
+        unsigned int parity = 0;
+        while (bits) {
+            parity ^= bits & 1;
+            bits >>= 1;
+        }
+        fprintf(file, "%s%u%s", value % 16 ? "," : ".byte ",
+                parity ? 0 : 4, value % 16 == 15 ? "\n" : "");
+    }
+    for (uint64_t i = 0; i < pack->fallback_targets->len; i++) {
         uint64_t rva = g_array_index(pack->fallback_targets, uint64_t, i);
         uint64_t stub = pack->fallback_stubs + i * FALLBACK_STUB_SIZE;
         uint32_t words[FALLBACK_STUB_WORDS] = {
@@ -2355,17 +2404,6 @@ static int emit_assembly(const char *path, const ModulePack *pack,
         for (unsigned int w = 0; w < FALLBACK_STUB_WORDS; w++) {
             fprintf(file, ".word 0x%08x\n", words[w]);
         }
-    }
-    fprintf(file, ".Llat_aot_pf_table:\n");
-    for (unsigned int value = 0; value < 256; value++) {
-        unsigned int bits = value;
-        unsigned int parity = 0;
-        while (bits) {
-            parity ^= bits & 1;
-            bits >>= 1;
-        }
-        fprintf(file, "%s%u%s", value % 16 ? "," : ".byte ",
-                parity ? 0 : 4, value % 16 == 15 ? "\n" : "");
     }
     fprintf(file,
         ".hidden lat_aot_generated_abi_anchor\n"

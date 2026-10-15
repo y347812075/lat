@@ -7,6 +7,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -200,10 +201,22 @@ int lat_tb_key_set_union(const LatTbKeySet *left, const LatTbKeySet *right,
                          LatTbKeySet *result,
                          char *error, size_t error_size)
 {
-    if (!left || !right || !result || !sources_match(left, right) ||
-        left->count > LAT_AOT_V2_TBSET_RECORD_LIMIT - right->count) {
+    if (!left || !right || !result) {
         errno = EINVAL;
         return fail(error, error_size, "cannot union TB key sets");
+    }
+    if (!sources_match(left, right)) {
+        errno = EINVAL;
+        return fail(error, error_size,
+                    "cannot union TB key sets: source digest mismatch");
+    }
+    if (left->count > LAT_AOT_V2_TBSET_RECORD_LIMIT - right->count) {
+        errno = E2BIG;
+        return fail(error, error_size,
+                    "cannot union TB key sets: %" PRIu64 " + %" PRIu64
+                    " exceeds record limit %u",
+                    left->count, right->count,
+                    LAT_AOT_V2_TBSET_RECORD_LIMIT);
     }
     memset(result, 0, sizeof(*result));
     memcpy(result->source_sha256, left->source_sha256, 32);
