@@ -12,6 +12,7 @@
 
 #include <elf.h>
 #include <errno.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,7 @@ static bool strict_file_aot;
 static char *stats_output_pattern;
 
 bool latc_aot_v2_is_file_pc(target_ulong guest_pc);
+void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags);
 static bool stat_pretranslation_disabled;
 static bool stat_aot_cache_hit;
 static uint64_t stat_bundle_verify_ns, stat_guest_extract_ns;
@@ -260,13 +262,30 @@ void latc_bundle_note_tb_generated(uint64_t guest_pc, uint32_t cflags)
 {
     bool program_pc = program_address(guest_pc);
     bool file_pc = latc_aot_v2_is_file_pc(guest_pc);
+    const char *trace_pc = getenv("LATC_TRACE_TB_PC");
+    if (trace_pc && *trace_pc &&
+        (uint64_t)strtoull(trace_pc, NULL, 0) == guest_pc) {
+        void *frames[16];
+        int count = backtrace(frames, 16);
+        fprintf(stderr,
+                "latc: tb-gen trace pc=0x%llx cflags=0x%x pid=%d frames=%d\n",
+                (unsigned long long)guest_pc, cflags, getpid(), count);
+        for (int i = 0; i < count; i++) {
+            fprintf(stderr, "latc: tb-gen frame[%d]=%p\n", i, frames[i]);
+        }
+    }
     if (strict_aot || (program_pc && strict_program_aot) ||
         (file_pc && strict_file_aot)) {
         fprintf(stderr,
                 "latc: strict AOT rejected generated JIT TB at 0x%llx "
                 "cflags=0x%x file=%d program=%d\n",
                 (unsigned long long)guest_pc, cflags, file_pc, program_pc);
-        _exit(125);
+        if (!getenv("LATC_STRICT_AOT_COLLECT")) {
+            _exit(125);
+        }
+    }
+    if (file_pc) {
+        latc_aot_v2_note_jit_key(guest_pc, cflags);
     }
     if (!runtime_stats_enabled()) return;
     stat_runtime_tb_gen_calls++;

@@ -22,6 +22,9 @@
 #include "qemu.h"
 #include "cpu_loop-common.h"
 #include "latx-options.h"
+#ifdef CONFIG_LATX
+#include "latc-aot-v2-runner.h"
+#endif
 #include <linux/audit.h>
 
 /***********************************************************/
@@ -220,6 +223,9 @@ void cpu_loop(CPUX86State *env)
         trapnr = cpu_exec(cs);
         cpu_exec_end(cs);
         process_queued_cpu_work(cs);
+#ifdef CONFIG_LATX
+        latc_aot_v2_flush_deferred_pending();
+#endif
 #if defined(CONFIG_LATX_KZT)
         kzt_reclaim_unloaded_headers();
         if (latx_kzt_runtime_enabled() && trapnr == 0xCC)

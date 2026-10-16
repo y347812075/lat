@@ -129,6 +129,8 @@ static pthread_mutex_t submission_control_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t submission_control_cond = PTHREAD_COND_INITIALIZER;
 static uint64_t submission_generation;
 static bool submission_thread_started;
+static _Atomic bool deferred_pending_keys;
+static _Atomic unsigned deferred_flush_failures;
 typedef struct LatAotV2PendingMapping {
     int fd;
     uint64_t guest_start;
@@ -698,6 +700,32 @@ void latc_aot_v2_flush_pending_keys(void)
     submit_runtime_tbsets();
 }
 
+void latc_aot_v2_flush_deferred_pending(void)
+{
+    if (!atomic_load_explicit(&deferred_pending_keys, memory_order_acquire)) {
+        return;
+    }
+    if (submit_runtime_tbsets()) {
+        atomic_store_explicit(&deferred_pending_keys, false,
+                              memory_order_release);
+        atomic_store_explicit(&deferred_flush_failures, 0,
+                              memory_order_relaxed);
+        return;
+    }
+    /*
+     * The daemon may be temporarily unavailable; retry at later guest
+     * syscall boundaries, but stop after a bounded number of attempts so a
+     * broken socket cannot add a connect attempt to every syscall forever.
+     * The deferred worker still owns the set from the next clone/unshare
+     * safe point.
+     */
+    if (atomic_fetch_add_explicit(&deferred_flush_failures, 1,
+                                  memory_order_relaxed) + 1 >= 1000) {
+        atomic_store_explicit(&deferred_pending_keys, false,
+                              memory_order_release);
+    }
+}
+
 static int relocate_source_fd(int *owned_fd, int guest_fd)
 {
     if (*owned_fd != guest_fd) {
@@ -909,19 +937,45 @@ bool latc_aot_v2_mapping_enabled(void)
     return (cache && *cache) || (module && *module) || (socket && *socket);
 }
 
+static bool trace_jit_key(target_ulong guest_pc)
+{
+    const char *trace = getenv("LATC_TRACE_TB_PC");
+    if (trace && *trace &&
+        (uint64_t)strtoull(trace, NULL, 0) == (uint64_t)guest_pc) {
+        return true;
+    }
+    return getenv("LATC_TRACE_KEY") != NULL;
+}
+
 static bool note_jit_key_locked(target_ulong guest_pc, uint32_t cflags)
 {
+    bool trace = trace_jit_key(guest_pc);
     if (cflags & CF_INVALID) {
+        if (trace) {
+            fprintf(stderr, "latx: note-key pc=0x%llx pid=%d skip=cf-invalid flags=0x%x\n",
+                    (unsigned long long)guest_pc, getpid(), cflags);
+        }
         return false;
     }
     LatAotV2ModuleStats *stats = module_stats_for_pc(guest_pc);
     if (!stats || !stats->jit_tbset ||
         g_hash_table_size(stats->jit_tbset) >= LAT_AOT_V2_TBSET_RECORD_LIMIT) {
+        if (trace) {
+            fprintf(stderr, "latx: note-key pc=0x%llx pid=%d skip=no-stats-or-full stats=%p count=%u\n",
+                    (unsigned long long)guest_pc, getpid(), (void *)stats,
+                    stats && stats->jit_tbset ?
+                    g_hash_table_size(stats->jit_tbset) : 0);
+        }
         return false;
     }
     uint64_t source_base = atomic_load_explicit(&stats->source_base,
                                                 memory_order_acquire);
     if (guest_pc < source_base) {
+        if (trace) {
+            fprintf(stderr, "latx: note-key pc=0x%llx pid=%d skip=below-base base=0x%llx\n",
+                    (unsigned long long)guest_pc, getpid(),
+                    (unsigned long long)source_base);
+        }
         return false;
     }
     LatAotV2TbsetEntry candidate = {
@@ -929,6 +983,11 @@ static bool note_jit_key_locked(target_ulong guest_pc, uint32_t cflags)
         .flags = aot_v2_semantic_flags(cflags),
     };
     if (g_hash_table_contains(stats->jit_tbset, &candidate)) {
+        if (trace) {
+            fprintf(stderr, "latx: note-key pc=0x%llx pid=%d skip=duplicate rva=0x%llx\n",
+                    (unsigned long long)guest_pc, getpid(),
+                    (unsigned long long)candidate.rva);
+        }
         return false;
     }
     LatAotV2TbsetEntry *entry = g_new(LatAotV2TbsetEntry, 1);
@@ -943,12 +1002,27 @@ static bool note_jit_key_locked(target_ulong guest_pc, uint32_t cflags)
     }
     *pending = candidate;
     g_hash_table_add(stats->pending_tbset, pending);
+    if (trace) {
+        fprintf(stderr, "latx: note-key pc=0x%llx pid=%d added rva=0x%llx flags=0x%x jit=%u pending=%u\n",
+                (unsigned long long)guest_pc, getpid(),
+                (unsigned long long)candidate.rva, candidate.flags,
+                g_hash_table_size(stats->jit_tbset),
+                g_hash_table_size(stats->pending_tbset));
+    }
     return true;
 }
 
 void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
 {
+    bool trace = trace_jit_key(guest_pc);
     const char *socket = lat_aot_socket_path();
+    if (trace) {
+        fprintf(stderr, "latx: note-key pc=0x%llx pid=%d socket=%s deferred=%d mapping=%d\n",
+                (unsigned long long)guest_pc, getpid(),
+                socket && *socket ? socket : "-",
+                rcu_atfork_child_is_deferred(),
+                latc_aot_v2_mapping_enabled());
+    }
     if (!socket || !*socket) {
         return;
     }
@@ -956,7 +1030,16 @@ void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
     bool added = note_jit_key_locked(guest_pc, cflags);
     pthread_mutex_unlock(&tbset_lock);
     if (added) {
+        if (rcu_atfork_child_is_deferred()) {
+            atomic_store_explicit(&deferred_pending_keys, true,
+                                  memory_order_release);
+        }
         schedule_runtime_tbset_submission();
+        if (trace) {
+            fprintf(stderr, "latx: note-key pc=0x%llx pid=%d scheduled deferred=%d\n",
+                    (unsigned long long)guest_pc, getpid(),
+                    rcu_atfork_child_is_deferred());
+        }
     }
 }
 
@@ -1013,6 +1096,12 @@ static bool submit_runtime_tbsets(void)
         }
         pthread_mutex_unlock(&tbset_lock);
         if (!entries || stats->source_fd < 0) {
+            if (entries && getenv("LATX_AOT_V2_REPORT")) {
+                char skip_source[65];
+                digest_hex(stats->source_sha256, skip_source);
+                fprintf(stderr, "latx: AOT v2 pending TB set not submitted source=%s count=%u source_fd=%d\n",
+                        skip_source, count, stats->source_fd);
+            }
             if (entries) g_array_free(entries, TRUE);
             continue;
         }
@@ -1134,8 +1223,19 @@ static void schedule_runtime_tbset_submission(void)
     submission_generation++;
     if (!submission_thread_started && !rcu_atfork_child_is_deferred()) {
         pthread_t thread;
-        if (!pthread_create(&thread, NULL,
-                            runtime_tbset_submission_thread, NULL)) {
+        sigset_t set, oldset;
+        /* This host-only worker has no thread_cpu for guest signal delivery. */
+        sigfillset(&set);
+        sigdelset(&set, SIGSEGV);
+        sigdelset(&set, SIGFPE);
+        sigdelset(&set, SIGILL);
+        int err = pthread_sigmask(SIG_SETMASK, &set, &oldset);
+        if (!err) {
+            err = pthread_create(&thread, NULL,
+                                 runtime_tbset_submission_thread, NULL);
+            pthread_sigmask(SIG_SETMASK, &oldset, NULL);
+        }
+        if (!err) {
             submission_thread_started = true;
             pthread_detach(thread);
         }
