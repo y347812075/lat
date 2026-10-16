@@ -750,8 +750,17 @@ static void delet_static_tb(TranslationBlock **tb_list, uint32_t *tb_num_in_tu)
         tb = tb_list[i];
         assert(tb);
         if (tb->s_data->tu_tb_mode == TU_TB_MODE_STATIC) {
-            free(tb->s_data);
-            free(tb);
+            /*
+             * Other TBs can still reference a static TB through
+             * s_data->next_tb[] during AOT pre-translation, so freeing it
+             * here leaves dangling pointers.  The export process exits
+             * after writing the image; keep the memory alive during
+             * pre-translation and free it in the live path only.
+             */
+            if (!in_pre_translate) {
+                free(tb->s_data);
+                free(tb);
+            }
             tb = NULL;
         } else {
             tb_list[last_tb_id++] = tb;

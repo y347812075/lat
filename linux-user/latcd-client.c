@@ -9,6 +9,7 @@
 #include <poll.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -23,6 +24,31 @@ static int fail(char *error, size_t error_size, const char *format, ...)
         va_end(arguments);
     }
     return -1;
+}
+
+static int latcd_client_operation_timeout(uint32_t operation)
+{
+    const char *name;
+    int fallback;
+    if (operation == LATCD_OP_SUBMIT_KEYS ||
+        operation == LATCD_OP_SUBMIT_STATIC_KEYS) {
+        name = "LATX_AOT_V2_SUBMIT_TIMEOUT_MS";
+        fallback = 5000;
+    } else if (operation == LATCD_OP_HELLO) {
+        name = "LATX_AOT_V2_HELLO_TIMEOUT_MS";
+        fallback = 3000;
+    } else {
+        return 120000;
+    }
+    const char *value = getenv(name);
+    if (value && *value) {
+        char *end = NULL;
+        long parsed = strtol(value, &end, 10);
+        if (end && !*end && parsed > 0 && parsed <= 600000) {
+            return (int)parsed;
+        }
+    }
+    return fallback;
 }
 
 static int exchange(const char *socket_path, int source_fd, int keys_fd,
@@ -82,8 +108,7 @@ static int exchange(const char *socket_path, int source_fd, int keys_fd,
         return -1;
     }
     struct pollfd event = { .fd = socket_fd, .events = POLLIN };
-    int timeout = operation == LATCD_OP_SUBMIT_KEYS ||
-                  operation == LATCD_OP_HELLO ? 1000 : 120000;
+    int timeout = latcd_client_operation_timeout(operation);
     int ready;
     do {
         ready = poll(&event, 1, timeout);

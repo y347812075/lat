@@ -870,6 +870,11 @@ static unsigned int tcg_aot_thread_count(void)
 static size_t tcg_n_regions(void)
 {
     max_tcg_ctxs = tcg_aot_thread_count();
+    /* Guest JIT shares tcg_init_ctx, whose buffer bounds also serve TB lookup.
+     * Moving that context to another region would hide still-live code. */
+    if (!getenv("LATC_EMIT_AOT")) {
+        return 1;
+    }
     /* Address ranges do not produce equal amounts of host code.  Keep a
      * second region per compiler thread in the shared allocator so a busy
      * worker can continue instead of truncating its TB slice. */

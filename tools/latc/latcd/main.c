@@ -51,7 +51,7 @@ static long superseded_grace_seconds(void);
 #define LATCD_MAX_WORKERS 32u
 #define LATCD_DEFAULT_MAX_NEGATIVE 128u
 #define LATCD_DEFAULT_NEGATIVE_MS 30000u
-#define LATCD_DEFAULT_CPU_SECONDS 60u
+#define LATCD_DEFAULT_CPU_SECONDS 1200u
 #define LATCD_DEFAULT_ADDRESS_SPACE (UINT64_C(1) << 40)
 #define LATCD_DEFAULT_FILE_SIZE (UINT64_C(2) << 30)
 #define LATCD_DEFAULT_OPEN_FILES 256u
@@ -1123,7 +1123,15 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         if (setpgid(0, 0)) {
             _exit(126);
         }
-        struct rlimit cpu = { config->cpu_seconds, config->cpu_seconds };
+        struct rlimit inherited_cpu;
+        rlim_t cpu_seconds = config->cpu_seconds;
+        if (!getrlimit(RLIMIT_CPU, &inherited_cpu) &&
+            inherited_cpu.rlim_max != RLIM_INFINITY &&
+            cpu_seconds > inherited_cpu.rlim_max) {
+            /* An unprivileged child cannot raise its inherited hard limit. */
+            cpu_seconds = inherited_cpu.rlim_max;
+        }
+        struct rlimit cpu = { cpu_seconds, cpu_seconds };
         struct rlimit memory = {
             config->address_space_limit, config->address_space_limit,
         };
@@ -3998,6 +4006,16 @@ int main(int argc, char **argv)
     if (validate_toolchain(&config, error, sizeof(error))) {
         fprintf(stderr, "latcd: %s\n", error);
         return 1;
+    }
+    struct rlimit inherited_cpu;
+    if (getrlimit(RLIMIT_CPU, &inherited_cpu) == 0 &&
+        inherited_cpu.rlim_max != RLIM_INFINITY &&
+        config.cpu_seconds > inherited_cpu.rlim_max) {
+        fprintf(stderr,
+                "latcd: CPU limit %u exceeds inherited hard limit %llu; using %llu seconds\n",
+                config.cpu_seconds,
+                (unsigned long long)inherited_cpu.rlim_max,
+                (unsigned long long)inherited_cpu.rlim_max);
     }
     if (daemonize) {
         pid_t child = fork();

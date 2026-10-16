@@ -1427,6 +1427,12 @@ static int patch_jrra_target(uint32_t *instructions, uint32_t slots,
 static int patch_runtime_target(uint32_t *instructions, uint32_t slots,
                                 uint64_t patch, uint64_t target)
 {
+    /* Native tail exits reserve a second word for an out-of-range jump. */
+    if (slots == 2 &&
+        (instructions[0] & 0xfc000000u) == 0x50000000u &&
+        instructions[1] == 0x03400000u) {
+        return patch_tb_target_pair(instructions, patch, target, 0);
+    }
     if ((instructions[0] & 0xfc000000u) == 0x50000000u ||
         (instructions[0] & 0xfc000000u) == 0x54000000u ||
         (instructions[0] & 0xfc000000u) == 0x40000000u ||
@@ -2340,7 +2346,7 @@ static int emit_assembly(const char *path, const ModulePack *pack,
         const char *entry = runtime_entry(symbol);
         fprintf(file, ".Llat_aot_runtime_%u:\n", symbol);
         if (entry) {
-            fprintf(file, "b %s\n", entry);
+            fprintf(file, "b .Llat_aot_runtime_target_%u\n", symbol);
         } else {
             fprintf(file, "nop\n");
         }
@@ -2405,13 +2411,26 @@ static int emit_assembly(const char *path, const ModulePack *pack,
             fprintf(file, ".word 0x%08x\n", words[w]);
         }
     }
+    /* Keep four-byte entry slots stable; distant PLT entries need GOT jumps. */
+    for (uint32_t symbol = 0; symbol < LAT_NATIVE_SYMBOL_COUNT; symbol++) {
+        const char *entry = runtime_entry(symbol);
+        if (entry) {
+            fprintf(file,
+                ".Llat_aot_runtime_target_%u:\n"
+                "pcalau12i $t0,%%got_pc_hi20(%s)\n"
+                "ld.d $t0,$t0,%%got_pc_lo12(%s)\n"
+                "jirl $zero,$t0,0\n", symbol, entry, entry);
+        }
+    }
+    /* Keep the ABI import independent of the generated text's branch range. */
     fprintf(file,
-        ".hidden lat_aot_generated_abi_anchor\n"
-        "lat_aot_generated_abi_anchor:\n"
-        "b lat_aot_runtime_abi_version\n"
         ".global lat_aot_generated_text_end\n"
         ".hidden lat_aot_generated_text_end\n"
         "lat_aot_generated_text_end:\n"
+        ".section .data.rel.ro.lat.abi,\"aw\",@progbits\n.p2align 3\n"
+        ".hidden lat_aot_generated_abi_anchor\n"
+        "lat_aot_generated_abi_anchor:\n"
+        ".8byte lat_aot_runtime_abi_version\n"
         ".section .rodata.lat.tb,\"a\",@progbits\n.p2align 3\n"
         ".global lat_aot_generated_tbs_begin\n.hidden lat_aot_generated_tbs_begin\n"
         "lat_aot_generated_tbs_begin:\n.incbin \"tbs.bin\"\n"

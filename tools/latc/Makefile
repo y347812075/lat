@@ -439,6 +439,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(MAKE) test-aot-v2
 	$(MAKE) test-aot-v2-source-sync
 	$(MAKE) test-prepare-runner-source
+	python3 tests/test-tcg-jit-regions.py
+	python3 tests/test-aot-v2-submission-signals.py
 	$(MAKE) check-import
 
 $(BUILD)/tests/test-latcd-protocol: \

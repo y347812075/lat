@@ -1438,6 +1438,99 @@ static int test_edge_flags(const char *directory)
     return 0;
 }
 
+static int test_distant_runtime_exit(const char *directory)
+{
+    const size_t code_size = (128u << 20) + 4096;
+    const size_t code_offset = sizeof(LatNativeImageHeaderV2) + 8;
+    const size_t tb_offset = code_offset + code_size;
+    const size_t relocation_offset = tb_offset + 3 * sizeof(LatNativeTbV1);
+    const size_t map_offset = relocation_offset +
+        2 * sizeof(LatNativeRelocationV1);
+    const size_t image_size = map_offset + 3 * sizeof(LatNativePcMapV2);
+    g_autofree unsigned char *image = g_malloc0(image_size);
+    LatNativeImageHeaderV2 *h = (void *)image;
+    memcpy(h->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
+    h->version = LAT_NATIVE_IMAGE_VERSION;
+    h->header_size = sizeof(*h);
+    h->guest_entry = 0x401000;
+    h->preferred_guest_base = 0x400000;
+    h->guest_image_offset = sizeof(*h);
+    h->guest_image_size = 1;
+    h->code_offset = code_offset;
+    h->code_size = code_size;
+    h->tb_table_offset = tb_offset;
+    h->tb_count = 3;
+    h->relocation_offset = relocation_offset;
+    h->relocation_count = 2;
+    h->pc_map_offset = map_offset;
+    h->pc_map_count = 3;
+    strcpy(h->lat_build_id, "aot-v2-distant-runtime-exit-test");
+    uint32_t *code = (void *)(image + code_offset);
+    code[0] = 0x58000000u;
+    code[1] = 0x50000000u;
+    code[2] = 0x03400000u;
+    code[code_size / 4 - 1] = 0x03400000u;
+    LatNativeTbV1 *tbs = (void *)(image + tb_offset);
+    tbs[0] = (LatNativeTbV1) {
+        .guest_pc = 0x401000, .code_offset = 0, .code_size = 4, .flags = 3,
+    };
+    tbs[1] = (LatNativeTbV1) {
+        .guest_pc = 0x402000, .code_offset = 4, .code_size = 8, .flags = 3,
+    };
+    tbs[2] = (LatNativeTbV1) {
+        .guest_pc = 0x403000, .code_offset = code_size - 4,
+        .code_size = 4, .flags = 3,
+    };
+    LatNativeRelocationV1 *relocs = (void *)(image + relocation_offset);
+    relocs[0] = (LatNativeRelocationV1) {
+        .code_offset = 0, .addend = 0x402000,
+        .kind = LAT_NATIVE_RELOC_TB_TARGET, .target = 3, .slots = 1,
+        .reserved = LAT_NATIVE_SYMBOL_EPILOGUE_RET_0,
+    };
+    relocs[1] = (LatNativeRelocationV1) {
+        .code_offset = 4, .kind = LAT_NATIVE_RELOC_RUNTIME_SYMBOL,
+        .target = LAT_NATIVE_SYMBOL_EPILOGUE_RET_0, .slots = 2,
+    };
+    LatNativePcMapV2 *maps = (void *)(image + map_offset);
+    for (size_t i = 0; i < 3; i++) {
+        maps[i] = (LatNativePcMapV2) {
+            .guest_pc = tbs[i].guest_pc,
+            .host_offset_begin = tbs[i].code_offset,
+            .host_offset_end = tbs[i].code_offset + tbs[i].code_size,
+            .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+        };
+    }
+    g_autofree char *input = g_build_filename(directory, "distant.latnative", NULL);
+    g_autofree char *tb_path = g_build_filename(directory, "tbs.bin", NULL);
+    g_autofree char *text_path = g_build_filename(directory, "text.bin", NULL);
+    char error[256] = {0};
+    gchar *tb_data = NULL;
+    gchar *text = NULL;
+    gsize tb_size = 0, text_size = 0;
+    int failed = !g_file_set_contents(input, (const char *)image, image_size, NULL) ||
+        lat_aot_v2_emit_module_sources(input, directory, error, sizeof(error)) ||
+        !g_file_get_contents(tb_path, &tb_data, &tb_size, NULL) ||
+        !g_file_get_contents(text_path, &text, &text_size, NULL);
+    if (!failed) {
+        const uint32_t *words = (const void *)text;
+        failed = tb_size != 3 * sizeof(LatAotTbV2) || text_size != code_size ||
+            (words[0] & 0xfc0003ffu) != 0x58000000u ||
+            ((words[0] >> 10) & 0xffffu) != 1 ||
+            (words[1] & 0xfe00001fu) != 0x1e00000cu ||
+            (words[2] & 0xfc0003ffu) != 0x4c000180u;
+        int64_t upper = (int64_t)(int32_t)(words[1] << 7) >> 12;
+        int64_t lower = (int16_t)(words[2] >> 10);
+        int64_t target = 4 + upper * (INT64_C(1) << 18) + lower * 4;
+        failed |= target != (int64_t)code_size +
+            LAT_NATIVE_SYMBOL_EPILOGUE_RET_0 * 4;
+    }
+    if (failed) fprintf(stderr, "distant runtime tail exit lost TB coverage: %s\n", error);
+    g_free(text);
+    g_free(tb_data);
+    g_remove(input);
+    return failed ? -1 : 0;
+}
+
 int main(void)
 {
     g_autofree char *directory = g_build_filename(g_get_tmp_dir(),
@@ -1447,6 +1540,10 @@ int main(void)
         return 1;
     }
     char *image_path = g_build_filename(directory, "fixture.latnative", NULL);
+    if (test_distant_runtime_exit(directory)) {
+        g_free(image_path);
+        return 1;
+    }
     if (test_primary_tb_aliases(directory)) {
         g_free(image_path);
         return 1;
@@ -1518,17 +1615,31 @@ int main(void)
     }
     gchar *assembly = NULL;
     if (!g_file_get_contents(assembly_path, &assembly, NULL, NULL) ||
-        !strstr(assembly, "b lat_aot_runtime_log2") ||
-        !strstr(assembly, "b lat_aot_runtime_pow") ||
-        !strstr(assembly, "b lat_aot_runtime_sincos") ||
-        !strstr(assembly, "b lat_aot_runtime_fprem") ||
-        !strstr(assembly, "b lat_aot_runtime_fbst_st0") ||
-        !strstr(assembly, "b lat_aot_runtime_aesenc_xmm") ||
-        !strstr(assembly, "b lat_aot_runtime_aesenclast_xmm") ||
-        !strstr(assembly, "b lat_aot_runtime_sha1nexte") ||
-        !strstr(assembly, "b lat_aot_runtime_sha256rnds2_xmm0") ||
-        !strstr(assembly, "b lat_aot_runtime_raise_int") ||
-        !strstr(assembly, "b lat_aot_runtime_xgetbv")) {
+        !strstr(assembly, ".section .data.rel.ro.lat.abi,\"aw\",@progbits") ||
+        !strstr(assembly, ".8byte lat_aot_runtime_abi_version\n") ||
+        strstr(assembly, "b lat_aot_runtime_abi_version\n")) {
+        fprintf(stderr, "ABI import anchor must not use a range-limited branch\n");
+        g_free(assembly);
+        return 1;
+    }
+    g_free(assembly);
+    assembly = NULL;
+    if (!g_file_get_contents(assembly_path, &assembly, NULL, NULL) ||
+        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_log2)") ||
+        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_pow)") ||
+        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_sincos)") ||
+        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_fprem)") ||
+        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_fbst_st0)") ||
+        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_aesenc_xmm)") ||
+        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_aesenclast_xmm)") ||
+        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_sha1nexte)") ||
+        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_sha256rnds2_xmm0)") ||
+        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_raise_int)") ||
+        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_xgetbv)") ||
+        !strstr(assembly, "b .Llat_aot_runtime_target_1\n") ||
+        !strstr(assembly, "ld.d $t0,$t0,%got_pc_lo12(lat_aot_runtime_epilogue_ret_id_1)\n") ||
+        !strstr(assembly, "jirl $zero,$t0,0\n") ||
+        strstr(assembly, "b lat_aot_runtime_")) {
         fprintf(stderr, "host math AOT runtime trampolines were not emitted\n");
         g_free(assembly);
         g_free(assembly_path);

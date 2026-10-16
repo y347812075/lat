@@ -698,6 +698,32 @@ wait_stats 's["failed"] == 1 and s["active_jobs"] == 0'
 grep -q 'compiler terminated by signal' "$phase/server.stderr" || true
 stop_service
 
+cpu_hard=$(ulimit -Ht)
+if [ "$cpu_hard" = "unlimited" ]; then
+    cpu_expected=1200
+else
+    cpu_expected=$cpu_hard
+    [ "$cpu_expected" -lt 1200 ] || cpu_expected=1200
+fi
+start_service cpu-default "$script_dir/fake-latc-cpu-report.sh"
+submit_source "$socket" "$guest" "$phase/client"
+wait_stats 's["failed"] == 1 and s["active_jobs"] == 0'
+grep -q "^FAKE_CPU_SOFT=$cpu_expected$" "$phase/server.stderr"
+stop_service
+
+if [ "$cpu_hard" = "unlimited" ] || [ "$cpu_hard" -ge 60 ]; then
+    (
+        ulimit -t 60
+        start_service cpu-clamped "$script_dir/fake-latc-cpu-report.sh"
+        submit_source "$socket" "$guest" "$phase/client"
+        wait_stats 's["failed"] == 1 and s["active_jobs"] == 0'
+        grep -q '^FAKE_CPU_SOFT=60$' "$phase/server.stderr"
+        grep -q 'CPU limit 1200 exceeds inherited hard limit 60' \
+            "$phase/server.stderr"
+        stop_service
+    )
+fi
+
 cp "$guest" "$work/a.elf"
 cp "$guest" "$work/b.elf"
 cp "$guest" "$work/c.elf"
