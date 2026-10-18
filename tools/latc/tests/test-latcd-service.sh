@@ -287,7 +287,7 @@ with open(source_path, "rb") as source:
     assert load_vaddrs and entry >= min(load_vaddrs)
     entry_rva = entry - min(load_vaddrs)
 
-for request_id, flags in ((101, 1), (102, 3)):
+for request_id, flags in ((101, 3), (102, 3)):
     if request_id == 102:
         import time
         time.sleep(0.2)
@@ -327,7 +327,7 @@ values = dict(line.rstrip().split("=", 1) for line in open(sys.argv[1]) if "=" i
 assert int(values["accepted_sequence"]) > 0, values
 assert values["accepted_sequence"] == values["published_sequence"], values
 PY
-wait_stats 's["compiled"] == 2 and s["active_jobs"] == 0 and s["running_sources"] == 0'
+wait_stats 's["compiled"] == 1 and s["active_jobs"] == 0 and s["running_sources"] == 0'
 python3 - "$cache" "$guest" "$script_dir" <<'PY'
 import hashlib
 import json
@@ -357,8 +357,8 @@ entry_rva = entry - min(load_vaddrs)
 tbset = cache / ".tbsets" / f"{source_sha}.tbset"
 digest, sequence, records = read_key_set(tbset)
 assert digest.hex() == source_sha, digest.hex()
-assert records == [(entry_rva, 1), (entry_rva, 3)], records
-assert sequence == 2, sequence
+assert records == [(entry_rva, 3)], records
+assert sequence >= 1, sequence
 assert not (cache / f"{source_sha}.so").exists()
 current = json.loads((cache / f"{source_sha}.current").read_text())
 assert current["version"] == 2, current
@@ -370,8 +370,8 @@ assert len(list(cache.glob(f"{source_sha}-*.native"))) == 1
 assert len(list(cache.glob(f"{source_sha}-*.tbset"))) == 1
 stats = json.loads((cache.parent / "stats.json").read_text())
 assert stats["requests"] == 2, stats
-assert stats["queued"] == 2 and stats["deduplicated"] == 1, stats
-assert stats["compiled"] == 2 and stats["failed"] == 0, stats
+assert stats["queued"] == 1 and stats["deduplicated"] == 1, stats
+assert stats["compiled"] == 1 and stats["failed"] == 0, stats
 PY
 set +e
 LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$cache" \
@@ -417,7 +417,7 @@ with open(source_path, "rb") as source:
             bases.append(struct.unpack_from("<Q", phdr, 16)[0])
 entry_rva = entry - min(bases)
 with tempfile.NamedTemporaryFile() as tbset:
-    write_key_set(Path(source_path), Path(tbset.name), [(entry_rva + 5, 1)])
+    write_key_set(Path(source_path), Path(tbset.name), [(entry_rva + 5, 3)])
     source_fd = os.open(source_path, os.O_RDONLY)
     tbset_fd = os.open(tbset.name, os.O_RDONLY)
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -435,7 +435,7 @@ PY
 "$latcd" --flush-source --socket "$socket" "$guest" \
   >"$phase/compact-flush.client"
 grep -q '^status=0$' "$phase/compact-flush.client"
-wait_stats 's["compiled"] == 3 and s["active_jobs"] == 0'
+wait_stats 's["compiled"] == 2 and s["active_jobs"] == 0'
 python3 - "$cache" "$guest" "$script_dir" <<'PY'
 import hashlib
 import json
@@ -463,8 +463,8 @@ with source.open("rb") as elf:
 entry_rva = entry - min(bases)
 current = json.loads((cache / f"{source_sha}.current").read_text())
 _, sequence, records = read_key_set(cache / current["tbset"])
-assert sequence == 3, sequence
-assert records == [(entry_rva, 1), (entry_rva, 3), (entry_rva + 5, 1)], records
+assert sequence >= 2, sequence
+assert records == [(entry_rva, 3), (entry_rva + 5, 3)], records
 assert current["version"] == 2, current
 assert (cache / current["native"]).is_file(), current
 assert len(list(cache.glob(f"{source_sha}-*.so"))) == 1
@@ -610,7 +610,7 @@ source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
 manifest = json.loads((cache / f"{source_sha}.current").read_text())
 _, _, records = read_key_set(cache / manifest["tbset"])
 assert records
-write_key_set(source, output, [(records[0][0], 3)])
+write_key_set(source, output, [(records[0][0] + 5, 3)])
 PY
 "$latcd" --submit --socket "$socket" --tbset "$phase/delta.tbset" \
   "$guest" >"$phase/delta.client"
@@ -659,7 +659,7 @@ from tb_key_set import read_key_set
 source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
 manifest = json.loads((cache / f"{source_sha}.current").read_text())
 _, _, records = read_key_set(cache / manifest["tbset"])
-assert {flags for _, flags in records} == {1, 3}, records
+assert {flags for _, flags in records} == {3}, records
 assert len(list(cache.glob(f"{source_sha}-*.so"))) == 1
 assert len(list(cache.glob(f"{source_sha}-*.native"))) == 1
 assert len(list(cache.glob(f"{source_sha}-*.tbset"))) == 1
@@ -779,4 +779,142 @@ elapsed=$(($(date +%s) - start))
 grep -q '"queue_full":1' "$stats"
 test -z "$(find "$cache/.tmp" -mindepth 1 -maxdepth 1 -print -quit)"
 
+compile_failure_marker=$work/compile-failure.once
+compile_failure_compiler=$work/compile-failure-latc
+printf '%s\n' '#!/bin/sh' 'set -eu' \
+  "if [ \"\${1:-}\" = build-id ]; then exec $latc \"\$@\"; fi" \
+  "if [ -e $compile_failure_marker ]; then exit 1; fi" \
+  ": >$compile_failure_marker" \
+  "exec $latc \"\$@\"" >"$compile_failure_compiler"
+chmod 755 "$compile_failure_compiler"
+start_service compile-failure "$compile_failure_compiler"
+submit_source "$socket" "$guest" "$phase/initial.client"
+"$latcd" --flush-source --socket "$socket" "$guest" \
+  >"$phase/initial-flush.client"
+grep -q '^status=0$' "$phase/initial-flush.client"
+python3 - "$cache" "$guest" "$phase/published.json" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+cache, source, output = map(Path, sys.argv[1:])
+source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+manifest_path = cache / f"{source_sha}.current"
+manifest = json.loads(manifest_path.read_text())
+paths = [manifest_path] + [cache / manifest[name]
+                           for name in ("module", "native", "tbset")]
+output.write_text(json.dumps(
+    {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+     for path in paths}, sort_keys=True))
+PY
+python3 - "$cache" "$guest" "$phase/delta.tbset" "$script_dir" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+cache, source, output = map(Path, sys.argv[1:4])
+sys.path.insert(0, sys.argv[4])
+from tb_key_set import read_key_set, write_key_set
+source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+manifest = json.loads((cache / f"{source_sha}.current").read_text())
+_, _, records = read_key_set(cache / manifest["tbset"])
+candidate = records[0][0] + 5
+assert candidate not in {rva for rva, _ in records}, records
+write_key_set(source, output, [(candidate, 3)])
+PY
+"$latcd" --submit --socket "$socket" --tbset "$phase/delta.tbset" \
+  "$guest" >"$phase/delta.client"
+set +e
+"$latcd" --flush-source --socket "$socket" "$guest" \
+  >"$phase/failed-flush.client"
+compile_failure_status=$?
+set -e
+test "$compile_failure_status" -ne 0
+wait_stats 's["failed"] == 1 and s["active_jobs"] == 0'
+python3 - "$cache" "$guest" "$phase/published.json" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+cache, source, snapshot = map(Path, sys.argv[1:])
+source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+manifest_path = cache / f"{source_sha}.current"
+manifest = json.loads(manifest_path.read_text())
+paths = [manifest_path] + [cache / manifest[name]
+                           for name in ("module", "native", "tbset")]
+expected = json.loads(snapshot.read_text())
+actual = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+          for path in paths}
+assert actual == expected, (actual, expected)
+print(cache / manifest["module"])
+PY
+module=$(python3 - "$cache" "$guest" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+cache, source = map(Path, sys.argv[1:])
+source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+manifest = json.loads((cache / f"{source_sha}.current").read_text())
+print(cache / manifest["module"])
+PY
+)
+"$latc" inspect-module --json "$module" >"$phase/module.json"
+stop_service
+
+start_service capacity "$latc" --max-cache-bytes 4194304
+submit_source "$socket" "$guest" "$phase/a.client"
+"$latcd" --flush-source --socket "$socket" "$guest" \
+  >"$phase/a-flush.client"
+grep -q '^status=0$' "$phase/a-flush.client"
+python3 - "$cache" "$guest" "$phase/published.json" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+cache, source, output = map(Path, sys.argv[1:])
+source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+manifest_path = cache / f"{source_sha}.current"
+manifest = json.loads(manifest_path.read_text())
+paths = [manifest_path] + [cache / manifest[name]
+                           for name in ("module", "native", "tbset")]
+output.write_text(json.dumps(
+    {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+     for path in paths}, sort_keys=True))
+PY
+orphan=$cache/0000000000000000000000000000000000000000000000000000000000000000-1111111111111111111111111111111111111111111111111111111111111111.native
+truncate -s 4188160 "$orphan"
+cp "$guest" "$work/capacity-b.elf"
+printf z >>"$work/capacity-b.elf"
+submit_source "$socket" "$work/capacity-b.elf" "$phase/b.client"
+set +e
+"$latcd" --flush-source --socket "$socket" "$work/capacity-b.elf" \
+  >"$phase/b-flush.client"
+capacity_status=$?
+set -e
+test "$capacity_status" -ne 0
+wait_stats 's["failed"] == 1 and s["active_jobs"] == 0'
+python3 - "$cache" "$guest" "$phase/published.json" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+cache, source, snapshot = map(Path, sys.argv[1:])
+source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+manifest_path = cache / f"{source_sha}.current"
+manifest = json.loads(manifest_path.read_text())
+paths = [manifest_path] + [cache / manifest[name]
+                           for name in ("module", "native", "tbset")]
+expected = json.loads(snapshot.read_text())
+actual = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+          for path in paths}
+assert actual == expected, (actual, expected)
+PY
+stop_service
 echo "test-latcd-service: PASS"

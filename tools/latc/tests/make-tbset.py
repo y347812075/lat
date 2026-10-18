@@ -5,7 +5,7 @@ from pathlib import Path
 import struct
 import sys
 
-from tb_key_set import write_key_set
+from tb_key_set import CODE64, PARALLEL, write_key_set
 
 
 def main() -> int:
@@ -28,7 +28,7 @@ def main() -> int:
         print(f"{source}: invalid ELF entry point", file=sys.stderr)
         return 1
     write_key_set(source, Path(sys.argv[2]),
-                  [(entry - min(load_bases), 1)])
+                  [(entry - min(load_bases), CODE64 | PARALLEL)])
     return 0
 
 

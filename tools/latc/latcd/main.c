@@ -1615,9 +1615,14 @@ static void reconcile_superseded_generations(const LatcdConfig *config)
     g_free(batch);
 }
 
+static bool cache_fits(uint64_t total, uint64_t incoming, uint64_t limit)
+{
+    return total <= limit && incoming <= limit - total;
+}
+
 static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
-                           const char *incoming_name, char *error,
-                           size_t error_size)
+                           const char *incoming_name, bool evict,
+                           char *error, size_t error_size)
 {
     if (incoming > config->max_cache_bytes) {
         return fail(error, error_size,
@@ -1717,9 +1722,28 @@ static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
     }
     g_dir_close(directory);
     g_ptr_array_sort(entries, cache_entry_compare);
+    uint64_t evictable = 0;
+    for (guint i = 0; i < entries->len; i++) {
+        LatcdCacheEntry *entry = g_ptr_array_index(entries, i);
+        if (cache_index_points_to(entry->index_path, entry->module_name)) {
+            evictable = entry->size > UINT64_MAX - evictable ?
+                UINT64_MAX : evictable + entry->size;
+        }
+    }
+    if (!cache_fits(total, incoming, config->max_cache_bytes)) {
+        uint64_t after = total > evictable ? total - evictable : 0;
+        if (!cache_fits(after, incoming, config->max_cache_bytes)) {
+            g_ptr_array_free(entries, TRUE);
+            return fail(error, error_size,
+                        "cache capacity is occupied by non-evictable files");
+        }
+        if (!evict) {
+            g_ptr_array_free(entries, TRUE);
+            return 0;
+        }
+    }
     for (guint i = 0;
-         incoming > config->max_cache_bytes - MIN(total,
-                                                   config->max_cache_bytes) &&
+         !cache_fits(total, incoming, config->max_cache_bytes) &&
          i < entries->len;
          i++) {
         LatcdCacheEntry *entry = g_ptr_array_index(entries, i);
@@ -1731,11 +1755,8 @@ static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
             total = total > entry->size ? total - entry->size : 0;
         }
     }
-    int result = 0;
-    if (total > config->max_cache_bytes - incoming) {
-        result = fail(error, error_size,
-                      "cache capacity is occupied by non-evictable files");
-    }
+    int result = cache_fits(total, incoming, config->max_cache_bytes) ? 0 :
+        fail(error, error_size, "cannot reclaim enough cache capacity");
     g_ptr_array_free(entries, TRUE);
     return result;
 }
@@ -2011,7 +2032,7 @@ static int publish_covered_tbset(const LatcdConfig *config,
         goto out;
     }
     if (strcmp(manifest.tbset, tbset_name)) {
-        if (cache_make_room(config, tbset_size, manifest.module,
+        if (cache_make_room(config, tbset_size, manifest.module, false,
                             error, sizeof(error)) ||
             rename(temporary, final_tbset)) {
             if (!error[0]) {
@@ -2053,6 +2074,12 @@ static int publish_covered_tbset(const LatcdConfig *config,
         fprintf(stderr,
                 "latcd: committed covered-TB manifest sync failed: %s\n",
                 sync_error);
+    }
+    char cleanup_error[128] = {0};
+    if (cache_make_room(config, 0, "", true, cleanup_error,
+                        sizeof(cleanup_error))) {
+        fprintf(stderr, "latcd: post-publish cache cleanup failed: %s\n",
+                cleanup_error);
     }
     remove_superseded_generation(config, source_hex, manifest.module,
                                  manifest.native, tbset_name);
@@ -2293,7 +2320,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     pthread_mutex_lock(&cache_lock);
     uint64_t incoming = (uint64_t)module_status.st_size +
                         (uint64_t)native_status.st_size + tbset_size;
-    if (cache_make_room(config, incoming, module_name,
+    if (cache_make_room(config, incoming, module_name, false,
                         error, sizeof(error))) {
         pthread_mutex_unlock(&cache_lock);
         goto out;
@@ -2340,6 +2367,12 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     }
     remove_superseded_generation(config, hex, module_name, native_name,
                                  tbset_name);
+    char cleanup_error[128] = {0};
+    if (cache_make_room(config, 0, "", true, cleanup_error,
+                        sizeof(cleanup_error))) {
+        fprintf(stderr, "latcd: post-publish cache cleanup failed: %s\n",
+                cleanup_error);
+    }
     pthread_mutex_unlock(&cache_lock);
     snprintf(error, sizeof(error), "published: %s", final_module);
     status = LATCD_STATUS_OK;
