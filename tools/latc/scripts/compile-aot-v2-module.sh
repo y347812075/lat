@@ -41,7 +41,10 @@ if [ -n "${LATC_NATIVE_BASE:-}" ]; then
         -o "$work/merged.latnative"
     native_image=$work/merged.latnative
 fi
-if [ -n "$tbset" ]; then
+if [ -n "${LATC_NATIVE_BASE:-}" ]; then
+    "$script_dir/link-aot-v2-module.sh" "$latc" "$native_image" \
+        "$runtime_dir" "$output"
+elif [ -n "$tbset" ]; then
     "$script_dir/link-aot-v2-module.sh" "$latc" "$native_image" \
         "$runtime_dir" "$output" "$guest" "$tbset"
 else

@@ -1,8 +1,11 @@
 #include "registry.h"
 
 #include <errno.h>
+#include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 struct LatAotRegistrySnapshotV2 {
     size_t count;
@@ -336,11 +339,18 @@ int lat_aot_v2_registry_lookup(LatAotRegistryV2 *registry,
             right = middle;
         }
     }
+    size_t overlaps = 0;
+    size_t active_overlaps = 0;
     while (left) {
         size_t index = --left;
         LatAotModuleInstanceV2 *instance = snapshot->instances[index];
-        if (guest_pc < instance->guest_end &&
-            atomic_load_explicit(&instance->active, memory_order_acquire)) {
+        bool instance_active = atomic_load_explicit(
+            &instance->active, memory_order_acquire);
+        if (guest_pc < instance->guest_end) {
+            overlaps++;
+            if (instance_active) active_overlaps++;
+        }
+        if (guest_pc < instance->guest_end && instance_active) {
             const LatAotTbV2 *tb = instance_find_tb(instance, guest_pc, flags);
             if (tb) {
                 atomic_fetch_add_explicit(&instance->readers, 1,
@@ -356,6 +366,9 @@ int lat_aot_v2_registry_lookup(LatAotRegistryV2 *registry,
                     target->instance = instance;
                     target->generation = atomic_load_explicit(
                         &instance->generation, memory_order_acquire);
+                    target->lookup_state = LAT_AOT_REGISTRY_TARGET_FOUND;
+                    target->overlapping_instances = overlaps;
+                    target->active_overlapping_instances = active_overlaps;
                     atomic_fetch_sub_explicit(&registry->readers, 1,
                                               memory_order_seq_cst);
                     return 0;
@@ -364,6 +377,32 @@ int lat_aot_v2_registry_lookup(LatAotRegistryV2 *registry,
         }
         if (!index || snapshot->prefix_max_end[index - 1] <= guest_pc) {
             break;
+        }
+    }
+    target->overlapping_instances = overlaps;
+    target->active_overlapping_instances = active_overlaps;
+    target->lookup_state = !overlaps ? LAT_AOT_REGISTRY_NO_INSTANCE :
+        !active_overlaps ? LAT_AOT_REGISTRY_INACTIVE_INSTANCE :
+        LAT_AOT_REGISTRY_NO_TB;
+    if (getenv("LATX_AOT_V2_TRACE_REGISTRY")) {
+        size_t first = left > 8 ? left - 8 : 0;
+        size_t last = left + 4 < snapshot->count ? left + 4 : snapshot->count;
+        fprintf(stderr,
+                "latx: AOT registry trace pid=%d pc=0x%llx state=%d "
+                "snapshot_count=%zu left=%zu shown=%zu-%zu\n",
+                (int)getpid(), (unsigned long long)guest_pc,
+                target->lookup_state, snapshot->count, left, first, last);
+        for (size_t i = first; i < last; i++) {
+            LatAotModuleInstanceV2 *instance = snapshot->instances[i];
+            fprintf(stderr,
+                    "latx: AOT registry instance[%zu]=0x%llx-0x%llx "
+                    "active=%d generation=%llu\n", i,
+                    (unsigned long long)instance->guest_begin,
+                    (unsigned long long)instance->guest_end,
+                    atomic_load_explicit(&instance->active,
+                                         memory_order_acquire),
+                    (unsigned long long)atomic_load_explicit(
+                        &instance->generation, memory_order_acquire));
         }
     }
     atomic_fetch_sub_explicit(&registry->readers, 1,

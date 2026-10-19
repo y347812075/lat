@@ -434,6 +434,22 @@ static int runtime_symbol_supported(uint32_t symbol)
     return symbol == LAT_NATIVE_SYMBOL_PFTABLE || runtime_entry(symbol);
 }
 
+static bool runtime_symbol_noreturn(uint32_t symbol)
+{
+    switch (symbol) {
+    case LAT_NATIVE_SYMBOL_RAISE_ILLOP:
+    case LAT_NATIVE_SYMBOL_RAISE_GPF:
+    case LAT_NATIVE_SYMBOL_RAISE_SYSCALL:
+    case LAT_NATIVE_SYMBOL_RAISE_INT:
+    case LAT_NATIVE_SYMBOL_RAISE_TRAPOP:
+    case LAT_NATIVE_SYMBOL_RAISE_INTO:
+    case LAT_NATIVE_SYMBOL_RAISE_BOUND:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static int instruction_falls_through(uint32_t instruction)
 {
     uint32_t opcode = instruction & 0xfc000000u;
@@ -947,6 +963,8 @@ static int patch_tb_target_pair(uint32_t *instructions,
                                 uint32_t exit_symbol);
 static int patch_runtime_target(uint32_t *instructions, uint32_t slots,
                                 uint64_t patch, uint64_t target);
+static int patch_noreturn_target(uint32_t *instructions, uint32_t slots,
+                                 uint64_t patch, uint64_t target);
 
 static void configure_local_dispatch(ModulePack *pack)
 {
@@ -985,10 +1003,22 @@ static uint64_t fallback_stub_for_relocation(
 
 static void select_supported_tbs(ModulePack *pack)
 {
+    const char *trace_text = getenv("LATC_TRACE_UNSUPPORTED_RVA");
+    uint64_t trace_rva = trace_text && *trace_text ?
+                         strtoull(trace_text, NULL, 0) : UINT64_MAX;
+#define TRACE_LOSS(owner, reason) do {                                      \
+    if (trace_rva != UINT64_MAX && (int64_t)(owner) >= 0 &&                \
+        (uint64_t)(owner) < pack->header->tb_count &&                     \
+        pack->tbs[owner].guest_pc == trace_rva) {                         \
+        fprintf(stderr, "latc: support loss rva=0x%llx index=%d reason=%s\n",\
+                (unsigned long long)trace_rva, (int)(owner), reason);      \
+    }                                                                        \
+} while (0)
     memset(pack->supported, 1, pack->header->tb_count);
     for (uint64_t i = 0; i < pack->header->tb_count; i++) {
         if (pack->tbs[i].guest_pc < pack->header->preferred_guest_base ||
             !tb_pc_maps_complete(pack, i)) {
+            TRACE_LOSS(i, "pc-map");
             pack->supported[i] = 0;
         }
     }
@@ -1000,11 +1030,13 @@ static void select_supported_tbs(ModulePack *pack)
         }
         if (relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL &&
             !runtime_symbol_supported(relocation->target)) {
+            TRACE_LOSS(owner, "runtime-symbol-unsupported");
             pack->supported[owner] = 0;
             continue;
         }
         if (relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL) {
             if (!relocation->slots || relocation->slots > 3) {
+                TRACE_LOSS(owner, "runtime-symbol-slots");
                 pack->supported[owner] = 0;
                 continue;
             }
@@ -1014,8 +1046,16 @@ static void select_supported_tbs(ModulePack *pack)
             uint64_t target = relocation->target == LAT_NATIVE_SYMBOL_PFTABLE ?
                 pack->pf_table : pack->runtime_trampolines +
                 relocation->target * sizeof(uint32_t);
-            if (patch_runtime_target(instructions, relocation->slots,
-                                     relocation->code_offset, target)) {
+            bool zero_placeholder = !instructions[0] && !instructions[1] &&
+                (relocation->slots < 3 || !instructions[2]);
+            int patch_result = zero_placeholder &&
+                runtime_symbol_noreturn(relocation->target) ?
+                patch_noreturn_target(instructions, relocation->slots,
+                                      relocation->code_offset, target) :
+                patch_runtime_target(instructions, relocation->slots,
+                                     relocation->code_offset, target);
+            if (patch_result) {
+                TRACE_LOSS(owner, "runtime-symbol-patch");
                 pack->supported[owner] = 0;
             }
         }
@@ -1025,16 +1065,37 @@ static void select_supported_tbs(ModulePack *pack)
                    relocation->slots * sizeof(*instructions));
             if (patch_address(instructions, relocation->slots,
                               relocation->code_offset, relocation->addend)) {
+                TRACE_LOSS(owner, "image-data-patch");
                 pack->supported[owner] = 0;
             }
         }
     }
+#define TRACE_SUPPORT(phase) do {                                            \
+    if (trace_rva != UINT64_MAX) {                                           \
+        for (uint64_t trace_i = 0; trace_i < pack->header->tb_count;       \
+             trace_i++) {                                                    \
+            if (pack->tbs[trace_i].guest_pc == trace_rva &&                \
+                pack->tbs[trace_i].flags ==                                \
+                    (LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL)) {           \
+                fprintf(stderr,                                              \
+                        "latc: support trace rva=0x%llx phase=%s "            \
+                        "index=%llu supported=%u primary=%d\\n",             \
+                        (unsigned long long)trace_rva, phase,                 \
+                        (unsigned long long)trace_i,                         \
+                        pack->supported[trace_i],                            \
+                        pack->tb_primary_index[trace_i]);                    \
+            }                                                                \
+        }                                                                    \
+    }                                                                        \
+} while (0)
+    TRACE_SUPPORT("initial-relocations");
     int changed;
     do {
         changed = 0;
         /* Logical keys can use a complete delta without discarding physical
          * aliases referenced by relocations in the base native image. */
         select_supported_primaries(pack);
+        TRACE_SUPPORT("primaries");
         for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
             int target = pack->relocation_targets[i];
             if (target >= 0) {
@@ -1105,6 +1166,7 @@ static void select_supported_tbs(ModulePack *pack)
                 }
             }
         }
+        TRACE_SUPPORT("guest-slots");
         guint fallback_before = pack->fallback_targets->len;
         for (uint64_t i = 0; i < pack->header->relocation_count; i++) {
             const LatNativeRelocationV1 *relocation = &pack->relocations[i];
@@ -1231,6 +1293,7 @@ static void select_supported_tbs(ModulePack *pack)
                 changed = 1;
             }
         }
+        TRACE_SUPPORT("tb-targets");
         if (pack->fallback_targets->len != fallback_before) {
             changed = 1;
         }
@@ -1264,7 +1327,10 @@ static void select_supported_tbs(ModulePack *pack)
                 changed = 1;
             }
         }
+        TRACE_SUPPORT("fallthrough");
     } while (changed);
+#undef TRACE_SUPPORT
+#undef TRACE_LOSS
 }
 
 static int patch_branch(uint32_t *instruction, uint64_t patch, uint64_t target)
@@ -1444,6 +1510,25 @@ static int patch_runtime_target(uint32_t *instructions, uint32_t slots,
         return patch_branch(instructions, patch, target);
     }
     return patch_address(instructions, slots, patch, target);
+}
+
+static int patch_noreturn_target(uint32_t *instructions, uint32_t slots,
+                                 uint64_t patch, uint64_t target)
+{
+    if (slots != 3 || instructions[0] || instructions[1] || instructions[2]) {
+        return -1;
+    }
+    int64_t difference = (int64_t)target - (int64_t)patch;
+    if (difference & 3) {
+        return -1;
+    }
+    int64_t offset = difference >> 2;
+    uint32_t upper = (uint32_t)((offset + (1 << 15)) >> 16) & 0xfffff;
+    uint32_t lower = (uint32_t)offset & 0xffff;
+    instructions[0] = 0x1e000000u | upper << 5 | 12u;
+    instructions[1] = 0x4c000000u | lower << 10 | 12u << 5;
+    instructions[2] = 0x03400000u;
+    return 0;
 }
 
 static int guest_slot(ModulePack *pack, uint64_t guest_rva)
@@ -1724,9 +1809,16 @@ static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
                                           pack->pf_table);
         } else if (relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL &&
                    runtime_entry(relocation->target)) {
-            result = patch_runtime_target(
-                instructions, relocation->slots, relocation->code_offset,
-                pack->runtime_trampolines + relocation->target * 4);
+            uint64_t target = pack->runtime_trampolines +
+                              relocation->target * 4;
+            bool zero_placeholder = !instructions[0] && !instructions[1] &&
+                (relocation->slots < 3 || !instructions[2]);
+            result = zero_placeholder &&
+                     runtime_symbol_noreturn(relocation->target) ?
+                patch_noreturn_target(instructions, relocation->slots,
+                                      relocation->code_offset, target) :
+                patch_runtime_target(instructions, relocation->slots,
+                                     relocation->code_offset, target);
         } else if (relocation->kind == LAT_NATIVE_RELOC_TB_TARGET) {
             int target = pack->relocation_patch_targets[i];
             if (target >= 0 && pack->supported[target]) {

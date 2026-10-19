@@ -11,7 +11,7 @@ import tempfile
 def main():
     root = Path(__file__).resolve().parents[3]
     source = (root / "tcg/tcg.c").read_text()
-    begin = source.index("static unsigned int tcg_aot_thread_count(void)")
+    begin = source.index("unsigned int tcg_aot_thread_count(void)")
     end = source.index("\n#else", source.index("static size_t tcg_n_regions(void)", begin))
     functions = source[begin:end]
     harness = r'''

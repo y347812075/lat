@@ -94,7 +94,7 @@
 #include "exec/fasttb.h"
 #endif
 #ifdef CONFIG_LATX_TU
-void tu_reset_tb(TranslationBlock *tb);
+#include "tu.h"
 #endif
 #include "linux/memfd.h"
 /* #define DEBUG_TB_INVALIDATE */
@@ -1242,6 +1242,7 @@ static bool alloc_tb_gen_buffer(size_t size)
 #endif
 
     tcg_ctx->tb_gen_buffer = buf;
+    tcg_ctx->tb_gen_buffer_size = size;
     tcg_ctx->tb_gen_highwater = buf + size - 1024;
     return true;
 }
@@ -1420,6 +1421,31 @@ static void tb_htable_init(void)
     qht_init(&tb_ctx.htable, tb_cmp, CODE_GEN_HTABLE_SIZE, mode);
 }
 
+static size_t aot_tb_metadata_size(size_t size)
+{
+#if defined(CONFIG_USER_ONLY) && defined(CONFIG_LATX_TU)
+    if (getenv("LATC_EMIT_AOT")) {
+        uint64_t count = latc_bundle_tb_count();
+        size_t threads = tcg_aot_thread_count();
+        size_t align = qemu_icache_linesize;
+        size_t slot = QEMU_ALIGN_UP(sizeof(TranslationBlock), align) +
+                      QEMU_ALIGN_UP(sizeof(struct separated_data), align);
+        /* Each worker can consume a second region. Include TU lookahead
+         * and the allocator highwater in every metadata region. */
+        uint64_t per_region = count / threads + (count % threads != 0);
+        if (per_region > SIZE_MAX / slot - 2 * MAX_TB_IN_CACHE ||
+            per_region + 2 * MAX_TB_IN_CACHE >
+                SIZE_MAX / slot / (2 * threads)) {
+            error_report("AOT TB metadata allocation overflows");
+            exit(EXIT_FAILURE);
+        }
+        size = MAX(size,
+            (per_region + 2 * MAX_TB_IN_CACHE) * slot * (2 * threads));
+    }
+#endif
+    return size;
+}
+
 /* Must be called before using the QEMU cpus. 'tb_size' is the size
    (in bytes) allocated to the translation buffer. Zero means default
    size. */
@@ -1436,8 +1462,16 @@ void tcg_exec_init(unsigned long tb_size, int splitwx)
                                splitwx, &error_fatal);
     assert(ok);
 
-    ok = alloc_tb_gen_buffer(size_code_gen_buffer(tb_size));
+    size_t metadata_size = aot_tb_metadata_size(size_code_gen_buffer(tb_size));
+    ok = alloc_tb_gen_buffer(metadata_size);
     if (!ok) {
+#if defined(CONFIG_USER_ONLY) && defined(CONFIG_LATX_TU)
+        if (getenv("LATC_EMIT_AOT")) {
+            error_report("cannot allocate %zu bytes for AOT TB metadata",
+                         metadata_size);
+            exit(EXIT_FAILURE);
+        }
+#endif
         option_split_tb = 0;
     }
 

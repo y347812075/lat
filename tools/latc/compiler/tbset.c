@@ -689,7 +689,7 @@ static int close_parallel_targets(const char *path, CfgProgram *program,
                 truncated = 1;
                 break;
             }
-            if (pending->len >= 1048576) {
+            if (pending->len >= LAT_AOT_V2_TBSET_RECORD_LIMIT) {
                 result = fail(error, error_size, "direct TB closure too large");
                 goto out;
             }
@@ -752,9 +752,14 @@ int latc_tbset_apply(const char *path, const char *source_path,
         return -1;
     }
     size_t hit = 0, miss = 0, skip = 0;
+    const char *trace_pc_text = getenv("LATC_TRACE_TBSET_PC");
+    uint64_t trace_pc = trace_pc_text && *trace_pc_text ?
+                        strtoull(trace_pc_text, NULL, 0) : UINT64_MAX;
     bool has_parallel = false;
     const char *closure_limit_env = getenv("LATC_TBSET_CLOSURE_LIMIT");
     bool bounded_selection = closure_limit_env && *closure_limit_env;
+    bool expand_functions = !bounded_selection ||
+        getenv("LATC_TBSET_EXPAND_FUNCTIONS") != NULL;
     size_t template_count = program->tb_count;
     if (set.count > (SIZE_MAX / sizeof(*program->tbs)) -
                     program->tb_count) {
@@ -807,6 +812,14 @@ int latc_tbset_apply(const char *path, const char *source_path,
         if (found) {
             program->tbs[exact_index].selected = true;
             program->tbs[exact_index].observed = true;
+        }
+        if (pc == trace_pc) {
+            fprintf(stderr,
+                    "latc: tbset trace pc=0x%llx record=%zu found=%d "
+                    "exact=%zu template=%zu executable=%d\n",
+                    (unsigned long long)pc, record, found, exact_index,
+                    template_index,
+                    cfg_program_address_is_executable(program, pc));
         }
         if (found) {
             hit++;
@@ -887,7 +900,7 @@ int latc_tbset_apply(const char *path, const char *source_path,
             }
         }
     }
-    if (has_parallel && !bounded_selection &&
+    if (has_parallel && expand_functions &&
         expand_bounded_parallel_functions(
             program, template_count, error, error_size)) {
         free(templates);
@@ -903,6 +916,14 @@ int latc_tbset_apply(const char *path, const char *source_path,
     for (size_t i = 0; i < program->tb_count; i++) {
         if (program->tbs[i].selected) {
             program->tbs[i].semantic_flags |= CFG_TB_BOUNDED;
+        }
+        if (trace_pc != UINT64_MAX && program->tbs[i].start == trace_pc) {
+            fprintf(stderr,
+                    "latc: tbset trace result index=%zu selected=%d "
+                    "observed=%d flags=0x%x end=0x%llx\n", i,
+                    program->tbs[i].selected, program->tbs[i].observed,
+                    program->tbs[i].semantic_flags,
+                    (unsigned long long)program->tbs[i].end);
         }
     }
     free(templates);

@@ -767,6 +767,7 @@ static void tcg_region_assign(TCGContext *s, size_t curr_region)
     if (aot_tb_region_start && aot_tb_region_size) {
         s->tb_gen_buffer = aot_tb_region_start +
                            curr_region * aot_tb_region_size;
+        s->tb_gen_buffer_size = aot_tb_region_size;
         s->tb_gen_highwater = s->tb_gen_buffer + aot_tb_region_size - 1024;
     }
     s->tb_gen_ptr = s->tb_gen_buffer;
@@ -804,6 +805,13 @@ static bool tcg_region_alloc(TCGContext *s)
         region.agg_size_full += size_full - TCG_HIGHWATER;
     }
     qemu_mutex_unlock(&region.lock);
+#ifdef CONFIG_USER_ONLY
+    if (err && getenv("LATC_EMIT_AOT")) {
+        error_report("AOT translation buffer exhausted; "
+                     "refusing incomplete native image");
+        exit(EXIT_FAILURE);
+    }
+#endif
     return err;
 }
 
@@ -845,7 +853,7 @@ void tcg_region_reset_all(void)
 }
 
 #ifdef CONFIG_USER_ONLY
-static unsigned int tcg_aot_thread_count(void)
+unsigned int tcg_aot_thread_count(void)
 {
     const char *value = getenv("LATC_AOT_THREADS");
     unsigned long requested;
@@ -959,7 +967,9 @@ void tcg_region_init(void)
 #ifdef CONFIG_USER_ONLY
     if (n_regions > 1 && tcg_init_ctx.tb_gen_buffer) {
         aot_tb_region_start = tcg_init_ctx.tb_gen_buffer;
-        aot_tb_region_size = tcg_init_ctx.code_gen_buffer_size / n_regions;
+        aot_tb_region_size = QEMU_ALIGN_DOWN(
+            tcg_init_ctx.tb_gen_buffer_size / n_regions,
+            qemu_icache_linesize);
     }
 #endif
 

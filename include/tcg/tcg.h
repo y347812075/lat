@@ -658,6 +658,7 @@ struct TCGContext {
     void *data_gen_ptr;
 
     void *tb_gen_buffer;
+    size_t tb_gen_buffer_size;
     void *tb_gen_ptr;
     void *tb_gen_highwater;
 
@@ -906,6 +907,7 @@ TranslationBlock *tcg_tb_alloc_full(TCGContext *s);
 
 void tcg_region_init(void);
 bool tcg_region_alloc_aot(TCGContext *s);
+unsigned int tcg_aot_thread_count(void);
 void tb_destroy(TranslationBlock *tb);
 void tcg_region_reset_all(void);
 

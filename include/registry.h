@@ -56,10 +56,20 @@ typedef struct LatAotRegistryCountsV2 {
     size_t readers;
 } LatAotRegistryCountsV2;
 
+typedef enum LatAotRegistryLookupStateV2 {
+    LAT_AOT_REGISTRY_TARGET_FOUND = 0,
+    LAT_AOT_REGISTRY_NO_INSTANCE,
+    LAT_AOT_REGISTRY_INACTIVE_INSTANCE,
+    LAT_AOT_REGISTRY_NO_TB,
+} LatAotRegistryLookupStateV2;
+
 typedef struct LatAotTargetV2 {
     const void *host_address;
     LatAotModuleInstanceV2 *instance;
     uint64_t generation;
+    LatAotRegistryLookupStateV2 lookup_state;
+    size_t overlapping_instances;
+    size_t active_overlapping_instances;
 } LatAotTargetV2;
 
 int lat_aot_v2_registry_init(LatAotRegistryV2 *registry);

@@ -262,6 +262,11 @@ void latc_bundle_note_tb_generated(uint64_t guest_pc, uint32_t cflags)
 {
     bool program_pc = program_address(guest_pc);
     bool file_pc = latc_aot_v2_is_file_pc(guest_pc);
+    if (file_pc && getenv("LATC_TRACE_GENERATED_KEY")) {
+        fprintf(stderr,
+                "latx: generated file TB pc=0x%llx pid=%d cflags=0x%x\n",
+                (unsigned long long)guest_pc, getpid(), cflags);
+    }
     const char *trace_pc = getenv("LATC_TRACE_TB_PC");
     if (trace_pc && *trace_pc &&
         (uint64_t)strtoull(trace_pc, NULL, 0) == guest_pc) {
@@ -276,10 +281,33 @@ void latc_bundle_note_tb_generated(uint64_t guest_pc, uint32_t cflags)
     }
     if (strict_aot || (program_pc && strict_program_aot) ||
         (file_pc && strict_file_aot)) {
-        fprintf(stderr,
-                "latc: strict AOT rejected generated JIT TB at 0x%llx "
-                "cflags=0x%x file=%d program=%d\n",
-                (unsigned long long)guest_pc, cflags, file_pc, program_pc);
+        if (file_pc && getenv("LATX_AOT_V2_DUMP_STRICT_BYTES")) {
+            const unsigned char *bytes = g2h_untagged(guest_pc);
+            fprintf(stderr, "latx: strict bytes pid=%d pc=0x%llx data=",
+                    getpid(), (unsigned long long)guest_pc);
+            for (unsigned int i = 0; i < 16; i++) {
+                fprintf(stderr, "%02x", bytes[i]);
+            }
+            fputc('\n', stderr);
+        }
+        if (getenv("LATX_AOT_V2_TRACE_STRICT_GENERATED")) {
+            void *frames[16];
+            int count = backtrace(frames, 16);
+            fprintf(stderr,
+                    "latx: strict generated trace pid=%d pc=0x%llx frames=%d\n",
+                    getpid(), (unsigned long long)guest_pc, count);
+            for (int i = 0; i < count; i++) {
+                fprintf(stderr, "latx: strict generated frame[%d]=%p\n", i,
+                        frames[i]);
+            }
+        }
+        if (!getenv("LATC_STRICT_AOT_COLLECT_TRACE_ONLY")) {
+            fprintf(stderr,
+                    "latc: strict AOT rejected generated JIT TB at 0x%llx "
+                    "cflags=0x%x file=%d program=%d pid=%d\n",
+                    (unsigned long long)guest_pc, cflags, file_pc, program_pc,
+                    getpid());
+        }
         if (!getenv("LATC_STRICT_AOT_COLLECT")) {
             _exit(125);
         }
@@ -630,6 +658,43 @@ static int read_cfg(void *buffer, size_t size, uint64_t offset)
     return bundle_self_fd >= 0 &&
            pread(bundle_self_fd, buffer, size,
                  (off_t)(bundle_footer.cfg_offset + offset)) == (ssize_t)size ? 0 : -1;
+}
+
+uint64_t latc_bundle_tb_count(void)
+{
+    LatcDiskCfgHeader header;
+    uint64_t remaining;
+
+    if (bundle_self_fd < 0) {
+        return 0;
+    }
+    if (bundle_footer.cfg_size < sizeof(header) ||
+        read_cfg(&header, sizeof(header), 0) ||
+        memcmp(header.magic, LATC_CFG_MAGIC, 8) ||
+        header.version != LATC_CFG_VERSION ||
+        header.record_size != sizeof(header)) {
+        goto invalid;
+    }
+    remaining = bundle_footer.cfg_size - sizeof(header);
+#define CHECK_CFG_ARRAY(count, type) do { \
+    if ((count) > remaining / sizeof(type)) { \
+        goto invalid; \
+    } \
+    remaining -= (count) * sizeof(type); \
+} while (0)
+    CHECK_CFG_ARRAY(header.function_count, LatcDiskFunction);
+    CHECK_CFG_ARRAY(header.exec_range_count, LatcDiskExecRange);
+    CHECK_CFG_ARRAY(header.tb_count, LatcDiskTb);
+    CHECK_CFG_ARRAY(header.edge_count, LatcDiskEdge);
+#undef CHECK_CFG_ARRAY
+    if (header.string_size != remaining) {
+        goto invalid;
+    }
+    return header.tb_count;
+
+invalid:
+    fprintf(stderr, "latc: invalid embedded CFG allocation bounds\n");
+    exit(EXIT_FAILURE);
 }
 
 void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)

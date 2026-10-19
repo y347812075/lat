@@ -129,6 +129,8 @@ static pthread_mutex_t submission_control_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t submission_control_cond = PTHREAD_COND_INITIALIZER;
 static uint64_t submission_generation;
 static bool submission_thread_started;
+static int strict_submission_pid;
+static unsigned strict_submission_count;
 static _Atomic bool deferred_pending_keys;
 static _Atomic unsigned deferred_flush_failures;
 typedef struct LatAotV2PendingMapping {
@@ -154,6 +156,11 @@ static __thread bool aot_v2_execution_active;
 static __thread LatAotModuleInstanceV2 *aot_v2_execution_instance;
 static __thread LatAotV2TargetCacheEntry *aot_v2_target_cache;
 static _Atomic uint64_t direct_targets;
+static _Atomic uint64_t traced_lookup_rejects;
+static void trace_lookup_reject(const char *stage, target_ulong guest_pc,
+                                uint32_t cflags,
+                                LatAotV2ModuleStats *stats,
+                                const LatAotTargetV2 *target);
 static _Atomic uint64_t file_dispatch_misses;
 static _Atomic uint64_t nonfile_dispatch_misses;
 static _Atomic uint64_t traced_dispatch_misses;
@@ -1008,12 +1015,18 @@ static bool note_jit_key_locked(target_ulong guest_pc, uint32_t cflags)
                 (unsigned long long)candidate.rva, candidate.flags,
                 g_hash_table_size(stats->jit_tbset),
                 g_hash_table_size(stats->pending_tbset));
+        fprintf(stderr, "latx: note-key stats=%p source_fd=%d\n",
+                (void *)stats, stats->source_fd);
     }
     return true;
 }
 
 void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
 {
+    if (getenv("LATC_STRICT_AOT_COLLECT") &&
+        getenv("LATC_STRICT_AOT_COLLECT_NO_SUBMIT")) {
+        return;
+    }
     bool trace = trace_jit_key(guest_pc);
     const char *socket = lat_aot_socket_path();
     if (trace) {
@@ -1035,6 +1048,36 @@ void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
                                   memory_order_release);
         }
         schedule_runtime_tbset_submission();
+        if (getenv("LATC_STRICT_AOT_COLLECT")) {
+            bool flush;
+            pthread_mutex_lock(&tbset_lock);
+            int current_pid = getpid();
+            if (strict_submission_pid != current_pid) {
+                strict_submission_pid = current_pid;
+                strict_submission_count = 0;
+            }
+            strict_submission_count++;
+            flush = strict_submission_count <= 8 ||
+                    strict_submission_count % 64 == 0;
+            pthread_mutex_unlock(&tbset_lock);
+            if (flush) {
+                LatAotV2ModuleStats *flush_stats = module_stats_for_pc(guest_pc);
+                guint pending_before = flush_stats && flush_stats->pending_tbset ?
+                    g_hash_table_size(flush_stats->pending_tbset) : 0;
+                bool submitted = submit_runtime_tbsets();
+                guint pending_after = flush_stats && flush_stats->pending_tbset ?
+                    g_hash_table_size(flush_stats->pending_tbset) : 0;
+                if (trace) {
+                    fprintf(stderr,
+                            "latx: strict sync flush pid=%d stats=%p fd=%d "
+                            "count=%u pending=%u->%u submitted=%d\n",
+                            current_pid, (void *)flush_stats,
+                            flush_stats ? flush_stats->source_fd : -1,
+                            strict_submission_count, pending_before,
+                            pending_after, submitted);
+                }
+            }
+        }
         if (trace) {
             fprintf(stderr, "latx: note-key pc=0x%llx pid=%d scheduled deferred=%d\n",
                     (unsigned long long)guest_pc, getpid(),
@@ -1072,7 +1115,7 @@ static bool submit_runtime_tbsets(void)
         pthread_mutex_unlock(&submission_lock);
         return true;
     }
-    if (!lat_aot_ensure_daemon()) {
+    if (!getenv("LATC_STRICT_AOT_COLLECT") && !lat_aot_ensure_daemon()) {
         atomic_fetch_add(&compiler_submission_failures, 1);
         pthread_mutex_unlock(&submission_lock);
         return false;
@@ -1108,9 +1151,28 @@ static bool submit_runtime_tbsets(void)
         g_array_sort(entries, tbset_entry_compare);
         char source[65];
         digest_hex(stats->source_sha256, source);
-        gchar *path = NULL;
-        GError *gerror = NULL;
-        int output_fd = g_file_open_tmp("latc-tbset-XXXXXX", &path, &gerror);
+        const char *trace_pc = getenv("LATC_TRACE_TB_PC");
+        if (trace_pc && *trace_pc) {
+            uint64_t target_pc = strtoull(trace_pc, NULL, 0);
+            uint64_t source_base = atomic_load_explicit(
+                &stats->source_base, memory_order_acquire);
+            uint64_t target_rva = target_pc >= source_base ?
+                                  target_pc - source_base : UINT64_MAX;
+            bool contains_target = false;
+            for (guint i = 0; i < entries->len; i++) {
+                const LatAotV2TbsetEntry *entry = &g_array_index(
+                    entries, LatAotV2TbsetEntry, i);
+                contains_target |= entry->rva == target_rva;
+            }
+            fprintf(stderr,
+                    "latx: AOT v2 submission candidate pid=%d stats=%p source=%s source_fd=%d "
+                    "keys=%u target_rva=0x%llx contains_target=%d\n",
+                    getpid(), (void *)stats, source, stats->source_fd, count,
+                    (unsigned long long)target_rva, contains_target);
+        }
+        char error[256] = {0};
+        int output_fd = memfd_create("latc-tbset",
+                                     MFD_CLOEXEC | MFD_ALLOW_SEALING);
         LatTbKeySet key_set = { .count = entries->len };
         memcpy(key_set.source_sha256, stats->source_sha256, 32);
         key_set.keys = g_new0(LatTbKey, key_set.count);
@@ -1122,26 +1184,28 @@ static bool submit_runtime_tbsets(void)
         }
         int failed = output_fd < 0 || !key_set.keys;
         if (!failed && (lat_tb_key_set_write_fd(
-                            output_fd, &key_set, NULL, 0) ||
+                            output_fd, &key_set, error, sizeof(error)) ||
                         fsync(output_fd))) {
             failed = 1;
         }
-        if (output_fd >= 0 && close(output_fd)) failed = 1;
+        if (!failed && fcntl(output_fd, F_ADD_SEALS,
+                             F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW |
+                             F_SEAL_SEAL)) {
+            snprintf(error, sizeof(error), "cannot seal TB set descriptor: %s",
+                     strerror(errno));
+            failed = 1;
+        }
+        if (failed && output_fd >= 0) {
+            close(output_fd);
+        }
         g_free(key_set.keys);
-        int tbset_fd = !failed ? open(path, O_RDONLY | O_CLOEXEC) : -1;
-        if (tbset_fd >= 0) unlink(path);
+        int tbset_fd = failed ? -1 : output_fd;
         uint64_t request_id;
         if (!next_compiler_request_id(&request_id)) {
             if (tbset_fd >= 0) close(tbset_fd);
-            if (path) {
-                unlink(path);
-                g_free(path);
-            }
-            g_clear_error(&gerror);
             g_array_free(entries, TRUE);
             continue;
         }
-        char error[256] = {0};
         if (tbset_fd < 0 || latcd_client_submit_keys_fd(
                 socket, stats->source_fd, tbset_fd,
                 LATCD_PRIORITY_LIBRARY, request_id, request_id,
@@ -1150,8 +1214,11 @@ static bool submit_runtime_tbsets(void)
             submitted = false;
             if (getenv("LATX_AOT_V2_REPORT")) {
                 fprintf(stderr,
-                        "latx: AOT v2 TB set submission failed source=%s: %s\n",
-                        source, error[0] ? error : strerror(errno));
+                        "latx: AOT v2 TB set submission failed source=%s "
+                        "failed=%d output_fd=%d tbset_fd=%d errno=%s "
+                        "error=%s\n",
+                        source, failed, output_fd, tbset_fd, strerror(errno),
+                        error[0] ? error : "none");
             }
         } else {
             atomic_fetch_add(&compiler_submissions, 1);
@@ -1168,11 +1235,6 @@ static bool submit_runtime_tbsets(void)
             }
         }
         if (tbset_fd >= 0) close(tbset_fd);
-        if (path) {
-            unlink(path);
-            g_free(path);
-        }
-        g_clear_error(&gerror);
         g_array_free(entries, TRUE);
     }
     pthread_mutex_unlock(&submission_lock);
@@ -1192,7 +1254,9 @@ static void *runtime_tbset_submission_thread(void *opaque)
         uint64_t target = submission_generation;
         struct timespec deadline;
         clock_gettime(CLOCK_REALTIME, &deadline);
-        deadline.tv_nsec += 100 * 1000 * 1000;
+        long debounce_ns = getenv("LATC_STRICT_AOT_COLLECT") ?
+                           1000 * 1000 : 100 * 1000 * 1000;
+        deadline.tv_nsec += debounce_ns;
         if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
             deadline.tv_sec++;
             deadline.tv_nsec -= 1000 * 1000 * 1000;
@@ -1350,9 +1414,10 @@ static void drain_mappings(void)
             }
             if (getenv("LATX_AOT_V2_REPORT")) {
                 fprintf(stderr,
-                        "latx: AOT v2 discovered ELF dev=%llu ino=%llu "
+                        "latx: AOT v2 discovered ELF pid=%d dev=%llu ino=%llu "
                         "bias=0x%llx range=0x%llx-0x%llx exec_ranges=%u "
                         "module=%s%s%s\n",
+                        getpid(),
                         (unsigned long long)info->device,
                         (unsigned long long)info->inode,
                         (unsigned long long)info->load_bias,
@@ -1860,15 +1925,16 @@ static GPtrArray *read_module_manifest(const char *cache,
         errno = ENOEXEC;
         return NULL;
     }
+    GPtrArray *modules = g_ptr_array_new_with_free_func(g_free);
     char *cursor = strstr(contents, "\"module\":\"");
     if (!cursor) {
         snprintf(error, error_size, "AOT v2 module manifest has no module");
+        g_ptr_array_free(modules, TRUE);
         g_free(contents);
         errno = ENOEXEC;
         return NULL;
     }
     cursor += strlen("\"module\":\"");
-    GPtrArray *modules = g_ptr_array_new_with_free_func(g_free);
     char *end = strchr(cursor, '\"');
     if (end && end != cursor && end - cursor < 192 &&
         !memchr(cursor, '/', end - cursor) && end - cursor > 3 &&
@@ -2179,6 +2245,12 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
                 if (lat_aot_v2_module_open(path, &expected, &module->loaded,
                                            error, error_size)) {
                     int saved_errno = errno;
+                    if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
+                        fprintf(stderr,
+                                "latx: AOT v2 module open failed path=%s "
+                                "errno=%d error=%s\n",
+                                path, saved_errno, error);
+                    }
                     g_free(module);
                     g_free(path);
                     if (saved_errno == ENOENT && attempt == 0) {
@@ -2189,12 +2261,22 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
                     errno = saved_errno;
                     return -1;
                 }
+                if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
+                    fprintf(stderr,
+                            "latx: AOT v2 module open path=%s codegen=8388230...\n",
+                            path);
+                }
                 if (register_host_module(module)) {
                     int saved_errno = errno;
                     if (!error[0]) {
                         snprintf(error, error_size,
                                  "cannot index AOT v2 host module: %s",
                                  strerror(saved_errno));
+                    }
+                    if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
+                        fprintf(stderr,
+                                "latx: AOT v2 host index failed path=%s: %s\n",
+                                path, error);
                     }
                     g_free(module);
                     g_free(path);
@@ -2209,6 +2291,10 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
                 module->path = path;
                 module->next = runtime_modules;
                 runtime_modules = module;
+                if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
+                    fprintf(stderr,
+                            "latx: AOT v2 module loaded path=%s\n", path);
+                }
             }
             g_ptr_array_free(basenames, TRUE);
             if (!retry_manifest) {
@@ -2236,12 +2322,20 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
                                      info->guest_begin, info->guest_end,
                                      info->exec_ranges,
                                      info->exec_range_count, &current)) {
+            if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
+                fprintf(stderr,
+                        "latx: AOT v2 instance registration failed: %s\n",
+                        error);
+            }
             snprintf(error, error_size, "cannot register AOT v2 instance: %s",
                      strerror(errno));
             return -1;
         }
         if (!registered && instance) *instance = current;
         registered++;
+    }
+    if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
+        fprintf(stderr, "latx: AOT v2 instances registered=%d\n", registered);
     }
     return registered ? 1 : 0;
 }
@@ -2634,6 +2728,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
                              uint32_t cflags, LatcAotV2Target *result)
 {
     if (!registry_initialized || !result) {
+        trace_lookup_reject("registry-unavailable", guest_pc, cflags, NULL, NULL);
         if (aot_v2_reject_miss) {
             fprintf(stderr,
                     "latc: strict AOT rejected runtime TB generation at "
@@ -2646,6 +2741,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
     }
     if (aot_v2_collect_only) {
         if (aot_v2_reject_miss) {
+            trace_lookup_reject("collect-only", guest_pc, cflags, NULL, NULL);
             fprintf(stderr,
                     "latc: strict AOT rejected runtime TB generation at "
                     "0x%llx cflags=0x%x file=%d program=0\n",
@@ -2666,6 +2762,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
         if (track) {
             note_dispatch_miss(stats, guest_pc, cflags);
         }
+        trace_lookup_reject("registry-inactive", guest_pc, cflags, stats, NULL);
         if (aot_v2_reject_miss) {
             fprintf(stderr,
                     "latc: strict AOT rejected runtime TB generation at "
@@ -2683,6 +2780,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
                                      LAT_AOT_V2_TARGET_CACHE_SIZE);
         if (!aot_v2_target_cache) {
             note_dispatch_miss(stats, guest_pc, cflags);
+            trace_lookup_reject("target-cache-allocation", guest_pc, cflags, NULL, NULL);
             if (aot_v2_reject_miss) {
                 fprintf(stderr,
                         "latc: strict AOT rejected runtime TB generation at "
@@ -2737,6 +2835,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
             if (track) {
                 note_dispatch_miss(stats, guest_pc, cflags);
             }
+            trace_lookup_reject("registry-miss", guest_pc, cflags, stats, &target);
             if (aot_v2_reject_miss) {
                 fprintf(stderr,
                         "latc: strict AOT rejected runtime TB generation at "
@@ -2776,6 +2875,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
                                       memory_order_seq_cst);
             result->reader_held = false;
         }
+        trace_lookup_reject("activation-failed", guest_pc, cflags, stats, &target);
         note_dispatch_miss(stats, guest_pc, cflags);
         if (aot_v2_reject_miss) {
             fprintf(stderr,
@@ -3199,4 +3299,120 @@ void latc_aot_v2_drain_signal_recovery(CPUState *cpu)
         cpu, diagnostic.guest_begin,
         diagnostic.guest_end - diagnostic.guest_begin,
         LATC_AOT_V2_INVALIDATE_CODE_WRITE);
+}
+static const char *registry_lookup_state_name(LatAotRegistryLookupStateV2 state)
+{
+    switch (state) {
+    case LAT_AOT_REGISTRY_TARGET_FOUND: return "found";
+    case LAT_AOT_REGISTRY_NO_INSTANCE: return "no-instance";
+    case LAT_AOT_REGISTRY_INACTIVE_INSTANCE: return "inactive-instance";
+    case LAT_AOT_REGISTRY_NO_TB: return "no-tb";
+    default: return "unknown";
+    }
+}
+
+static LatAotV2RuntimeInstance *runtime_instance_for(
+    const LatAotModuleInstanceV2 *instance)
+{
+    LatAotV2RuntimeInstance *runtime;
+    for (runtime = runtime_instances; runtime; runtime = runtime->next) {
+        if (&runtime->instance == instance) return runtime;
+    }
+    for (runtime = runtime_instances_retired; runtime;
+         runtime = runtime->next) {
+        if (&runtime->instance == instance) return runtime;
+    }
+    return NULL;
+}
+
+static void trace_lookup_reject(const char *stage, target_ulong guest_pc,
+                                uint32_t cflags,
+                                LatAotV2ModuleStats *stats,
+                                const LatAotTargetV2 *target)
+{
+    uint64_t trace_limit = 128;
+    const char *limit_value = getenv("LATX_AOT_V2_TRACE_LOOKUP_LIMIT");
+    if (limit_value && *limit_value) {
+        char *end = NULL;
+        unsigned long long parsed = strtoull(limit_value, &end, 0);
+        if (end && *end == '\0') {
+            trace_limit = parsed;
+        }
+    }
+    if (!latc_aot_v2_is_file_pc(guest_pc) ||
+        !getenv("LATX_AOT_V2_TRACE_LOOKUP") ||
+        (trace_limit &&
+         atomic_fetch_add(&traced_lookup_rejects, 1) >= trace_limit)) {
+        return;
+    }
+    LatAotModuleInstanceV2 *target_instance = target ? target->instance : NULL;
+    LatAotV2RuntimeInstance *runtime = runtime_instance_for(target_instance);
+    if (!stats) stats = runtime ? runtime->stats : module_stats_for_pc(guest_pc);
+    char source[65] = "none";
+    int has_rva = 0;
+    uint64_t rva = 0;
+    uint64_t begin = 0;
+    uint64_t end = 0;
+    LatAotV2ModuleState state = LAT_AOT_V2_MODULE_MISSING;
+    if (stats) {
+        uint64_t base;
+        digest_hex(stats->source_sha256, source);
+        base = atomic_load_explicit(&stats->source_base, memory_order_acquire);
+        begin = atomic_load_explicit(&stats->guest_begin, memory_order_acquire);
+        end = atomic_load_explicit(&stats->guest_end, memory_order_acquire);
+        state = atomic_load_explicit(&stats->state, memory_order_acquire);
+        if (guest_pc >= base) {
+            rva = guest_pc - base;
+            has_rva = 1;
+        }
+    }
+    if (getenv("LATX_AOT_V2_TRACE_LOOKUP_COMPACT")) {
+        char compact[256];
+        int length = snprintf(
+            compact, sizeof(compact),
+            "latx: lookup-miss stage=%s source=%s rva=%s0x%llx "
+            "cflags=0x%x file=%d\n",
+            stage, source, has_rva ? "" : "na:",
+            (unsigned long long)rva, cflags,
+            latc_aot_v2_is_file_pc(guest_pc));
+        if (length > 0) {
+            size_t bytes = MIN((size_t)length, sizeof(compact));
+            if (write(STDERR_FILENO, compact, bytes) < 0) {
+                return;
+            }
+        }
+        return;
+    }
+    int target_active = -1;
+    uint64_t target_generation = 0;
+    uint64_t current_generation = 0;
+    const char *module = "none";
+    if (target_instance) {
+        target_active = atomic_load_explicit(&target_instance->active,
+                                             memory_order_acquire);
+        target_generation = target ? target->generation : 0;
+        current_generation = atomic_load_explicit(&target_instance->generation,
+                                                  memory_order_acquire);
+    }
+    if (runtime && runtime->runtime_module && runtime->runtime_module->path) {
+        module = runtime->runtime_module->path;
+    }
+    fprintf(stderr,
+            "latx: AOT v2 lookup trace stage=%s pid=%d tid=%d "
+            "pc=0x%llx cflags=0x%x file=%d source=%s rva=%s0x%llx "
+            "stats_range=0x%llx-0x%llx stats_state=%s "
+            "registry_state=%s overlaps=%zu active_overlaps=%zu "
+            "target_instance=%p target_active=%d target_generation=%llu "
+            "current_generation=%llu module=%s\n",
+            stage, getpid(), qemu_get_thread_id(), (unsigned long long)guest_pc,
+            cflags, stats != NULL, source, has_rva ? "" : "na:",
+            (unsigned long long)rva, (unsigned long long)begin,
+            (unsigned long long)end, module_state_name(state),
+            registry_lookup_state_name(target ? target->lookup_state :
+                                       LAT_AOT_REGISTRY_NO_INSTANCE),
+            target ? target->overlapping_instances : 0,
+            target ? target->active_overlapping_instances : 0,
+            (void *)target_instance, target_active,
+            (unsigned long long)target_generation,
+            (unsigned long long)current_generation, module);
 }

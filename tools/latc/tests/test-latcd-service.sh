@@ -779,12 +779,10 @@ elapsed=$(($(date +%s) - start))
 grep -q '"queue_full":1' "$stats"
 test -z "$(find "$cache/.tmp" -mindepth 1 -maxdepth 1 -print -quit)"
 
-compile_failure_marker=$work/compile-failure.once
 compile_failure_compiler=$work/compile-failure-latc
 printf '%s\n' '#!/bin/sh' 'set -eu' \
   "if [ \"\${1:-}\" = build-id ]; then exec $latc \"\$@\"; fi" \
-  "if [ -e $compile_failure_marker ]; then exit 1; fi" \
-  ": >$compile_failure_marker" \
+  'if [ -n "${LATC_NATIVE_BASE:-}" ]; then exit 1; fi' \
   "exec $latc \"\$@\"" >"$compile_failure_compiler"
 chmod 755 "$compile_failure_compiler"
 start_service compile-failure "$compile_failure_compiler"
@@ -826,13 +824,12 @@ write_key_set(source, output, [(candidate, 3)])
 PY
 "$latcd" --submit --socket "$socket" --tbset "$phase/delta.tbset" \
   "$guest" >"$phase/delta.client"
-set +e
 "$latcd" --flush-source --socket "$socket" "$guest" \
-  >"$phase/failed-flush.client"
-compile_failure_status=$?
-set -e
-test "$compile_failure_status" -ne 0
-wait_stats 's["failed"] == 1 and s["active_jobs"] == 0'
+  >"$phase/fallback-flush.client"
+grep -q '^status=0$' "$phase/fallback-flush.client"
+grep -q 'incremental compile failed, retrying full compile' \
+  "$phase/server.stderr"
+wait_stats 's["compiled"] == 2 and s["failed"] == 0 and s["active_jobs"] == 0'
 python3 - "$cache" "$guest" "$phase/published.json" <<'PY'
 import hashlib
 import json
@@ -848,7 +845,7 @@ paths = [manifest_path] + [cache / manifest[name]
 expected = json.loads(snapshot.read_text())
 actual = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
           for path in paths}
-assert actual == expected, (actual, expected)
+assert actual != expected, (actual, expected)
 print(cache / manifest["module"])
 PY
 module=$(python3 - "$cache" "$guest" <<'PY'

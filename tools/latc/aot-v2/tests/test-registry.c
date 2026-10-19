@@ -110,10 +110,25 @@ int main(void)
         fprintf(stderr, "registry accepted removed non-parallel variant\n");
         return 1;
     }
+    if (target.lookup_state != LAT_AOT_REGISTRY_NO_TB ||
+        target.overlapping_instances != 1 ||
+        target.active_overlapping_instances != 1) {
+        fprintf(stderr, "registry did not diagnose a TB miss\n");
+        return 1;
+    }
+    if (lat_aot_v2_registry_lookup(&registry, 0x100000,
+                                   LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL,
+                                   &target) == 0 ||
+        target.lookup_state != LAT_AOT_REGISTRY_NO_INSTANCE ||
+        target.overlapping_instances != 0) {
+        fprintf(stderr, "registry did not diagnose an instance miss\n");
+        return 1;
+    }
     if (lat_aot_v2_registry_lookup(&registry, 0x401000,
                                    LAT_AOT_TB_CODE64 |
                                    LAT_AOT_TB_PARALLEL, &target) ||
-        target.host_address != text + 4 || target.instance != &first) {
+        target.host_address != text + 4 || target.instance != &first ||
+        target.lookup_state != LAT_AOT_REGISTRY_TARGET_FOUND) {
         fprintf(stderr, "registry lookup failed\n");
         return 1;
     }

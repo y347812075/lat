@@ -475,6 +475,40 @@ int lat_native_image_merge_files(const char *base_path,
         memcmp(base_data + base->guest_image_offset,
                delta_data + delta->guest_image_offset,
                base->guest_image_size)) {
+        size_t guest_difference = SIZE_MAX;
+        if (base->guest_image_size == delta->guest_image_size) {
+            const unsigned char *base_guest =
+                base_data + base->guest_image_offset;
+            const unsigned char *delta_guest =
+                delta_data + delta->guest_image_offset;
+            for (size_t i = 0; i < base->guest_image_size; i++) {
+                if (base_guest[i] != delta_guest[i]) {
+                    guest_difference = i;
+                    break;
+                }
+            }
+        }
+        fprintf(stderr,
+                "latc: native image mismatch base_flags=0x%x "
+                "delta_flags=0x%x base_entry=0x%llx delta_entry=0x%llx "
+                "base_preferred=0x%llx delta_preferred=0x%llx "
+                "base_guest_size=%llu delta_guest_size=%llu "
+                "guest_sha256_equal=%d build_id_equal=%d "
+                "base_build_id=%s delta_build_id=%s "
+                "guest_image_difference=%s%zu\n",
+                base->flags, delta->flags,
+                (unsigned long long)base->guest_entry,
+                (unsigned long long)delta->guest_entry,
+                (unsigned long long)base->preferred_guest_base,
+                (unsigned long long)delta->preferred_guest_base,
+                (unsigned long long)base->guest_image_size,
+                (unsigned long long)delta->guest_image_size,
+                !memcmp(base->guest_sha256, delta->guest_sha256,
+                        sizeof(base->guest_sha256)),
+                !strcmp(base->lat_build_id, delta->lat_build_id),
+                base->lat_build_id, delta->lat_build_id,
+                guest_difference == SIZE_MAX ? "none:" : "offset:",
+                guest_difference);
         invalid(error, error_size,
                 "native images do not describe the same guest and codegen");
         goto out;

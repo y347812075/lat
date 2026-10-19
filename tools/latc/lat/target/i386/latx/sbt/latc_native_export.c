@@ -680,7 +680,20 @@ static int append_tb_pc_map(GArray *output, const uint8_t *code,
                             uint64_t code_offset, uint64_t guest_pc,
                             uint64_t decode_limit, uint64_t executable_limit)
 {
+    bool trace = false;
+    const char *trace_text = getenv("LATC_TRACE_PCMAP_RVA");
+    if (trace_text && *trace_text) {
+        char *end = NULL;
+        uint64_t value = strtoull(trace_text, &end, 0);
+        trace = end && *end == '\0' && value == guest_pc;
+    }
     if (!tb->icount || !tb->tb_cache_size) {
+        if (trace) {
+            fprintf(stderr,
+                    "latc: pc-map trace pc=0x%llx empty icount=%u size=%u\n",
+                    (unsigned long long)guest_pc, tb->icount,
+                    tb->tb_cache_size);
+        }
         return 0;
     }
     if (code_offset > code_size ||
@@ -688,6 +701,17 @@ static int append_tb_pc_map(GArray *output, const uint8_t *code,
         return -1;
     }
     uint64_t search_offset = code_offset + tb->tu_search_addr_offset;
+    if (!(tb->bool_flags & IS_TU_TB) && !tb->tu_search_addr_offset) {
+        LatNativePcMapV2 map = {
+            .guest_pc = guest_pc,
+            .host_offset_begin = code_offset,
+            .host_offset_end = executable_limit,
+            .state_record_offset = 0,
+            .flags = LAT_NATIVE_PC_MAP_DYNAMIC_STATE,
+        };
+        g_array_append_val(output, map);
+        return 0;
+    }
     if (search_offset >= decode_limit || decode_limit > code_size ||
         executable_limit < code_offset || executable_limit > decode_limit) {
         return -1;
@@ -699,6 +723,16 @@ static int append_tb_pc_map(GArray *output, const uint8_t *code,
     uint64_t encoded_host_end = 0;
     guint first_map = output->len;
     bool truncated_unlink_stub = false;
+    if (trace) {
+        fprintf(stderr,
+                "latc: pc-map trace pc=0x%llx code=0x%llx size=%u search=0x%llx "
+                "decode_end=0x%llx exec_end=0x%llx icount=%u\n",
+                (unsigned long long)guest_pc, (unsigned long long)code_offset,
+                tb->tb_cache_size,
+                (unsigned long long)tb->tu_search_addr_offset,
+                (unsigned long long)decode_limit,
+                (unsigned long long)executable_limit, tb->icount);
+    }
 
     for (uint16_t i = 0; i < tb->icount; i++) {
         int64_t guest_delta;
@@ -711,6 +745,13 @@ static int append_tb_pc_map(GArray *output, const uint8_t *code,
             add_signed_u64(&current_guest_pc, guest_delta) ||
             (uint64_t)host_delta > UINT64_MAX - encoded_host_end) {
             return -1;
+        }
+        if (trace) {
+            fprintf(stderr,
+                    "latc: pc-map trace pc=0x%llx insn=%u guest_delta=%lld "
+                    "state_delta=%lld host_delta=%lld\n",
+                    (unsigned long long)guest_pc, i, (long long)guest_delta,
+                    (long long)state_delta, (long long)host_delta);
         }
         if (state_delta > INT32_MAX || state_delta < INT32_MIN ||
             (state_delta > 0 && current_state > INT32_MAX - state_delta) ||
@@ -756,6 +797,11 @@ static int append_tb_pc_map(GArray *output, const uint8_t *code,
         LatNativePcMapV2 *last = &g_array_index(
             output, LatNativePcMapV2, output->len - 1);
         last->host_offset_end = executable_limit;
+    } else if (trace) {
+        fprintf(stderr,
+                "latc: pc-map trace pc=0x%llx produced no maps cursor=0x%llx\n",
+                (unsigned long long)guest_pc,
+                (unsigned long long)(cursor - code));
     }
     return 0;
 }
@@ -819,7 +865,10 @@ static int collect_native_tu_ranges(const aot_tb *tbs, size_t tb_count,
         uint64_t tu_begin = tb_begin - native_tb_offset_in_tu(&tbs[i]);
         NativeTuRange *range = g_hash_table_lookup(ranges, &tu_begin);
         uint64_t tb_end = tb_begin + tbs[i].tb_cache_size;
-        uint64_t search_begin = tb_begin + tbs[i].tu_search_addr_offset;
+        bool has_search_data = (tbs[i].bool_flags & IS_TU_TB) ||
+                               tbs[i].tu_search_addr_offset;
+        uint64_t search_begin = has_search_data ?
+            tb_begin + tbs[i].tu_search_addr_offset : tb_end;
         if (!range || tb_end < tb_begin || tb_end > range->end ||
             search_begin < tb_begin || search_begin > range->end) {
             goto fail;
@@ -873,11 +922,21 @@ static int extract_native_tus(GArray *output, const aot_tb *tbs,
 
 static int native_tu_index_for_offset(const GArray *tus, uint64_t offset)
 {
-    for (guint i = 0; i < tus->len; i++) {
-        const LatNativeTuV1 *tu = &g_array_index(tus, LatNativeTuV1, i);
-        if (offset >= tu->code_offset &&
-            offset < tu->code_offset + tu->code_size) {
-            return (int)i;
+    guint left = 0;
+    guint right = tus->len;
+    while (left < right) {
+        guint middle = left + (right - left) / 2;
+        const LatNativeTuV1 *tu = &g_array_index(tus, LatNativeTuV1, middle);
+        if (tu->code_offset <= offset) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+    if (left) {
+        const LatNativeTuV1 *tu = &g_array_index(tus, LatNativeTuV1, left - 1);
+        if (offset - tu->code_offset < tu->code_size) {
+            return (int)(left - 1);
         }
     }
     return -1;
@@ -1021,8 +1080,32 @@ int latc_native_export(const char *path, const char *guest_path,
     native_pc_maps = g_array_new(FALSE, FALSE, sizeof(LatNativePcMapV2));
     native_tus = g_array_new(FALSE, FALSE, sizeof(LatNativeTuV1));
     size_t tb_count = (tb_table_end - (uintptr_t)tbs) / sizeof(*tbs);
+    const char *trace_pc_text = getenv("LATC_TRACE_NATIVE_PC");
+    uint64_t trace_pc = trace_pc_text && *trace_pc_text ?
+                        strtoull(trace_pc_text, NULL, 0) : UINT64_MAX;
     native_code = g_malloc(code_size);
     memcpy(native_code, code, code_size);
+    if (trace_pc != UINT64_MAX) {
+        size_t matches = 0;
+        for (size_t i = 0; i < tb_count; i++) {
+            const aot_segment *segment = find_tb_segment(header, segments,
+                                                          &tbs[i]);
+            uint64_t pc = segment ?
+                segment->details.seg_begin + tbs[i].offset_in_segment : 0;
+            if (pc != trace_pc) continue;
+            fprintf(stderr,
+                    "latc: native input pc=0x%llx tb=%zu "
+                    "cache_offset=0x%llx cache_size=%u flags=0x%x "
+                    "bool_flags=0x%x tu_offset=%u\n",
+                    (unsigned long long)pc, i,
+                    (unsigned long long)tbs[i].tb_cache_offset,
+                    tbs[i].tb_cache_size, tbs[i].cflags,
+                    tbs[i].bool_flags, tbs[i].offset_in_tu);
+            matches++;
+        }
+        fprintf(stderr, "latc: native input target=0x%llx matches=%zu\n",
+                (unsigned long long)trace_pc, matches);
+    }
     if (extract_native_pc_maps(native_pc_maps, native_code, code_size,
             header, segments, tbs, tb_count, aot_code_offset,
             guest_load_bias) ||
@@ -1121,8 +1204,20 @@ int latc_native_export(const char *path, const char *guest_path,
                     goto out;
                 }
                 memcpy(&instruction, native_code + code_offset + site, 4);
+                if (instruction == 0 &&
+                    getenv("LATC_AOT_ALLOW_ZERO_EFLAGS_STUB")) {
+                    /* An isolated bounded TU does not emit a link stub when it
+                     * has no in-TU successor; leave the default eflags path. */
+                    continue;
+                }
                 if (instruction != 0x03400000u) {
-                    fprintf(stderr, "latc: eflags stub is not unlinked\n");
+                    fprintf(stderr,
+                            "latc: eflags stub is not unlinked pc=0x%llx "
+                            "tb=%zu edge=%d site=%llu instruction=0x%x "
+                            "actions=0x%x\n",
+                            (unsigned long long)pc, i, edge,
+                            (unsigned long long)site,
+                            instruction, actions);
                     goto out;
                 }
                 native_tb.eflags_stub_offset[edge] = site + 1;

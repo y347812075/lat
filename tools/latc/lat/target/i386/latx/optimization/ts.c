@@ -663,7 +663,6 @@ static inline void get_ts_queue(CPUState *cpu, target_ulong cs_base,
     target_ulong curr_tb_pc, curr_tb_cflags;
     TranslationBlock *tb;
     uint32_t tb_id = 0;
-    const char *native_output = getenv("LATC_NATIVE_IMAGE_OUT");
     while (untr_tb_id <= curr_seg->last_tb_id && *tb_num_in_tu < MAX_TB_IN_TS) {
         curr_tb_pc = curr_tb_message_vector[untr_tb_id].pc;
         curr_tb_cflags = curr_tb_message_vector[untr_tb_id].cflags;
@@ -681,8 +680,9 @@ static inline void get_ts_queue(CPUState *cpu, target_ulong cs_base,
          * Legacy AOT recovery expects TU members to be contiguous in the
          * guest-PC-sorted table. Native export records each TU explicitly.
          */
-        if (tb && (tb->bool_flags & IS_AOT_BOUNDED) &&
-            (!native_output || !*native_output)) {
+        /* A bounded key must remain an independently addressable TB.  Merging
+         * it into another TU can fold its entry code away. */
+        if (tb && (tb->bool_flags & IS_AOT_BOUNDED)) {
             break;
         }
         for (; tb_id <  *tb_num_in_tu && *tb_num_in_tu < MAX_TB_IN_TS;  tb_id++) {
@@ -823,9 +823,23 @@ static void ts_tb_explore(CPUState *cpu, target_ulong cs_base,
 
 static void save_tu_to_ts(void) {
     TranslationBlock** tb_list = tu_data->tb_list;
+    const char *trace_text = getenv("LATC_TRACE_TU_PC");
+    uint64_t trace_pc = trace_text && *trace_text ?
+                        strtoull(trace_text, NULL, 0) : UINT64_MAX;
     for (int i = 0; i < tu_data->tb_num; i++){
-        if ((tb_list[i]->bool_flags & IS_AOT_BOUNDED) &&
-            !tb_list[i]->tc.size) {
+        bool bounded = tb_list[i]->bool_flags & IS_AOT_BOUNDED;
+        bool dropped = bounded && !tb_list[i]->tc.size;
+        if (tb_list[i]->pc == trace_pc) {
+            fprintf(stderr,
+                    "latx: TU trace pc=0x%llx index=%d bool_flags=0x%x "
+                    "code_size=%zu mode=%d icount=%u tu_id=0x%llx "
+                    "dropped=%d\n",
+                    (unsigned long long)tb_list[i]->pc, i,
+                    tb_list[i]->bool_flags, tb_list[i]->tc.size,
+                    tb_list[i]->s_data->tu_tb_mode, tb_list[i]->icount,
+                    (unsigned long long)tb_list[i]->s_data->tu_id, dropped);
+        }
+        if (dropped) {
             continue;
         }
 	ts_push_back(tb_list[i]);

@@ -2751,6 +2751,16 @@ int tr_translate_tb(struct TranslationBlock *tb)
 #endif
 
     int code_nr = 0, __attribute__((unused)) asm_code_nr = 0;
+    const char *trace_pc_text = getenv("LATC_TRACE_TRANSLATE_PC");
+    bool trace_translate = trace_pc_text && *trace_pc_text &&
+        tb->pc == strtoull(trace_pc_text, NULL, 0);
+    if (trace_translate) {
+        fprintf(stderr,
+                "latx: translate trace pc=0x%llx cflags=0x%x "
+                "bool_flags=0x%x icount=%u tb_size=%u done=%d\n",
+                (unsigned long long)tb->pc, tb->cflags, tb->bool_flags,
+                tb->icount, tb->size, translation_done);
+    }
 
     if (translation_done) {
         /* optimize ir2 */
@@ -2810,6 +2820,11 @@ int tr_translate_tb(struct TranslationBlock *tb)
 #endif
 
     int code_size = code_nr * 4;
+    if (trace_translate) {
+        fprintf(stderr,
+                "latx: translate result pc=0x%llx code_nr=%d code_size=%d\n",
+                (unsigned long long)tb->pc, code_nr, code_size);
+    }
     counter_mips_tr += code_nr;
 
     /* finalize */

@@ -10,6 +10,8 @@ int latc_bundle_inject_argv(int *argc, char ***argv);
 int latc_bundle_verified_guest(uint8_t digest[32], uint64_t *guest_begin,
                                uint64_t *guest_end);
 int latc_bundle_verified_guest_digest(uint8_t digest[32]);
+/* Validated CFG upper bound for standalone compiler allocation. */
+uint64_t latc_bundle_tb_count(void);
 
 struct CPUState;
 void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry);

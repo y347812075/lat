@@ -670,7 +670,9 @@ static int snapshot_tbset(int tbset_fd, const char *source_path,
 {
     struct stat status;
     int flags = fcntl(tbset_fd, F_GETFL);
-    if (flags < 0 || (flags & O_ACCMODE) != O_RDONLY ||
+    int seals = fcntl(tbset_fd, F_GET_SEALS);
+    bool immutable = seals >= 0 && (seals & F_SEAL_WRITE);
+    if (flags < 0 || (!immutable && (flags & O_ACCMODE) != O_RDONLY) ||
         fstat(tbset_fd, &status) || !S_ISREG(status.st_mode) ||
         status.st_size <= 0 || status.st_size > 64 * 1024 * 1024) {
         return fail(error, error_size,
@@ -1030,6 +1032,11 @@ static int module_missing_is_jit_only(const char *module, const char *tbset,
                 "will stay JIT-only (first 0x%" PRIx64 ")\n",
                 module, requested.count - missing.count, requested.count,
                 missing.count, missing.keys[0].guest_rva);
+        for (size_t i = 0; i < missing.count; i++) {
+            fprintf(stderr,
+                    "latcd: unsupported TB rva=0x%" PRIx64 " flags=0x%x\n",
+                    missing.keys[i].guest_rva, missing.keys[i].flags);
+        }
         if (error && error_size) {
             error[0] = '\0';
         }
@@ -1077,6 +1084,11 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         g_strdup_printf("LAT_LD_PREFIX=%s", config->x86_rootfs) : NULL;
     const char *compile_timing = getenv("LATCD_COMPILE_TIMING") ?
         "LATC_COMPILE_TIMING=1" : NULL;
+    const char *expand_functions = getenv("LATC_TBSET_EXPAND_FUNCTIONS") ?
+        "LATC_TBSET_EXPAND_FUNCTIONS=1" : NULL;
+    const char *allow_zero_eflags_stub =
+        getenv("LATC_AOT_ALLOW_ZERO_EFLAGS_STUB") ?
+        "LATC_AOT_ALLOW_ZERO_EFLAGS_STUB=1" : NULL;
     long online = sysconf(_SC_NPROCESSORS_ONLN);
     uint32_t aot_thread_count = online > 0 ?
         MAX(1u, MIN(8u, (uint32_t)online / config->workers)) : 1u;
@@ -1102,7 +1114,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     }
     char *closure_environment = g_strdup_printf(
         "LATC_TBSET_CLOSURE_LIMIT=%s", closure_limit);
-    const char *environment[14];
+    const char *environment[16];
     size_t environment_count = 0;
     environment[environment_count++] = "PATH=/usr/bin:/bin";
     environment[environment_count++] = "LANG=C";
@@ -1115,6 +1127,10 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (native_base) environment[environment_count++] = native_base;
     environment[environment_count++] = native_output;
     if (compile_timing) environment[environment_count++] = compile_timing;
+    if (expand_functions) environment[environment_count++] = expand_functions;
+    if (allow_zero_eflags_stub) {
+        environment[environment_count++] = allow_zero_eflags_stub;
+    }
     environment[environment_count++] = closure_environment;
     environment[environment_count++] = "LATC_SKIP_FINAL_INSPECT=1";
     environment[environment_count] = NULL;
@@ -2258,8 +2274,29 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
                                        base_native, native,
                                        module, digest, error, sizeof(error));
     if (compiler_result) {
-        status = LATCD_STATUS_COMPILE_FAILED;
-        goto out;
+        if (!base_native) {
+            status = LATCD_STATUS_COMPILE_FAILED;
+            goto out;
+        }
+        /*
+         * Some translated TBs cannot be merged with an older native image,
+         * although a clean full compile emits them successfully.  Preserve
+         * the active generation and retry without the incremental base.
+         */
+        fprintf(stderr,
+                "latcd: incremental compile failed, retrying full compile: %s\n",
+                error[0] ? error : "unknown error");
+        unlink(module);
+        unlink(native);
+        error[0] = '\0';
+        compiler_result = run_compiler(config, worker_index, snapshot,
+                                       complete_tbset, static_tbset,
+                                       NULL, native, module, digest,
+                                       error, sizeof(error));
+        if (compiler_result) {
+            status = LATCD_STATUS_COMPILE_FAILED;
+            goto out;
+        }
     }
     uint8_t codegen_id[32];
     expected_codegen_id(codegen_id);
@@ -2268,11 +2305,40 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
             module, complete_tbset, &info, error, sizeof(error)) :
         lat_aot_v2_module_inspect_file(module, &info,
                                        error, sizeof(error));
+    bool retry_full = false;
     if (inspect_result && complete_tbset) {
         int jit_only = module_missing_is_jit_only(
             module, complete_tbset, digest, &info, error, sizeof(error));
         if (jit_only > 0) {
             inspect_result = 0;
+            retry_full = base_native != NULL;
+        }
+    }
+    if (retry_full) {
+        /*
+         * Incremental merging can omit requested TBs even though a full
+         * compile can emit them.  Replace a partially covered incremental
+         * result with a full compile before publishing it.
+         */
+        unlink(module);
+        unlink(native);
+        error[0] = '\0';
+        compiler_result = run_compiler(config, worker_index, snapshot,
+                                       complete_tbset, static_tbset,
+                                       NULL, native, module, digest,
+                                       error, sizeof(error));
+        if (compiler_result) {
+            status = LATCD_STATUS_COMPILE_FAILED;
+            goto out;
+        }
+        inspect_result = lat_aot_v2_module_inspect_and_validate_tbset_file(
+            module, complete_tbset, &info, error, sizeof(error));
+        if (inspect_result) {
+            int jit_only = module_missing_is_jit_only(
+                module, complete_tbset, digest, &info, error, sizeof(error));
+            if (jit_only > 0) {
+                inspect_result = 0;
+            }
         }
     }
     if (inspect_result || memcmp(info.note.source_sha256, digest, 32) ||
@@ -2826,6 +2892,9 @@ static void *compiler_worker(void *opaque)
                 job->compile_sequence : job->accepted_sequence;
             if (published_sequence > source_state->published_sequence) {
                 source_state->published_sequence = published_sequence;
+            }
+            if (source_state->failed_sequence <= published_sequence) {
+                source_state->failed_sequence = 0;
             }
             g_hash_table_remove(service->negative, job->key);
         } else {
