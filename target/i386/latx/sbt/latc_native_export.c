@@ -580,6 +580,10 @@ static void append_tu_relocations(GArray *output, RelocationOffsetSet *offsets,
         const aot_tb *tb, uint64_t tb_code_offset, uint64_t guest_pc)
 {
 #ifdef CONFIG_LATX_TU
+    /* Non-TU records reuse this union for ordinary jump reset offsets. */
+    if (!(tb->bool_flags & IS_TU_JMP)) {
+        return;
+    }
     for (int edge = 0; edge < 2; edge++) {
         if (tb->tu_jmp[edge] == UINT16_MAX) continue;
         uint64_t code_offset = tb_code_offset + tb->tu_jmp[edge];

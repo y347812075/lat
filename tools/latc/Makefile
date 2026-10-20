@@ -442,7 +442,9 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	python3 tests/test-tcg-jit-regions.py
 	python3 tests/test-aot-v2-submission-signals.py
 	python3 tests/test-native-search-data.py
+	python3 tests/test-native-tu-relocations.py
 	python3 tests/test-aot-metadata-buffer.py
+	python3 tests/test-module-runtime-prefix.py
 	$(MAKE) check-import
 
 $(BUILD)/tests/test-latcd-protocol: \

@@ -56,6 +56,7 @@ typedef struct ModulePack {
     GHashTable *guest_rva_indexes;
     int three_level_guest_slots;
     uint64_t runtime_trampolines;
+    uint64_t runtime_prefix;
     uint64_t fallback_stubs;
     uint64_t fallback_stub_count;
     uint64_t *fallback_relocations;
@@ -70,6 +71,36 @@ typedef struct ModulePack {
     unsigned char *return_guard_count;
     int (*return_guard_targets)[5];
 } ModulePack;
+
+static uint64_t runtime_target(const ModulePack *pack, uint64_t site,
+                               uint32_t symbol)
+{
+    uint64_t tail = symbol == LAT_NATIVE_SYMBOL_PFTABLE ? pack->pf_table :
+                    pack->runtime_trampolines + symbol * 4;
+    uint64_t front = symbol == LAT_NATIVE_SYMBOL_PFTABLE ?
+                     LAT_NATIVE_SYMBOL_COUNT * 8 : symbol * 8;
+    return pack->runtime_prefix && site < pack->runtime_trampolines / 2 ?
+           front : tail;
+}
+
+static void shift_runtime_prefix(ModulePack *pack)
+{
+    uint64_t prefix = pack->runtime_prefix;
+    /* Shift the whole native layout together, preserving physical TU edges. */
+    for (uint64_t i = 0; prefix && i < pack->header->tb_count; i++) {
+        pack->tbs[i].code_offset += prefix;
+    }
+    for (uint64_t i = 0; prefix && i < pack->header->relocation_count; i++) {
+        pack->relocations[i].code_offset += prefix;
+        if (pack->relocations[i].kind == LAT_NATIVE_RELOC_IMAGE_DATA) {
+            pack->relocations[i].addend += prefix;
+        }
+    }
+    for (uint64_t i = 0; prefix && i < pack->header->pc_map_count; i++) {
+        pack->pc_maps[i].host_offset_begin += prefix;
+        pack->pc_maps[i].host_offset_end += prefix;
+    }
+}
 
 static gint compare_tb_code(gconstpointer left, gconstpointer right)
 {
@@ -665,7 +696,8 @@ static gint compare_layout_component(gconstpointer left, gconstpointer right)
 
 static void reorder_profiled_code(ModulePack *pack, const CfgProgram *program)
 {
-    if (!program || !program->tb_count || !pack->header->tb_count) {
+    if (pack->runtime_prefix || !program || !program->tb_count ||
+        !pack->header->tb_count) {
         return;
     }
     /* Embedded constants retain their native offsets, including after merges. */
@@ -1043,9 +1075,8 @@ static void select_supported_tbs(ModulePack *pack)
             uint32_t instructions[3] = {0};
             memcpy(instructions, pack->code + relocation->code_offset,
                    relocation->slots * sizeof(*instructions));
-            uint64_t target = relocation->target == LAT_NATIVE_SYMBOL_PFTABLE ?
-                pack->pf_table : pack->runtime_trampolines +
-                relocation->target * sizeof(uint32_t);
+            uint64_t target = runtime_target(pack, relocation->code_offset,
+                                             relocation->target);
             bool zero_placeholder = !instructions[0] && !instructions[1] &&
                 (relocation->slots < 3 || !instructions[2]);
             int patch_result = zero_placeholder &&
@@ -1283,8 +1314,8 @@ static void select_supported_tbs(ModulePack *pack)
                            !patch_runtime_target(
                                instructions, relocation->slots,
                                relocation->code_offset,
-                               pack->runtime_trampolines +
-                                   relocation->reserved * 4)) {
+                               runtime_target(pack, relocation->code_offset,
+                                              relocation->reserved))) {
                     patchable = 1;
                 }
             }
@@ -1806,11 +1837,13 @@ static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
                    relocation->target == LAT_NATIVE_SYMBOL_PFTABLE) {
             result = patch_runtime_target(instructions, relocation->slots,
                                           relocation->code_offset,
-                                          pack->pf_table);
+                                          runtime_target(pack,
+                                              relocation->code_offset,
+                                              LAT_NATIVE_SYMBOL_PFTABLE));
         } else if (relocation->kind == LAT_NATIVE_RELOC_RUNTIME_SYMBOL &&
                    runtime_entry(relocation->target)) {
-            uint64_t target = pack->runtime_trampolines +
-                              relocation->target * 4;
+            uint64_t target = runtime_target(pack, relocation->code_offset,
+                                             relocation->target);
             bool zero_placeholder = !instructions[0] && !instructions[1] &&
                 (relocation->slots < 3 || !instructions[2]);
             result = zero_placeholder &&
@@ -1843,7 +1876,8 @@ static int patch_relocations(ModulePack *pack, char *error, size_t error_size)
                 result = patch_runtime_target(
                     instructions, relocation->slots,
                     relocation->code_offset,
-                    pack->runtime_trampolines + relocation->reserved * 4);
+                    runtime_target(pack, relocation->code_offset,
+                                   relocation->reserved));
             }
         } else if (relocation->kind == LAT_NATIVE_RELOC_JRRA_TARGET) {
             int target = pack->relocation_targets[i];
@@ -2395,7 +2429,23 @@ static int emit_assembly(const char *path, const ModulePack *pack,
         ".global lat_aot_generated_text_begin\n"
         ".hidden lat_aot_generated_text_begin\n"
         "lat_aot_generated_text_begin:\n");
-    uint64_t cursor = 0;
+    uint64_t cursor = pack->runtime_prefix;
+    if (cursor) {
+        for (uint32_t symbol = 0; symbol < LAT_NATIVE_SYMBOL_COUNT; symbol++) {
+            uint32_t words[2] = {0x1e00000cu, 0x4c000180u};
+            if (patch_address(words, 2, symbol * 8,
+                              pack->runtime_trampolines + symbol * 4)) {
+                fclose(file);
+                return fail(error, error_size, "cannot encode runtime prefix");
+            }
+            fprintf(file, ".word 0x%08x,0x%08x\n", words[0], words[1]);
+        }
+        for (unsigned value = 0; value < FALLBACK_PF_TABLE_SIZE; value++) {
+            fprintf(file, ".byte %u\n", __builtin_parity(value) ? 0 : 4);
+        }
+        fprintf(file, ".zero %llu\n", (unsigned long long)(cursor -
+                LAT_NATIVE_SYMBOL_COUNT * 8 - FALLBACK_PF_TABLE_SIZE));
+    }
     int have_local_dispatch = 0;
     for (guint i = 0; i < pack->code_order->len; i++) {
         const LatNativeTbV1 *tb = g_array_index(
@@ -2589,7 +2639,15 @@ static int emit_module_sources(const char *native_image,
         return fail(error, error_size, "cannot create output directory %s",
                     output_directory);
     }
-    const LatNativeImageHeaderV2 *header = (const void *)image;
+    const LatNativeImageHeaderV2 *original = (const void *)image;
+    LatNativeImageHeaderV2 adjusted = *original;
+    uint64_t prefix = original->code_size >= (UINT64_C(1) << 31) ? 4096 : 0;
+    if (original->code_size > SIZE_MAX - prefix) {
+        g_free(image);
+        return fail(error, error_size, "native code prefix overflows");
+    }
+    adjusted.code_size += prefix;
+    const LatNativeImageHeaderV2 *header = &adjusted;
     if (program && (!guest_sha256 ||
                     memcmp(header->guest_sha256, guest_sha256, 32))) {
         g_free(image);
@@ -2621,6 +2679,7 @@ static int emit_module_sources(const char *native_image,
         .guest_rva_indexes = g_hash_table_new_full(
             g_int64_hash, g_int64_equal, g_free, NULL),
         .runtime_trampolines = (header->code_size + 3) & ~(uint64_t)3,
+        .runtime_prefix = prefix,
         .fallback_relocations = g_new0(uint64_t, header->relocation_count),
         .fallback_targets = g_array_new(FALSE, FALSE, sizeof(uint64_t)),
         .fallback_indexes = g_hash_table_new_full(
@@ -2632,6 +2691,7 @@ static int emit_module_sources(const char *native_image,
            header->relocation_count * sizeof(*pack.relocations));
     memcpy(pack.pc_maps, image + header->pc_map_offset,
            header->pc_map_count * sizeof(*pack.pc_maps));
+    shift_runtime_prefix(&pack);
     for (uint64_t i = 0; i < header->tb_count; i++) {
         const LatNativeTbV1 *tb = &pack.tbs[i];
         g_array_append_val(pack.code_order, tb);
@@ -2657,7 +2717,8 @@ static int emit_module_sources(const char *native_image,
         pack.relocation_patch_targets[i] = pack.relocation_targets[i];
     }
     allocate_fallback_stubs(&pack);
-    memcpy(pack.code, image + header->code_offset, header->code_size);
+    memset(pack.code, 0, prefix);
+    memcpy(pack.code + prefix, image + header->code_offset, original->code_size);
     int all_ranges_valid = all_tb_ranges_valid(&pack);
     pack.preserve_native_layout = header->tu_count != 0;
     if (all_ranges_valid) {
