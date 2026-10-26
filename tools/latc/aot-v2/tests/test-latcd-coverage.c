@@ -639,6 +639,20 @@ static void test_copy_root_recovery(void)
     g_free(directory);
 }
 
+static int restore_compiler_budgets(const LatcdConfig *config, char *error, size_t size)
+{
+    LatcdBudgetRecovery work = {0};
+    unsigned visited;
+    int result;
+    do {
+        result = restore_compiler_budgets_step(config, &work, 1, &visited, error, size);
+        g_assert_cmpuint(visited, <=, 1);
+        if (result == 1) g_assert_nonnull(work.cursor);
+    } while (result == 1);
+    g_assert_null(work.cursor);
+    return result;
+}
+
 static void test_compiler_input_recovery(void)
 {
     char *directory = g_dir_make_tmp("latcd-input-recovery-XXXXXX", NULL);

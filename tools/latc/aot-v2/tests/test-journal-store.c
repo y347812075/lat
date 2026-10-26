@@ -524,6 +524,8 @@ static void check_range_edges(const char *parent, const char *source,
 
 int main(void)
 {
+    /* These fixtures invoke run_service directly, after simulated startup. */
+    atomic_store(&compiler_budget_recovery_state, 1);
     alarm(60);
     char *directory = g_dir_make_tmp("journal-store-XXXXXX", NULL);
     g_assert_nonnull(directory);

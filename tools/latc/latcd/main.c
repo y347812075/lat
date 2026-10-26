@@ -218,6 +218,14 @@ static volatile sig_atomic_t stop_requested;
 static volatile sig_atomic_t compiler_process_groups[LATCD_MAX_WORKERS];
 static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
 static LatcdCacheCapacity generation_capacity = LATCD_CACHE_CAPACITY_INIT;
+/* Admission stays closed until both persistent compiler budget passes finish. */
+static atomic_int compiler_budget_recovery_state;
+typedef struct LatcdBudgetRecovery {
+    DIR *cursor;
+    bool scanning_tasks;
+    unsigned visited;
+} LatcdBudgetRecovery;
+static LatcdBudgetRecovery compiler_budget_recovery;
 
 static int fail(char *error, size_t error_size, const char *format, ...);
 
@@ -1375,25 +1383,36 @@ static int record_compiler_budget(const LatcdConfig *config, const char *id,
     return lease < 0 ? -1 : 0;
 }
 
-static int restore_compiler_budgets(const LatcdConfig *config, char *error, size_t error_size)
+static int restore_compiler_budgets_step(const LatcdConfig *config,
+    LatcdBudgetRecovery *work, unsigned budget, unsigned *visited,
+    char *error, size_t error_size)
 {
     int root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int gc = root < 0 ? -1 : open_task_directory(root, ".gc");
     int tasks = gc < 0 ? -1 : open_task_directory(gc, "tasks");
     int budgets = gc < 0 ? -1 : open_task_directory(gc, "compiler-budgets");
-    DIR *directory = budgets < 0 ? NULL : fdopendir(budgets);
+    DIR *directory = work->cursor;
     int result = -1;
-    unsigned visited = 0;
-    if (!directory && budgets >= 0) close(budgets);
+    *visited = 0;
+    int64_t started = g_get_monotonic_time();
     struct stat cache;
-    if (!directory || tasks < 0 || fstat(root, &cache)) goto out;
-    for (;;) {
+    if (budgets < 0 || tasks < 0 || fstat(root, &cache)) goto out;
+    if (!directory) {
+        int scan = openat(work->scanning_tasks ? tasks : budgets, ".",
+                          O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        directory = scan < 0 ? NULL : fdopendir(scan);
+        if (!directory) { if (scan >= 0) close(scan); goto out; }
+    }
+    while (!work->scanning_tasks) {
+        if (stop_requested || *visited >= budget || (*visited &&
+            g_get_monotonic_time() - started >= 10000)) { result = 1; goto out; }
         errno = 0;
         struct dirent *entry = readdir(directory);
         if (!entry) { result = errno ? -1 : 0; break; }
         const char *name = entry->d_name;
         if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
-        if (++visited > 100000 || stop_requested || strlen(name) != 40 ||
+        (*visited)++;
+        if (++work->visited > 100000 || strlen(name) != 40 ||
             strcmp(name + 36, ".ini")) break;
         char id[37];
         memcpy(id, name, 36);
@@ -1436,21 +1455,30 @@ static int restore_compiler_budgets(const LatcdConfig *config, char *error, size
         g_key_file_free(record);
         if (!valid) break;
     }
-    if (!result) {
+    if (!work->scanning_tasks && !result) {
+        closedir(directory);
+        directory = NULL;
+        work->scanning_tasks = true;
         int scan = openat(tasks, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        DIR *task_directory = scan < 0 ? NULL : fdopendir(scan);
-        if (!task_directory) {
+        directory = scan < 0 ? NULL : fdopendir(scan);
+        if (!directory) {
             if (scan >= 0) close(scan);
             result = -1;
         }
-        while (task_directory) {
+    }
+    if (work->scanning_tasks && directory) {
+        result = -1;
+        for (;;) {
+            if (stop_requested || *visited >= budget || (*visited &&
+                g_get_monotonic_time() - started >= 10000)) { result = 1; break; }
             errno = 0;
-            struct dirent *entry = readdir(task_directory);
-            if (!entry) { if (errno) result = -1; break; }
+            struct dirent *entry = readdir(directory);
+            if (!entry) { result = errno ? -1 : 0; break; }
             const char *name = entry->d_name;
             if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
             result = -1;
-            if (++visited > 100000 || stop_requested || strlen(name) != 40 ||
+            (*visited)++;
+            if (++work->visited > 100000 || strlen(name) != 40 ||
                 strcmp(name + 36, ".ini")) break;
             char id[37];
             memcpy(id, name, 36);
@@ -1497,14 +1525,15 @@ static int restore_compiler_budgets(const LatcdConfig *config, char *error, size
             if (!copying) latcd_cache_capacity_unknown_task(&generation_capacity, id);
             result = 0;
         }
-        if (task_directory) closedir(task_directory);
     }
 out:
-    if (directory) closedir(directory);
+    work->cursor = result == 1 ? directory : NULL;
+    if (result != 1 && directory) closedir(directory);
+    if (budgets >= 0) close(budgets);
     if (tasks >= 0) close(tasks);
     if (gc >= 0) close(gc);
     if (root >= 0) close(root);
-    return result ? fail(error, error_size, "capacity: compiler budget recovery incomplete or unsafe") : 0;
+    return result < 0 ? fail(error, error_size, "capacity: compiler budget recovery incomplete or unsafe") : result;
 }
 
 static int record_compiler_release(const LatcdConfig *config, const char *id,
@@ -1831,6 +1860,17 @@ static void *compiler_input_recovery_worker(void *opaque)
         if (now >= next) {
             char error[256];
             unsigned visited;
+            if (!atomic_load(&compiler_budget_recovery_state)) {
+                int result = restore_compiler_budgets_step(work->config,
+                    &compiler_budget_recovery, 32, &visited, error, sizeof(error));
+                if (result <= 0) {
+                    atomic_store(&compiler_budget_recovery_state, result < 0 ? -1 : 1);
+                    if (result < 0) fprintf(stderr, "latcd: %s\n", error);
+                }
+                next = g_get_monotonic_time() + 100000;
+                continue;
+            }
+            if (atomic_load(&compiler_budget_recovery_state) < 0) break;
             int result = recover_compiler_inputs_step(work->config, &cursor, 32,
                 &visited, error, sizeof(error));
             if (result < 0 && !failed) fprintf(stderr, "latcd: %s\n", error);
@@ -3725,6 +3765,7 @@ static void write_stats_locked(LatcdService *service)
     unsigned unknown_budgets = generation_capacity.unknown_tasks ?
         g_hash_table_size(generation_capacity.unknown_tasks) : 0;
     bool capacity_ready = generation_capacity.ready;
+    int budget_recovery = atomic_load(&compiler_budget_recovery_state);
     pthread_mutex_unlock(&generation_capacity.lock);
     int length = snprintf(contents, sizeof(contents),
         "{\"requests\":%" PRIu64 ",\"queued\":%" PRIu64
@@ -3738,6 +3779,7 @@ static void write_stats_locked(LatcdService *service)
         ",\"publication_reserved_bytes\":%" PRIu64 ",\"compiler_peak_reserved_bytes\":%" PRIu64
         ",\"recovered_compiler_reserved_bytes\":%" PRIu64
         ",\"unknown_compiler_budget_tasks\":%u"
+        ",\"compiler_budget_recovery_state\":%d"
         ",\"generation_capacity_ready\":%s}\n",
         service->requests, service->queued, service->deduplicated,
         service->cache_hits, service->compiled, service->failed,
@@ -3746,7 +3788,8 @@ static void write_stats_locked(LatcdService *service)
         g_hash_table_size(service->active),
         g_hash_table_size(service->running_sources), service->config->workers,
         service->config->max_cache_bytes, (long)getpid(), generation_bytes,
-        publication_bytes, transient_bytes, recovered_bytes, unknown_budgets, capacity_ready ? "true" : "false");
+        publication_bytes, transient_bytes, recovered_bytes, unknown_budgets, budget_recovery,
+        capacity_ready ? "true" : "false");
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
         ssize_t written = write(fd, contents, length);
@@ -4264,6 +4307,13 @@ static int service_queue_request(LatcdService *service, int source_fd,
     char *snapshot = NULL;
     char *tbset = NULL;
     response_init(response, request->request_id);
+    if (atomic_load(&compiler_budget_recovery_state) != 1) {
+        response->status = LATCD_STATUS_QUEUE_FULL;
+        g_strlcpy(response->message, "capacity: compiler budget recovery pending or unsafe",
+                  sizeof(response->message));
+        g_free(temporary_dir);
+        return -1;
+    }
     struct stat identity;
     snapshot = reuse_active_source(service, source_fd, temporary_dir,
                                     response->source_sha256, &identity);
@@ -5217,7 +5267,7 @@ static int run_service(const LatcdConfig *config)
     pthread_mutex_lock(&service.lock);
     write_stats_locked(&service);
     pthread_mutex_unlock(&service.lock);
-    if (recovered_journals) {
+    if (recovered_journals && atomic_load(&compiler_budget_recovery_state) == 1) {
         LatcdResponseV2 recovered = {0};
         response_init(&recovered, 1);
         if (journal_queue_receipts(config, &service, journal_build,
@@ -5262,9 +5312,17 @@ static int run_service(const LatcdConfig *config)
     };
     nfds_t channel_count = 1;
     GPtrArray *pending_flushes = g_ptr_array_new();
+    int previous_budget_recovery = -2;
     while (!stop_requested) {
+        int budget_recovery = atomic_load(&compiler_budget_recovery_state);
+        if (budget_recovery != previous_budget_recovery) {
+            pthread_mutex_lock(&service.lock);
+            write_stats_locked(&service);
+            pthread_mutex_unlock(&service.lock);
+            previous_budget_recovery = budget_recovery;
+        }
         finish_flush_requests(&service, pending_flushes, false);
-        admit_journal_receipts_periodically(
+        if (budget_recovery == 1) admit_journal_receipts_periodically(
             config, &service, journal_build, journal_codegen,
             &last_journal_admission, &journal_admission_error);
         int available = poll(channels, channel_count, 250);
@@ -5875,8 +5933,16 @@ int main(int argc, char **argv)
         close(cache_owner);
         return 1;
     }
-    if (restore_compiler_budgets(&config, error, sizeof(error))) {
-        fprintf(stderr, "latcd: %s\n", error);
+    unsigned budget_visited;
+    int budget_result;
+    do {
+        budget_result = restore_compiler_budgets_step(&config, &compiler_budget_recovery,
+            32, &budget_visited, error, sizeof(error));
+    } while (!serve && budget_result == 1 && !stop_requested);
+    atomic_store(&compiler_budget_recovery_state, budget_result < 0 ? -1 : budget_result == 0);
+    if (budget_result < 0 || stop_requested) {
+        fprintf(stderr, "latcd: %s\n", stop_requested ? "budget recovery deferred by stop request" : error);
+        if (compiler_budget_recovery.cursor) closedir(compiler_budget_recovery.cursor);
         latcd_cache_capacity_close(&generation_capacity);
         close(cache_owner);
         return 1;
@@ -5888,6 +5954,7 @@ int main(int argc, char **argv)
         return 1;
     }
     int result = serve ? run_service(&config) : run_once(&config);
+    if (compiler_budget_recovery.cursor) closedir(compiler_budget_recovery.cursor);
     latcd_cache_capacity_close(&generation_capacity);
     close(cache_owner);
     return result;
