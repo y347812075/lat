@@ -1553,6 +1553,172 @@ int latcd_tombstone_delete_due(const char *root, const char *name, uint64_t grac
     return tombstone_delete(root, name, &grace_us, error, error_size);
 }
 
+typedef struct RetirementCandidate {
+    uint64_t deadline, enqueued, epoch;
+} RetirementCandidate;
+
+struct LatcdRetirementQueue {
+    char *root;
+    uint64_t grace, epoch;
+    unsigned visited;
+    DIR *cursor;
+    GHashTable *candidates;
+    bool complete;
+};
+
+LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grace_us)
+{
+    LatcdRetirementQueue *queue = g_new0(LatcdRetirementQueue, 1);
+    queue->root = g_strdup(root);
+    queue->grace = grace_us;
+    queue->candidates = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    return queue;
+}
+
+void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
+{
+    if (!queue) return;
+    if (queue->cursor) closedir(queue->cursor);
+    g_hash_table_unref(queue->candidates);
+    g_free(queue->root); g_free(queue);
+}
+
+static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t size,
+                          const char *boot, uint64_t now)
+{
+    GKeyFile *record = g_key_file_new();
+    bool valid = !memchr(raw, 0, size) && g_key_file_load_from_data(record, raw, size, 0, NULL) &&
+        record_shape_valid(record);
+    char *source = g_key_file_get_string(record, "transaction", "source", NULL);
+    char *state = g_key_file_get_string(record, "transaction", "state", NULL);
+    valid = valid && source_valid(source) && state &&
+        (!strcmp(state, "PREPARED") || !strcmp(state, "RETIRED") ||
+         !strcmp(state, "ABORTED") || !strcmp(state, "UNKNOWN"));
+    if (!valid || strcmp(state, "RETIRED")) goto out;
+    char *old64 = g_key_file_get_string(record, "transaction", "previous", NULL);
+    char *next64 = g_key_file_get_string(record, "transaction", "next", NULL);
+    char *objects64 = g_key_file_get_string(record, "transaction", "objects", NULL);
+    gsize old_size = 0, next_size = 0, object_size = 0;
+    guchar *old = old64 ? decode_snapshot(old64, &old_size) : NULL;
+    guchar *next = next64 ? decode_snapshot(next64, &next_size) : NULL;
+    guchar *objects = objects64 ? g_base64_decode(objects64, &object_size) : NULL;
+    char *canonical = objects ? g_base64_encode(objects, object_size) : NULL;
+    uint64_t stamp;
+    valid = record_string_is(record, "transaction", "version", "2") && old && next && objects &&
+        canonical && !g_strcmp0(canonical, objects64) &&
+        record_string_is(record, "transaction", "binding_status", "COMPLETE") &&
+        record_string_is(record, "transaction", "objects_status", "RECORDED") &&
+        !latcd_retirement_validate_binding(source, (char *)old, old_size, (char *)next, next_size,
+                                          (char *)objects, object_size) &&
+        record_string_is(record, "transaction", "retired_boot", boot) &&
+        record_uint64(record, "transaction", "retired_boottime_us", &stamp) && stamp <= now &&
+        queue->grace <= UINT64_MAX - stamp;
+    GHashTable *old_refs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    GHashTable *next_refs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    valid = valid && (!old_size || manifest_references(source, (char *)old, old_size, old_refs)) &&
+        manifest_references(source, (char *)next, next_size, next_refs);
+    GHashTableIter iterator;
+    gpointer key;
+    g_hash_table_iter_init(&iterator, old_refs);
+    while (valid && g_hash_table_iter_next(&iterator, &key, NULL)) {
+        if (g_hash_table_contains(next_refs, key)) continue;
+        RetirementCandidate *candidate = g_hash_table_lookup(queue->candidates, key);
+        if (!candidate) {
+            if (g_hash_table_size(queue->candidates) >= 128) { valid = false; break; }
+            candidate = g_new0(RetirementCandidate, 1);
+            candidate->enqueued = now;
+            g_hash_table_insert(queue->candidates, g_strdup(key), candidate);
+        }
+        uint64_t deadline = stamp + queue->grace;
+        candidate->deadline = candidate->epoch == queue->epoch ? MAX(candidate->deadline, deadline) : deadline;
+        candidate->epoch = queue->epoch;
+    }
+    g_hash_table_unref(old_refs); g_hash_table_unref(next_refs);
+    g_free(canonical); g_free(objects); g_free(next); g_free(old);
+    g_free(objects64); g_free(next64); g_free(old64);
+out:
+    g_free(source); g_free(state); g_key_file_unref(record);
+    return valid;
+}
+
+int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
+                                 uint64_t time_us, LatcdRetirementQueueStats *stats,
+                                 char *error, size_t error_size)
+{
+    if (!queue || !entries || !time_us || time_us > INT64_MAX / 2 || !stats)
+        return fail(error, error_size, "invalid retirement queue budget");
+    memset(stats, 0, sizeof(*stats));
+    int result = -1;
+    char *boot = NULL;
+    struct timespec clock;
+    uint64_t now = 0;
+    if (clock_gettime(CLOCK_BOOTTIME, &clock) || clock.tv_sec < 0 ||
+        (uint64_t)clock.tv_sec > UINT64_MAX / 1000000 ||
+        !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL)) goto out;
+    g_strchomp(boot);
+    if (!hold_id_valid(boot)) goto out;
+    now = (uint64_t)clock.tv_sec * 1000000 + clock.tv_nsec / 1000;
+    if (!queue->cursor) {
+        queue->complete = false;
+        queue->visited = 0;
+        queue->epoch++;
+        int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (root < 0) goto out;
+        int store = open_store(root, false), saved = errno;
+        close(root);
+        if (store < 0) {
+            if (saved == ENOENT) { result = 0; goto sweep_complete; }
+            goto out;
+        }
+        queue->cursor = fdopendir(store);
+        if (!queue->cursor) { close(store); goto out; }
+    }
+    int64_t started = g_get_monotonic_time();
+    result = 1;
+    while (stats->visited < entries && (uint64_t)(g_get_monotonic_time() - started) < time_us) {
+        errno = 0;
+        struct dirent *entry = readdir(queue->cursor);
+        if (!entry) { result = errno ? -1 : 0; break; }
+        stats->visited++;
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        char *raw = NULL;
+        size_t size;
+        bool valid = ++queue->visited <= 100000 && name_valid(entry->d_name) &&
+            !read_file(dirfd(queue->cursor), entry->d_name, RECORD_LIMIT, &raw, &size) &&
+            queue_record(queue, raw, size, boot, now);
+        g_free(raw);
+        if (!valid) { result = -1; break; }
+    }
+sweep_complete:
+    if (!result) {
+        GHashTableIter iterator;
+        gpointer value;
+        g_hash_table_iter_init(&iterator, queue->candidates);
+        while (g_hash_table_iter_next(&iterator, NULL, &value))
+            if (((RetirementCandidate *)value)->epoch != queue->epoch) g_hash_table_iter_remove(&iterator);
+        queue->complete = true;
+    }
+out:
+    if (result <= 0 && queue->cursor) { closedir(queue->cursor); queue->cursor = NULL; }
+    if (result < 0) queue->complete = false;
+    stats->complete = queue->complete;
+    stats->candidates = g_hash_table_size(queue->candidates);
+    GHashTableIter iterator;
+    gpointer value;
+    g_hash_table_iter_init(&iterator, queue->candidates);
+    while (g_hash_table_iter_next(&iterator, NULL, &value)) {
+        RetirementCandidate *candidate = value;
+        if (candidate->deadline <= now) {
+            stats->due++;
+            uint64_t ready = MAX(candidate->deadline, candidate->enqueued);
+            if (ready <= now) stats->oldest_due_wait_us = MAX(stats->oldest_due_wait_us, now - ready);
+        } else if (!stats->next_deadline_us || candidate->deadline < stats->next_deadline_us)
+            stats->next_deadline_us = candidate->deadline;
+    }
+    g_free(boot);
+    return result < 0 ? fail(error, error_size, "retirement queue discovery incomplete or unsafe") : result;
+}
+
 static void recovery_object_free(gpointer pointer)
 {
     RecoveryObject *object = pointer;

@@ -81,4 +81,20 @@ int latcd_tombstone_delete(const char *root, const char *name,
 int latcd_tombstone_delete_due(const char *root, const char *name, uint64_t grace_us,
                                char *error, size_t error_size);
 
+typedef struct LatcdRetirementQueue LatcdRetirementQueue;
+typedef struct LatcdRetirementQueueStats {
+    unsigned candidates, due, visited;
+    uint64_t next_deadline_us, oldest_due_wait_us;
+    bool complete;
+} LatcdRetirementQueueStats;
+
+/* Single I/O worker owns this diagnostic queue under the management lease.
+ * Bounded transaction discovery only, not liveness verification/admission.
+ * Retains original enqueue time across sweeps; no deletion or timer handoff. */
+LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grace_us);
+int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
+                                 uint64_t time_us, LatcdRetirementQueueStats *stats,
+                                 char *error, size_t error_size);
+void latcd_retirement_queue_free(LatcdRetirementQueue *queue);
+
 #endif

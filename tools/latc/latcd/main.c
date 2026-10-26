@@ -226,6 +226,8 @@ typedef struct LatcdBudgetRecovery {
     unsigned visited;
 } LatcdBudgetRecovery;
 static LatcdBudgetRecovery compiler_budget_recovery;
+static pthread_mutex_t retirement_queue_lock = PTHREAD_MUTEX_INITIALIZER;
+static LatcdRetirementQueueStats retirement_queue_stats;
 
 static int fail(char *error, size_t error_size, const char *format, ...);
 
@@ -1854,9 +1856,22 @@ static void *compiler_input_recovery_worker(void *opaque)
     LatcdTaskRecovery *work = opaque;
     DIR *cursor = NULL;
     int64_t next = 0;
+    int64_t next_retirement = 0;
     bool failed = false;
+    LatcdRetirementQueue *retirement = latcd_retirement_queue_new(work->config->cache_dir,
+        UINT64_C(600) * 1000000);
     while (!atomic_load(&work->stopping) && !stop_requested) {
         int64_t now = g_get_monotonic_time();
+        if (now >= next_retirement) {
+            LatcdRetirementQueueStats stats;
+            char error[256];
+            int result = latcd_retirement_queue_step(retirement, 32, 10000,
+                &stats, error, sizeof(error));
+            pthread_mutex_lock(&retirement_queue_lock);
+            retirement_queue_stats = stats;
+            pthread_mutex_unlock(&retirement_queue_lock);
+            next_retirement = g_get_monotonic_time() + (result == 1 ? 100000 : 5000000);
+        }
         if (now >= next) {
             char error[256];
             unsigned visited;
@@ -1881,6 +1896,7 @@ static void *compiler_input_recovery_worker(void *opaque)
         nanosleep(&pause, NULL);
     }
     if (cursor) closedir(cursor);
+    latcd_retirement_queue_free(retirement);
     return NULL;
 }
 
@@ -3756,7 +3772,7 @@ static void write_stats_locked(LatcdService *service)
     }
     char *temporary = g_strdup_printf("%s.tmp.%ld",
         service->config->stats_path, (long)getpid());
-    char contents[1024];
+    char contents[2048];
     pthread_mutex_lock(&generation_capacity.lock);
     uint64_t generation_bytes = generation_capacity.committed;
     uint64_t publication_bytes = generation_capacity.reserved;
@@ -3767,6 +3783,9 @@ static void write_stats_locked(LatcdService *service)
     bool capacity_ready = generation_capacity.ready;
     int budget_recovery = atomic_load(&compiler_budget_recovery_state);
     pthread_mutex_unlock(&generation_capacity.lock);
+    pthread_mutex_lock(&retirement_queue_lock);
+    LatcdRetirementQueueStats retirement = retirement_queue_stats;
+    pthread_mutex_unlock(&retirement_queue_lock);
     int length = snprintf(contents, sizeof(contents),
         "{\"requests\":%" PRIu64 ",\"queued\":%" PRIu64
         ",\"deduplicated\":%" PRIu64 ",\"cache_hits\":%" PRIu64
@@ -3780,6 +3799,10 @@ static void write_stats_locked(LatcdService *service)
         ",\"recovered_compiler_reserved_bytes\":%" PRIu64
         ",\"unknown_compiler_budget_tasks\":%u"
         ",\"compiler_budget_recovery_state\":%d"
+        ",\"retirement_candidates\":%u,\"retirement_due_candidates\":%u"
+        ",\"retirement_next_deadline_boottime_us\":%" PRIu64
+        ",\"retirement_oldest_due_wait_us\":%" PRIu64
+        ",\"retirement_discovery_complete\":%s,\"automatic_deletion_enabled\":false"
         ",\"generation_capacity_ready\":%s}\n",
         service->requests, service->queued, service->deduplicated,
         service->cache_hits, service->compiled, service->failed,
@@ -3789,6 +3812,8 @@ static void write_stats_locked(LatcdService *service)
         g_hash_table_size(service->running_sources), service->config->workers,
         service->config->max_cache_bytes, (long)getpid(), generation_bytes,
         publication_bytes, transient_bytes, recovered_bytes, unknown_budgets, budget_recovery,
+        retirement.candidates, retirement.due, retirement.next_deadline_us, retirement.oldest_due_wait_us,
+        retirement.complete ? "true" : "false",
         capacity_ready ? "true" : "false");
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
@@ -5313,13 +5338,16 @@ static int run_service(const LatcdConfig *config)
     nfds_t channel_count = 1;
     GPtrArray *pending_flushes = g_ptr_array_new();
     int previous_budget_recovery = -2;
+    int64_t last_retirement_stats = 0;
     while (!stop_requested) {
         int budget_recovery = atomic_load(&compiler_budget_recovery_state);
-        if (budget_recovery != previous_budget_recovery) {
+        if (budget_recovery != previous_budget_recovery ||
+            g_get_monotonic_time() - last_retirement_stats >= G_USEC_PER_SEC) {
             pthread_mutex_lock(&service.lock);
             write_stats_locked(&service);
             pthread_mutex_unlock(&service.lock);
             previous_budget_recovery = budget_recovery;
+            last_retirement_stats = g_get_monotonic_time();
         }
         finish_flush_requests(&service, pending_flushes, false);
         if (budget_recovery == 1) admit_journal_receipts_periodically(

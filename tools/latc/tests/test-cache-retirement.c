@@ -1173,6 +1173,44 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
     if (mutation == 14) g_key_file_set_string(record, "transaction", "retired_boottime_us", "18446744073709551616");
     char *raw = g_key_file_to_data(record, NULL, NULL);
     put(record_path, raw);
+    if (!mutation) {
+        LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 0);
+        LatcdRetirementQueueStats stats;
+        int queued;
+        unsigned steps = 0;
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0 && stats.visited <= 1 && ++steps < 100);
+        } while (queued);
+        assert(stats.complete && stats.candidates == 3 && stats.due == 3);
+        uint64_t wait = stats.oldest_due_wait_us;
+        g_usleep(10000);
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.complete && stats.candidates == 3 && stats.oldest_due_wait_us > wait);
+        put(record_path, "[transaction]\nstate=BROKEN\n");
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+        } while (queued > 0);
+        assert(queued < 0 && !stats.complete && stats.candidates == 3);
+        assert(!unlink(record_path));
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.complete && !stats.candidates);
+        put(record_path, raw);
+        latcd_retirement_queue_free(queue);
+        queue = latcd_retirement_queue_new(root, UINT64_C(3600) * 1000000);
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.candidates == 3 && !stats.due && stats.next_deadline_us);
+        latcd_retirement_queue_free(queue);
+    }
     fd = open(paths[0], O_RDONLY | O_CLOEXEC);
     assert(fd >= 0);
     if (!mutation && executor) {

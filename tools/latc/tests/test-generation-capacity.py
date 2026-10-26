@@ -77,6 +77,16 @@ def run(prefix, guest, work):
             generated = [p for p in cache.iterdir() if p.suffix in {".so", ".native", ".tbset"}]
             unique = {(p.stat().st_dev, p.stat().st_ino): p.stat().st_size for p in generated}
             assert after["generation_logical_bytes"] == sum(unique.values()), after
+            deadline = time.monotonic() + 15
+            while True:
+                observed = json.loads(stats.read_bytes())
+                assert not observed['automatic_deletion_enabled'], observed
+                if observed['retirement_discovery_complete'] and observed['retirement_candidates']:
+                    assert not observed['retirement_due_candidates'], observed
+                    assert observed['retirement_next_deadline_boottime_us'], observed
+                    break
+                assert daemon.poll() is None and time.monotonic() < deadline, observed
+                time.sleep(.05)
             result = subprocess.run([str(prefix / "bin/latx-x86_64"), str(guest)],
                 env=dict(env, LATX_AOT="0", LATX_AOT_V2="1", LATX_AOT_V2_CACHE_DIR=str(cache),
                          LATX_AOT_V2_AUTOSTART="0", LATC_STRICT_FILE_AOT="1",
