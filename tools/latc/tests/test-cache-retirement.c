@@ -1183,6 +1183,102 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
             assert(queued >= 0 && stats.visited <= 1 && ++steps < 100);
         } while (queued);
         assert(stats.complete && stats.candidates == 3 && stats.due == 3);
+        assert(!latcd_retirement_queue_checkpoint(queue, error, sizeof(error)));
+        LatcdRetirementQueue *restored = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_restore(restored, error, sizeof(error)));
+        LatcdRetirementAttempt probe;
+        assert(!latcd_retirement_queue_take(restored, UINT64_MAX, &probe));
+        do {
+            queued = latcd_retirement_queue_step(restored, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        struct timespec clock;
+        assert(!clock_gettime(CLOCK_BOOTTIME, &clock));
+        uint64_t actual_now = (uint64_t)clock.tv_sec * 1000000 + clock.tv_nsec / 1000;
+        assert(latcd_retirement_queue_take(restored, actual_now, &probe) == 1);
+        assert(!latcd_retirement_queue_defer(restored, &probe, actual_now, true));
+        assert(!latcd_retirement_queue_checkpoint(restored, error, sizeof(error)));
+        latcd_retirement_queue_free(restored);
+        restored = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_restore(restored, error, sizeof(error)));
+        do {
+            queued = latcd_retirement_queue_step(restored, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        LatcdRetirementAttempt next_attempt;
+        assert(latcd_retirement_queue_take(restored, actual_now, &next_attempt) == 1);
+        assert(strcmp(next_attempt.name, probe.name) && next_attempt.sequence > probe.sequence);
+        assert(latcd_retirement_queue_defer(restored, &probe, actual_now, true) < 0);
+        assert(!latcd_retirement_queue_defer(restored, &next_attempt, actual_now, false));
+        latcd_retirement_queue_free(restored);
+        char *checkpoint = g_build_filename(root, ".gc", "retirement-scheduler.ini", NULL);
+        struct stat checkpoint_before, checkpoint_after;
+        assert(!stat(checkpoint, &checkpoint_before));
+        assert(!latcd_retirement_queue_checkpoint(queue, error, sizeof(error)));
+        assert(!latcd_retirement_queue_checkpoint(queue, error, sizeof(error)));
+        assert(!stat(checkpoint, &checkpoint_before));
+        assert(!latcd_retirement_queue_checkpoint(queue, error, sizeof(error)));
+        assert(!stat(checkpoint, &checkpoint_after));
+        assert(checkpoint_before.st_ino == checkpoint_after.st_ino &&
+               checkpoint_before.st_mtim.tv_sec == checkpoint_after.st_mtim.tv_sec &&
+               checkpoint_before.st_mtim.tv_nsec == checkpoint_after.st_mtim.tv_nsec);
+        GKeyFile *saved = g_key_file_new();
+        assert(g_key_file_load_from_file(saved, checkpoint, 0, NULL));
+        char *good_checkpoint = g_key_file_to_data(saved, NULL, NULL);
+        for (unsigned damaged = 0; damaged < 8; damaged++) {
+            assert(g_key_file_load_from_data(saved, good_checkpoint, -1, 0, NULL));
+            if (damaged == 0) g_key_file_set_string(saved, "queue", "sequence", "-1");
+            if (damaged == 1) g_key_file_set_string(saved, "queue", "sequence", "18446744073709551616");
+            if (damaged == 2) g_key_file_set_string(saved, "queue", "unexpected", "1");
+            if (damaged == 3) g_key_file_remove_key(saved, "queue", "boot", NULL);
+            char *data = g_key_file_to_data(saved, NULL, NULL);
+            put(checkpoint, damaged == 4 ? "[queue]\nversion=" : data);
+            g_free(data);
+            char *alias = g_strconcat(checkpoint, ".alias", NULL);
+            if (damaged == 5) assert(!chmod(checkpoint, 0666));
+            if (damaged == 6) assert(!link(checkpoint, alias));
+            if (damaged == 7) {
+                assert(!rename(checkpoint, alias));
+                assert(!symlink(alias, checkpoint));
+            }
+            restored = latcd_retirement_queue_new(root, 0);
+            assert(latcd_retirement_queue_restore(restored, error, sizeof(error)) < 0);
+            latcd_retirement_queue_free(restored);
+            if (damaged == 5) assert(!chmod(checkpoint, 0600));
+            if (damaged == 6) assert(!unlink(alias));
+            if (damaged == 7) {
+                assert(!unlink(checkpoint));
+                assert(!rename(alias, checkpoint));
+            }
+            g_free(alias);
+        }
+        for (unsigned changed = 0; changed < 2; changed++) {
+            assert(g_key_file_load_from_data(saved, good_checkpoint, -1, 0, NULL));
+            if (!changed) g_key_file_set_string(saved, "queue", "boot", "00000000-0000-0000-0000-000000000000");
+            else g_key_file_set_uint64(saved, "queue", "grace_us", 1);
+            char *data = g_key_file_to_data(saved, NULL, NULL);
+            put(checkpoint, data);
+            g_free(data);
+            restored = latcd_retirement_queue_new(root, 0);
+            assert(!latcd_retirement_queue_restore(restored, error, sizeof(error)));
+            assert(!latcd_retirement_queue_take(restored, UINT64_MAX, &probe));
+            do {
+                queued = latcd_retirement_queue_step(restored, 1, 10000, &stats, error, sizeof(error));
+                assert(queued >= 0);
+            } while (queued);
+            assert(latcd_retirement_queue_take(restored, UINT64_MAX, &probe) == 1);
+            assert(probe.sequence == 1);
+            latcd_retirement_queue_free(restored);
+        }
+        assert(g_key_file_load_from_data(saved, good_checkpoint, -1, 0, NULL));
+        g_key_file_set_uint64(saved, "queue", "cache_inode", 0);
+        char *bad_checkpoint = g_key_file_to_data(saved, NULL, NULL);
+        put(checkpoint, bad_checkpoint);
+        restored = latcd_retirement_queue_new(root, 0);
+        assert(latcd_retirement_queue_restore(restored, error, sizeof(error)) < 0);
+        latcd_retirement_queue_free(restored);
+        assert(!unlink(checkpoint));
+        g_free(good_checkpoint); g_free(bad_checkpoint); g_key_file_unref(saved); g_free(checkpoint);
         LatcdRetirementAttempt attempts[3], invalid;
         for (unsigned i = 0; i < 3; i++) {
             assert(latcd_retirement_queue_take(queue, UINT64_MAX - 10000000, &attempts[i]) == 1);

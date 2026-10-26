@@ -113,4 +113,13 @@ int latcd_retirement_queue_defer(LatcdRetirementQueue *queue,
                                  const LatcdRetirementAttempt *attempt,
                                  uint64_t now_us, bool busy);
 
+/* Owner lease and single queue worker required. Strict cache/boot/grace-bound
+ * scheduler checkpoint; never restores discovery completeness or deadlines.
+ * Restore before the first sweep. A reboot starts fresh scheduling ages.
+ * Missing checkpoint is normal; corrupt/unsafe metadata is an error. */
+int latcd_retirement_queue_checkpoint(LatcdRetirementQueue *queue,
+                                      char *error, size_t error_size);
+int latcd_retirement_queue_restore(LatcdRetirementQueue *queue,
+                                   char *error, size_t error_size);
+
 #endif

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise indexed publication reservations in an isolated real daemon."""
 
+import configparser
 import hashlib
 import json
 import os
@@ -93,6 +94,30 @@ def run(prefix, guest, work):
                          LATC_DISABLE_PRETRANSLATE="1"), capture_output=True, timeout=30)
             (work / "strict.log").write_bytes(result.stdout + result.stderr)
             assert result.returncode == 42
+            checkpoint = cache / '.gc/retirement-scheduler.ini'
+            saved = configparser.ConfigParser()
+            saved.read(checkpoint)
+            ages = {name: saved[name]['enqueued'] for name in saved.sections() if name != 'queue'}
+            assert ages
+            checkpoint_inode = checkpoint.stat().st_ino
+            daemon.terminate()
+            assert daemon.wait(timeout=20) == 0
+            stats.unlink()
+            daemon = subprocess.Popen(command, env=env, stdout=log, stderr=log)
+            deadline = time.monotonic() + 20
+            while True:
+                observed = json.loads(stats.read_bytes()) if stats.exists() else {}
+                if observed.get('retirement_discovery_complete'):
+                    assert observed['retirement_candidates'] == len(ages), observed
+                    assert not observed['automatic_deletion_enabled'], observed
+                    recovered = configparser.ConfigParser()
+                    recovered.read(checkpoint)
+                    assert ages == {name: recovered[name]['enqueued'] for name in
+                                    recovered.sections() if name != 'queue'}
+                    assert checkpoint.stat().st_ino == checkpoint_inode
+                    break
+                assert daemon.poll() is None and time.monotonic() < deadline, observed
+                time.sleep(.05)
             updated = current.read_bytes()
             orphan = cache / ("b" * 64 + "-" + "c" * 64 + ".native")
             orphan.write_bytes(b"external generation")
@@ -103,7 +128,7 @@ def run(prefix, guest, work):
             subprocess.run([sys.executable, str(Path(__file__).with_name("make-tbset.py")),
                             str(second), str(second_keys)], env=env, check=True)
             client("external-change", second_keys, second, False)
-            rejected = settled(2, 2)
+            rejected = settled(0, 1)
             assert not rejected["generation_capacity_ready"]
             assert current.read_bytes() == updated and orphan.read_bytes() == b"external generation"
             assert b"capacity:" in (work / "daemon.log").read_bytes()
@@ -137,7 +162,7 @@ def run(prefix, guest, work):
         finally:
             daemon.terminate()
             assert daemon.wait(timeout=20) == 0
-    print("generation-capacity: publication/retry/index/strict42/compiler-peak-admission PASS")
+    print("generation-capacity: publication/retry/index/strict42/scheduler-restart/compiler-peak-admission PASS")
 
 
 if __name__ == "__main__":

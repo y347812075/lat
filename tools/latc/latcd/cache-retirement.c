@@ -1783,6 +1783,143 @@ int latcd_retirement_queue_defer(LatcdRetirementQueue *queue,
     return 0;
 }
 
+static int queue_clock(char **boot, uint64_t *now)
+{
+    struct timespec clock;
+    if (clock_gettime(CLOCK_BOOTTIME, &clock) || clock.tv_sec < 0 ||
+        (uint64_t)clock.tv_sec > UINT64_MAX / 1000000 ||
+        !g_file_get_contents("/proc/sys/kernel/random/boot_id", boot, NULL, NULL)) return -1;
+    g_strchomp(*boot);
+    if (!hold_id_valid(*boot)) return -1;
+    *now = (uint64_t)clock.tv_sec * 1000000 + clock.tv_nsec / 1000;
+    return 0;
+}
+
+int latcd_retirement_queue_checkpoint(LatcdRetirementQueue *queue,
+                                      char *error, size_t error_size)
+{
+    if (!queue || !queue->complete || queue->cursor)
+        return fail(error, error_size, "cannot checkpoint incomplete retirement discovery");
+    int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = root < 0 ? -1 : open_directory(root, ".gc", true);
+    GKeyFile *record = g_key_file_new();
+    struct stat cache;
+    char *boot = NULL;
+    uint64_t now;
+    int result = -1;
+    if (gc < 0 || fstat(root, &cache) || queue_clock(&boot, &now)) goto out;
+    g_key_file_set_integer(record, "queue", "version", 1);
+    g_key_file_set_string(record, "queue", "boot", boot);
+    g_key_file_set_uint64(record, "queue", "cache_device", cache.st_dev);
+    g_key_file_set_uint64(record, "queue", "cache_inode", cache.st_ino);
+    g_key_file_set_uint64(record, "queue", "grace_us", queue->grace);
+    g_key_file_set_uint64(record, "queue", "sequence", queue->sequence);
+    g_key_file_set_string(record, "queue", "last_source", queue->last_source);
+    GList *names = g_hash_table_get_keys(queue->candidates);
+    names = g_list_sort(names, (GCompareFunc)strcmp);
+    for (GList *item = names; item; item = item->next) {
+        const char *name = item->data;
+        RetirementCandidate *candidate = g_hash_table_lookup(queue->candidates, name);
+        g_key_file_set_uint64(record, name, "enqueued", candidate->enqueued);
+        g_key_file_set_uint64(record, name, "last_attempt", candidate->last_attempt);
+        g_key_file_set_uint64(record, name, "retry_at", candidate->retry_at);
+        g_key_file_set_uint64(record, name, "busy_count", candidate->busy_count);
+    }
+    g_list_free(names);
+    char *previous = NULL;
+    size_t previous_size;
+    int status = read_file(gc, "retirement-scheduler.ini", RECORD_LIMIT, &previous, &previous_size);
+    gsize current_size;
+    char *current = g_key_file_to_data(record, &current_size, NULL);
+    result = status < 0 || current_size > RECORD_LIMIT ? -1 : !status && previous_size == current_size &&
+        !memcmp(previous, current, current_size) ? 0 : write_record(gc, "retirement-scheduler.ini", record);
+    g_free(previous); g_free(current);
+out:
+    g_free(boot); g_key_file_unref(record);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    return result ? fail(error, error_size, "cannot persist retirement scheduler") : 0;
+}
+
+int latcd_retirement_queue_restore(LatcdRetirementQueue *queue,
+                                   char *error, size_t error_size)
+{
+    if (!queue || queue->epoch || queue->cursor || g_hash_table_size(queue->candidates))
+        return fail(error, error_size, "retirement scheduler restore requires a new queue");
+    int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = root < 0 ? -1 : open_directory(root, ".gc", false);
+    int result = -1;
+    char *raw = NULL, *boot = NULL;
+    size_t size;
+    uint64_t now;
+    struct stat cache;
+    GKeyFile *record = g_key_file_new();
+    GHashTable *restored = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    if (root < 0) goto out;
+    if (gc < 0) { if (errno == ENOENT) result = 0; goto out; }
+    int status = read_file(gc, "retirement-scheduler.ini", RECORD_LIMIT, &raw, &size);
+    if (status) { if (status == 1) result = 0; goto out; }
+    if (fstat(root, &cache) || queue_clock(&boot, &now) || memchr(raw, 0, size) ||
+        !g_key_file_load_from_data(record, raw, size, 0, NULL)) goto out;
+    const char *keys[] = {"version", "boot", "cache_device", "cache_inode", "grace_us", "sequence", "last_source"};
+    uint64_t device, inode, grace, sequence;
+    char *saved_boot = g_key_file_get_string(record, "queue", "boot", NULL);
+    char *last_source = g_key_file_get_string(record, "queue", "last_source", NULL);
+    bool valid = exact_keys(record, "queue", keys, G_N_ELEMENTS(keys)) &&
+        record_string_is(record, "queue", "version", "1") && hold_id_valid(saved_boot) &&
+        last_source && (!*last_source || source_valid(last_source)) &&
+        record_uint64(record, "queue", "cache_device", &device) && device == (uint64_t)cache.st_dev &&
+        record_uint64(record, "queue", "cache_inode", &inode) && inode == (uint64_t)cache.st_ino &&
+        record_uint64(record, "queue", "grace_us", &grace) &&
+        record_uint64(record, "queue", "sequence", &sequence) && sequence < UINT64_MAX;
+    bool compatible = valid && !strcmp(boot, saved_boot) && grace == queue->grace;
+    gsize count;
+    char **groups = g_key_file_get_groups(record, &count);
+    valid &= count <= 129;
+    const char *fields[] = {"enqueued", "last_attempt", "retry_at", "busy_count"};
+    for (gsize i = 0; valid && i < count; i++) {
+        const char *name = groups[i];
+        if (!strcmp(name, "queue")) continue;
+        char source[65] = {0};
+        if (strlen(name) >= 64) memcpy(source, name, 64);
+        uint64_t enqueued, attempted, retry, busy;
+        valid = source_valid(source) && object_name_valid(source, name) &&
+            exact_keys(record, name, fields, G_N_ELEMENTS(fields)) &&
+            record_uint64(record, name, "enqueued", &enqueued) &&
+            record_uint64(record, name, "last_attempt", &attempted) && attempted <= sequence &&
+            record_uint64(record, name, "retry_at", &retry) &&
+            record_uint64(record, name, "busy_count", &busy) && busy <= 7;
+        if (compatible) valid = valid && enqueued <= now &&
+            (retry <= now || retry - now <= UINT64_C(5000000));
+        if (valid && compatible) {
+            RetirementCandidate *candidate = g_new0(RetirementCandidate, 1);
+            candidate->enqueued = enqueued;
+            candidate->last_attempt = attempted;
+            candidate->retry_at = retry;
+            candidate->busy_count = busy;
+            g_hash_table_insert(restored, g_strdup(name), candidate);
+        }
+    }
+    g_strfreev(groups);
+    if (valid) {
+        if (compatible) {
+            g_hash_table_unref(queue->candidates);
+            queue->candidates = restored;
+            restored = NULL;
+            queue->sequence = sequence;
+            g_strlcpy(queue->last_source, last_source, sizeof(queue->last_source));
+        }
+        result = 0;
+    }
+    g_free(last_source); g_free(saved_boot);
+out:
+    if (restored) g_hash_table_unref(restored);
+    g_free(boot); g_free(raw); g_key_file_unref(record);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    return result ? fail(error, error_size, "retirement scheduler state unsafe or incompatible") : 0;
+}
+
 static void recovery_object_free(gpointer pointer)
 {
     RecoveryObject *object = pointer;

@@ -1860,13 +1860,21 @@ static void *compiler_input_recovery_worker(void *opaque)
     bool failed = false;
     LatcdRetirementQueue *retirement = latcd_retirement_queue_new(work->config->cache_dir,
         UINT64_C(600) * 1000000);
+    char retirement_error[256];
+    bool retirement_safe = !latcd_retirement_queue_restore(retirement, retirement_error, sizeof(retirement_error));
+    if (!retirement_safe) fprintf(stderr, "latcd: %s\n", retirement_error);
     while (!atomic_load(&work->stopping) && !stop_requested) {
         int64_t now = g_get_monotonic_time();
-        if (now >= next_retirement) {
+        if (retirement_safe && now >= next_retirement) {
             LatcdRetirementQueueStats stats;
             char error[256];
             int result = latcd_retirement_queue_step(retirement, 32, 10000,
                 &stats, error, sizeof(error));
+            if (!result && latcd_retirement_queue_checkpoint(retirement, error, sizeof(error))) {
+                stats.complete = false;
+                retirement_safe = false;
+                fprintf(stderr, "latcd: %s\n", error);
+            }
             pthread_mutex_lock(&retirement_queue_lock);
             retirement_queue_stats = stats;
             pthread_mutex_unlock(&retirement_queue_lock);
