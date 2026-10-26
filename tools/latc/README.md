@@ -174,6 +174,26 @@ cold-start validation remain incomplete. Config is still incomplete/quarantined;
 receipt collection does not admit compilation, recover jobs or publish modules.
 See `docs/aot-v2-handoff/runtime-key-delivery.md` and `STATUS.md`.
 
+`test-aot-v2-journal-fd` is an opt-in real guest integrity regression and is
+currently expected to fail until guest descriptor isolation is implemented.
+Build `tests/x86-journal-fd.S` on an x86 Docker toolchain with
+`gcc -nostdlib -static -no-pie -Wl,--build-id=none -DATTACK=N`, using values
+0 through 4 for `guest-control`, `guest-truncate`, `guest-setfl`,
+`guest-overwrite`, and `guest-dup`. Put the five executables in `GUEST_DIR`:
+
+```sh
+make -C tools/latc test-aot-v2-journal-fd \
+  INSTALL_PREFIX=/path/to/private/install/usr GUEST_DIR=/path/to/guests \
+  WORK="$HOME/tmp/journal-fd-new-run"
+```
+
+The test discloses the real internal journal fd to each guest through stdin;
+this is not a natural-discovery or sandbox claim. All operations must return
+`EBADF`, the guest must continue, and collection after SIGKILL must preserve
+both executed fixture keys. Each case records product hashes, commands,
+fd state, before/after journals, raw collector replies and available receipts.
+Corruption is reported as failure, never accepted as the expected test result.
+
 In service mode, `flush-source` and `flush-all` freeze the accepted sequence
 for each applicable source when admitted. They wait for those targets without
 blocking the request loop or extending the barrier to later submissions.

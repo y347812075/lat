@@ -1338,6 +1338,12 @@ test-aot-v2-install:
 	sh tests/test-aot-v2-install.sh $(INSTALL_PREFIX) $(X86_ROOTFS) \
 	  $(X86_GUEST) $(BUILD)/aot-v2-install-test
 
+.PHONY: test-aot-v2-journal-fd
+test-aot-v2-journal-fd:
+	@test -n "$(INSTALL_PREFIX)" -a -n "$(GUEST_DIR)" -a -n "$(WORK)" || \
+	  { echo "usage: make test-aot-v2-journal-fd INSTALL_PREFIX=... GUEST_DIR=... WORK=..."; exit 2; }
+	python3 tests/test-aot-v2-journal-fd.py "$(INSTALL_PREFIX)" "$(GUEST_DIR)" "$(WORK)"
+
 .PHONY: test-latcd-async-flush
 test-latcd-async-flush:
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(WORK)" || \
