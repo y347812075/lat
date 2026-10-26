@@ -182,6 +182,10 @@ def run(prefix, guest, work):
                 assert (cache / record).exists()
                 assert output.exists() == (stage != 'recorded')
                 assert current.read_bytes() == original
+                if stage != 'handedoff':
+                    recovered = plan()['tasks'][record]
+                    assert recovered.get('copy_released', False) == (stage == 'recorded'), recovered
+                    assert not recovered['completion_verified']
             finally:
                 if daemon is not None and daemon.poll() is None:
                     daemon.kill()

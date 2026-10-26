@@ -1484,8 +1484,11 @@ static bool compiler_input_release_matches(int releases, const char *name,
     return valid;
 }
 
-/* Caller owns the daemon lease. Recover input ownership only: surviving
- * descendants retain SH on the task inode; existing outputs stay roots. */
+static int release_copy_task(const LatcdConfig *config, int task_pin,
+                              char *error, size_t error_size);
+
+/* Caller owns the daemon lease. Surviving tasks retain SH on the task inode;
+ * only absent outputs may reach a recovered terminal state. */
 static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
                                     unsigned budget, unsigned *visited,
                                     char *error, size_t error_size)
@@ -1536,8 +1539,16 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
             pread(task, data, before.st_size, 0) == before.st_size &&
             !fstat(task, &after) && metadata_equal(&before, &after) &&
             g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
+        char *version = g_key_file_get_string(record, "task", "version", NULL);
+        bool copying = version && !strcmp(version, "2");
+        g_free(version);
+        if (valid && copying) {
+            char *kind = g_key_file_get_string(record, "task", "kind", NULL);
+            valid = kind && !strcmp(kind, "COPY");
+            g_free(kind);
+        }
         const char *fields[] = {"version", "id", "state", "build_id"};
-        const char *values[] = {"1", id, "BOUND", LATC_BUILD_ID};
+        const char *values[] = {copying ? "2" : "1", id, "BOUND", LATC_BUILD_ID};
         for (unsigned i = 0; valid && i < G_N_ELEMENTS(fields); i++) {
             char *value = g_key_file_get_string(record, "task", fields[i], NULL);
             valid = value && !strcmp(value, values[i]);
@@ -1570,6 +1581,19 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
             g_clear_error(&parse_error);
         }
         g_key_file_free(record);
+        if (copying) {
+            int copy_releases = open_task_directory(gc, "copy-releases");
+            bool absent = copy_releases >= 0 &&
+                fstatat(copy_releases, name, &existing, AT_SYMLINK_NOFOLLOW) && errno == ENOENT;
+            if (copy_releases >= 0) close(copy_releases);
+            /* Keep the independent EX held through receipt persistence. The
+             * ordinary publisher instead still owns its original task SH. */
+            if (valid && temporary_matches && absent &&
+                !release_copy_task(config, task, error, error_size)) recovered++;
+            else retained++;
+            if (task >= 0) close(task);
+            continue;
+        }
         if (task >= 0) close(task);
         /* Reopen and retake EX in the normal writer; never upgrade an OFD or
          * treat the earlier observation as permanent authority. */
@@ -1597,7 +1621,7 @@ out:
     if (tasks >= 0) close(tasks);
     if (gc >= 0) close(gc);
     if (root >= 0) close(root);
-    if (recovered) fprintf(stderr, "latcd: compiler input recovery recovered=%u retained=%u\n", recovered, retained);
+    if (recovered) fprintf(stderr, "latcd: task root recovery recovered=%u retained=%u\n", recovered, retained);
     if (result < 0) fail(error, error_size, "cannot scan compiler task roots: %s", strerror(errno));
     return result;
 }
@@ -2168,7 +2192,8 @@ static int release_copy_task(const LatcdConfig *config, int task_pin,
     GKeyFile *release = g_key_file_new();
     char *id = NULL, *name = NULL;
     int root = -1, gc = -1, releases = -1, temporary = -1, lease = -1;
-    if (fstat(task_pin, &task) || task.st_size <= 0 || task.st_size > 65536 ||
+    if (fstat(task_pin, &task) || !S_ISREG(task.st_mode) || task.st_uid != geteuid() ||
+        task.st_nlink != 1 || (task.st_mode & 0222) || task.st_size <= 0 || task.st_size > 65536 ||
         pread(task_pin, data, task.st_size, 0) != task.st_size ||
         !g_key_file_load_from_data(record, data, task.st_size, G_KEY_FILE_NONE, NULL)) goto out;
     id = g_key_file_get_string(record, "task", "id", NULL);
@@ -2179,8 +2204,19 @@ static int release_copy_task(const LatcdConfig *config, int task_pin,
     if (root < 0 || (gc = open_task_directory(root, ".gc")) < 0 ||
         (releases = open_task_directory(gc, "copy-releases")) < 0 ||
         (temporary = openat(root, ".tmp", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) < 0 ||
-        !fstatat(temporary, name, &output, AT_SYMLINK_NOFOLLOW) || errno != ENOENT ||
-        fsync(temporary)) goto out;
+        !fstatat(temporary, name, &output, AT_SYMLINK_NOFOLLOW) || errno != ENOENT) goto out;
+    struct stat tmp;
+    if (fstat(temporary, &tmp) || tmp.st_uid != geteuid() || (tmp.st_mode & 0077)) goto out;
+    const char *fields[] = {"device", "inode"};
+    uint64_t expected[] = {tmp.st_dev, tmp.st_ino};
+    for (unsigned i = 0; i < G_N_ELEMENTS(fields); i++) {
+        GError *parse_error = NULL;
+        guint64 value = g_key_file_get_uint64(record, "temporary", fields[i], &parse_error);
+        bool valid = !parse_error && value == expected[i];
+        g_clear_error(&parse_error);
+        if (!valid) goto out;
+    }
+    if (fsync(temporary)) goto out;
     g_key_file_set_string(release, "handoff", "version", "1");
     g_key_file_set_string(release, "handoff", "task_id", id);
     g_key_file_set_string(release, "handoff", "state", "RELEASED");

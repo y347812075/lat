@@ -578,6 +578,67 @@ static void test_incremental_retention(const char *compiler, unsigned mode)
     g_free(directory);
 }
 
+static void test_copy_root_recovery(void)
+{
+    char *directory = g_dir_make_tmp("latcd-copy-recovery-XXXXXX", NULL);
+    g_assert_nonnull(directory);
+    char *temporary = g_build_filename(directory, ".tmp", NULL);
+    g_assert_cmpint(g_mkdir(temporary, 0700), ==, 0);
+    char *input = g_build_filename(temporary, "input", NULL);
+    char *output = g_build_filename(temporary, "output", NULL);
+    g_assert_true(g_file_set_contents(input, "copy input", -1, NULL));
+    int pins[] = {open(input, O_RDONLY | O_CLOEXEC), -1, -1, -1};
+    g_assert_cmpint(pins[0], >=, 0);
+    const char *paths[] = {input, NULL, NULL, NULL, output, NULL};
+    uint8_t digest[32] = {1};
+    LatcdConfig config = {.cache_dir = directory};
+    char *id = NULL, error[256];
+    int lease = record_task(&config, true, paths, pins, digest, NULL, &id,
+        error, sizeof(error));
+    g_assert_cmpint(lease, >=, 0);
+    char *name = g_strdup_printf("%s.ini", id);
+    char *receipt = g_build_filename(directory, ".gc", "copy-releases", name, NULL);
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_false(g_file_test(receipt, G_FILE_TEST_EXISTS));
+    close(lease);
+    g_assert_true(g_file_set_contents(output, "partial", -1, NULL));
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_false(g_file_test(receipt, G_FILE_TEST_EXISTS));
+    char *contents = NULL;
+    g_assert_true(g_file_get_contents(output, &contents, NULL, NULL));
+    g_assert_cmpstr(contents, ==, "partial");
+    g_free(contents);
+    g_assert_cmpint(g_unlink(output), ==, 0);
+    char *old = g_strconcat(temporary, "-old", NULL);
+    g_assert_cmpint(g_rename(temporary, old), ==, 0);
+    g_assert_cmpint(g_mkdir(temporary, 0700), ==, 0);
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_false(g_file_test(receipt, G_FILE_TEST_EXISTS));
+    g_assert_cmpint(g_rmdir(temporary), ==, 0);
+    g_assert_cmpint(g_rename(old, temporary), ==, 0);
+    record_boundary = RECORD_FILE_SYNC;
+    record_hits = 0;
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(record_hits, ==, 1);
+    g_assert_false(g_file_test(receipt, G_FILE_TEST_EXISTS));
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    struct stat before, after;
+    g_assert_cmpint(stat(receipt, &before), ==, 0);
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(stat(receipt, &after), ==, 0);
+    g_assert_true(metadata_equal(&before, &after));
+    close(pins[0]);
+    g_free(old);
+    g_free(receipt);
+    g_free(name);
+    g_free(id);
+    g_free(input);
+    g_free(output);
+    g_free(temporary);
+    remove_fixture_tree(directory);
+    g_free(directory);
+}
+
 static void test_compiler_input_recovery(void)
 {
     char *directory = g_dir_make_tmp("latcd-input-recovery-XXXXXX", NULL);
@@ -871,6 +932,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc == 1) {
+        test_copy_root_recovery();
         test_compiler_input_recovery();
         test_task_record_persistence();
         test_compile_space();
