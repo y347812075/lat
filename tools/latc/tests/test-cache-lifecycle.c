@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +59,117 @@ static int signal_byte(int fd)
         count = write(fd, &byte, 1);
     } while (count < 0 && errno == EINTR);
     return count == 1 ? 0 : -1;
+}
+
+static atomic_int paused_close_fd = -1;
+static int close_entered, close_release;
+static _Thread_local int allocation_wait_ready = -1;
+
+int __real_pthread_cond_wait(pthread_cond_t *condition, pthread_mutex_t *mutex);
+int __wrap_pthread_cond_wait(pthread_cond_t *condition, pthread_mutex_t *mutex)
+{
+    if (allocation_wait_ready >= 0) {
+        if (signal_byte(allocation_wait_ready)) return EIO;
+        allocation_wait_ready = -1;
+    }
+    return __real_pthread_cond_wait(condition, mutex);
+}
+
+int __real_close(int fd);
+int __wrap_close(int fd)
+{
+    if (fd == atomic_load(&paused_close_fd)) {
+        if (signal_byte(close_entered) || wait_byte(close_release)) {
+            errno = EIO;
+            return -1;
+        }
+    }
+    return __real_close(fd);
+}
+
+static void *close_guest_fd(void *opaque)
+{
+    int fd = *(int *)opaque;
+    return lat_aot_v2_internal_fd_close_guest(fd) ? (void *)1 : NULL;
+}
+
+typedef struct AllocationAttempt {
+    int ready;
+    int acquired;
+    int fd;
+} AllocationAttempt;
+
+static void *allocate_internal_fd(void *opaque)
+{
+    AllocationAttempt *attempt = opaque;
+    allocation_wait_ready = attempt->ready;
+    lat_aot_v2_internal_fd_allocation_lock();
+    attempt->fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    int result = attempt->fd < 0 ||
+        lat_aot_v2_internal_fd_register_locked(attempt->fd);
+    lat_aot_v2_internal_fd_unlock();
+    if (signal_byte(attempt->acquired)) result = -1;
+    return result ? (void *)1 : NULL;
+}
+
+static int test_guest_close(void)
+{
+    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (fd < 0 || lat_aot_v2_internal_fd_close_guest(fd) ||
+        lat_aot_v2_internal_fd_close_guest(fd) != -1 || errno != EBADF) return -1;
+    fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    lat_aot_v2_internal_fd_allocation_lock();
+    int registered = lat_aot_v2_internal_fd_register_locked(fd);
+    lat_aot_v2_internal_fd_unlock();
+    if (fd < 0 || registered || lat_aot_v2_internal_fd_close_guest(fd) != -1 ||
+        errno != EACCES || fcntl(fd, F_GETFD) < 0) return -1;
+    lat_aot_v2_internal_fd_lock();
+    int result = lat_aot_v2_internal_fd_unregister_close_locked(fd);
+    lat_aot_v2_internal_fd_unlock();
+    if (result) return -1;
+
+    int entered[2], release[2], ready[2], acquired[2];
+    if (pipe(entered) || pipe(release) || pipe(ready) || pipe(acquired)) return -1;
+    fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    int other = open("/dev/zero", O_RDONLY | O_CLOEXEC);
+    if (fd < 0 || other < 0) return -1;
+    close_entered = entered[1]; close_release = release[0];
+    atomic_store(&paused_close_fd, fd);
+    pthread_t closer, allocator;
+    if (pthread_create(&closer, NULL, close_guest_fd, &fd) || wait_byte(entered[0]))
+        return -1;
+    pid_t child = fork();
+    if (child < 0) return -1;
+    if (!child) {
+        alarm(5);
+        atomic_store(&paused_close_fd, -1);
+        lat_aot_v2_internal_fd_allocation_lock();
+        int copy = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        int result = copy < 0 || lat_aot_v2_internal_fd_register_locked(copy);
+        lat_aot_v2_internal_fd_unlock();
+        _exit(result ? 1 : 0);
+    }
+    int status;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+        WEXITSTATUS(status)) return -1;
+    AllocationAttempt attempt = {.ready = ready[1], .acquired = acquired[1], .fd = -1};
+    if (pthread_create(&allocator, NULL, allocate_internal_fd, &attempt) ||
+        wait_byte(ready[0])) return -1;
+    if (lat_aot_v2_internal_fd_fcntl(other, F_GETFD, 0) != FD_CLOEXEC ||
+        lat_aot_v2_internal_fd_close_guest(other)) return -1;
+    if (signal_byte(release[1])) return -1;
+    void *closed, *allocated;
+    if (pthread_join(closer, &closed) || pthread_join(allocator, &allocated) ||
+        closed || allocated || wait_byte(acquired[0]) ||
+        !lat_aot_v2_internal_fd_is_protected(attempt.fd)) return -1;
+    atomic_store(&paused_close_fd, -1);
+    lat_aot_v2_internal_fd_lock();
+    result = lat_aot_v2_internal_fd_unregister_close_locked(attempt.fd);
+    lat_aot_v2_internal_fd_unlock();
+    for (int i = 0; i < 2; i++) {
+        close(entered[i]); close(release[i]); close(ready[i]); close(acquired[i]);
+    }
+    return result;
 }
 
 static int test_source_latch(const char *root)
@@ -154,6 +266,7 @@ typedef struct DupAttempt {
     int ready;
     bool dup3;
     bool snapshot;
+    bool close_guest;
     int command;
     int result;
     int error;
@@ -163,7 +276,9 @@ static void *attempt_dup(void *opaque)
 {
     DupAttempt *attempt = opaque;
     if (signal_byte(attempt->ready)) return (void *)1;
-    if (attempt->command >= 0)
+    if (attempt->close_guest)
+        attempt->result = lat_aot_v2_internal_fd_close_guest(attempt->source);
+    else if (attempt->command >= 0)
         attempt->result = lat_aot_v2_internal_fd_fcntl(attempt->source, attempt->command, 0);
     else if (attempt->snapshot)
         attempt->result = lat_aot_v2_internal_fd_snapshot_guest(attempt->source);
@@ -174,7 +289,8 @@ static void *attempt_dup(void *opaque)
     return NULL;
 }
 
-static int test_dup_registration(bool dup3, bool protect_source, bool snapshot, int command)
+static int test_dup_registration(bool dup3, bool protect_source, bool snapshot, int command,
+                                 bool close_guest)
 {
     int source = open("/dev/null", O_RDONLY | O_CLOEXEC);
     int target = open("/dev/zero", O_RDONLY | O_CLOEXEC);
@@ -184,7 +300,7 @@ static int test_dup_registration(bool dup3, bool protect_source, bool snapshot, 
     if (fstat(target, &before)) return -1;
     DupAttempt attempt = { .source = source, .target = target,
                            .ready = ready[1], .dup3 = dup3, .snapshot = snapshot,
-                           .command = command };
+                           .command = command, .close_guest = close_guest };
     pthread_t worker;
     /* Simulate an internal allocator completing registration while a guest
      * replacement has started but cannot yet enter the shared lock. */
@@ -455,19 +571,20 @@ int main(void)
     chmod(root, 0700);
     for (int dup3 = 0; dup3 < 2; dup3++)
         for (int source = 0; source < 2; source++)
-            if (test_dup_registration(dup3, source, false, -1)) {
+            if (test_dup_registration(dup3, source, false, -1, false)) {
                 fprintf(stderr, "atomic dup registration failed dup3=%d source=%d\n", dup3, source);
                 return 1;
             }
-    if (test_dup_registration(false, true, true, -1)) return 1;
+    if (test_dup_registration(false, true, true, -1, false) ||
+        test_dup_registration(false, true, false, -1, true)) return 1;
     const int commands[] = {F_GETFD, F_SETFD, F_DUPFD, F_DUPFD_CLOEXEC};
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
-        if (test_dup_registration(false, true, false, commands[i])) return 1;
+        if (test_dup_registration(false, true, false, commands[i], false)) return 1;
     int result = test_unsafe_layout(root) || test_source_latch(root) ||
         test_guest_fd_registry(root) || test_atfork_registry() ||
         test_fork_inheritance(root) || test_exec_closes_latch(root) ||
         test_artifact_latch(root) || test_tombstones(root) || test_guest_snapshot(root) ||
-        test_guest_fcntl();
+        test_guest_fcntl() || test_guest_close();
     if (cleanup(root)) {
         fprintf(stderr, "cannot clean lifecycle test directory %s: %s\n",
                 root, strerror(errno));

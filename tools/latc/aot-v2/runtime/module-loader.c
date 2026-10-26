@@ -184,7 +184,7 @@ int lat_aot_v2_module_open(const char *path,
     }
     memset(module, 0, sizeof(*module));
     module->backing_fd = -1;
-    lat_aot_v2_internal_fd_lock();
+    lat_aot_v2_internal_fd_allocation_lock();
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
         int saved = errno;

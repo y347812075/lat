@@ -5,11 +5,13 @@
 
 /* Protect runtime-owned fds from direct guest close/dup/fcntl operations. */
 void lat_aot_v2_internal_fd_lock(void);
+/* Wait for admitted guest closes before allocating any internal descriptor. */
+void lat_aot_v2_internal_fd_allocation_lock(void);
 void lat_aot_v2_internal_fd_unlock(void);
 
 /*
- * Caller holds the registry lock. Registration fails rather than allowing an
- * AOT object to run without lifetime protection.
+ * Caller holds the allocation lock from before opening/duplicating the fd.
+ * Registration fails rather than running an AOT object without protection.
  */
 int lat_aot_v2_internal_fd_register_locked(int fd);
 
@@ -32,5 +34,6 @@ int lat_aot_v2_internal_fd_try_flock(int fd, int operation);
 
 /* Only nonblocking descriptor flags/dup commands; record locks are excluded. */
 int lat_aot_v2_internal_fd_fcntl(int fd, int command, int argument);
+int lat_aot_v2_internal_fd_close_guest(int fd);
 
 #endif

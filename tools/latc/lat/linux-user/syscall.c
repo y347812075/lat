@@ -15460,7 +15460,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         }
 #endif
         fd_trans_unregister(arg1);
-        ret = get_errno(close(arg1));
+        ret = get_errno(latc_aot_v2_fd_close_guest(arg1));
 #ifdef CONFIG_LATX
         latx_syscall_fd_end();
 #endif

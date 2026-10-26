@@ -371,6 +371,11 @@ int latc_aot_v2_fd_fcntl(int fd, int command, int argument)
     return lat_aot_v2_internal_fd_fcntl(fd, command, argument);
 }
 
+int latc_aot_v2_fd_close_guest(int fd)
+{
+    return lat_aot_v2_internal_fd_close_guest(fd);
+}
+
 typedef struct LatAotV2KeyRetry {
     CPUState *cpu;
     target_ulong pc;

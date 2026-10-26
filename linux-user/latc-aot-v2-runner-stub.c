@@ -133,6 +133,11 @@ int latc_aot_v2_fd_fcntl(int fd, int command, int argument)
     return fcntl(fd, command, argument);
 }
 
+int latc_aot_v2_fd_close_guest(int fd)
+{
+    return close(fd);
+}
+
 void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
 {
     (void)guest_pc;

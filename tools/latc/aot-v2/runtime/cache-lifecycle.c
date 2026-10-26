@@ -203,7 +203,7 @@ int lat_aot_v2_cache_source_lock(const char *cache_dir,
         errno = EINVAL;
         return fail(error, error_size, "invalid source latch arguments");
     }
-    if (protect_from_guest) lat_aot_v2_internal_fd_lock();
+    if (protect_from_guest) lat_aot_v2_internal_fd_allocation_lock();
     int root = open(cache_dir, O_RDONLY | O_DIRECTORY |
                     O_CLOEXEC | O_NOFOLLOW);
     if (root < 0) {

@@ -12,6 +12,8 @@
 #include <unistd.h>
 
 static pthread_mutex_t registry_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t closes_idle = PTHREAD_COND_INITIALIZER;
+static size_t guest_closes;
 static int *protected_fds;
 static size_t protected_count;
 static size_t protected_capacity;
@@ -27,10 +29,17 @@ static void registry_atfork_release(void)
     pthread_mutex_unlock(&registry_lock);
 }
 
+static void registry_atfork_child(void)
+{
+    /* Other threads' pending closes cannot target the child's fd table. */
+    guest_closes = 0;
+    pthread_mutex_unlock(&registry_lock);
+}
+
 static void register_atfork_handlers(void)
 {
     (void)pthread_atfork(registry_atfork_prepare, registry_atfork_release,
-                         registry_atfork_release);
+                         registry_atfork_child);
 }
 
 __attribute__((constructor))
@@ -42,6 +51,12 @@ static void initialize_internal_fd_registry(void)
 void lat_aot_v2_internal_fd_lock(void)
 {
     pthread_mutex_lock(&registry_lock);
+}
+
+void lat_aot_v2_internal_fd_allocation_lock(void)
+{
+    pthread_mutex_lock(&registry_lock);
+    while (guest_closes) pthread_cond_wait(&closes_idle, &registry_lock);
 }
 
 void lat_aot_v2_internal_fd_unlock(void)
@@ -122,6 +137,26 @@ bool lat_aot_v2_internal_fd_is_protected(int fd)
     return protected;
 }
 
+int lat_aot_v2_internal_fd_close_guest(int fd)
+{
+    lat_aot_v2_internal_fd_lock();
+    if (fd_is_protected_locked(fd)) {
+        lat_aot_v2_internal_fd_unlock();
+        errno = EACCES;
+        return -1;
+    }
+    guest_closes++;
+    lat_aot_v2_internal_fd_unlock();
+    /* close may wait for a socket peer; only internal allocation must wait. */
+    int result = close(fd);
+    int saved = errno;
+    lat_aot_v2_internal_fd_lock();
+    if (!--guest_closes) pthread_cond_broadcast(&closes_idle);
+    lat_aot_v2_internal_fd_unlock();
+    errno = saved;
+    return result;
+}
+
 int lat_aot_v2_internal_fd_dup_replace(int oldfd, int newfd, int flags, bool use_dup3)
 {
     lat_aot_v2_internal_fd_lock();
@@ -140,7 +175,7 @@ int lat_aot_v2_internal_fd_dup_replace(int oldfd, int newfd, int flags, bool use
 
 int lat_aot_v2_internal_fd_snapshot_guest(int fd)
 {
-    lat_aot_v2_internal_fd_lock();
+    lat_aot_v2_internal_fd_allocation_lock();
     int snapshot = -1;
     if (fd_is_protected_locked(fd)) errno = EACCES;
     else {
