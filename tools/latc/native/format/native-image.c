@@ -509,20 +509,19 @@ int lat_native_image_validate(const void *data, size_t size,
     return 0;
 }
 
-int lat_native_image_merge_files(const char *base_path,
-                                 const char *delta_path,
-                                 const char *output_path,
-                                 char *error, size_t error_size)
+int lat_native_image_merge_memory(const void *base_input, size_t base_size,
+                                  const void *delta_input, size_t delta_size,
+                                  void **output, size_t *output_size_out,
+                                  char *error, size_t error_size)
 {
-    unsigned char *base_data = NULL;
-    unsigned char *delta_data = NULL;
+    const unsigned char *base_data = base_input;
+    const unsigned char *delta_data = delta_input;
     unsigned char *output_data = NULL;
-    size_t base_size = 0, delta_size = 0;
     int result = -1;
 
-    if (!base_path || !delta_path || !output_path ||
-        read_image(base_path, &base_data, &base_size, error, error_size) ||
-        read_image(delta_path, &delta_data, &delta_size, error, error_size) ||
+    if (output) *output = NULL;
+    if (output_size_out) *output_size_out = 0;
+    if (!base_data || !delta_data || !output || !output_size_out ||
         lat_native_image_validate(base_data, base_size, error, error_size) ||
         lat_native_image_validate(delta_data, delta_size, error, error_size)) {
         goto out;
@@ -798,10 +797,37 @@ int lat_native_image_merge_files(const char *base_path,
                                   error, error_size)) {
         goto out;
     }
-    result = write_image(output_path, output_data, output_size,
-                         error, error_size);
+    *output = output_data;
+    *output_size_out = output_size;
+    output_data = NULL;
+    result = 0;
 out:
     free(output_data);
+    return result;
+}
+
+int lat_native_image_merge_files(const char *base_path,
+                                 const char *delta_path,
+                                 const char *output_path,
+                                 char *error, size_t error_size)
+{
+    unsigned char *base_data = NULL;
+    unsigned char *delta_data = NULL;
+    void *merged = NULL;
+    size_t base_size = 0, delta_size = 0, merged_size = 0;
+    int result = -1;
+    if (!base_path || !delta_path || !output_path ||
+        read_image(base_path, &base_data, &base_size, error, error_size) ||
+        read_image(delta_path, &delta_data, &delta_size, error, error_size) ||
+        lat_native_image_merge_memory(base_data, base_size,
+            delta_data, delta_size, &merged, &merged_size,
+            error, error_size)) {
+        goto out;
+    }
+    result = write_image(output_path, merged, merged_size,
+                         error, error_size);
+out:
+    free(merged);
     free(delta_data);
     free(base_data);
     return result;

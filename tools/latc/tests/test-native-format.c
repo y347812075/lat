@@ -6,6 +6,7 @@
 #include <elf.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 _Static_assert(sizeof(LatX86StateV1) == 560,
@@ -277,6 +278,30 @@ int main(int argc, char **argv)
             fprintf(stderr, "cannot merge native images: %s\n", error);
             return 1;
         }
+        gchar *base_bytes = NULL, *delta_bytes = NULL, *merged_bytes = NULL;
+        gsize base_bytes_size = 0, delta_bytes_size = 0;
+        gsize file_merged_size = 0;
+        void *memory_merged = NULL;
+        size_t memory_merged_size = 0;
+        if (!g_file_get_contents(argv[1], &base_bytes, &base_bytes_size, NULL) ||
+            !g_file_get_contents(argv[2], &delta_bytes, &delta_bytes_size, NULL) ||
+            !g_file_get_contents(argv[3], &merged_bytes, &file_merged_size, NULL) ||
+            lat_native_image_merge_memory(base_bytes, base_bytes_size,
+                delta_bytes, delta_bytes_size, &memory_merged,
+                &memory_merged_size, error, sizeof(error)) ||
+            memory_merged_size != file_merged_size ||
+            memcmp(memory_merged, merged_bytes, file_merged_size)) {
+            fprintf(stderr, "memory and file native merges differ\n");
+            g_free(base_bytes);
+            g_free(delta_bytes);
+            g_free(merged_bytes);
+            free(memory_merged);
+            return 1;
+        }
+        g_free(base_bytes);
+        g_free(delta_bytes);
+        g_free(merged_bytes);
+        free(memory_merged);
         LatNativeTbV1 merged_tbs[2];
         LatNativeTuV1 merged_tus[2];
         LatNativeRelocationV1 merged_relocations[2];

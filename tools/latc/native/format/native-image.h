@@ -16,5 +16,11 @@ int lat_native_image_merge_files(const char *base_path,
                                  const char *delta_path,
                                  const char *output_path,
                                  char *error, size_t error_size);
+/* Caller releases *output with free(). The result is byte-identical to the
+ * file merge path and remains subject to the same quarantine checks. */
+int lat_native_image_merge_memory(const void *base_data, size_t base_size,
+                                  const void *delta_data, size_t delta_size,
+                                  void **output, size_t *output_size,
+                                  char *error, size_t error_size);
 
 #endif
