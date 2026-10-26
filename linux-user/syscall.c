@@ -2945,6 +2945,37 @@ static inline abi_long host_to_target_cmsg(struct target_msghdr *target_msgh,
     return 0;
 }
 
+static bool scm_has_protected_fd(const struct msghdr *message)
+{
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR((struct msghdr *)message);
+         cmsg; cmsg = CMSG_NXTHDR((struct msghdr *)message, cmsg)) {
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS ||
+            cmsg->cmsg_len < CMSG_LEN(0)) {
+            continue;
+        }
+        size_t bytes = cmsg->cmsg_len - CMSG_LEN(0);
+        int *fds = (int *)CMSG_DATA(cmsg);
+        for (size_t i = 0; i < bytes / sizeof(*fds); i++) {
+            if (latc_aot_v2_fd_is_protected(fds[i])) return true;
+        }
+    }
+    return false;
+}
+
+static void close_scm_fds(const struct msghdr *message)
+{
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR((struct msghdr *)message);
+         cmsg; cmsg = CMSG_NXTHDR((struct msghdr *)message, cmsg)) {
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS ||
+            cmsg->cmsg_len < CMSG_LEN(0)) {
+            continue;
+        }
+        size_t bytes = cmsg->cmsg_len - CMSG_LEN(0);
+        int *fds = (int *)CMSG_DATA(cmsg);
+        for (size_t i = 0; i < bytes / sizeof(*fds); i++) close(fds[i]);
+    }
+}
+
 /* do_setsockopt() Must return target values and target errnos. */
 static abi_long do_setsockopt(int sockfd, int level, int optname,
                               abi_ulong optval_addr, socklen_t optlen)
@@ -4745,6 +4776,12 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
             ret = get_errno(safe_recvmsg(fd, &msg, flags));
         }
 
+        if (!is_error(ret) && scm_has_protected_fd(&msg)) {
+            close_scm_fds(&msg);
+            ret = -TARGET_EACCES;
+            goto out;
+        }
+
         if (!is_error(ret)) {
             len = ret;
             trans = fd_trans_host_to_target_data(fd);
@@ -4820,6 +4857,19 @@ static abi_long do_sendrecvmmsg(int fd, abi_ulong target_msgvec,
     /* direct syscall (only for 64bit guest and host) */
     if(send==0) {
         ret = get_errno(safe_recvmmsg(fd, (struct msghdr *)mmsgp, vlen, flags, timeout));
+        if (!is_error(ret) && ret > 0) {
+            bool rejected = false;
+            for (int i = 0; i < ret; i++) {
+                rejected |= scm_has_protected_fd(
+                    (const struct msghdr *)&mmsgp[i].msg_hdr);
+            }
+            if (rejected) {
+                for (int i = 0; i < ret; i++) {
+                    close_scm_fds((const struct msghdr *)&mmsgp[i].msg_hdr);
+                }
+                ret = -TARGET_EACCES;
+            }
+        }
     } else {
         ret = get_errno(safe_sendmmsg(fd, (struct msghdr *)mmsgp, vlen, flags));
     }
@@ -10443,6 +10493,9 @@ static abi_long do_fcntl(CPUArchState *env, int fd, int cmd, abi_ulong arg)
     abi_long ret;
     int host_cmd = target_to_host_fcntl_cmd(cmd);
 
+    if (latc_aot_v2_fd_is_protected(fd)) {
+        return -TARGET_EACCES;
+    }
     if (host_cmd == -TARGET_EINVAL)
 	    return host_cmd;
 
@@ -13452,6 +13505,10 @@ static abi_long guest_fd_dup_replace(CPUArchState *env, abi_long oldfd,
 {
     abi_long ret;
 
+    if (latc_aot_v2_fd_is_protected(oldfd)) {
+        return -TARGET_EACCES;
+    }
+
 #ifdef CONFIG_LATX
     latx_syscall_fd_begin();
 #endif
@@ -15299,6 +15356,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         _exit(arg1);
         return 0; /* avoid warning */
     case TARGET_NR_read:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
         if (arg3 == 0) {
             return get_errno(safe_read(arg1, 0, 0));
         } else {
@@ -15313,6 +15371,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         }
         return ret;
     case TARGET_NR_write:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
         if (arg3 == 0) {
             return get_errno(safe_write(arg1, 0, 0));
         }
@@ -16381,7 +16440,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return ret;
 #endif
     case TARGET_NR_dup:
-        ret = get_errno(dup(arg1));
+        ret = latc_aot_v2_fd_is_protected(arg1) ? -TARGET_EACCES :
+              get_errno(dup(arg1));
         if (ret >= 0) {
             fd_trans_dup(arg1, ret);
         }
@@ -16598,6 +16658,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return ret;
 #endif
     case TARGET_NR_ioctl:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
         ret = do_ioctl(arg1, arg2, arg3);
 #ifdef CONFIG_LATX_DEBUG
         if (ret) {
@@ -17444,6 +17505,10 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return ret;
 #ifdef TARGET_NR_mmap
     case TARGET_NR_mmap:
+        if (!(arg4 & TARGET_MAP_ANONYMOUS) &&
+            latc_aot_v2_fd_is_protected(arg5)) {
+            return -TARGET_EACCES;
+        }
 #if (defined(TARGET_I386) && defined(TARGET_ABI32)) || \
     (defined(TARGET_ARM) && defined(TARGET_ABI32)) || \
     defined(TARGET_M68K) || defined(TARGET_CRIS) || defined(TARGET_MICROBLAZE) \
@@ -17514,6 +17579,10 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
 #ifdef TARGET_NR_mmap2
     case TARGET_NR_mmap2:
+        if (!(arg4 & TARGET_MAP_ANONYMOUS) &&
+            latc_aot_v2_fd_is_protected(arg5)) {
+            return -TARGET_EACCES;
+        }
 #ifndef MMAP_SHIFT
 #define MMAP_SHIFT 12
 #endif
@@ -18464,6 +18533,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return get_errno(safe_flock(arg1, arg2));
     case TARGET_NR_readv:
         {
+            if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
             struct iovec *vec = lock_iovec(VERIFY_WRITE, arg2, arg3, 0);
             if (vec != NULL) {
                 ret = get_errno(safe_readv(arg1, vec, arg3));
@@ -18475,6 +18545,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return ret;
     case TARGET_NR_writev:
         {
+            if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
             struct iovec *vec = lock_iovec_remap(VERIFY_READ, arg2, arg3, 1);
             if (vec != NULL) {
                 ret = get_errno(safe_writev(arg1, vec, arg3));
@@ -18487,6 +18558,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #if defined(TARGET_NR_preadv)
     case TARGET_NR_preadv:
         {
+            if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
             struct iovec *vec = lock_iovec(VERIFY_WRITE, arg2, arg3, 0);
             if (vec != NULL) {
                 unsigned long low, high;
@@ -18503,6 +18575,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #if defined(TARGET_NR_pwritev)
     case TARGET_NR_pwritev:
         {
+            if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
             struct iovec *vec = lock_iovec(VERIFY_READ, arg2, arg3, 1);
             if (vec != NULL) {
                 unsigned long low, high;
@@ -18519,6 +18592,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #if defined(TARGET_NR_preadv2)
     case TARGET_NR_preadv2:
         {
+            if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
             struct iovec *vec = lock_iovec(VERIFY_WRITE, arg2, arg3, 0);
             if (vec != NULL) {
                 unsigned long low, high;
@@ -18535,6 +18609,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #if defined(TARGET_NR_pwritev2)
     case TARGET_NR_pwritev2:
         {
+            if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
             struct iovec *vec = lock_iovec(VERIFY_READ, arg2, arg3, 1);
             if (vec != NULL) {
                 unsigned long low, high;
@@ -19145,6 +19220,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
 #ifdef TARGET_NR_pread64
     case TARGET_NR_pread64:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
         if (regpairs_aligned(cpu_env, num)) {
             arg4 = arg5;
             arg5 = arg6;
@@ -19185,6 +19261,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 
         return ret;
     case TARGET_NR_pwrite64:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
         if (regpairs_aligned(cpu_env, num)) {
             arg4 = arg5;
             arg5 = arg6;
@@ -19286,6 +19363,10 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #ifdef TARGET_NR_sendfile
     case TARGET_NR_sendfile:
     {
+        if (latc_aot_v2_fd_is_protected(arg1) ||
+            latc_aot_v2_fd_is_protected(arg2)) {
+            return -TARGET_EACCES;
+        }
         off_t *offp = NULL;
         off_t off;
         if (arg3) {
@@ -19308,6 +19389,10 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #ifdef TARGET_NR_sendfile64
     case TARGET_NR_sendfile64:
     {
+        if (latc_aot_v2_fd_is_protected(arg1) ||
+            latc_aot_v2_fd_is_protected(arg2)) {
+            return -TARGET_EACCES;
+        }
         off_t *offp = NULL;
         off_t off;
         if (arg3) {
@@ -21073,6 +21158,10 @@ defined(__loongarch__)
 #ifdef TARGET_NR_tee
     case TARGET_NR_tee:
         {
+            if (latc_aot_v2_fd_is_protected(arg1) ||
+                latc_aot_v2_fd_is_protected(arg2)) {
+                return -TARGET_EACCES;
+            }
             ret = get_errno(tee(arg1,arg2,arg3,arg4));
         }
         return ret;
@@ -21080,6 +21169,10 @@ defined(__loongarch__)
 #ifdef TARGET_NR_splice
     case TARGET_NR_splice:
         {
+            if (latc_aot_v2_fd_is_protected(arg1) ||
+                latc_aot_v2_fd_is_protected(arg3)) {
+                return -TARGET_EACCES;
+            }
             loff_t loff_in, loff_out;
             loff_t *ploff_in = NULL, *ploff_out = NULL;
             if (arg2) {
@@ -21111,6 +21204,7 @@ defined(__loongarch__)
 #ifdef TARGET_NR_vmsplice
 	case TARGET_NR_vmsplice:
         {
+            if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
             struct iovec *vec = lock_iovec(VERIFY_READ, arg2, arg3, 1);
             if (vec != NULL) {
                 ret = get_errno(vmsplice(arg1, vec, arg3, arg4));
@@ -21151,6 +21245,7 @@ defined(__loongarch__)
 #endif /* CONFIG_EVENTFD  */
 #if defined(CONFIG_FALLOCATE) && defined(TARGET_NR_fallocate)
     case TARGET_NR_fallocate:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
 #if TARGET_ABI_BITS == 32
         ret = get_errno(fallocate(arg1, arg2, target_offset64(arg3, arg4),
                                   target_offset64(arg5, arg6)));
@@ -21906,6 +22001,10 @@ defined(__loongarch__)
 #if defined(TARGET_NR_copy_file_range) && defined(__NR_copy_file_range)
     case TARGET_NR_copy_file_range:
         {
+            if (latc_aot_v2_fd_is_protected(arg1) ||
+                latc_aot_v2_fd_is_protected(arg3)) {
+                return -TARGET_EACCES;
+            }
             loff_t inoff, outoff;
             loff_t *pinoff = NULL, *poutoff = NULL;
 

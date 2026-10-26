@@ -8,6 +8,7 @@ runner task across fork and exec, and never treats corruption as a pass.
 """
 
 import argparse
+import array
 import errno
 import gzip
 import hashlib
@@ -25,7 +26,7 @@ from tb_key_set import read_key_set
 
 
 MODES = ('control', 'truncate', 'setfl', 'overwrite', 'dup', 'collision',
-         'path-control', 'path', 'hardlink', 'symlink')
+         'path-control', 'path', 'hardlink', 'symlink', 'scm-control', 'scm')
 
 
 def require(condition, message):
@@ -154,6 +155,8 @@ def run_case(prefix, guests, root, mode):
     require(len(os.fsencode(endpoint)) < 108, 'use a shorter work path for AF_UNIX')
     if mode == 'hardlink':
         guest = guests / 'guest-hardlink'
+    elif mode in ('scm-control', 'scm'):
+        guest = guests / 'guest-scm'
     else:
         guest = guests / ('guest-path' if mode in
                           ('path-control', 'path', 'symlink')
@@ -165,7 +168,7 @@ def run_case(prefix, guests, root, mode):
                 'installed_sha256': {name: digest(prefix / name) for name in
                     ('bin/latx-x86_64', 'bin/latc', 'bin/latcd',
                      'lib/liblat-aot-runtime.so.2')}}
-    daemon = runner = None
+    daemon = runner = stdin_peer = None
     failures = []
     try:
         command = ['python3', str(Path(__file__).with_name('make-symbol-tbset.py')),
@@ -190,8 +193,14 @@ def run_case(prefix, guests, root, mode):
                 time.sleep(.01)
             command = [str(prefix / 'bin/latx-x86_64'), str(guest)]
             evidence['commands'].append(command)
-            runner = subprocess.Popen(command, env=env, stdin=subprocess.PIPE,
+            runner_stdin = subprocess.PIPE
+            if mode in ('scm-control', 'scm'):
+                stdin_peer, runner_stdin = socket.socketpair(
+                    socket.AF_UNIX, socket.SOCK_SEQPACKET)
+            runner = subprocess.Popen(command, env=env, stdin=runner_stdin,
                                       stdout=subprocess.PIPE, stderr=err)
+            if mode in ('scm-control', 'scm'):
+                runner_stdin.close()
             require(exact(runner.stdout, 1) == b'R', 'missing guest ready handshake')
             journals = list((cache / '.journals').glob('*/keys'))
             require(len(journals) == 1, 'expected one registered journal')
@@ -212,7 +221,8 @@ def run_case(prefix, guests, root, mode):
                     'journal directory remained in the guest-visible main fd table')
             require(not private,
                     f'runner task held a journal descriptor: {private}')
-            fd = None if mode in ('path-control', 'path', 'hardlink', 'symlink') else \
+            fd = None if mode in ('path-control', 'path', 'hardlink', 'symlink',
+                                  'scm-control', 'scm') else \
                 unused_main_fd(main_table)
             before = journal.read_bytes()
             require(len(before) >= 224, 'short initial journal')
@@ -236,14 +246,26 @@ def run_case(prefix, guests, root, mode):
                             ('path-control', 'path', 'hardlink', 'symlink') else None,
                             entry_record=target)
             (work / 'journal-before.gz').write_bytes(gzip.compress(before, mtime=0))
-            if mode == 'hardlink':
+            if mode in ('scm-control', 'scm'):
+                injected_path = journal
+                if mode == 'scm-control':
+                    injected_path = work / 'ordinary-scm-file'
+                    injected_path.write_bytes(b'')
+                injected = os.open(injected_path, os.O_RDWR)
+                stdin_peer.sendmsg(
+                    [b'x'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                              array.array('i', [injected]))])
+                os.close(injected)
+                evidence['scm_injected_path'] = str(injected_path)
+            elif mode == 'hardlink':
                 runner.stdin.write(os.fsencode(journal) + b'\0' +
                                    os.fsencode(attack_path) + b'\0')
             elif mode in ('path-control', 'path', 'symlink'):
                 runner.stdin.write(os.fsencode(attack_path) + b'\0')
             else:
                 runner.stdin.write(struct.pack('<i', fd))
-            runner.stdin.flush()
+            if mode not in ('scm-control', 'scm'):
+                runner.stdin.flush()
             try:
                 result = struct.unpack('<q', exact(runner.stdout, 8))[0]
                 evidence['guest_result'] = result
@@ -256,7 +278,15 @@ def run_case(prefix, guests, root, mode):
                             evidence['dup_fd']['device'], evidence['dup_fd']['inode']) == (
                             stat.st_dev, stat.st_ino):
                         failures.append('guest duplicated the internal journal')
-                if mode == 'collision':
+                if mode == 'scm':
+                    if result != -errno.EACCES:
+                        failures.append(
+                            f'injected journal fd recvmsg returned {result}, expected EACCES')
+                elif mode == 'scm-control':
+                    if result != 32:
+                        failures.append(
+                            f'ordinary injected fd write returned {result}, expected 32')
+                elif mode == 'collision':
                     if result < 0:
                         failures.append(
                             f'guest fd number collision returned {result}, expected usable guest fd')
@@ -272,8 +302,11 @@ def run_case(prefix, guests, root, mode):
                             f'ordinary guest path write returned {result}, expected 32')
                 elif result != -errno.EBADF:
                     failures.append(f'internal descriptor syscall returned {result}, expected EBADF')
-                runner.stdin.write(b'x')
-                runner.stdin.flush()
+                if mode in ('scm-control', 'scm'):
+                    stdin_peer.send(b'x')
+                else:
+                    runner.stdin.write(b'x')
+                    runner.stdin.flush()
                 require(exact(runner.stdout, 1) == b'T', 'target did not execute after operation')
             except (AssertionError, BrokenPipeError) as error:
                 failures.append(str(error))
@@ -312,6 +345,8 @@ def run_case(prefix, guests, root, mode):
         if runner is not None and runner.poll() is None:
             runner.kill()
             runner.wait(timeout=10)
+        if stdin_peer is not None:
+            stdin_peer.close()
         if daemon is not None:
             if daemon.poll() is None:
                 daemon.terminate()
