@@ -1698,6 +1698,55 @@ void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
     g_free(queue->root); g_free(queue);
 }
 
+/* Completed namespace removal only, never physical-space or domain admission.
+ * Bind the receipt to this transaction's object, not merely its basename. */
+static int queue_object_removed(const char *root_path, const char *source,
+                                 const char *name, GKeyFile *objects)
+{
+    int root = open(root_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = root < 0 ? -1 : open_directory(root, ".gc", false);
+    int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
+    int result = -1;
+    char *raw = NULL, *stored_source = NULL, *hash = NULL;
+    size_t size;
+    GKeyFile *receipt = g_key_file_new();
+    if (root < 0 || gc < 0) goto out;
+    if (store < 0) { if (errno == ENOENT) result = 0; goto out; }
+    int status = read_file(store, name, RECORD_LIMIT, &raw, &size);
+    if (status) { if (status == 1) result = 0; goto out; }
+    uint64_t values[4];
+    if (memchr(raw, 0, size) || !g_key_file_load_from_data(receipt, raw, size, 0, NULL) ||
+        !tombstone_shape(receipt, name, &stored_source, values, &hash) ||
+        g_strcmp0(source, stored_source)) goto out;
+    if (!record_string_is(receipt, "tombstone", "deletion_status", "UNLINKED") ||
+        !record_string_is(receipt, "tombstone", "recovery_status", "MISSING")) {
+        result = 0;
+        goto out;
+    }
+    struct stat st;
+    if (!fstatat(root, name, &st, AT_SYMLINK_NOFOLLOW) || errno != ENOENT) goto out;
+    int count = g_key_file_get_integer(objects, "objects", "count", NULL);
+    const char *fields[] = {"device", "inode", "size", "allocated"};
+    for (int i = 0; i < count; i++) {
+        char group[32];
+        snprintf(group, sizeof(group), "object%d", i);
+        if (!record_string_is(objects, group, "name", name)) continue;
+        bool matches = record_string_is(objects, group, "sha256", hash);
+        for (unsigned j = 0; matches && j < G_N_ELEMENTS(fields); j++) {
+            uint64_t value;
+            matches = record_uint64(objects, group, fields[j], &value) && value == values[j];
+        }
+        if (matches) result = 1;
+        break;
+    }
+out:
+    g_free(raw); g_free(stored_source); g_free(hash); g_key_file_unref(receipt);
+    if (store >= 0) close(store);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    return result;
+}
+
 static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t size,
                           const char *boot, uint64_t now)
 {
@@ -1735,8 +1784,13 @@ static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t si
     GHashTableIter iterator;
     gpointer key;
     g_hash_table_iter_init(&iterator, old_refs);
+    GKeyFile *object_record = g_key_file_new();
+    valid = valid && g_key_file_load_from_data(object_record, (char *)objects, object_size, 0, NULL);
     while (valid && g_hash_table_iter_next(&iterator, &key, NULL)) {
         if (g_hash_table_contains(next_refs, key)) continue;
+        int removed = queue_object_removed(queue->root, source, key, object_record);
+        if (removed < 0) { valid = false; break; }
+        if (removed) continue;
         RetirementCandidate *candidate = g_hash_table_lookup(queue->candidates, key);
         if (!candidate) {
             if (g_hash_table_size(queue->candidates) >= 128) { valid = false; break; }
@@ -1748,6 +1802,7 @@ static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t si
         candidate->deadline = candidate->epoch == queue->epoch ? MAX(candidate->deadline, deadline) : deadline;
         candidate->epoch = queue->epoch;
     }
+    g_key_file_unref(object_record);
     g_hash_table_unref(old_refs); g_hash_table_unref(next_refs);
     g_free(canonical); g_free(objects); g_free(next); g_free(old);
     g_free(objects64); g_free(next64); g_free(old64);

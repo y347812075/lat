@@ -1458,6 +1458,22 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         assert(!access(paths[0], F_OK));
     }
     LatcdRetirementDeletionReport deletion_report;
+    if (!mutation && executor) {
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:unlinked", 1));
+        assert(latcd_tombstone_delete_due_report(root, names[0], 0, &deletion_report,
+                                                error, sizeof(error)));
+        assert(deletion_report.object_unlinked && !deletion_report.receipt_durable);
+        assert(!unsetenv("LATCD_TEST_RETIREMENT_IO"));
+        LatcdRetirementQueue *partial = latcd_retirement_queue_new(root, 0);
+        LatcdRetirementQueueStats partial_stats;
+        int step;
+        do {
+            step = latcd_retirement_queue_step(partial, 1, 10000, &partial_stats, error, sizeof(error));
+            assert(step >= 0);
+        } while (step);
+        assert(partial_stats.complete && partial_stats.candidates == 3);
+        latcd_retirement_queue_free(partial);
+    }
     int result = executor ? latcd_tombstone_delete_due_report(root, names[0], 0, &deletion_report, error, sizeof(error)) :
         latcd_retirement_tombstone(root, source, names[0], fd, single, error, sizeof(error));
     close(fd);
@@ -1465,6 +1481,76 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
     assert((result == 0) == accepted);
     if (!mutation && !executor) assert(!latcd_tombstone_delete(root, names[0], error, sizeof(error)));
     assert((access(paths[0], F_OK) == 0) == (mutation != 0));
+    if (!mutation) {
+        LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 0);
+        LatcdRetirementQueueStats stats;
+        int queued;
+        char *marker = g_build_filename(root, ".gc", "tombstones", names[0], NULL);
+        char *receipt;
+        assert(g_file_get_contents(marker, &receipt, NULL, NULL));
+        assert(!unlink(marker));
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.complete && stats.candidates == 3); /* Missing is not complete. */
+        put(marker, receipt);
+        for (unsigned variant = 0; variant < 10; variant++) {
+            GKeyFile *changed = g_key_file_new();
+            assert(g_key_file_load_from_data(changed, receipt, -1, 0, NULL));
+            if (variant == 0) g_key_file_remove_key(changed, "tombstone", "deletion_status", NULL);
+            if (variant == 1) g_key_file_set_string(changed, "tombstone", "recovery_status", "UNKNOWN");
+            const char *fields[] = {"device", "inode", "size", "allocated", "sha256"};
+            if (variant >= 2 && variant <= 6) {
+                const char *field = fields[variant - 2];
+                if (variant == 6) g_key_file_set_string(changed, "tombstone", field, source);
+                else {
+                    uint64_t value = g_key_file_get_uint64(changed, "tombstone", field, NULL);
+                    g_key_file_set_uint64(changed, "tombstone", field, value + 1);
+                }
+            }
+            if (variant == 7) g_key_file_set_string(changed, "tombstone", "unexpected", "1");
+            char *data = g_key_file_to_data(changed, NULL, NULL);
+            put(marker, data);
+            if (variant == 8) put(paths[0], "replacement must not be forgotten\n");
+            if (variant == 9) assert(!symlink("missing", paths[0]));
+            do {
+                queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+            } while (queued > 0);
+            if (variant < 2) assert(!queued && stats.complete && stats.candidates == 3);
+            else {
+                assert(queued < 0 && !stats.complete);
+                LatcdRetirementAttempt attempt;
+                assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));
+            }
+            if (variant >= 8) assert(!unlink(paths[0]));
+            g_free(data); g_key_file_unref(changed);
+        }
+        put(marker, receipt);
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.complete && stats.candidates == 2 && stats.due == 2);
+        assert(!latcd_retirement_queue_checkpoint(queue, error, sizeof(error)));
+        latcd_retirement_queue_free(queue);
+        queue = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_restore(queue, error, sizeof(error)));
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.complete && stats.candidates == 2);
+        LatcdRetirementAttempt attempt;
+        for (unsigned i = 0; i < 2; i++) {
+            assert(latcd_retirement_queue_take(queue, 1, &attempt) == 0);
+            assert(latcd_retirement_queue_take(queue, UINT64_MAX - 10000000, &attempt) == 1);
+            assert(strcmp(attempt.name, names[0]));
+            assert(!latcd_retirement_queue_defer(queue, &attempt, UINT64_MAX - 10000000, true));
+        }
+        latcd_retirement_queue_free(queue);
+        g_free(receipt); g_free(marker);
+    }
     g_free(raw); g_key_file_unref(record); g_free(record_path); g_free(evidence);
     g_free(single); g_free(current); g_free(previous); g_free(following); g_free(transaction);
     for (unsigned i = 0; i < 6; i++) { g_free(paths[i]); g_free(names[i]); }

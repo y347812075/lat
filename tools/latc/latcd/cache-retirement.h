@@ -111,7 +111,9 @@ typedef struct LatcdRetirementQueueStats {
 
 /* Single I/O worker owns this diagnostic queue under the management lease.
  * Bounded transaction discovery only, not liveness verification/admission.
- * Retains original enqueue time across sweeps; no deletion or timer handoff. */
+ * Retains original enqueue time across sweeps; fully object-bound UNLINKED /
+ * MISSING receipts remove completed names only after absence is rechecked.
+ * No deletion or timer handoff; missing alone never completes a candidate. */
 LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grace_us);
 int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
                                  uint64_t time_us, LatcdRetirementQueueStats *stats,
