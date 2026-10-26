@@ -13737,6 +13737,24 @@ static int has_x_permission(struct stat *st) {
     }
 }
 
+static bool latx_guest_path_protected(int dirfd, const char *pathname)
+{
+    char buffer[PATH_MAX + 1];
+    const char *host_path = path(pathname);
+    bool protected;
+
+    if (pathname[0] == '/' || dirfd == AT_FDCWD) {
+        protected = latc_aot_v2_path_is_protected(host_path);
+    } else {
+        int length = snprintf(buffer, sizeof(buffer), "/proc/self/fd/%d/%s",
+                              dirfd, pathname);
+        host_path = buffer;
+        protected = length > 0 && (size_t)length < sizeof(buffer) &&
+                    latc_aot_v2_path_is_protected(buffer);
+    }
+    return protected;
+}
+
 static int do_openat(void *cpu_env, int dirfd, const char *pathname, int flags, mode_t mode)
 {
     struct fake_open {
@@ -13771,6 +13789,11 @@ static int do_openat(void *cpu_env, int dirfd, const char *pathname, int flags, 
         { "/proc/version", open_version, is_proc },
         { NULL, NULL, NULL }
     };
+
+    if (latx_guest_path_protected(dirfd, pathname)) {
+        errno = EACCES;
+        return -1;
+    }
 
     if (is_proc_myself(pathname, "exe")) {
         char exe_path_buffer[64];
@@ -13845,7 +13868,13 @@ static int do_openat(void *cpu_env, int dirfd, const char *pathname, int flags, 
             }
         }
     }
-    return safe_openat(dirfd, path(pathname), flags, mode);
+    int opened = safe_openat(dirfd, path(pathname), flags, mode);
+    if (opened >= 0 && latc_aot_v2_fd_is_protected(opened)) {
+        close(opened);
+        errno = EACCES;
+        return -1;
+    }
+    return opened;
 }
 
 #define MAX_PATH_SIZE 1024
@@ -15402,7 +15431,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_creat:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
-        ret = get_errno(creat(p, arg2));
+        ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
+              get_errno(creat(p, arg2));
         fd_trans_unregister(ret);
         unlock_user(p, arg1, 0);
         return ret;
@@ -15415,6 +15445,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             p2 = lock_user_string(arg2);
             if (!p || !p2)
                 ret = -TARGET_EFAULT;
+            else if (latx_guest_path_protected(AT_FDCWD, p) ||
+                     latx_guest_path_protected(AT_FDCWD, p2))
+                ret = -TARGET_EACCES;
             else
                 ret = get_errno(link(p, p2));
             unlock_user(p2, arg2, 0);
@@ -15432,6 +15465,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             p2 = lock_user_string(arg4);
             if (!p || !p2)
                 ret = -TARGET_EFAULT;
+            else if (latx_guest_path_protected(arg1, p) ||
+                     latx_guest_path_protected(arg3, p2))
+                ret = -TARGET_EACCES;
             else
                 ret = get_errno(linkat(arg1, p, arg3, p2, arg5));
             unlock_user(p, arg2, 0);
@@ -15443,7 +15479,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_unlink:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
-        ret = get_errno(unlink(p));
+        ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
+              get_errno(unlink(p));
         unlock_user(p, arg1, 0);
         return ret;
 #endif
@@ -15451,7 +15488,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_unlinkat:
         if (!(p = lock_user_string(arg2)))
             return -TARGET_EFAULT;
-        ret = get_errno(unlinkat(arg1, p, arg3));
+        ret = latx_guest_path_protected(arg1, p) ? -TARGET_EACCES :
+              get_errno(unlinkat(arg1, p, arg3));
         unlock_user(p, arg2, 0);
         return ret;
 #endif
@@ -16009,7 +16047,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_mknod:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
-        ret = get_errno(mknod(p, arg2, arg3));
+        ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
+              get_errno(mknod(p, arg2, arg3));
         unlock_user(p, arg1, 0);
         return ret;
 #endif
@@ -16017,7 +16056,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_mknodat:
         if (!(p = lock_user_string(arg2)))
             return -TARGET_EFAULT;
-        ret = get_errno(mknodat(arg1, p, arg3, arg4));
+        ret = latx_guest_path_protected(arg1, p) ? -TARGET_EACCES :
+              get_errno(mknodat(arg1, p, arg3, arg4));
         unlock_user(p, arg2, 0);
         return ret;
 #endif
@@ -16025,7 +16065,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_chmod:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
-        ret = get_errno(chmod(p, arg2));
+        ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
+              get_errno(chmod(p, arg2));
         unlock_user(p, arg1, 0);
         return ret;
 #endif
@@ -16162,7 +16203,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             }
             if (!(p = lock_user_string(arg1)))
                 return -TARGET_EFAULT;
-            ret = get_errno(utime(p, host_tbuf));
+            ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
+                  get_errno(utime(p, host_tbuf));
             unlock_user(p, arg1, 0);
         }
         return ret;
@@ -16182,7 +16224,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             }
             if (!(p = lock_user_string(arg1)))
                 return -TARGET_EFAULT;
-            ret = get_errno(utimes(p, tvp));
+            ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
+                  get_errno(utimes(p, tvp));
             unlock_user(p, arg1, 0);
         }
         return ret;
@@ -16203,7 +16246,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             if (!(p = lock_user_string(arg2))) {
                 return -TARGET_EFAULT;
             }
-            ret = get_errno(futimesat(arg1, path(p), tvp));
+            ret = latx_guest_path_protected(arg1, p) ? -TARGET_EACCES :
+                  get_errno(futimesat(arg1, path(p), tvp));
             unlock_user(p, arg2, 0);
         }
         return ret;
@@ -16262,6 +16306,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             p2 = lock_user_string(arg2);
             if (!p || !p2)
                 ret = -TARGET_EFAULT;
+            else if (latx_guest_path_protected(AT_FDCWD, p) ||
+                     latx_guest_path_protected(AT_FDCWD, p2))
+                ret = -TARGET_EACCES;
             else
                 ret = get_errno(rename(p, p2));
             unlock_user(p2, arg2, 0);
@@ -16277,6 +16324,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             p2 = lock_user_string(arg4);
             if (!p || !p2)
                 ret = -TARGET_EFAULT;
+            else if (latx_guest_path_protected(arg1, p) ||
+                     latx_guest_path_protected(arg3, p2))
+                ret = -TARGET_EACCES;
             else
                 ret = get_errno(renameat(arg1, p, arg3, p2));
             unlock_user(p2, arg4, 0);
@@ -16292,6 +16342,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             p2 = lock_user_string(arg4);
             if (!p || !p2) {
                 ret = -TARGET_EFAULT;
+            } else if (latx_guest_path_protected(arg1, p) ||
+                       latx_guest_path_protected(arg3, p2)) {
+                ret = -TARGET_EACCES;
             } else {
                 ret = get_errno(sys_renameat2(arg1, p, arg3, p2, arg5));
             }
@@ -16304,7 +16357,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_mkdir:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
-        ret = get_errno(mkdir(p, arg2));
+        ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
+              get_errno(mkdir(p, arg2));
         unlock_user(p, arg1, 0);
         return ret;
 #endif
@@ -16312,7 +16366,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_mkdirat:
         if (!(p = lock_user_string(arg2)))
             return -TARGET_EFAULT;
-        ret = get_errno(mkdirat(arg1, p, arg3));
+        ret = latx_guest_path_protected(arg1, p) ? -TARGET_EACCES :
+              get_errno(mkdirat(arg1, p, arg3));
         unlock_user(p, arg2, 0);
         return ret;
 #endif
@@ -16320,7 +16375,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_rmdir:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
-        ret = get_errno(rmdir(p));
+        ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
+              get_errno(rmdir(p));
         unlock_user(p, arg1, 0);
         return ret;
 #endif
@@ -17269,6 +17325,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             p2 = lock_user_string(arg2);
             if (!p || !p2)
                 ret = -TARGET_EFAULT;
+            else if (latx_guest_path_protected(AT_FDCWD, p2))
+                ret = -TARGET_EACCES;
             else
                 ret = get_errno(symlink(p, p2));
             unlock_user(p2, arg2, 0);
@@ -17284,6 +17342,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             p2 = lock_user_string(arg3);
             if (!p || !p2)
                 ret = -TARGET_EFAULT;
+            else if (latx_guest_path_protected(arg2, p2))
+                ret = -TARGET_EACCES;
             else
                 ret = get_errno(symlinkat(p, arg2, p2));
             unlock_user(p2, arg3, 0);
@@ -17567,21 +17627,25 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_truncate:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
-        ret = get_errno(truncate(p, arg2));
+        ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
+              get_errno(truncate(p, arg2));
         unlock_user(p, arg1, 0);
         return ret;
 #endif
 #ifdef TARGET_NR_ftruncate
     case TARGET_NR_ftruncate:
-        return get_errno(ftruncate(arg1, arg2));
+        return latc_aot_v2_fd_is_protected(arg1) ? -TARGET_EACCES :
+               get_errno(ftruncate(arg1, arg2));
 #endif
     case TARGET_NR_fchmod:
-        return get_errno(fchmod(arg1, arg2));
+        return latc_aot_v2_fd_is_protected(arg1) ? -TARGET_EACCES :
+               get_errno(fchmod(arg1, arg2));
 #if defined(TARGET_NR_fchmodat)
     case TARGET_NR_fchmodat:
         if (!(p = lock_user_string(arg2)))
             return -TARGET_EFAULT;
-        ret = get_errno(fchmodat(arg1, p, arg3, 0));
+        ret = latx_guest_path_protected(arg1, p) ? -TARGET_EACCES :
+              get_errno(fchmodat(arg1, p, arg3, 0));
         unlock_user(p, arg2, 0);
         return ret;
 #endif
@@ -19291,13 +19355,15 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_truncate64:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
-	ret = target_truncate64(cpu_env, p, arg2, arg3, arg4);
+ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
+              target_truncate64(cpu_env, p, arg2, arg3, arg4);
         unlock_user(p, arg1, 0);
         return ret;
 #endif
 #ifdef TARGET_NR_ftruncate64
     case TARGET_NR_ftruncate64:
-        return target_ftruncate64(cpu_env, arg1, arg2, arg3, arg4);
+        return latc_aot_v2_fd_is_protected(arg1) ? -TARGET_EACCES :
+               target_ftruncate64(cpu_env, arg1, arg2, arg3, arg4);
 #endif
 #ifdef TARGET_NR_stat64
     case TARGET_NR_stat64:
@@ -19542,7 +19608,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_lchown:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
-        ret = get_errno(lchown(p, low2highuid(arg2), low2highgid(arg3)));
+        ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
+              get_errno(lchown(p, low2highuid(arg2), low2highgid(arg3)));
         unlock_user(p, arg1, 0);
         return ret;
 #endif
@@ -19607,12 +19674,14 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             return get_errno(sys_setgroups(gidsetsize, grouplist));
         }
     case TARGET_NR_fchown:
-        return get_errno(fchown(arg1, low2highuid(arg2), low2highgid(arg3)));
+        return latc_aot_v2_fd_is_protected(arg1) ? -TARGET_EACCES :
+               get_errno(fchown(arg1, low2highuid(arg2), low2highgid(arg3)));
 #if defined(TARGET_NR_fchownat)
     case TARGET_NR_fchownat:
         if (!(p = lock_user_string(arg2)))
             return -TARGET_EFAULT;
-        ret = get_errno(fchownat(arg1, p, low2highuid(arg3),
+        ret = latx_guest_path_protected(arg1, p) ? -TARGET_EACCES :
+              get_errno(fchownat(arg1, p, low2highuid(arg3),
                                  low2highgid(arg4), arg5));
         unlock_user(p, arg2, 0);
         return ret;
@@ -19661,7 +19730,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_chown:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
-        ret = get_errno(chown(p, low2highuid(arg2), low2highgid(arg3)));
+        ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
+              get_errno(chown(p, low2highuid(arg2), low2highgid(arg3)));
         unlock_user(p, arg1, 0);
         return ret;
 #endif
@@ -20368,7 +20438,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             }
             p = lock_user_string(arg1);
             n = lock_user_string(arg2);
-            if (p && n) {
+            if (p && n && latx_guest_path_protected(AT_FDCWD, p)) {
+                ret = -TARGET_EACCES;
+            } else if (p && n) {
                 if (num == TARGET_NR_setxattr) {
                     ret = get_errno(setxattr(p, n, v, arg4, arg5));
                 } else {
@@ -20392,7 +20464,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 }
             }
             n = lock_user_string(arg2);
-            if (n) {
+            if (n && latc_aot_v2_fd_is_protected(arg1)) {
+                ret = -TARGET_EACCES;
+            } else if (n) {
                 ret = get_errno(fsetxattr(arg1, n, v, arg4, arg5));
             } else {
                 ret = -TARGET_EFAULT;
@@ -20413,7 +20487,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             }
             p = lock_user_string(arg1);
             n = lock_user_string(arg2);
-            if (p && n) {
+            if (p && n && latx_guest_path_protected(AT_FDCWD, p)) {
+                ret = -TARGET_EACCES;
+            } else if (p && n) {
                 if (num == TARGET_NR_getxattr) {
                     ret = get_errno(getxattr(p, n, v, arg4));
                 } else {
@@ -20469,7 +20545,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         {
             void *n;
             n = lock_user_string(arg2);
-            if (n) {
+            if (n && latc_aot_v2_fd_is_protected(arg1)) {
+                ret = -TARGET_EACCES;
+            } else if (n) {
                 ret = get_errno(fremovexattr(arg1, n));
             } else {
                 ret = -TARGET_EFAULT;
@@ -20710,7 +20788,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 if (!(p = lock_user_string(arg2))) {
                     return -TARGET_EFAULT;
                 }
-                ret = get_errno(sys_utimensat(arg1, path(p), tsp, arg4));
+                ret = latx_guest_path_protected(arg1, p) ? -TARGET_EACCES :
+                      get_errno(sys_utimensat(arg1, path(p), tsp, arg4));
                 unlock_user(p, arg2, 0);
             }
         }
@@ -20739,7 +20818,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 if (!p) {
                     return -TARGET_EFAULT;
                 }
-                ret = get_errno(sys_utimensat(arg1, path(p), tsp, arg4));
+                ret = latx_guest_path_protected(arg1, p) ? -TARGET_EACCES :
+                      get_errno(sys_utimensat(arg1, path(p), tsp, arg4));
                 unlock_user(p, arg2, 0);
             }
         }

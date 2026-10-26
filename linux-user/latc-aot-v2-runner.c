@@ -192,6 +192,139 @@ static bool key_journal_enabled;
 static int key_journal_config_fd = -1;
 static uint8_t key_journal_config_digest[32];
 static pthread_mutex_t key_journal_lock = PTHREAD_MUTEX_INITIALIZER;
+#define LAT_AOT_V2_PROTECTED_OBJECT_LIMIT 1024
+typedef struct LatAotV2ProtectedObject {
+    dev_t device;
+    ino_t inode;
+} LatAotV2ProtectedObject;
+static pthread_mutex_t protected_object_lock = PTHREAD_MUTEX_INITIALIZER;
+static LatAotV2ProtectedObject protected_objects[
+    LAT_AOT_V2_PROTECTED_OBJECT_LIMIT];
+static size_t protected_object_count;
+static char protected_journal_root[PATH_MAX + 1];
+static bool protected_journal_root_initialized;
+
+static bool add_protected_object_locked(const struct stat *st)
+{
+    for (size_t i = 0; i < protected_object_count; i++) {
+        if (protected_objects[i].device == st->st_dev &&
+            protected_objects[i].inode == st->st_ino) {
+            return true;
+        }
+    }
+    if (protected_object_count == LAT_AOT_V2_PROTECTED_OBJECT_LIMIT) {
+        return false;
+    }
+    protected_objects[protected_object_count++] =
+        (LatAotV2ProtectedObject){ .device = st->st_dev, .inode = st->st_ino };
+    return true;
+}
+
+static bool protected_object_locked(const struct stat *st)
+{
+    for (size_t i = 0; i < protected_object_count; i++) {
+        if (protected_objects[i].device == st->st_dev &&
+            protected_objects[i].inode == st->st_ino) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool initialize_protected_journal_root_locked(void)
+{
+    if (protected_journal_root_initialized) {
+        return protected_journal_root[0] != '\0';
+    }
+    const char *cache = lat_aot_cache_path();
+    if (!cache || !*cache) return false;
+    char *path = g_build_filename(cache, ".journals", NULL);
+    if (realpath(path, protected_journal_root)) {
+        protected_journal_root_initialized = true;
+    }
+    g_free(path);
+    return protected_journal_root[0] != '\0';
+}
+
+static bool protected_path_prefix(const char *path)
+{
+    size_t length = strlen(protected_journal_root);
+
+    return !strncmp(path, protected_journal_root, length) &&
+        (path[length] == '\0' || path[length] == '/');
+}
+
+bool latc_aot_v2_record_journal_epoch(const char *epoch)
+{
+    const char *cache = lat_aot_cache_path();
+    char path[PATH_MAX + 1];
+    bool ok = cache && epoch && strlen(epoch) == 32;
+
+    pthread_mutex_lock(&protected_object_lock);
+    ok = ok && initialize_protected_journal_root_locked();
+    if (ok) {
+        struct stat st;
+        ok = !stat(protected_journal_root, &st) &&
+             add_protected_object_locked(&st);
+    }
+    const char *entries[] = { "", "keys", "source", "config", "registration" };
+    for (size_t i = 0; ok && i < G_N_ELEMENTS(entries); i++) {
+        int length = entries[i][0] ?
+            snprintf(path, sizeof(path), "%s/%s/%s", protected_journal_root,
+                     epoch, entries[i]) :
+            snprintf(path, sizeof(path), "%s/%s", protected_journal_root, epoch);
+        struct stat st;
+        ok = length > 0 && (size_t)length < sizeof(path) &&
+             !stat(path, &st) && add_protected_object_locked(&st);
+    }
+    pthread_mutex_unlock(&protected_object_lock);
+    return ok;
+}
+
+bool latc_aot_v2_path_is_protected(const char *host_path)
+{
+    char resolved[PATH_MAX + 1];
+    bool protected = false;
+
+    if (!host_path || !*host_path) return false;
+    pthread_mutex_lock(&protected_object_lock);
+    if (initialize_protected_journal_root_locked()) {
+        if (realpath(host_path, resolved) && protected_path_prefix(resolved)) {
+            protected = true;
+        } else {
+            char parent[PATH_MAX + 1];
+            struct stat st;
+            size_t length = strlen(host_path);
+            if (length < sizeof(parent)) {
+                memcpy(parent, host_path, length + 1);
+                char *slash = strrchr(parent, '/');
+                if (slash) {
+                    if (slash == parent) slash[1] = '\0';
+                    else *slash = '\0';
+                    protected = realpath(parent, resolved) &&
+                        protected_path_prefix(resolved);
+                }
+            }
+            protected = protected || (!stat(host_path, &st) &&
+                                       protected_object_locked(&st));
+        }
+    }
+    pthread_mutex_unlock(&protected_object_lock);
+    return protected;
+}
+
+bool latc_aot_v2_fd_is_protected(int host_fd)
+{
+    struct stat st;
+    bool protected;
+
+    if (host_fd < 0 || fstat(host_fd, &st)) return false;
+    pthread_mutex_lock(&protected_object_lock);
+    protected = protected_object_locked(&st);
+    pthread_mutex_unlock(&protected_object_lock);
+    return protected;
+}
+
 typedef struct LatAotV2KeyRetry {
     CPUState *cpu;
     target_ulong pc;
@@ -2885,6 +3018,12 @@ static int register_broker_journal(LatAotV2ModuleStats *stats, char *error,
                                          &stats->journal_id)) {
         stats->journal_epoch[0] = 0;
         snprintf(error, size, "invalid journal epoch response");
+        return -1;
+    }
+    if (!result && !latc_aot_v2_record_journal_epoch(stats->journal_epoch)) {
+        stats->journal_epoch[0] = 0;
+        stats->journal_id = 0;
+        snprintf(error, size, "cannot protect journal epoch objects");
         return -1;
     }
     return result;

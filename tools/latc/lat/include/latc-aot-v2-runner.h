@@ -65,6 +65,10 @@ void latc_aot_v2_start_deferred_submission(void);
 void latc_aot_v2_prepare_submission_channel(void);
 /* Preserve internal source references before a guest closes/overwrites fd. */
 int latc_aot_v2_relocate_source_fd(int fd);
+/* Protect daemon-owned journal objects from guest pathname and fd admission. */
+bool latc_aot_v2_record_journal_epoch(const char *epoch);
+bool latc_aot_v2_path_is_protected(const char *host_path);
+bool latc_aot_v2_fd_is_protected(int host_fd);
 /* Record a file-backed JIT translation request without execution counters. */
 void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags);
 /* Opt-in journal integration. Check is memory-only under mmap_lock; a miss

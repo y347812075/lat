@@ -180,7 +180,9 @@ See `docs/aot-v2-handoff/runtime-key-delivery.md` and `STATUS.md`.
 0 through 5 for `guest-control`, `guest-truncate`, `guest-setfl`,
 `guest-overwrite`, `guest-dup`, and `guest-collision`. Build
 `tests/x86-journal-exec.S` with `gcc -nostdlib -static -no-pie
--Wl,--build-id=none` as `guest-exec`. Put all seven executables in `GUEST_DIR`:
+-Wl,--build-id=none` as `guest-exec`; build `tests/x86-journal-path.S` as
+`guest-path` and `tests/x86-journal-hardlink.S` as `guest-hardlink`. Put all
+nine executables in `GUEST_DIR`:
 
 ```sh
 make -C tools/latc test-aot-v2-journal-fd \
@@ -197,7 +199,10 @@ both receipts covers all executed phases. The Make target enters a private
 user/mount namespace and binds the installed runner over the binfmt interpreter
 so guest exec cannot silently select a system runner. Each case records product
 hashes, commands, fd state, before/after journals, raw collector replies and
-available receipts. This does not yet protect a disclosed cache pathname.
+available receipts. Disclosed direct, symlink, and in-TB hardlink paths must
+return `EACCES`; the protected journal inode/nlink and receipt remain unchanged.
+This covers guest syscall admission, not an arbitrary same-UID host process that
+bypasses the emulator.
 Corruption is reported as failure, never accepted as the expected test result.
 
 `test-aot-v2-journal-fork` runs the existing dynamic fork fixture with the

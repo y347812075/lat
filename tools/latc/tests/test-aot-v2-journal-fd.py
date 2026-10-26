@@ -24,7 +24,8 @@ import time
 from tb_key_set import read_key_set
 
 
-MODES = ('control', 'truncate', 'setfl', 'overwrite', 'dup', 'collision')
+MODES = ('control', 'truncate', 'setfl', 'overwrite', 'dup', 'collision',
+         'path-control', 'path', 'hardlink', 'symlink')
 
 
 def require(condition, message):
@@ -151,7 +152,12 @@ def run_case(prefix, guests, root, mode):
     cache.mkdir()
     endpoint = str(work / 'socket')
     require(len(os.fsencode(endpoint)) < 108, 'use a shorter work path for AF_UNIX')
-    guest = guests / ('guest-' + mode)
+    if mode == 'hardlink':
+        guest = guests / 'guest-hardlink'
+    else:
+        guest = guests / ('guest-path' if mode in
+                          ('path-control', 'path', 'symlink')
+                          else 'guest-' + mode)
     env = guest_environment(prefix, work, root, endpoint)
     evidence = {'mode': mode, 'environment': env, 'commands': [],
                 'scope': 'real guest with controlled numeric fd; broker owns journal file',
@@ -206,24 +212,43 @@ def run_case(prefix, guests, root, mode):
                     'journal directory remained in the guest-visible main fd table')
             require(not private,
                     f'runner task held a journal descriptor: {private}')
-            fd = unused_main_fd(main_table)
+            fd = None if mode in ('path-control', 'path', 'hardlink', 'symlink') else \
+                unused_main_fd(main_table)
             before = journal.read_bytes()
             require(len(before) >= 224, 'short initial journal')
             target = struct.unpack_from('<QQQQ', before, 192)
             require(target[0] == 3 and target[2:] == (3, 0), 'entry slot not committed')
+            attack_path = journal
+            if mode == 'path-control':
+                attack_path = work / 'ordinary-file'
+                attack_path.write_bytes(b'')
+            elif mode == 'hardlink':
+                attack_path = work / 'journal-hardlink'
+            elif mode == 'symlink':
+                attack_path = work / 'journal-symlink'
+                attack_path.symlink_to(journal)
             evidence.update(attack_fd=fd,
                             main_journal_descriptors=main_descriptors,
                             main_journal_directory_descriptors=main_directory_descriptors,
                             private_journal_descriptors=private,
-                            fd_before=fd_snapshot(main_table, fd),
+                            fd_before=fd_snapshot(main_table, fd) if fd is not None else None,
+                            attack_path=str(attack_path) if mode in
+                            ('path-control', 'path', 'hardlink', 'symlink') else None,
                             entry_record=target)
             (work / 'journal-before.gz').write_bytes(gzip.compress(before, mtime=0))
-            runner.stdin.write(struct.pack('<i', fd))
+            if mode == 'hardlink':
+                runner.stdin.write(os.fsencode(journal) + b'\0' +
+                                   os.fsencode(attack_path) + b'\0')
+            elif mode in ('path-control', 'path', 'symlink'):
+                runner.stdin.write(os.fsencode(attack_path) + b'\0')
+            else:
+                runner.stdin.write(struct.pack('<i', fd))
             runner.stdin.flush()
             try:
                 result = struct.unpack('<q', exact(runner.stdout, 8))[0]
                 evidence['guest_result'] = result
-                evidence['fd_after'] = fd_snapshot(main_table, fd)
+                evidence['fd_after'] = (fd_snapshot(main_table, fd)
+                                        if fd is not None else None)
                 evidence['main_fd_after'] = fd_snapshot(main_table, fd)
                 if mode == 'dup' and result >= 0:
                     evidence['dup_fd'] = fd_snapshot(main_table, result)
@@ -235,6 +260,16 @@ def run_case(prefix, guests, root, mode):
                     if result < 0:
                         failures.append(
                             f'guest fd number collision returned {result}, expected usable guest fd')
+                elif mode in ('path', 'hardlink', 'symlink'):
+                    if result != -errno.EACCES:
+                        failures.append(
+                            f'journal pathname open/write returned {result}, expected EACCES')
+                    if mode == 'hardlink' and attack_path.exists():
+                        failures.append('guest created a hardlink alias to journal keys')
+                elif mode == 'path-control':
+                    if result != 32:
+                        failures.append(
+                            f'ordinary guest path write returned {result}, expected 32')
                 elif result != -errno.EBADF:
                     failures.append(f'internal descriptor syscall returned {result}, expected EBADF')
                 runner.stdin.write(b'x')
