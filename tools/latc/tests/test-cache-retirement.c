@@ -554,6 +554,50 @@ static void test_other_current(unsigned mutation, bool executor)
     g_free(evidence); g_free(path); g_free(name); remove_root(root); g_free(root);
 }
 
+static void test_roots_latch(void)
+{
+    char *root = root_new(), error[256];
+    int first = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error));
+    int second = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error));
+    assert(first >= 0 && second >= 0);
+    assert(latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error)) < 0);
+    close(first);
+    assert(latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error)) < 0);
+    close(second);
+    int exclusive = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error));
+    assert(exclusive >= 0);
+    assert(latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error)) < 0);
+    close(exclusive);
+    char *name = g_strconcat(source, ".native", NULL);
+    char *object = g_build_filename(root, name, NULL);
+    put(object, "roots contention\n");
+    const char *names[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+    int fd = open(object, O_RDONLY | O_CLOEXEC);
+    first = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error));
+    assert(fd >= 0 && first >= 0 && evidence);
+    assert(latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)) < 0);
+    close(first);
+    assert(!latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+    close(fd);
+    first = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error));
+    assert(first >= 0);
+    assert(latcd_tombstone_delete(root, name, error, sizeof(error)) < 0);
+    assert(!access(object, F_OK));
+    close(first);
+    assert(!latcd_tombstone_delete(root, name, error, sizeof(error)));
+    g_free(evidence); g_free(object); g_free(name);
+    char *path = g_build_filename(root, ".gc", "reference-roots.lock", NULL);
+    char *alias = g_strconcat(path, ".alias", NULL);
+    assert(!link(path, alias));
+    assert(latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error)) < 0);
+    assert(!unlink(alias));
+    assert(!chmod(path, 0666));
+    assert(latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error)) < 0);
+    assert(!chmod(path, 0600));
+    g_free(alias); g_free(path); remove_root(root); g_free(root);
+}
+
 static void test_tombstone_crash(const char *point, bool crash)
 {
     char *root = root_new(), *name = g_strdup_printf("%s.native", source);
@@ -1551,6 +1595,7 @@ static void test_hold_crash(bool release, const char *point)
 
 int main(void)
 {
+    test_roots_latch();
     for (unsigned mutation = 0; mutation < 6; mutation++) {
         test_other_current(mutation, false);
         test_other_current(mutation, true);

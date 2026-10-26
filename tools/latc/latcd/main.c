@@ -2792,9 +2792,11 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     }
     source_lock_fd = lat_aot_v2_cache_source_lock(
         config->cache_dir, hex, LOCK_EX, false, error, error_size);
+    int roots_lock_fd = source_lock_fd < 0 ? -1 : latcd_retirement_roots_lock(
+        config->cache_dir, LOCK_SH, error, error_size);
     pthread_mutex_lock(&cache_lock);
     bool latest_valid = !current_manifest_read(config, hex, &latest);
-    bool unchanged = source_lock_fd >= 0 && pinned && !lstat(module_path, &module_after) &&
+    bool unchanged = source_lock_fd >= 0 && roots_lock_fd >= 0 && pinned && !lstat(module_path, &module_after) &&
         !lstat(native_path, &native_after) &&
         metadata_equal(&module_before, &module_after) &&
         metadata_equal(&native_before, &native_after) &&
@@ -2814,6 +2816,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     g_free(native_path);
     g_free(tbset_path);
     if (!unchanged || !module_sha256 || !native_sha256) {
+        if (roots_lock_fd >= 0) close(roots_lock_fd);
         if (source_lock_fd >= 0) close(source_lock_fd);
         g_free(objects);
         g_free(module_sha256);
@@ -2828,6 +2831,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         int unavailable = lat_aot_v2_cache_object_available(path, error, error_size);
         g_free(path);
         if (unavailable) {
+            close(roots_lock_fd);
             close(source_lock_fd);
             g_free(objects);
             g_free(module_sha256);
@@ -2845,6 +2849,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         ((previous.module_sha256 && strcmp(previous.module_sha256, module_sha256)) ||
          (previous.native_sha256 && strcmp(previous.native_sha256, native_sha256)))) {
         current_manifest_clear(&previous);
+        close(roots_lock_fd);
         close(source_lock_fd);
         g_free(objects);
         g_free(module_sha256);
@@ -2856,6 +2861,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     char *temporary = g_build_filename(temporary_dir, "current-XXXXXX", NULL);
     int fd = g_mkstemp_full(temporary, O_RDWR | O_CLOEXEC, 0600);
     if (fd < 0) {
+        close(roots_lock_fd);
         close(source_lock_fd);
         g_free(objects);
         g_free(module_sha256);
@@ -2928,6 +2934,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     }
     if (!result && crash && !strcmp(crash, "retired")) raise(SIGKILL);
     g_free(transaction);
+    close(roots_lock_fd);
     close(source_lock_fd);
     g_free(final);
     g_free(temporary);

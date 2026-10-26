@@ -6,6 +6,11 @@
 #include <stdint.h>
 
 typedef struct LatcdRecoveryCursor LatcdRecoveryCursor;
+/* Owner lease required. Acquire after source latch, never wait under cache_lock.
+ * Publishers hold SH through transaction finish; retirement/deletion holds EX.
+ * Returned CLOEXEC fd is released by close only. Not domain admission. */
+int latcd_retirement_roots_lock(const char *root, int operation,
+                                char *error, size_t error_size);
 typedef struct LatcdRecoveryProgress {
     unsigned visited;
     unsigned recovered;

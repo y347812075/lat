@@ -171,6 +171,35 @@ static int open_store(int root, bool create)
     return records;
 }
 
+int latcd_retirement_roots_lock(const char *root, int operation,
+                                char *error, size_t error_size)
+{
+    if (operation != LOCK_SH && operation != (LOCK_SH | LOCK_NB) &&
+        operation != (LOCK_EX | LOCK_NB))
+        return fail(error, error_size, "invalid reference roots latch operation");
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", true);
+    int fd = gc < 0 ? -1 : openat(gc, "reference-roots.lock",
+        O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0600);
+    bool created = fd >= 0;
+    if (gc >= 0 && fd < 0 && errno == EEXIST)
+        fd = openat(gc, "reference-roots.lock", O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    struct stat st, path;
+    bool valid = fd >= 0 && !fstat(fd, &st) && S_ISREG(st.st_mode) &&
+        st.st_uid == geteuid() && st.st_nlink == 1 && !(st.st_mode & 0077) &&
+        !st.st_size && (!created || (!fsync(fd) && !fsync(gc))) &&
+        !lat_aot_v2_cache_lock_fd(fd, operation, error, error_size) &&
+        !fstatat(gc, "reference-roots.lock", &path, AT_SYMLINK_NOFOLLOW) &&
+        object_stat_equal(&st, &path);
+    int saved = errno;
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    if (valid) return fd;
+    if (fd >= 0) close(fd);
+    errno = saved;
+    return fail(error, error_size, "reference roots latch busy or unsafe");
+}
+
 /* ENOENT is separate from a malformed, unsafe or unreadable root. */
 static int read_file(int directory, const char *name, size_t limit,
                      char **contents, size_t *size)
@@ -466,7 +495,7 @@ static bool manifest_references(const char *source, const char *raw, size_t size
     return valid;
 }
 
-/* Caller serializes publishers under the owner contract. This bounded final
+/* Caller holds the reference roots EX latch under the owner contract. This bounded final
  * check is defense in depth, not a persistent reference index or domain gate. */
 static int object_current_status(int root, const char *name)
 {
@@ -1024,6 +1053,7 @@ int latcd_retirement_tombstone(const char *root, const char *source,
     int directory = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     int gc = directory < 0 ? -1 : open_directory(directory, ".gc", true);
     int store = gc < 0 ? -1 : open_directory(gc, "tombstones", true);
+    int roots = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, error_size);
     int result = -1;
     GKeyFile *record = g_key_file_new();
     GKeyFile *captured = g_key_file_new();
@@ -1031,7 +1061,7 @@ int latcd_retirement_tombstone(const char *root, const char *source,
     struct stat before, after, path;
     char *current = g_strdup_printf("%s.current", source), *manifest = NULL;
     size_t size = 0;
-    if (store < 0 || flock(object_fd, LOCK_EX | LOCK_NB) ||
+    if (store < 0 || roots < 0 || flock(object_fd, LOCK_EX | LOCK_NB) ||
         fstat(object_fd, &before) || !S_ISREG(before.st_mode) ||
         before.st_uid != geteuid() || before.st_nlink != 1 ||
         (before.st_mode & 0222) || before.st_size <= 0 ||
@@ -1099,6 +1129,7 @@ out:
     if (store >= 0) close(store);
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
+    if (roots >= 0) close(roots);
     return result ? fail(error, error_size, "cannot persist object deletion intent") : 0;
 }
 
@@ -1435,7 +1466,7 @@ static int recover_tombstone(const char *root_path, int root, int store,
     size_t size;
     uint64_t values[4] = {0};
     GKeyFile *record = g_key_file_new();
-    int result = -1, object = -1, latch = -1;
+    int result = -1, object = -1, latch = -1, roots = -1;
     if (read_file(store, name, RECORD_LIMIT, &raw, &size) || memchr(raw, 0, size) ||
         !g_key_file_load_from_data(record, raw, size, 0, NULL) ||
         !tombstone_shape(record, name, &source, values, &hash)) goto out;
@@ -1481,7 +1512,8 @@ static int recover_tombstone(const char *root_path, int root, int store,
     }
     latch = lat_aot_v2_cache_source_lock(root_path, source, LOCK_EX | LOCK_NB,
                                          false, NULL, 0);
-    if (latch < 0) {
+    if (latch < 0 || (remove_object && (roots = latcd_retirement_roots_lock(
+            root_path, LOCK_EX | LOCK_NB, NULL, 0)) < 0)) {
         observation = !strcmp(observation, "UNKNOWN") || errno != EWOULDBLOCK ? "UNKNOWN" : "BUSY";
     } else {
         char *current = g_strdup_printf("%s.current", source), *manifest = NULL;
@@ -1540,6 +1572,7 @@ static int recover_tombstone(const char *root_path, int root, int store,
 out:
     if (object >= 0) close(object);
     if (latch >= 0) close(latch);
+    if (roots >= 0) close(roots);
     g_free(raw); g_free(source); g_free(hash);
     g_key_file_unref(record);
     return result;

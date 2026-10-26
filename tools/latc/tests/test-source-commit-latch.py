@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """A publisher waits outside C, then rechecks its selection under S."""
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -24,7 +25,7 @@ def run(prefix, guest, work):
     full_tbset = work / 'full.tbset'
     subprocess.run([str(prefix / 'bin/latc'), 'emit-static-tbset', str(guest),
                     '-o', str(full_tbset)], env=env, check=True)
-    for mutation in ('none', 'current', 'module', 'native', 'tbset'):
+    for mutation in ('none', 'current', 'module', 'native', 'tbset', 'roots'):
         directory = work / mutation
         directory.mkdir(mode=0o700)
         cache = directory / 'cache'
@@ -64,7 +65,7 @@ def run(prefix, guest, work):
         ready, notify = os.pipe()
         resume, release = os.pipe()
         client = daemon = None
-        gate = None
+        gate = roots = None
         with (directory / 'daemon.log').open('wb') as log, (directory / 'submit.log').open('wb') as client_log:
             try:
                 daemon = start(dict(env, LATCD_TEST_SOURCE_COMMIT_FD=str(notify),
@@ -74,6 +75,31 @@ def run(prefix, guest, work):
                 client = subprocess.Popen(replacement_submit, env=env, stdout=client_log, stderr=client_log)
                 assert select.select([ready], [], [], 30)[0], 'publisher did not reach source latch'
                 assert os.read(ready, 1) == b'x'
+                if mutation == 'roots':
+                    roots = (cache / '.gc/reference-roots.lock').open('rb')
+                    fcntl.flock(roots, fcntl.LOCK_EX)
+                    os.write(release, b'x')
+                    gate = (cache / '.gc/source-locks' / (source + '.lock')).open('rb')
+                    deadline = time.monotonic() + 20
+                    while True:
+                        try:
+                            fcntl.flock(gate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            fcntl.flock(gate, fcntl.LOCK_UN)
+                        except OSError as error:
+                            assert error.errno in (errno.EAGAIN, errno.EACCES)
+                            break
+                        assert daemon.poll() is None and time.monotonic() < deadline
+                        time.sleep(.01)
+                    assert manifest.read_bytes() == original
+                    roots.close()
+                    roots = None
+                    gate.close()
+                    gate = None
+                    assert client.wait(timeout=30) == 0
+                    subprocess.run([str(latcd), '--flush-source', '--socket', str(socket), str(guest)],
+                                   env=env, stdout=client_log, stderr=client_log, check=True, timeout=30)
+                    assert manifest.read_bytes() != original
+                    continue
                 gate = (cache / '.gc/source-locks' / (source + '.lock')).open('rb')
                 fcntl.flock(gate, fcntl.LOCK_EX)
                 os.write(release, b'x')
@@ -122,6 +148,8 @@ def run(prefix, guest, work):
                     assert manifest.read_bytes() == expected, 'stale publisher overwrote current'
                     assert 'changed during digest' in (directory / 'daemon.log').read_text()
             finally:
+                if roots is not None:
+                    roots.close()
                 if gate is not None:
                     gate.close()
                 if client is not None and client.poll() is None:
