@@ -31,10 +31,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/timerfd.h>
 #include <time.h>
 
 #include <sys/types.h>
@@ -228,6 +230,21 @@ typedef struct LatcdBudgetRecovery {
 static LatcdBudgetRecovery compiler_budget_recovery;
 static pthread_mutex_t retirement_queue_lock = PTHREAD_MUTEX_INITIALIZER;
 static LatcdRetirementQueueStats retirement_queue_stats;
+static atomic_int retirement_notify_fd = ATOMIC_VAR_INIT(-1);
+static uint64_t retirement_timer_wakeups, retirement_publication_wakeups;
+
+static void retirement_notify(void)
+{
+    int fd = atomic_load(&retirement_notify_fd);
+    uint64_t one = 1;
+    if (fd >= 0) {
+        ssize_t written;
+        do { written = write(fd, &one, sizeof(one)); } while (written < 0 && errno == EINTR);
+        /* Saturation already guarantees a pending wakeup; scans remain periodic. */
+        if (written < 0 && errno != EAGAIN)
+            fprintf(stderr, "latcd: retirement notification failed: %s\n", strerror(errno));
+    }
+}
 
 static int fail(char *error, size_t error_size, const char *format, ...);
 
@@ -1858,11 +1875,13 @@ static void *compiler_input_recovery_worker(void *opaque)
     int64_t next = 0;
     int64_t next_retirement = 0;
     bool failed = false;
+    int timer = timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC | TFD_NONBLOCK);
     LatcdRetirementQueue *retirement = latcd_retirement_queue_new(work->config->cache_dir,
         UINT64_C(600) * 1000000);
     char retirement_error[256];
     bool retirement_safe = !latcd_retirement_queue_restore(retirement, retirement_error, sizeof(retirement_error));
     if (!retirement_safe) fprintf(stderr, "latcd: %s\n", retirement_error);
+    if (timer < 0) fprintf(stderr, "latcd: retirement timer unavailable; periodic discovery only: %s\n", strerror(errno));
     while (!atomic_load(&work->stopping) && !stop_requested) {
         int64_t now = g_get_monotonic_time();
         if (retirement_safe && now >= next_retirement) {
@@ -1878,6 +1897,18 @@ static void *compiler_input_recovery_worker(void *opaque)
             pthread_mutex_lock(&retirement_queue_lock);
             retirement_queue_stats = stats;
             pthread_mutex_unlock(&retirement_queue_lock);
+            if (timer >= 0) {
+                struct itimerspec deadline = {0};
+                if (retirement_safe && stats.complete && stats.next_deadline_us) {
+                    deadline.it_value.tv_sec = stats.next_deadline_us / 1000000;
+                    deadline.it_value.tv_nsec = (stats.next_deadline_us % 1000000) * 1000;
+                }
+                if (timerfd_settime(timer, TFD_TIMER_ABSTIME, &deadline, NULL)) {
+                    fprintf(stderr, "latcd: retirement timer arm failed; periodic discovery only: %s\n", strerror(errno));
+                    close(timer);
+                    timer = -1;
+                }
+            }
             next_retirement = g_get_monotonic_time() + (result == 1 ? 100000 : 5000000);
         }
         if (now >= next) {
@@ -1891,19 +1922,40 @@ static void *compiler_input_recovery_worker(void *opaque)
                     if (result < 0) fprintf(stderr, "latcd: %s\n", error);
                 }
                 next = g_get_monotonic_time() + 100000;
-                continue;
+            } else {
+                if (atomic_load(&compiler_budget_recovery_state) < 0) break;
+                int result = recover_compiler_inputs_step(work->config, &cursor, 32,
+                    &visited, error, sizeof(error));
+                if (result < 0 && !failed) fprintf(stderr, "latcd: %s\n", error);
+                failed = result < 0;
+                next = g_get_monotonic_time() + (result == 1 ? 100000 : 5000000);
             }
-            if (atomic_load(&compiler_budget_recovery_state) < 0) break;
-            int result = recover_compiler_inputs_step(work->config, &cursor, 32,
-                &visited, error, sizeof(error));
-            if (result < 0 && !failed) fprintf(stderr, "latcd: %s\n", error);
-            failed = result < 0;
-            next = g_get_monotonic_time() + (result == 1 ? 100000 : 5000000);
         }
-        struct timespec pause = {.tv_nsec = 100 * 1000 * 1000};
-        nanosleep(&pause, NULL);
+        int64_t wake = retirement_safe ? MIN(next, next_retirement) : next;
+        int64_t remaining = MAX(INT64_C(0), wake - g_get_monotonic_time());
+        int timeout = (int)MIN(INT64_C(1000), (remaining + 999) / 1000);
+        struct pollfd signals[] = {
+            {.fd = atomic_load(&retirement_notify_fd), .events = POLLIN},
+            {.fd = timer, .events = POLLIN},
+        };
+        int ready = poll(signals, G_N_ELEMENTS(signals), timeout);
+        if (ready < 0 && errno != EINTR) {
+            fprintf(stderr, "latcd: recovery wait failed: %s\n", strerror(errno));
+            break;
+        }
+        for (unsigned i = 0; ready > 0 && i < G_N_ELEMENTS(signals); i++) {
+            uint64_t count;
+            if ((signals[i].revents & POLLIN) && read(signals[i].fd, &count, sizeof(count)) == sizeof(count)) {
+                next_retirement = 0;
+                pthread_mutex_lock(&retirement_queue_lock);
+                if (i) retirement_timer_wakeups += count;
+                else retirement_publication_wakeups += count;
+                pthread_mutex_unlock(&retirement_queue_lock);
+            }
+        }
     }
     if (cursor) closedir(cursor);
+    if (timer >= 0) close(timer);
     latcd_retirement_queue_free(retirement);
     return NULL;
 }
@@ -2858,6 +2910,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
             fprintf(stderr, "latcd: %s; transaction retained for recovery\n",
                     retirement_error);
         }
+        retirement_notify();
     }
     if (!result && crash && !strcmp(crash, "retired")) raise(SIGKILL);
     g_free(transaction);
@@ -3793,6 +3846,8 @@ static void write_stats_locked(LatcdService *service)
     pthread_mutex_unlock(&generation_capacity.lock);
     pthread_mutex_lock(&retirement_queue_lock);
     LatcdRetirementQueueStats retirement = retirement_queue_stats;
+    uint64_t timer_wakeups = retirement_timer_wakeups;
+    uint64_t publication_wakeups = retirement_publication_wakeups;
     pthread_mutex_unlock(&retirement_queue_lock);
     int length = snprintf(contents, sizeof(contents),
         "{\"requests\":%" PRIu64 ",\"queued\":%" PRIu64
@@ -3811,6 +3866,7 @@ static void write_stats_locked(LatcdService *service)
         ",\"retirement_next_deadline_boottime_us\":%" PRIu64
         ",\"retirement_oldest_due_wait_us\":%" PRIu64
         ",\"retirement_discovery_complete\":%s,\"automatic_deletion_enabled\":false"
+        ",\"retirement_timer_wakeups\":%" PRIu64 ",\"retirement_publication_wakeups\":%" PRIu64
         ",\"generation_capacity_ready\":%s}\n",
         service->requests, service->queued, service->deduplicated,
         service->cache_hits, service->compiled, service->failed,
@@ -3822,6 +3878,7 @@ static void write_stats_locked(LatcdService *service)
         publication_bytes, transient_bytes, recovered_bytes, unknown_budgets, budget_recovery,
         retirement.candidates, retirement.due, retirement.next_deadline_us, retirement.oldest_due_wait_us,
         retirement.complete ? "true" : "false",
+        timer_wakeups, publication_wakeups,
         capacity_ready ? "true" : "false");
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
@@ -5333,6 +5390,12 @@ static int run_service(const LatcdConfig *config)
     int64_t last_journal_admission = last_activity;
     bool journal_admission_error = false;
     LatcdTaskRecovery task_recovery = {.config = config};
+    int retirement_event = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    atomic_store(&retirement_notify_fd, retirement_event);
+    if (retirement_event < 0) {
+        fprintf(stderr, "latcd: cannot create recovery notification: %s\n", strerror(errno));
+        stop_requested = 1;
+    }
     pthread_t recovery_thread;
     bool recovery_started = !pthread_create(&recovery_thread, NULL,
         compiler_input_recovery_worker, &task_recovery);
@@ -5556,6 +5619,7 @@ static int run_service(const LatcdConfig *config)
         close(client);
     }
     atomic_store(&task_recovery.stopping, true);
+    retirement_notify();
     if (recovery_started) pthread_join(recovery_thread, NULL);
     for (nfds_t i = 1; i < channel_count; i++) {
         close(channels[i].fd);
@@ -5586,6 +5650,8 @@ static int run_service(const LatcdConfig *config)
     for (uint32_t i = 0; i < config->workers; i++) {
         pthread_join(service.workers[i], NULL);
     }
+    atomic_store(&retirement_notify_fd, -1);
+    if (retirement_event >= 0) close(retirement_event);
     pthread_mutex_lock(&service.lock);
     write_stats_locked(&service);
     pthread_mutex_unlock(&service.lock);

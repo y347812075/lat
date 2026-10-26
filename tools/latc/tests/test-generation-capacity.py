@@ -83,6 +83,7 @@ def run(prefix, guest, work):
                 observed = json.loads(stats.read_bytes())
                 assert not observed['automatic_deletion_enabled'], observed
                 if observed['retirement_discovery_complete'] and observed['retirement_candidates']:
+                    assert observed['retirement_publication_wakeups'], observed
                     assert not observed['retirement_due_candidates'], observed
                     assert observed['retirement_next_deadline_boottime_us'], observed
                     break
@@ -102,6 +103,22 @@ def run(prefix, guest, work):
             checkpoint_inode = checkpoint.stat().st_ino
             daemon.terminate()
             assert daemon.wait(timeout=20) == 0
+            # Move grace deadlines near the present only in this stopped,
+            # isolated cache. Production grace remains unchanged at 600s.
+            now_us = time.clock_gettime_ns(time.CLOCK_BOOTTIME) // 1000
+            assert now_us > 600_000_000
+            for transaction in (cache / '.gc/transactions').glob('*.ini'):
+                record = configparser.ConfigParser()
+                record.read(transaction)
+                if record['transaction']['state'] == 'RETIRED':
+                    record['transaction']['retired_boottime_us'] = str(now_us - 596_000_000)
+                    mode = transaction.stat().st_mode & 0o777
+                    transaction.chmod(0o600)
+                    try:
+                        with transaction.open('w') as stream:
+                            record.write(stream, space_around_delimiters=False)
+                    finally:
+                        transaction.chmod(mode)
             stats.unlink()
             daemon = subprocess.Popen(command, env=env, stdout=log, stderr=log)
             deadline = time.monotonic() + 20
@@ -115,6 +132,16 @@ def run(prefix, guest, work):
                     assert ages == {name: recovered[name]['enqueued'] for name in
                                     recovered.sections() if name != 'queue'}
                     assert checkpoint.stat().st_ino == checkpoint_inode
+                    assert not observed['retirement_due_candidates'], observed
+                    break
+                assert daemon.poll() is None and time.monotonic() < deadline, observed
+                time.sleep(.05)
+            deadline = time.monotonic() + 15
+            while True:
+                observed = json.loads(stats.read_bytes())
+                assert not observed['requests'] and not observed['automatic_deletion_enabled'], observed
+                if observed['retirement_timer_wakeups'] and observed['retirement_due_candidates']:
+                    assert observed['retirement_discovery_complete'], observed
                     break
                 assert daemon.poll() is None and time.monotonic() < deadline, observed
                 time.sleep(.05)
@@ -162,7 +189,7 @@ def run(prefix, guest, work):
         finally:
             daemon.terminate()
             assert daemon.wait(timeout=20) == 0
-    print("generation-capacity: publication/retry/index/strict42/scheduler-restart/compiler-peak-admission PASS")
+    print("generation-capacity: publication/retry/index/strict42/scheduler-restart/idle-deadline/compiler-peak-admission PASS")
 
 
 if __name__ == "__main__":
