@@ -232,6 +232,35 @@ class PlannerTest(unittest.TestCase):
         self.assertIn("clock_unavailable", rows[old["module"]]["holds"])
         self.assertIsNone(rows[old["module"]]["deadline_boottime_us"])
 
+    def test_completed_removal_receipt(self):
+        old = self.generation("1")
+        self.transaction(old, self.manifest)
+        name = old["module"]
+        st = (self.root / name).stat()
+        raw = (f"[tombstone]\nversion=1\nsource={SOURCE}\nname={name}\nstate=DELETING\n"
+               f"device={st.st_dev}\ninode={st.st_ino}\nsize={st.st_size}\n"
+               f"allocated={st.st_blocks * 512}\n"
+               f"sha256={hashlib.sha256((self.root / name).read_bytes()).hexdigest()}\n"
+               "recovery_status=MISSING\ndeletion_status=UNLINKED\n")
+        path = ".gc/tombstones/" + name
+        self.put(path, raw.encode())
+        (self.root / name).unlink()
+        plan, rows = self.selected()
+        self.assertTrue(plan["complete"])
+        self.assertEqual(rows[name]["selection_status"], "removed")
+        self.assertEqual(rows[old["native"]]["selection_status"], "due")
+        self.run_plan()
+        for bad in (raw.replace("deletion_status=UNLINKED\n", ""),
+                    raw.replace("recovery_status=MISSING", "recovery_status=UNKNOWN"),
+                    raw.replace(f"inode={st.st_ino}", "inode=0")):
+            self.put(path, bad.encode())
+            self.run_plan(False)
+        self.put(path, raw.encode())
+        self.put(name, b"replacement must survive")
+        plan, rows = self.selected()
+        self.assertFalse(plan["complete"])
+        self.assertEqual(rows[name]["selection_status"], "held")
+
     def test_current_and_inventory(self):
         self.put(".superseded/legacy/" + STEM + ".so", b"old")
         self.put(".tmp/part.native", b"work")

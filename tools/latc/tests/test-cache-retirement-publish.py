@@ -153,6 +153,51 @@ def run(prefix, guest, work):
         if old_manifest:
             for role in ("module", "native", "tbset"):
                 assert (cache / json.loads(old_manifest)[role]).is_file()
+        if initial and phase != "prepared":
+            retired = json.loads(old_manifest)
+            active = json.loads(manifest.read_bytes())
+            tombstones = cache / ".gc/tombstones"
+            tombstones.mkdir(mode=0o700)
+            shared = set(active[role] for role in ("module", "native", "tbset"))
+            removed = set()
+            for role in ("module", "native", "tbset"):
+                name = retired[role]
+                if name in shared or name in removed:
+                    continue
+                removed.add(name)
+                path = cache / name
+                st = path.stat()
+                marker = tombstones / name
+                marker.write_text(f"[tombstone]\nversion=1\nsource={source}\nname={name}\n"
+                    f"state=DELETING\ndevice={st.st_dev}\ninode={st.st_ino}\n"
+                    f"size={st.st_size}\nallocated={st.st_blocks * 512}\n"
+                    f"sha256={hashlib.sha256(path.read_bytes()).hexdigest()}\n"
+                    "recovery_status=MISSING\ndeletion_status=UNLINKED\n")
+                marker.chmod(0o400)
+                # Test fixture simulates completed durable GC; no product GC call.
+                with marker.open("rb") as stream:
+                    os.fsync(stream.fileno())
+                path.unlink()
+                for parent in (tombstones, cache):
+                    fd = os.open(parent, os.O_DIRECTORY | os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                with (directory / f"deleted-{role}-recovery.log").open("wb") as log:
+                    result = subprocess.run(arguments + ["--serve", "--idle-seconds", "1"],
+                        env=env, stdout=log, stderr=log, timeout=30)
+                assert result.returncode == 0
+                for transaction in (cache / ".gc/transactions").glob("*.ini"):
+                    parsed = configparser.ConfigParser(interpolation=None, strict=True)
+                    parsed.read(transaction)
+                    assert parsed["transaction"]["state"] == "RETIRED"
+                    assert parsed["transaction"]["objects_status"] == "RECORDED"
+                assert manifest.read_bytes() == current_before
+            with (directory / "after-removal-runner.log").open("wb") as log:
+                result = subprocess.run([str(prefix / "bin/latx-x86_64"), str(guest)],
+                    env=run_env, stdout=log, stderr=log, timeout=30)
+            assert result.returncode == 42
         print(f"{label}: crash/recovery PASS")
 
 

@@ -588,8 +588,45 @@ out:
 
 /* No pathname here is trusted until its source-bound basename is checked.
  * Content hashing is reserved for startup, outside daemon metadata locks. */
+static bool tombstone_shape(GKeyFile *record, const char *name,
+                             char **source, uint64_t values[4], char **hash);
+
+static bool completed_removal(int root, const char *source, const char *name,
+                              const uint64_t expected[4], const char *digest)
+{
+    int gc = open_directory(root, ".gc", false);
+    int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
+    char *raw = NULL, *stored_source = NULL, *hash = NULL;
+    size_t size = 0;
+    uint64_t values[4] = {0};
+    GKeyFile *record = g_key_file_new();
+    bool valid = store >= 0 && !read_file(store, name, RECORD_LIMIT, &raw, &size) &&
+        !memchr(raw, 0, size) && g_key_file_load_from_data(record, raw, size, 0, NULL) &&
+        tombstone_shape(record, name, &stored_source, values, &hash) &&
+        !g_strcmp0(source, stored_source) && !g_strcmp0(digest, hash) &&
+        !memcmp(values, expected, sizeof(values));
+    char *deletion = g_key_file_get_string(record, "tombstone", "deletion_status", NULL);
+    char *observation = g_key_file_get_string(record, "tombstone", "recovery_status", NULL);
+    valid = valid && !g_strcmp0(deletion, "UNLINKED") && !g_strcmp0(observation, "MISSING");
+    /* A receipt cannot erase a current reference, even if the file is absent. */
+    char *current = g_strdup_printf("%s.current", source), *manifest = NULL;
+    size_t manifest_size = 0;
+    GHashTable *references = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    if (valid) valid = !read_file(root, current, MANIFEST_LIMIT, &manifest, &manifest_size) &&
+        manifest_references(source, manifest, manifest_size, references) &&
+        !g_hash_table_contains(references, name);
+    struct stat st;
+    if (valid) valid = fstatat(root, name, &st, AT_SYMLINK_NOFOLLOW) && errno == ENOENT;
+    g_hash_table_unref(references);
+    g_free(manifest); g_free(current); g_free(deletion); g_free(observation);
+    g_free(raw); g_free(stored_source); g_free(hash); g_key_file_unref(record);
+    if (store >= 0) close(store);
+    if (gc >= 0) close(gc);
+    return valid;
+}
+
 static int verify_objects(int root, const char *source, const char *encoded,
-                           bool content)
+                           bool content, bool allow_removed)
 {
     if (!encoded) return -1;
     if (!*encoded) return 2;
@@ -634,8 +671,11 @@ static int verify_objects(int root, const char *source, const char *encoded,
         if (!valid) result = -1;
         else {
             struct stat st;
-            if (fstatat(root, name, &st, AT_SYMLINK_NOFOLLOW) ||
-                !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+            int status = fstatat(root, name, &st, AT_SYMLINK_NOFOLLOW);
+            if (status && errno == ENOENT && allow_removed &&
+                completed_removal(root, source, name, values, hash)) {
+                /* Durable exact-object receipt replaces only missing content. */
+            } else if (status || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
                 st.st_nlink != 1 || (st.st_mode & 0222) ||
                 (uint64_t)st.st_dev != values[0] || (uint64_t)st.st_ino != values[1] ||
                 (uint64_t)st.st_size != values[2] || (uint64_t)st.st_blocks * 512 != values[3]) {
@@ -694,7 +734,8 @@ static int recover_record(int root, int store, const char *name, bool content)
     }
     if (version == 2) {
         char *encoded = g_key_file_get_string(record, "transaction", "objects", NULL);
-        int object_result = verify_objects(root, source, encoded, content);
+        int object_result = verify_objects(root, source, encoded, content,
+                                           !strcmp(state, "RETIRED"));
         gsize object_size = 0;
         guchar *object_data = encoded ? g_base64_decode(encoded, &object_size) : NULL;
         bool bound = object_size && !latcd_retirement_validate_binding(source,

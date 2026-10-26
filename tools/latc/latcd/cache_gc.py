@@ -365,12 +365,37 @@ class Inventory:
                              self.entries[relative]["_identity"] != before):
                 self.error(relative, "concurrent_change", "directory changed before scan")
 
+    def completed_removal(self, name):
+        marker = self.tombstones.get(".gc/tombstones/" + name)
+        if (not marker or marker.get("deletion_status") != "UNLINKED" or
+                marker.get("recovery_status") != "MISSING" or name in self.entries or
+                name in self.refs or marker["source"] + ".current" not in self.manifests):
+            return False
+        references = self.transaction_refs.get(name, [])
+        if not references:
+            return False
+        fields = ("name", "device", "inode", "size", "allocated", "sha256")
+        for reference in references:
+            record = self.transactions[reference["transaction"]]
+            matching = [obj for obj in record["object_identities"] if obj["name"] == name]
+            if (record["state"] != "RETIRED" or not record["binding_verified"] or
+                    record.get("objects_status") != "RECORDED" or not matching or
+                    any(any(obj[field] != marker[field] for field in fields) for obj in matching)):
+                return False
+        return True
+
     def retirement_plan(self, objects):
         """Select diagnostic deadlines, not live-safe deletion candidates."""
         output = []
         for name, references in sorted(self.transaction_refs.items()):
             row = self.entries.get(name)
             source = GENERATED.fullmatch(name)[1]
+            if self.completed_removal(name):
+                output.append({"name": name, "source": source, "selection_status": "removed",
+                               "holds": [], "retirement_transactions": [], "current_references": [],
+                               "deadline_boottime_us": None, "remaining_grace_us": None,
+                               "delete_authorized": False})
+                continue
             holds, events, evidence = set(), [], []
             for reference in references:
                 path = reference["transaction"]
@@ -437,6 +462,8 @@ class Inventory:
             if (relative.startswith(".gc/tombstones/") and
                     not relative.removeprefix(".gc/tombstones/").startswith(".write-")):
                 name = relative.removeprefix(".gc/tombstones/")
+                if self.completed_removal(name):
+                    continue
                 match = GENERATED.fullmatch(name)
                 if match:
                     self.frozen.add(match[1])

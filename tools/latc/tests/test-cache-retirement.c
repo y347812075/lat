@@ -771,6 +771,80 @@ static void test_tombstone_delete(const char *point, bool crash, int mutation)
     remove_root(root); g_free(root);
 }
 
+static void test_deleted_transaction_recovery(int mutation)
+{
+    char *root = root_new(), error[256];
+    char *current = current_path(root), *transaction = NULL;
+    char *names[6], *paths[6];
+    const char *suffixes[] = {".so", ".native", ".tbset"};
+    for (size_t i = 0; i < 6; i++) {
+        names[i] = i < 3 ? g_strconcat(source, suffixes[i], NULL) :
+            g_strdup_printf("%s-%s%s", source, source, suffixes[i - 3]);
+        paths[i] = g_build_filename(root, names[i], NULL);
+        put(paths[i], "immutable transaction input\n");
+    }
+    char *previous = g_strdup_printf("{\"version\":2,\"module\":\"%s\",\"native\":\"%s\","
+        "\"tbset\":\"%s\",\"source_sha256\":\"%s\",\"codegen_id\":\"%s\",\"published_sequence\":1}",
+        names[0], names[1], names[2], source, source);
+    char *following = g_strdup_printf("{\"version\":2,\"module\":\"%s\",\"native\":\"%s\","
+        "\"tbset\":\"%s\",\"source_sha256\":\"%s\",\"codegen_id\":\"%s\",\"published_sequence\":2}",
+        names[3], names[4], names[5], source, source);
+    put(current, previous);
+    char *evidence = latcd_retirement_capture_objects(root, source, (const char *const *)names, 6);
+    assert(evidence && !latcd_retirement_prepare(root, source, following, strlen(following),
+        evidence, &transaction, error, sizeof(error)));
+    put(current, following);
+    assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+    for (size_t i = 0; i < 3; i++) {
+        const char *capture[] = {names[i]};
+        char *single = latcd_retirement_capture_objects(root, source, capture, 1);
+        int fd = open(paths[i], O_RDONLY | O_CLOEXEC);
+        assert(single && fd >= 0 && !latcd_retirement_tombstone(root, source, names[i], fd,
+            single, error, sizeof(error)));
+        close(fd); g_free(single);
+        if (!i) assert(!latcd_tombstone_delete(root, names[i], error, sizeof(error)));
+    }
+    char *marker = g_build_filename(root, ".gc", "tombstones", names[0], NULL);
+    if (mutation >= 1 && mutation <= 9) {
+        GKeyFile *record = g_key_file_new();
+        assert(g_key_file_load_from_file(record, marker, 0, NULL));
+        if (mutation == 1) g_key_file_remove_key(record, "tombstone", "deletion_status", NULL);
+        if (mutation == 2) g_key_file_set_string(record, "tombstone", "recovery_status", "UNKNOWN");
+        if (mutation == 3) g_key_file_set_string(record, "tombstone", "sha256", source);
+        if (mutation == 4) g_key_file_set_uint64(record, "tombstone", "inode", 0);
+        if (mutation == 5) g_key_file_set_uint64(record, "tombstone", "device", 0);
+        if (mutation == 6) g_key_file_set_uint64(record, "tombstone", "size", 1);
+        if (mutation == 7) g_key_file_set_uint64(record, "tombstone", "allocated", 1);
+        if (mutation == 8) g_key_file_set_string(record, "tombstone", "unexpected", "1");
+        if (mutation == 9) g_key_file_set_string(record, "tombstone", "recovery_status", "BUSY");
+        char *raw = g_key_file_to_data(record, NULL, NULL);
+        put(marker, raw); g_free(raw); g_key_file_unref(record);
+    }
+    if (mutation == 10) put(paths[0], "replacement must survive\n");
+    if (mutation == 11) assert(!unlink(marker));
+    if (mutation == 12) put(current, previous);
+    if (mutation == 13) assert(!unlink(current));
+    if (mutation == 14) put(current, "broken current\n");
+    unsigned recovered;
+    for (int pass = 0; pass < 2; pass++) {
+        assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)) && recovered == 1);
+        assert_state(root, mutation ? "UNKNOWN" : "RETIRED");
+        assert((access(paths[0], F_OK) == 0) == (mutation == 10));
+        assert(!access(paths[3], F_OK) && !access(paths[4], F_OK) && !access(paths[5], F_OK));
+    }
+    if (!mutation) {
+        /* Resume after one completed object; remaining evidence stays usable. */
+        for (size_t i = 1; i < 3; i++) {
+            assert(!latcd_tombstone_delete(root, names[i], error, sizeof(error)));
+            assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)));
+            assert_state(root, "RETIRED");
+        }
+    }
+    for (size_t i = 0; i < 6; i++) { g_free(paths[i]); g_free(names[i]); }
+    g_free(previous); g_free(following); g_free(evidence); g_free(transaction);
+    g_free(marker); g_free(current); remove_root(root); g_free(root);
+}
+
 static void test_partial_generation_delete(void)
 {
     char *root = root_new(), error[256];
@@ -820,6 +894,7 @@ int main(void)
     test_reboot();
     for (int mutation = 0; mutation < 7; mutation++) test_object_identity(mutation);
     test_legacy_and_schema();
+    for (int mutation = 0; mutation < 15; mutation++) test_deleted_transaction_recovery(mutation);
     test_manifest_binding();
     test_tombstone();
     for (int mutation = 0; mutation < 11; mutation++) test_tombstone_recovery(mutation);

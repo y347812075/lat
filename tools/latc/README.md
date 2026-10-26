@@ -908,6 +908,12 @@ initially absent current) is ABORTED, and any other result is UNKNOWN. Recovery
 does not recompile, move, or remove generation files. RETIRED timestamps use
 boot ID and CLOCK_BOOTTIME; a changed boot ID restarts the observation window.
 These records are evidence and conservative planner roots, not deletion permits.
+For RETIRED records only, an absent object can be reconciled with an immutable
+UNLINKED/MISSING tombstone matching its complete recorded identity and hash.
+A valid current manifest must exist and must not reference that name. Plain
+ENOENT, an unfinished receipt, a new object at the same name or any mismatch
+remains unproven. The read-only planner reports reconciled names as `removed`;
+this describes durable namespace removal, not physical block release.
 Version 2 additionally records the old/new immutable objects' basename, device,
 inode, length, allocated bytes and SHA256. Collection holds shared file leases
 outside the daemon metadata lock. Startup rechecks those identities and hashes;
