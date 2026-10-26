@@ -326,6 +326,7 @@ $(BUILD)/tests/test-cfg: tests/test-cfg.c $(BUILD)/liblatc_cfg.a
 
 test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-native-constants \
+$(BUILD)/tests/test-native-migration-v12 \
 	$(BUILD)/tests/test-native-tu-plan \
 	$(BUILD)/tests/test-native-tu-extract \
 	$(BUILD)/tests/test-native-tu-audit \
@@ -407,6 +408,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-native-format $(BUILD)/tests/base.native \
 	  $(BUILD)/tests/delta.native $(BUILD)/tests/merged.native
 	$(BUILD)/tests/test-native-relocate
+	$(BUILD)/tests/test-native-migration-v12
 	$(BUILD)/tests/test-native-tu-plan
 	$(BUILD)/tests/test-native-tu-extract
 	$(BUILD)/tests/test-native-tu-audit
@@ -1152,6 +1154,13 @@ test-final-provenance-export: all $(BUILD)/tests/make-provenance-tu-bundle
 test-fwait-constants: all
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)"
 	python3 tests/test-fwait-constants.py "$(INSTALL_PREFIX)" "$(X86_GUEST)" "$(TBSET)" "$(WORK)"
+
+$(BUILD)/tests/test-native-migration-v12: tests/test-native-migration-v12.c \
+	$(BUILD)/native/format/native-migration-v12.o \
+	$(BUILD)/native/format/native-image.o \
+	$(BUILD)/aot-v2/common/translation-config.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD)/tests/test-native-tu-plan: tests/test-native-tu-plan.c \
 		$(BUILD)/native/format/native-tu-plan.o \
