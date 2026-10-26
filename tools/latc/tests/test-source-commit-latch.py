@@ -38,8 +38,9 @@ def run(prefix, guest, work):
 
         def start(extra_env, log):
             daemon = subprocess.Popen(args, env=extra_env, stdout=log, stderr=log,
-                                      pass_fds=(() if 'LATCD_TEST_SOURCE_COMMIT_FD' not in extra_env
-                                                else (int(extra_env['LATCD_TEST_SOURCE_COMMIT_FD']),)))
+                                      pass_fds=tuple(int(extra_env[name]) for name in (
+                                          'LATCD_TEST_SOURCE_COMMIT_FD',
+                                          'LATCD_TEST_SOURCE_COMMIT_RESUME_FD') if name in extra_env))
             deadline = time.monotonic() + 30
             while not socket.is_socket():
                 assert daemon.poll() is None and time.monotonic() < deadline
@@ -61,20 +62,25 @@ def run(prefix, guest, work):
         selected = json.loads(original)
         baseline_names = {path.name for path in cache.iterdir()}
         ready, notify = os.pipe()
+        resume, release = os.pipe()
         client = daemon = None
         gate = None
         with (directory / 'daemon.log').open('wb') as log, (directory / 'submit.log').open('wb') as client_log:
             try:
-                daemon = start(dict(env, LATCD_TEST_SOURCE_COMMIT_FD=str(notify)), log)
-                gate = (cache / '.gc/source-locks' / (source + '.lock')).open('rb')
-                fcntl.flock(gate, fcntl.LOCK_EX)
+                daemon = start(dict(env, LATCD_TEST_SOURCE_COMMIT_FD=str(notify),
+                                    LATCD_TEST_SOURCE_COMMIT_RESUME_FD=str(resume)), log)
                 replacement_submit = list(submit)
                 replacement_submit[replacement_submit.index(str(tbset))] = str(full_tbset)
                 client = subprocess.Popen(replacement_submit, env=env, stdout=client_log, stderr=client_log)
                 assert select.select([ready], [], [], 30)[0], 'publisher did not reach source latch'
                 assert os.read(ready, 1) == b'x'
+                gate = (cache / '.gc/source-locks' / (source + '.lock')).open('rb')
+                fcntl.flock(gate, fcntl.LOCK_EX)
+                os.write(release, b'x')
                 # An independent publication must finish while this source waits.
                 other = directory / 'other-guest'
+                # The independent publication uses the same test-only handshake.
+                os.write(release, b'x')
                 other.write_bytes(guest.read_bytes() + b'other source identity\n')
                 other.chmod(0o700)
                 other_tbset = directory / 'other.tbset'
@@ -130,6 +136,8 @@ def run(prefix, guest, work):
                         daemon.wait(timeout=10)
                 os.close(ready)
                 os.close(notify)
+                os.close(resume)
+                os.close(release)
     print('test-source-commit-latch: PASS')
 
 

@@ -98,6 +98,8 @@ typedef struct LatcdCurrentManifest {
 } LatcdCurrentManifest;
 
 static void current_manifest_clear(LatcdCurrentManifest *manifest);
+static bool current_manifest_equal(const LatcdCurrentManifest *first,
+                                    const LatcdCurrentManifest *second);
 static int current_manifest_read(const LatcdConfig *config, const char *hex,
                                  LatcdCurrentManifest *manifest);
 static int persisted_manifest_valid(const LatcdConfig *config,
@@ -1576,9 +1578,11 @@ static int open_cached_file(const char *source, uint64_t max_size,
 }
 
 static int snapshot_cached_fd(int input, const char *temporary_dir,
-                              char **snapshot, char *error, size_t error_size)
+                              char **snapshot, int *snapshot_pin,
+                              char *error, size_t error_size)
 {
     *snapshot = NULL;
+    if (snapshot_pin) *snapshot_pin = -1;
     struct stat before, after;
     if (fstat(input, &before)) {
         return fail(error, error_size, "cannot inspect pinned cache file");
@@ -1590,6 +1594,12 @@ static int snapshot_cached_fd(int input, const char *temporary_dir,
         return fail(error, error_size,
                     "cannot create canonical native snapshot: %s",
                     strerror(errno));
+    }
+    if (flock(output, LOCK_SH | LOCK_NB)) {
+        close(output);
+        unlink(path);
+        g_free(path);
+        return fail(error, error_size, "cannot pin canonical snapshot");
     }
     unsigned char buffer[128 * 1024];
     int result = 0;
@@ -1632,34 +1642,28 @@ static int snapshot_cached_fd(int input, const char *temporary_dir,
         result = fail(error, error_size,
                       "pinned cache file changed while copying");
     }
-    if (close(output) && !result) {
-        result = fail(error, error_size,
-                      "cannot close canonical native snapshot: %s",
-                      strerror(errno));
+    int readonly = -1;
+    if (!result && snapshot_pin) {
+        struct stat writer, reader;
+        if (fchmod(output, 0400) ||
+            (readonly = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)) < 0 ||
+            fstat(output, &writer) || fstat(readonly, &reader) ||
+            writer.st_dev != reader.st_dev || writer.st_ino != reader.st_ino ||
+            flock(readonly, LOCK_SH | LOCK_NB)) {
+            result = fail(error, error_size, "cannot hand off canonical snapshot pin");
+        }
     }
+    if (close(output) && !result)
+        result = fail(error, error_size, "cannot close canonical native snapshot");
     if (result) {
+        if (readonly >= 0) close(readonly);
         unlink(path);
         g_free(path);
         return -1;
     }
+    if (snapshot_pin) *snapshot_pin = readonly;
     *snapshot = path;
     return 0;
-}
-
-static int snapshot_cached_file(const char *source, const char *temporary_dir,
-                                uint64_t max_size, char **snapshot,
-                                char *error, size_t error_size)
-{
-    *snapshot = NULL;
-    int input = open_cached_file(source, max_size, error, error_size);
-    if (input < 0) return -1;
-    /* Caller holds cache_lock; the descriptor survives retirement/eviction. */
-    pthread_mutex_unlock(&cache_lock);
-    int result = snapshot_cached_fd(input, temporary_dir, snapshot,
-                                    error, error_size);
-    close(input);
-    pthread_mutex_lock(&cache_lock);
-    return result;
 }
 
 static char *cached_fd_digest(int fd)
@@ -1692,56 +1696,60 @@ static char *cached_fd_digest(int fd)
     return digest;
 }
 
-static char *cached_file_digest(const char *path)
-{
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    char *digest = cached_fd_digest(fd);
-    if (fd >= 0 && close(fd)) g_clear_pointer(&digest, g_free);
-    return digest;
-}
-
 static int snapshot_current_pair(const LatcdConfig *config,
                                  const LatcdCurrentManifest *manifest,
                                  const uint8_t digest[32], const char *temporary,
-                                 char **native, char **module,
+                                 char **native, char **module, int snapshot_pins[2],
                                  char *error, size_t error_size)
 {
-    /* Caller holds cache_lock. Old manifests have no proof for plan dedup. */
-    if (!manifest->module_sha256 && !manifest->native_sha256) return 0;
-    if (!manifest->module_sha256 || !manifest->native_sha256) {
+    /* Caller holds C. Capture S outside C; G and snapshot pins overlap. */
+    bool pair = manifest->module_sha256 || manifest->native_sha256;
+    if (pair && (!manifest->module_sha256 || !manifest->native_sha256)) {
         return fail(error, error_size, "incomplete module/native pair digests");
     }
-    if (strlen(manifest->module_sha256) != 64 ||
-        strlen(manifest->native_sha256) != 64) {
+    if (pair && (strlen(manifest->module_sha256) != 64 ||
+        strlen(manifest->native_sha256) != 64)) {
         return fail(error, error_size, "invalid module/native pair digests");
+    }
+    char hex[65];
+    digest_hex(digest, hex);
+    pthread_mutex_unlock(&cache_lock);
+    int source_gate = lat_aot_v2_cache_source_lock(config->cache_dir, hex,
+        LOCK_SH | LOCK_NB, false, error, error_size);
+    pthread_mutex_lock(&cache_lock);
+    if (source_gate < 0) return -1;
+    LatcdCurrentManifest latest = {0};
+    bool unchanged = !current_manifest_read(config, hex, &latest) &&
+                     current_manifest_equal(manifest, &latest);
+    current_manifest_clear(&latest);
+    if (!unchanged) {
+        close(source_gate);
+        return fail(error, error_size, "current changed before baseline capture");
     }
     char *module_path = g_build_filename(config->cache_dir, manifest->module, NULL);
     char *native_path = g_build_filename(config->cache_dir, manifest->native, NULL);
     int native_fd = open_cached_file(native_path, config->file_size_limit,
                                      error, error_size);
-    int module_fd = native_fd >= 0 ? open_cached_file(
+    int module_fd = pair && native_fd >= 0 ? open_cached_file(
         module_path, config->file_size_limit, error, error_size) : -1;
     g_free(module_path);
     g_free(native_path);
-    if (module_fd < 0) {
+    close(source_gate);
+    if (native_fd < 0 || (pair && module_fd < 0)) {
         if (native_fd >= 0) close(native_fd);
         return -1;
     }
     /* Pin both members of one selected generation before releasing the lock. */
     pthread_mutex_unlock(&cache_lock);
-    int result = snapshot_cached_fd(native_fd, temporary, native,
+    int result = snapshot_cached_fd(native_fd, temporary, native, &snapshot_pins[0],
                                     error, error_size);
-    if (!result) result = snapshot_cached_fd(module_fd, temporary, module,
+    if (!result && pair) result = snapshot_cached_fd(module_fd, temporary, module,
+                                             &snapshot_pins[1],
                                              error, error_size);
-    close(native_fd);
-    close(module_fd);
-    if (!result && (chmod(*native, 0400) || chmod(*module, 0400))) {
-        result = fail(error, error_size, "cannot protect module/native snapshots");
-    }
-    char *module_sha = !result ? cached_file_digest(*module) : NULL;
-    char *native_sha = !result ? cached_file_digest(*native) : NULL;
+    char *module_sha = !result && pair ? cached_fd_digest(snapshot_pins[1]) : NULL;
+    char *native_sha = !result && pair ? cached_fd_digest(snapshot_pins[0]) : NULL;
     LatAotModuleInfoV2 info;
-    if (!result && (!module_sha || !native_sha ||
+    if (!result && pair && (!module_sha || !native_sha ||
         strcmp(module_sha, manifest->module_sha256) ||
         strcmp(native_sha, manifest->native_sha256) ||
         !cached_module_inspect(*module, digest, &info))) {
@@ -1749,8 +1757,14 @@ static int snapshot_current_pair(const LatcdConfig *config,
     }
     g_free(module_sha);
     g_free(native_sha);
+    close(native_fd);
+    if (module_fd >= 0) close(module_fd);
     pthread_mutex_lock(&cache_lock);
     if (result) {
+        for (unsigned i = 0; i < 2; i++) {
+            if (snapshot_pins[i] >= 0) close(snapshot_pins[i]);
+            snapshot_pins[i] = -1;
+        }
         if (*native) unlink(*native);
         if (*module) unlink(*module);
         g_clear_pointer(native, g_free);
@@ -1895,6 +1909,15 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
             char byte = 'x';
             ssize_t ignored = write((int)number, &byte, 1);
             (void)ignored;
+            const char *resume = getenv("LATCD_TEST_SOURCE_COMMIT_RESUME_FD");
+            if (resume) {
+                long release = strtol(resume, &end, 10);
+                if (*resume && !*end && release >= 0 && release <= INT_MAX) {
+                    ssize_t received;
+                    do { received = read((int)release, &byte, 1); }
+                    while (received < 0 && errno == EINTR);
+                }
+            }
         }
     }
     source_lock_fd = lat_aot_v2_cache_source_lock(
@@ -2351,6 +2374,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     char *final_tbset = NULL;
     char *base_native = NULL;
     char *base_module = NULL;
+    int baseline_pins[2] = {-1, -1};
     char *retained_tbset = NULL;
     char *module_name = NULL;
     char *native_name = NULL;
@@ -2471,22 +2495,11 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
             persisted_manifest_valid(config, hex, digest)) {
             if (snapshot_current_pair(config, &previous, digest, temporary_dir,
                                      &base_native, &base_module,
+                                     baseline_pins,
                                      error, sizeof(error))) {
                 current_manifest_clear(&previous);
                 pthread_mutex_unlock(&cache_lock);
                 goto out;
-            }
-            if (!base_native) {
-                char *cached_base = g_build_filename(config->cache_dir,
-                                                      previous.native, NULL);
-                int result = snapshot_cached_file(cached_base, temporary_dir,
-                    config->file_size_limit, &base_native, error, sizeof(error));
-                g_free(cached_base);
-                if (result) {
-                    current_manifest_clear(&previous);
-                    pthread_mutex_unlock(&cache_lock);
-                    goto out;
-                }
             }
         }
         current_manifest_clear(&previous);
@@ -2778,6 +2791,9 @@ out:
     g_free(base_native);
     if (base_module) unlink(base_module);
     g_free(base_module);
+    for (unsigned i = 0; i < 2; i++) {
+        if (baseline_pins[i] >= 0) close(baseline_pins[i]);
+    }
     g_free(final_tbset);
     g_free(final_native);
     g_free(final_module);

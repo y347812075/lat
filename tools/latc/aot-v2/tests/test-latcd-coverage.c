@@ -38,6 +38,25 @@ static void assert_unlocked_read(int fd)
     g_assert_cmpint(pthread_mutex_trylock(&cache_lock), ==, 0);
     pthread_mutex_unlock(&cache_lock);
 }
+static const char *baseline_paths[2];
+static const LatcdConfig *baseline_config;
+static const char *baseline_hex;
+static void assert_baseline_handoff(int fd)
+{
+    assert_unlocked_read(fd);
+    for (unsigned i = 0; i < 2; i++) {
+        int contender = open(baseline_paths[i], O_RDONLY | O_CLOEXEC);
+        g_assert_cmpint(contender, >=, 0);
+        g_assert_cmpint(flock(contender, LOCK_EX | LOCK_NB), ==, -1);
+        g_assert_cmpint(errno, ==, EWOULDBLOCK);
+        close(contender);
+    }
+    char error[128];
+    int source = lat_aot_v2_cache_source_lock(baseline_config->cache_dir,
+        baseline_hex, LOCK_EX | LOCK_NB, false, error, sizeof(error));
+    g_assert_cmpint(source, >=, 0); /* S is released for the long copy phase. */
+    close(source);
+}
 static void replace_during_read(int fd)
 {
     struct stat status;
@@ -75,10 +94,13 @@ static void test_pinned_cache_copy(const char *directory)
     hook_contents = "replacement";
     hook_mutate = false;
     read_hook = replace_during_read;
-    pthread_mutex_lock(&cache_lock);
-    g_assert_cmpint(snapshot_cached_file(path, directory, 4096, &snapshot,
+    int pinned = open_cached_file(path, 4096, error, sizeof(error));
+    int snapshot_pin = -1;
+    g_assert_cmpint(pinned, >=, 0);
+    g_assert_cmpint(snapshot_cached_fd(pinned, directory, &snapshot, &snapshot_pin,
         error, sizeof(error)), ==, 0);
-    pthread_mutex_unlock(&cache_lock);
+    close(pinned);
+    close(snapshot_pin);
     gchar *bytes = NULL;
     gsize size;
     g_assert_true(g_file_get_contents(snapshot, &bytes, &size, NULL));
@@ -89,10 +111,11 @@ static void test_pinned_cache_copy(const char *directory)
     g_assert_cmpint(g_chmod(path, 0444), ==, 0);
     hook_mutate = true;
     read_hook = replace_during_read;
-    pthread_mutex_lock(&cache_lock);
-    g_assert_cmpint(snapshot_cached_file(path, directory, 4096, &snapshot,
+    pinned = open_cached_file(path, 4096, error, sizeof(error));
+    g_assert_cmpint(pinned, >=, 0);
+    g_assert_cmpint(snapshot_cached_fd(pinned, directory, &snapshot, &snapshot_pin,
         error, sizeof(error)), ==, -1);
-    pthread_mutex_unlock(&cache_lock);
+    close(pinned);
     g_assert_null(snapshot);
     g_assert_nonnull(strstr(error, "changed while copying"));
     g_unlink(path);
@@ -552,33 +575,78 @@ int main(int argc, char **argv)
     LatcdCurrentManifest paired = {0};
     g_assert_cmpint(current_manifest_read(&config, hex, &paired), ==, 0);
     char *pair_native = NULL, *pair_module = NULL;
+    int pair_pins[2] = {-1, -1};
     g_assert_nonnull(paired.module_sha256);
     g_assert_nonnull(paired.native_sha256);
-    hook_read_path = native_path;
-    read_hook = assert_unlocked_read;
+    int source_gate = lat_aot_v2_cache_source_lock(directory, hex,
+        LOCK_EX | LOCK_NB, false, error, sizeof(error));
+    g_assert_cmpint(source_gate, >=, 0);
     g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
-        &pair_native, &pair_module, error, sizeof(error)), ==, 0);
+        &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(pthread_mutex_trylock(&cache_lock), ==, EBUSY);
+    g_assert_null(pair_native);
+    g_assert_null(pair_module);
+    close(source_gate);
+    baseline_paths[0] = native_path;
+    baseline_paths[1] = old_path;
+    baseline_config = &config;
+    baseline_hex = hex;
+    hook_read_path = native_path;
+    read_hook = assert_baseline_handoff;
+    g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
+        &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, 0);
     g_assert_nonnull(pair_native);
     g_assert_nonnull(pair_module);
+    for (unsigned i = 0; i < 2; i++) {
+        int contender = open(i ? pair_module : pair_native, O_RDONLY);
+        g_assert_cmpint(contender, >=, 0);
+        g_assert_cmpint(flock(contender, LOCK_EX | LOCK_NB), ==, -1);
+        g_assert_cmpint(errno, ==, EWOULDBLOCK);
+        close(pair_pins[i]);
+        pair_pins[i] = -1;
+        g_assert_cmpint(flock(contender, LOCK_EX | LOCK_NB), ==, 0);
+        close(contender);
+    }
     g_unlink(pair_native);
     g_unlink(pair_module);
     g_clear_pointer(&pair_native, g_free);
     g_clear_pointer(&pair_module, g_free);
     paired.native_sha256[0] = paired.native_sha256[0] == '0' ? '1' : '0';
     g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
-        &pair_native, &pair_module, error, sizeof(error)), ==, -1);
-    g_assert_nonnull(strstr(error, "snapshot mismatch"));
+        &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, -1);
+    g_assert_nonnull(strstr(error, "changed before baseline capture"));
     g_assert_null(pair_native);
     g_assert_null(pair_module);
     g_clear_pointer(&paired.native_sha256, g_free);
     g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
-        &pair_native, &pair_module, error, sizeof(error)), ==, -1);
+        &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, -1);
     g_clear_pointer(&paired.module_sha256, g_free);
     g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
-        &pair_native, &pair_module, error, sizeof(error)), ==, 0);
-    g_assert_null(pair_native); /* Historical manifest cannot enable dedup. */
+        &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, -1);
+    g_assert_null(pair_native); /* Caller must re-read the selected manifest. */
     g_assert_null(pair_module);
     current_manifest_clear(&paired);
+    /* A real legacy current has no hashes: capture native only, without dedup. */
+    gchar *modern = NULL;
+    g_assert_true(g_file_get_contents(manifest, &modern, NULL, NULL));
+    char *legacy = g_strdup_printf("{\"version\":2,\"module\":\"%s\","
+        "\"native\":\"%s\",\"tbset\":\"%s\",\"published_sequence\":1}",
+        old_name, native_name, tbset_name);
+    g_assert_true(g_file_set_contents(manifest, legacy, -1, NULL));
+    g_assert_cmpint(current_manifest_read(&config, hex, &paired), ==, 0);
+    g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
+        &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, 0);
+    g_assert_nonnull(pair_native);
+    g_assert_null(pair_module);
+    g_assert_cmpint(pair_pins[0], >=, 0);
+    close(pair_pins[0]);
+    pair_pins[0] = -1;
+    g_unlink(pair_native);
+    g_clear_pointer(&pair_native, g_free);
+    current_manifest_clear(&paired);
+    g_assert_true(g_file_set_contents(manifest, modern, -1, NULL));
+    g_free(legacy);
+    g_free(modern);
     /* Hashing must release the lock, but a concurrent current replacement
      * must prevent the delayed publisher from rolling the manifest back. */
     gchar *selected_manifest = NULL;
