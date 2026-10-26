@@ -152,8 +152,6 @@ def run(prefix, guest, work):
                 daemon = start(prefix / 'bin/latc', log)
                 assert_pinned()
                 task_plan('HELD_OBSERVED')
-                daemon.terminate()
-                assert daemon.wait(timeout=30) == 0
                 channel.sendall(b'f')
                 child = json.loads(stream.readline())['child']
                 (directory / 'descendant.json').write_text(json.dumps(dict(child=child)))
@@ -173,14 +171,18 @@ def run(prefix, guest, work):
                             time.sleep(.01)
                 for probe in probes:
                     fcntl.flock(probe, fcntl.LOCK_UN)
-                task_plan('NO_HOLDER_OBSERVED')
-                service_socket.unlink(missing_ok=True)
-                daemon = start(prefix / 'bin/latc', log)
-                result = subprocess.run([str(latcd), 'gc', '--plan', '--cache-dir',
-                    str(cache)], env=env, capture_output=True, text=True, timeout=10)
-                assert result.returncode == 0, result.stdout + result.stderr
-                recovered = json.loads(result.stdout)['tasks'][str(task_record.relative_to(cache))]
-                assert recovered['compiler_inputs_released'], recovered
+                # The same daemon must retry a busy task after its descendant
+                # exits; observe the receipt, not a fixed sleep or another restart.
+                deadline = time.monotonic() + 20
+                while True:
+                    result = subprocess.run([str(latcd), 'gc', '--plan', '--cache-dir',
+                        str(cache)], env=env, capture_output=True, text=True, timeout=10)
+                    if result.returncode == 0:
+                        recovered = json.loads(result.stdout)['tasks'][str(task_record.relative_to(cache))]
+                        if recovered.get('compiler_inputs_released', False):
+                            break
+                    assert daemon.poll() is None and time.monotonic() < deadline, result.stdout + result.stderr
+                    time.sleep(.05)
                 assert not recovered.get('compiler_outputs_released', False), recovered
                 assert not recovered['completion_verified']
                 daemon.terminate()

@@ -611,6 +611,27 @@ static void test_compiler_input_recovery(void)
     g_assert_true(metadata_equal(&before, &after));
     char *output_release = g_build_filename(directory, ".gc", "compiler-output-releases", name, NULL);
     g_assert_false(g_file_test(output_release, G_FILE_TEST_EXISTS));
+    char *task_directory = g_build_filename(directory, ".gc", "tasks", NULL);
+    for (unsigned i = 0; i < 70; i++) {
+        char *unknown = g_strdup_printf("%s/unknown-%u", task_directory, i);
+        g_assert_true(g_file_set_contents(unknown, "retain", -1, NULL));
+        g_free(unknown);
+    }
+    DIR *cursor = NULL;
+    unsigned visited, total = 0, batches = 0;
+    int result;
+    do {
+        result = recover_compiler_inputs_step(&config, &cursor, 7,
+            &visited, error, sizeof(error));
+        g_assert_cmpint(result, >=, 0);
+        g_assert_cmpuint(visited, <=, 7);
+        total += visited;
+        batches++;
+    } while (result == 1);
+    g_assert_null(cursor);
+    g_assert_cmpuint(total, ==, 71);
+    g_assert_cmpuint(batches, >=, 11);
+    g_free(task_directory);
     for (unsigned bad = 0; bad < 7; bad++) {
         char *bad_id = NULL;
         int bad_task = record_task(&config, false, paths, pins, digest, environment,

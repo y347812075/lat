@@ -1406,28 +1406,36 @@ typedef struct LatcdCompilerTask {
     struct stat identity;
 } LatcdCompilerTask;
 
-/* Startup owns the daemon lease. Recover input ownership only: surviving
+/* Caller owns the daemon lease. Recover input ownership only: surviving
  * descendants retain SH on the task inode; outputs and unknown records stay roots. */
-static int recover_compiler_inputs(const LatcdConfig *config,
+static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
+                                    unsigned budget, unsigned *visited,
                                     char *error, size_t error_size)
 {
     int root = -1, gc = -1, tasks = -1, releases = -1, result = -1;
-    DIR *directory = NULL;
+    DIR *directory = *cursor;
     unsigned recovered = 0, retained = 0;
+    *visited = 0;
+    int64_t started = g_get_monotonic_time();
     root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (root < 0 || (gc = open_task_directory(root, ".gc")) < 0 ||
         (tasks = open_task_directory(gc, "tasks")) < 0 ||
         (releases = open_task_directory(gc, "compiler-releases")) < 0) goto out;
-    int scan = dup(tasks);
-    if (scan < 0) goto out;
-    directory = fdopendir(scan);
-    if (!directory) { close(scan); goto out; }
+    if (!directory) {
+        int scan = dup(tasks);
+        if (scan < 0) goto out;
+        directory = fdopendir(scan);
+        if (!directory) { close(scan); goto out; }
+    }
     for (;;) {
         if (stop_requested) { result = 1; break; }
+        if (*visited >= budget || (*visited &&
+            g_get_monotonic_time() - started >= 10000)) { result = 1; break; }
         errno = 0;
         struct dirent *entry = readdir(directory);
         if (!entry) { result = errno ? -1 : 0; break; }
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        (*visited)++;
         const char *name = entry->d_name;
         char id[37];
         if (strlen(name) != 40 || strcmp(name + 36, ".ini")) { retained++; continue; }
@@ -1473,14 +1481,60 @@ static int recover_compiler_inputs(const LatcdConfig *config,
         else retained++;
     }
 out:
-    if (directory) closedir(directory);
+    if (directory && (result != 1 || stop_requested)) {
+        closedir(directory);
+        directory = NULL;
+    }
+    *cursor = directory;
     if (releases >= 0) close(releases);
     if (tasks >= 0) close(tasks);
     if (gc >= 0) close(gc);
     if (root >= 0) close(root);
-    fprintf(stderr, "latcd: compiler input recovery recovered=%u retained=%u\n", recovered, retained);
+    if (recovered) fprintf(stderr, "latcd: compiler input recovery recovered=%u retained=%u\n", recovered, retained);
     if (result < 0) fail(error, error_size, "cannot scan compiler task roots: %s", strerror(errno));
     return result;
+}
+
+static int recover_compiler_inputs(const LatcdConfig *config,
+                                    char *error, size_t error_size)
+{
+    DIR *cursor = NULL;
+    unsigned visited;
+    int result;
+    do {
+        result = recover_compiler_inputs_step(config, &cursor, 32, &visited, error, error_size);
+    } while (result == 1 && !stop_requested);
+    if (cursor) closedir(cursor);
+    return result;
+}
+
+typedef struct LatcdTaskRecovery {
+    const LatcdConfig *config;
+    atomic_bool stopping;
+} LatcdTaskRecovery;
+
+static void *compiler_input_recovery_worker(void *opaque)
+{
+    LatcdTaskRecovery *work = opaque;
+    DIR *cursor = NULL;
+    int64_t next = 0;
+    bool failed = false;
+    while (!atomic_load(&work->stopping) && !stop_requested) {
+        int64_t now = g_get_monotonic_time();
+        if (now >= next) {
+            char error[256];
+            unsigned visited;
+            int result = recover_compiler_inputs_step(work->config, &cursor, 32,
+                &visited, error, sizeof(error));
+            if (result < 0 && !failed) fprintf(stderr, "latcd: %s\n", error);
+            failed = result < 0;
+            next = g_get_monotonic_time() + (result == 1 ? 100000 : 5000000);
+        }
+        struct timespec pause = {.tv_nsec = 100 * 1000 * 1000};
+        nanosleep(&pause, NULL);
+    }
+    if (cursor) closedir(cursor);
+    return NULL;
 }
 
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
@@ -4846,6 +4900,14 @@ static int run_service(const LatcdConfig *config)
     int64_t last_activity = g_get_monotonic_time();
     int64_t last_journal_admission = last_activity;
     bool journal_admission_error = false;
+    LatcdTaskRecovery task_recovery = {.config = config};
+    pthread_t recovery_thread;
+    bool recovery_started = !pthread_create(&recovery_thread, NULL,
+        compiler_input_recovery_worker, &task_recovery);
+    if (!recovery_started) {
+        fprintf(stderr, "latcd: cannot start compiler input recovery worker\n");
+        stop_requested = 1;
+    }
     struct pollfd channels[LATCD_MAX_CHANNELS + 1] = {
         { .fd = server, .events = POLLIN },
     };
@@ -5050,6 +5112,8 @@ static int run_service(const LatcdConfig *config)
         }
         close(client);
     }
+    atomic_store(&task_recovery.stopping, true);
+    if (recovery_started) pthread_join(recovery_thread, NULL);
     for (nfds_t i = 1; i < channel_count; i++) {
         close(channels[i].fd);
     }
@@ -5450,7 +5514,7 @@ int main(int argc, char **argv)
     sigaction(SIGTERM, &recovery_action, NULL);
     int recovery = recover_lifecycle(config.cache_dir, false, error, sizeof(error));
     if (!recovery) recovery = recover_lifecycle(config.cache_dir, true, error, sizeof(error));
-    if (!recovery) recovery = recover_compiler_inputs(&config, error, sizeof(error));
+    if (!recovery && !serve) recovery = recover_compiler_inputs(&config, error, sizeof(error));
     if (recovery) {
         if (recovery < 0) fprintf(stderr, "latcd: %s\n", error);
         else fprintf(stderr, "latcd: recovery deferred by stop request\n");
