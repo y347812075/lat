@@ -255,7 +255,8 @@ typedef struct CompileSpaceReservation {
 } CompileSpaceReservation;
 
 static pthread_mutex_t compile_space_lock = PTHREAD_MUTEX_INITIALIZER;
-static CompileSpaceReservation compile_space[LATCD_MAX_WORKERS];
+/* The final slot belongs to serialized journal registration, not a compiler. */
+static CompileSpaceReservation compile_space[LATCD_MAX_WORKERS + 1];
 
 static bool space_add(uint64_t *value, uint64_t amount, uint64_t multiplier)
 {
@@ -268,7 +269,7 @@ static int reserve_compile_space(uint32_t worker, const dev_t devices[2],
                                   const uint64_t available[2], const uint64_t bytes[2],
                                   char *error, size_t error_size)
 {
-    if (worker >= LATCD_MAX_WORKERS) return fail(error, error_size, "invalid reservation worker");
+    if (worker >= G_N_ELEMENTS(compile_space)) return fail(error, error_size, "invalid reservation worker");
     CompileSpaceReservation request = { .active = true };
     memcpy(request.device, devices, sizeof(request.device));
     memcpy(request.bytes, bytes, sizeof(request.bytes));
@@ -283,7 +284,7 @@ static int reserve_compile_space(uint32_t worker, const dev_t devices[2],
     for (size_t i = 0; !result && i < 2; i++) {
         if (!request.bytes[i]) continue;
         uint64_t required = request.bytes[i];
-        for (size_t j = 0; !result && j < LATCD_MAX_WORKERS; j++) {
+        for (size_t j = 0; !result && j < G_N_ELEMENTS(compile_space); j++) {
             if (!compile_space[j].active) continue;
             for (size_t k = 0; k < 2; k++)
                 if (compile_space[j].device[k] == request.device[i] &&
@@ -301,8 +302,21 @@ static int reserve_compile_space(uint32_t worker, const dev_t devices[2],
 static void release_compile_space(uint32_t worker)
 {
     pthread_mutex_lock(&compile_space_lock);
-    if (worker < LATCD_MAX_WORKERS) memset(&compile_space[worker], 0, sizeof(compile_space[worker]));
+    if (worker < G_N_ELEMENTS(compile_space)) memset(&compile_space[worker], 0, sizeof(compile_space[worker]));
     pthread_mutex_unlock(&compile_space_lock);
+}
+
+static int journal_space_admit(const char *root, uint64_t bytes, char *error, size_t error_size)
+{
+    struct stat st;
+    struct statvfs fs;
+    if (stat(root, &st) || !S_ISDIR(st.st_mode) || statvfs(root, &fs) ||
+        !fs.f_frsize || fs.f_bavail > UINT64_MAX / fs.f_frsize)
+        return fail(error, error_size, "capacity: cannot inspect journal filesystem");
+    dev_t devices[] = {st.st_dev, st.st_dev};
+    uint64_t available[] = {fs.f_bavail * fs.f_frsize, fs.f_bavail * fs.f_frsize};
+    uint64_t needed[] = {bytes, 0};
+    return reserve_compile_space(LATCD_MAX_WORKERS, devices, available, needed, error, error_size);
 }
 
 static int compile_space_admit(uint32_t worker, const char *temporary,
@@ -5196,23 +5210,34 @@ static void register_journal(const LatcdConfig *config, int source, int config_f
     char error[sizeof(response->message)] = {0};
     char *temporary = g_build_filename(config->cache_dir, ".tmp", NULL);
     char *snapshot = NULL;
+    uint64_t reservation = 0;
+    bool reserved = false, filesystem_reserved = false;
+    struct stat before, copied;
     expected_codegen_id(codegen);
-    if (journal_build_id(build) || snapshot_source(source, temporary, config->max_input,
-            &snapshot, response->source_sha256, NULL, error, sizeof(error))) {
+    if (journal_build_id(build) || fstat(source, &before) || before.st_size < 0 ||
+        (uint64_t)before.st_size > config->max_input ||
+        latcd_journal_budget(source, config_fd, request->sequence, &reservation)) {
+        response->status = LATCD_STATUS_BAD_SOURCE;
+        goto cleanup;
+    }
+    if (latcd_cache_capacity_reserve(&generation_capacity, reservation,
+            config->max_cache_bytes, error, sizeof(error))) {
+        response->status = LATCD_STATUS_BAD_REQUEST;
+        goto cleanup;
+    }
+    reserved = true;
+    if (journal_space_admit(config->cache_dir, reservation, error, sizeof(error))) {
+        response->status = LATCD_STATUS_BAD_REQUEST;
+        goto cleanup;
+    }
+    filesystem_reserved = true;
+    if (snapshot_source(source, temporary, before.st_size,
+            &snapshot, response->source_sha256, &copied, error, sizeof(error)) ||
+        !metadata_equal(&before, &copied)) {
         response->status = LATCD_STATUS_BAD_SOURCE;
     } else {
         char stream[33];
         int result;
-        uint64_t reservation = 0;
-        int snapshot_fd = open(snapshot, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-        result = snapshot_fd < 0 ? -1 : latcd_journal_budget(snapshot_fd, config_fd, request->sequence, &reservation);
-        if (snapshot_fd >= 0) close(snapshot_fd);
-        if (!result) result = latcd_cache_capacity_reserve(&generation_capacity,
-            reservation, config->max_cache_bytes, error, sizeof(error));
-        if (result) {
-            response->status = LATCD_STATUS_BAD_REQUEST;
-            goto cleanup;
-        }
         if (request->operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY) {
             result = latcd_journal_register_capability(config->cache_dir, snapshot,
                 response->source_sha256, build, codegen, config_fd, request->sequence,
@@ -5227,11 +5252,14 @@ static void register_journal(const LatcdConfig *config, int source, int config_f
         char inventory_error[256] = {0};
         bool valid = !latcd_journal_inventory(config->cache_dir, build, codegen,
             config->max_cache_bytes, &count, &total, inventory_error, sizeof(inventory_error));
+        if (unlink(snapshot) && errno != ENOENT) valid = false;
+        else { g_free(snapshot); snapshot = NULL; }
         if (latcd_cache_capacity_journal(&generation_capacity, total, reservation, valid)) {
             fprintf(stderr, "latcd: journal capacity reconciliation failed: %s\n", inventory_error);
             if (*directory_fd >= 0) { close(*directory_fd); *directory_fd = -1; }
             result = fail(error, sizeof(error), "capacity: journal inventory unsafe; reservation retained");
         }
+        reserved = false;
         if (result) {
             response->status = LATCD_STATUS_BAD_REQUEST;
         } else {
@@ -5239,7 +5267,12 @@ static void register_journal(const LatcdConfig *config, int source, int config_f
         }
     }
 cleanup:
-    if (snapshot) unlink(snapshot);
+    bool removed = !snapshot || !unlink(snapshot) || errno == ENOENT;
+    if (reserved) {
+        if (removed) latcd_cache_capacity_finish(&generation_capacity, reservation, false);
+        else latcd_cache_capacity_journal(&generation_capacity, 0, reservation, false);
+    }
+    if (filesystem_reserved) release_compile_space(LATCD_MAX_WORKERS);
     g_free(snapshot);
     g_free(temporary);
     if (response->status != LATCD_STATUS_OK)

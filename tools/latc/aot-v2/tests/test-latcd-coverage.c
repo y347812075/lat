@@ -956,7 +956,13 @@ static void test_compile_space(void)
     release_compile_space(1); release_compile_space(2);
     uint64_t overflow[] = {UINT64_MAX, 1};
     g_assert_cmpint(reserve_compile_space(0, same, available, overflow, error, sizeof(error)), ==, -1);
-    g_assert_cmpint(reserve_compile_space(LATCD_MAX_WORKERS, same, available, bytes, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(reserve_compile_space(LATCD_MAX_WORKERS + 1, same, available, bytes, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(reserve_compile_space(LATCD_MAX_WORKERS, same, available, bytes, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(reserve_compile_space(0, same, available, bytes, error, sizeof(error)), ==, -1);
+    release_compile_space(LATCD_MAX_WORKERS);
+    g_assert_false(compile_space[LATCD_MAX_WORKERS].active);
+    g_assert_cmpint(reserve_compile_space(LATCD_MAX_WORKERS, same, available, bytes, error, sizeof(error)), ==, 0);
+    release_compile_space(LATCD_MAX_WORKERS);
     uint64_t n = UINT64_MAX - 1;
     g_assert_false(space_add(&n, 1, 2));
     g_assert_cmpuint(n, ==, UINT64_MAX - 1);

@@ -5,6 +5,7 @@
 #include "lat-translation-config.h"
 #include "latcd-client.h"
 #include <sys/mman.h>
+#include <sys/inotify.h>
 
 static void wait_ok(pid_t child)
 {
@@ -115,14 +116,32 @@ static void check_shared_capacity(const LatcdConfig *original, int source, int c
     config.socket_path = socket;
     config.max_cache_bytes = budget + 9;
     pid_t child = start_service(&config);
+    char *temporary = g_build_filename(cache, ".tmp", NULL);
+    int watcher = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    g_assert_cmpint(watcher, >=, 0);
+    g_assert_cmpint(inotify_add_watch(watcher, temporary, IN_CREATE | IN_MOVED_TO), >=, 0);
     LatcdResponseV2 response = request(&config, source, configuration, 2);
     g_assert_cmpint(response.status, !=, LATCD_STATUS_OK);
     g_assert_nonnull(strstr(response.message, "capacity:"));
+    char events[4096];
+    g_assert_cmpint(read(watcher, events, sizeof(events)), ==, -1);
+    g_assert_cmpint(errno, ==, EAGAIN);
+    close(watcher);
     g_assert_cmpint(kill(child, SIGTERM), ==, 0);
     wait_ok(child);
     g_assert_cmpint(unlink(native), ==, 0);
     child = start_service(&config);
-    g_assert_cmpint(request(&config, source, configuration, 2).status, ==, LATCD_STATUS_OK);
+    int invalid = memfd_create("invalid-journal-source", MFD_CLOEXEC);
+    g_assert_cmpint(invalid, >=, 0);
+    g_assert_cmpint(ftruncate(invalid, 16), ==, 0);
+    char *invalid_path = g_strdup_printf("/proc/self/fd/%d", invalid);
+    int readonly = open(invalid_path, O_RDONLY | O_CLOEXEC);
+    g_assert_cmpint(readonly, >=, 0);
+    g_assert_cmpint(request(&config, readonly, configuration, 2).status, !=, LATCD_STATUS_OK);
+    close(readonly); close(invalid); g_free(invalid_path);
+    response = request(&config, source, configuration, 2);
+    if (response.status != LATCD_STATUS_OK) g_error("registration after rejection: %s", response.message);
+    g_assert_cmpint(response.status, ==, LATCD_STATUS_OK);
     g_assert_cmpint(kill(child, SIGTERM), ==, 0);
     wait_ok(child);
     child = start_service(&config);
@@ -132,7 +151,7 @@ static void check_shared_capacity(const LatcdConfig *original, int source, int c
     g_assert_cmpint(kill(child, SIGTERM), ==, 0);
     wait_ok(child);
     remove_tree(cache);
-    g_free(native); g_free(name); g_free(socket); g_free(cache);
+    g_free(temporary); g_free(native); g_free(name); g_free(socket); g_free(cache);
 }
 
 static void check_collection(const LatcdConfig *config, int stream,
