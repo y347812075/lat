@@ -179,18 +179,22 @@ class Inventory:
                 os.close(fd)
             parser = configparser.ConfigParser(interpolation=None, strict=True)
             parser.read_string(raw.decode("ascii"))
-            inputs = {"source", "tbset", "base_native", "base_module"}
-            outputs = {"output_native", "output_module"}
-            required = {"task", "cache", "temporary", "source"} | outputs
+            copying = parser.get("task", "version", fallback="") == "2"
+            inputs = {"input"} if copying else {"source", "tbset", "base_native", "base_module"}
+            outputs = {"output"} if copying else {"output_native", "output_module"}
+            required = {"task", "cache", "temporary", "input" if copying else "source"} | outputs
             if (parser.defaults() or not required <= set(parser.sections()) or
                     set(parser.sections()) - required - inputs - {"collected"}):
                 raise ValueError("invalid task sections")
             value = dict(parser["task"])
             if (set(value) != {"version", "id", "state", "source", "build_id",
-                               "environment_sha256"} or value["version"] != "1" or
+                               "kind" if copying else "environment_sha256"} or
+                    value["version"] != ("2" if copying else "1") or
+                    (copying and value["kind"] != "COPY") or
                     value["id"] != name[:-4] or value["state"] != "BOUND" or
                     any(not re.fullmatch(SHA, value[k]) for k in
-                        ("source", "build_id", "environment_sha256"))):
+                        (("source", "build_id") if copying else
+                         ("source", "build_id", "environment_sha256")))):
                 raise ValueError("invalid task identity/state")
             objects = {}
             numbers = {"device", "inode", "size", "mode", "uid", "mtime_sec", "mtime_nsec"}
@@ -553,7 +557,7 @@ class Inventory:
                     observed = self.directories.get(path)
                     matched = observed and (observed[0], observed[1], observed[2], observed[3]) == (
                         obj["device"], obj["inode"], obj["mode"], obj["uid"])
-                elif role.startswith("output_"):
+                elif role == "output" or role.startswith("output_"):
                     continue  # Intent only: never claim an output inode is reserved.
                 else:
                     row = self.entries.get(path)

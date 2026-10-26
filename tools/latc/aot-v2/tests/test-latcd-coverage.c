@@ -97,7 +97,7 @@ static void test_pinned_cache_copy(const char *directory)
     int pinned = open_cached_file(path, 4096, error, sizeof(error));
     int snapshot_pin = -1;
     g_assert_cmpint(pinned, >=, 0);
-    g_assert_cmpint(snapshot_cached_fd(pinned, directory, &snapshot, &snapshot_pin,
+    g_assert_cmpint(snapshot_cached_fd(pinned, directory, &snapshot, &snapshot_pin, NULL,
         error, sizeof(error)), ==, 0);
     close(pinned);
     close(snapshot_pin);
@@ -113,7 +113,7 @@ static void test_pinned_cache_copy(const char *directory)
     read_hook = replace_during_read;
     pinned = open_cached_file(path, 4096, error, sizeof(error));
     g_assert_cmpint(pinned, >=, 0);
-    g_assert_cmpint(snapshot_cached_fd(pinned, directory, &snapshot, &snapshot_pin,
+    g_assert_cmpint(snapshot_cached_fd(pinned, directory, &snapshot, &snapshot_pin, NULL,
         error, sizeof(error)), ==, -1);
     close(pinned);
     g_assert_null(snapshot);
@@ -575,7 +575,7 @@ int main(int argc, char **argv)
     LatcdCurrentManifest paired = {0};
     g_assert_cmpint(current_manifest_read(&config, hex, &paired), ==, 0);
     char *pair_native = NULL, *pair_module = NULL;
-    int pair_pins[2] = {-1, -1};
+    int pair_pins[4] = {-1, -1, -1, -1};
     g_assert_nonnull(paired.module_sha256);
     g_assert_nonnull(paired.native_sha256);
     int source_gate = lat_aot_v2_cache_source_lock(directory, hex,
@@ -607,6 +607,9 @@ int main(int argc, char **argv)
         g_assert_cmpint(flock(contender, LOCK_EX | LOCK_NB), ==, 0);
         close(contender);
     }
+    close(pair_pins[2]);
+    close(pair_pins[3]);
+    pair_pins[2] = pair_pins[3] = -1;
     g_unlink(pair_native);
     g_unlink(pair_module);
     g_clear_pointer(&pair_native, g_free);
@@ -641,6 +644,8 @@ int main(int argc, char **argv)
     g_assert_cmpint(pair_pins[0], >=, 0);
     close(pair_pins[0]);
     pair_pins[0] = -1;
+    close(pair_pins[2]);
+    pair_pins[2] = -1;
     g_unlink(pair_native);
     g_clear_pointer(&pair_native, g_free);
     current_manifest_clear(&paired);

@@ -113,7 +113,7 @@ def run(prefix, guest, work):
                     assert result.returncode == 0, result.stdout + result.stderr
                     plan = json.loads(result.stdout)
                     tasks = [(path, task) for path, task in plan['tasks'].items()
-                             if task['lease_observation'] == expected]
+                             if task['lease_observation'] == expected and task.get('kind') != 'COPY']
                     if expected == 'HELD_OBSERVED':
                         assert len(tasks) == 1, plan
                         path, task = tasks[0]
@@ -123,6 +123,15 @@ def run(prefix, guest, work):
                         assert not task['completion_verified']
                         assert task['objects']['output_native']['name']
                         assert task['objects']['output_module']['name']
+                        copies = [value for value in plan['tasks'].values()
+                                  if value.get('kind') == 'COPY']
+                        assert len(copies) == (2 if incremental else 0)
+                        if daemon.poll() is None:
+                            assert all(value['lease_observation'] == 'HELD_OBSERVED'
+                                       for value in copies)
+                        else:
+                            assert all(value['lease_observation'] == 'NO_HOLDER_OBSERVED'
+                                       for value in copies)
                         return cache / path
                     assert not any(task['lease_observation'] == 'HELD_OBSERVED'
                                    for task in plan['tasks'].values()), plan

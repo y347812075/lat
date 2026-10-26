@@ -1199,7 +1199,7 @@ static void task_object_identity(GKeyFile *record, const char *group,
 }
 
 /* The immutable record is also the lease inode. No completion or deletion claim. */
-static int record_compiler_task(const LatcdConfig *config,
+static int record_task(const LatcdConfig *config, bool copying,
                                 const char *const paths[6], const int pins[4],
                                 const uint8_t digest[32],
                                 const char *const environment[],
@@ -1225,21 +1225,24 @@ static int record_compiler_task(const LatcdConfig *config,
     if (fstat(temporary, &st) || st.st_uid != geteuid() ||
         (st.st_mode & 0077)) goto failed;
     task_object_identity(record, "temporary", &st);
-    g_key_file_set_string(record, "task", "version", "1");
+    g_key_file_set_string(record, "task", "version", copying ? "2" : "1");
+    if (copying) g_key_file_set_string(record, "task", "kind", "COPY");
     g_key_file_set_string(record, "task", "id", id);
     g_key_file_set_string(record, "task", "state", "BOUND");
     g_key_file_set_string(record, "task", "source", source_hex);
     g_key_file_set_string(record, "task", "build_id", LATC_BUILD_ID);
-    GChecksum *configuration = g_checksum_new(G_CHECKSUM_SHA256);
-    for (unsigned i = 0; environment[i]; i++) {
-        g_checksum_update(configuration, (const guchar *)environment[i],
-                          strlen(environment[i]) + 1);
+    if (!copying) {
+        GChecksum *configuration = g_checksum_new(G_CHECKSUM_SHA256);
+        for (unsigned i = 0; environment[i]; i++) {
+            g_checksum_update(configuration, (const guchar *)environment[i],
+                              strlen(environment[i]) + 1);
+        }
+        g_key_file_set_string(record, "task", "environment_sha256",
+                               g_checksum_get_string(configuration));
+        g_checksum_free(configuration);
     }
-    g_key_file_set_string(record, "task", "environment_sha256",
-                           g_checksum_get_string(configuration));
-    g_checksum_free(configuration);
-    static const char *roles[] = {"source", "tbset", "base_native",
-                                  "base_module", "output_native", "output_module"};
+    const char *roles[] = {copying ? "input" : "source", "tbset", "base_native",
+                          "base_module", copying ? "output" : "output_native", "output_module"};
     for (unsigned i = 0; i < 6; i++) {
         if (!paths[i]) continue;
         char *parent = g_path_get_dirname(paths[i]);
@@ -1314,7 +1317,7 @@ failed:
     if (lease >= 0) close(lease);
     lease = -1;
     if (tasks >= 0) unlinkat(tasks, staging, 0);
-    fail(error, error_size, "cannot persist compiler task root");
+    fail(error, error_size, "cannot persist %s task root", copying ? "copy" : "compiler");
 out:
     if (collected >= 0) close(collected);
     if (temporary >= 0) close(temporary);
@@ -1430,7 +1433,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     int pin_result = pin_compiler_inputs(inputs, input_pins, error, error_size);
     const char *task_paths[6] = {source, tbset, base_native, base_module,
                                 output_native, output};
-    int task_lease = pin_result ? -1 : record_compiler_task(config, task_paths,
+    int task_lease = pin_result ? -1 : record_task(config, false, task_paths,
         input_pins, digest, environment, error, error_size);
     if (task_lease < 0) pin_result = -1;
     pid_t child = pin_result ? -1 : fork();
@@ -1579,6 +1582,7 @@ static int open_cached_file(const char *source, uint64_t max_size,
 
 static int snapshot_cached_fd(int input, const char *temporary_dir,
                               char **snapshot, int *snapshot_pin,
+                              const char *reserved_path,
                               char *error, size_t error_size)
 {
     *snapshot = NULL;
@@ -1587,8 +1591,10 @@ static int snapshot_cached_fd(int input, const char *temporary_dir,
     if (fstat(input, &before)) {
         return fail(error, error_size, "cannot inspect pinned cache file");
     }
-    char *path = g_build_filename(temporary_dir, "base-native-XXXXXX", NULL);
-    int output = g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
+    char *path = reserved_path ? g_strdup(reserved_path) :
+        g_build_filename(temporary_dir, "base-native-XXXXXX", NULL);
+    int output = reserved_path ? open(path, O_RDWR | O_CREAT | O_EXCL |
+        O_CLOEXEC | O_NOFOLLOW, 0600) : g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
     if (output < 0) {
         g_free(path);
         return fail(error, error_size,
@@ -1645,7 +1651,7 @@ static int snapshot_cached_fd(int input, const char *temporary_dir,
     int readonly = -1;
     if (!result && snapshot_pin) {
         struct stat writer, reader;
-        if (fchmod(output, 0400) ||
+        if (fchmod(output, 0400) || fsync(output) ||
             (readonly = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)) < 0 ||
             fstat(output, &writer) || fstat(readonly, &reader) ||
             writer.st_dev != reader.st_dev || writer.st_ino != reader.st_ino ||
@@ -1664,6 +1670,56 @@ static int snapshot_cached_fd(int input, const char *temporary_dir,
     if (snapshot_pin) *snapshot_pin = readonly;
     *snapshot = path;
     return 0;
+}
+
+static void copy_test_barrier(const char *stage)
+{
+    const char *selected = getenv("LATCD_TEST_COPY_STAGE");
+    const char *notify = getenv("LATCD_TEST_COPY_NOTIFY_FD");
+    const char *resume = getenv("LATCD_TEST_COPY_RESUME_FD");
+    if (!selected || strcmp(stage, selected) || !notify || !resume) return;
+    char *end;
+    long output = strtol(notify, &end, 10);
+    if (!*notify || *end || output < 0 || output > INT_MAX) return;
+    long input = strtol(resume, &end, 10);
+    if (!*resume || *end || input < 0 || input > INT_MAX) return;
+    char byte = 'x';
+    ssize_t result;
+    do { result = write((int)output, &byte, 1); } while (result < 0 && errno == EINTR);
+    if (result != 1) return;
+    do { result = read((int)input, &byte, 1); } while (result < 0 && errno == EINTR);
+}
+
+static int snapshot_task_copy(const LatcdConfig *config, const char *source,
+                              int input, const uint8_t digest[32],
+                              const char *temporary, char **snapshot,
+                              int *snapshot_pin, int *task_pin,
+                              char *error, size_t error_size)
+{
+    char *id = g_uuid_string_random();
+    char *name = g_strdup_printf("base-native-%s", id);
+    char *output = g_build_filename(temporary, name, NULL);
+    const char *paths[6] = {source, NULL, NULL, NULL, output, NULL};
+    int inputs[4] = {input, -1, -1, -1};
+    *task_pin = record_task(config, true, paths, inputs, digest, NULL,
+                            error, error_size);
+    if (*task_pin >= 0) copy_test_barrier("recorded");
+    int result = *task_pin < 0 ? -1 : snapshot_cached_fd(input, temporary,
+        snapshot, snapshot_pin, output, error, error_size);
+    if (!result) result = sync_directory(temporary, error, error_size);
+    if (!result) copy_test_barrier("copied");
+    if (result) {
+        if (*snapshot_pin >= 0) close(*snapshot_pin);
+        *snapshot_pin = -1;
+        if (*snapshot) unlink(*snapshot);
+        g_clear_pointer(snapshot, g_free);
+        if (*task_pin >= 0) close(*task_pin);
+        *task_pin = -1;
+    }
+    g_free(output);
+    g_free(name);
+    g_free(id);
+    return result;
 }
 
 static char *cached_fd_digest(int fd)
@@ -1699,7 +1755,7 @@ static char *cached_fd_digest(int fd)
 static int snapshot_current_pair(const LatcdConfig *config,
                                  const LatcdCurrentManifest *manifest,
                                  const uint8_t digest[32], const char *temporary,
-                                 char **native, char **module, int snapshot_pins[2],
+                                 char **native, char **module, int snapshot_pins[4],
                                  char *error, size_t error_size)
 {
     /* Caller holds C. Capture S outside C; G and snapshot pins overlap. */
@@ -1732,20 +1788,21 @@ static int snapshot_current_pair(const LatcdConfig *config,
                                      error, error_size);
     int module_fd = pair && native_fd >= 0 ? open_cached_file(
         module_path, config->file_size_limit, error, error_size) : -1;
-    g_free(module_path);
-    g_free(native_path);
     close(source_gate);
     if (native_fd < 0 || (pair && module_fd < 0)) {
         if (native_fd >= 0) close(native_fd);
+        g_free(module_path);
+        g_free(native_path);
         return -1;
     }
     /* Pin both members of one selected generation before releasing the lock. */
     pthread_mutex_unlock(&cache_lock);
-    int result = snapshot_cached_fd(native_fd, temporary, native, &snapshot_pins[0],
-                                    error, error_size);
-    if (!result && pair) result = snapshot_cached_fd(module_fd, temporary, module,
-                                             &snapshot_pins[1],
-                                             error, error_size);
+    int result = snapshot_task_copy(config, native_path, native_fd, digest,
+        temporary, native, &snapshot_pins[0], &snapshot_pins[2], error, error_size);
+    if (!result && pair) result = snapshot_task_copy(config, module_path, module_fd,
+        digest, temporary, module, &snapshot_pins[1], &snapshot_pins[3], error, error_size);
+    g_free(module_path);
+    g_free(native_path);
     char *module_sha = !result && pair ? cached_fd_digest(snapshot_pins[1]) : NULL;
     char *native_sha = !result && pair ? cached_fd_digest(snapshot_pins[0]) : NULL;
     LatAotModuleInfoV2 info;
@@ -1761,7 +1818,7 @@ static int snapshot_current_pair(const LatcdConfig *config,
     if (module_fd >= 0) close(module_fd);
     pthread_mutex_lock(&cache_lock);
     if (result) {
-        for (unsigned i = 0; i < 2; i++) {
+        for (unsigned i = 0; i < 4; i++) {
             if (snapshot_pins[i] >= 0) close(snapshot_pins[i]);
             snapshot_pins[i] = -1;
         }
@@ -2374,7 +2431,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     char *final_tbset = NULL;
     char *base_native = NULL;
     char *base_module = NULL;
-    int baseline_pins[2] = {-1, -1};
+    int baseline_pins[4] = {-1, -1, -1, -1};
     char *retained_tbset = NULL;
     char *module_name = NULL;
     char *native_name = NULL;
@@ -2791,7 +2848,7 @@ out:
     g_free(base_native);
     if (base_module) unlink(base_module);
     g_free(base_module);
-    for (unsigned i = 0; i < 2; i++) {
+    for (unsigned i = 0; i < 4; i++) {
         if (baseline_pins[i] >= 0) close(baseline_pins[i]);
     }
     g_free(final_tbset);

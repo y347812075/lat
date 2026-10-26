@@ -154,6 +154,29 @@ class PlannerTest(unittest.TestCase):
                  bound.replace('directory=cache', 'directory=collected').encode())
         self.run_plan(success=False)
 
+    def test_copy_task_schema_and_output_intent(self):
+        record = self.task()
+        original = record.read_text()
+        copying = original.replace('version=1', 'version=2\nkind=COPY').replace(
+            f'environment_sha256={OTHER}\n', '').replace('[source]', '[input]').replace(
+            '[output_native]', '[output]')
+        copying = copying.split('[output_module]')[0]
+        self.put(str(record.relative_to(self.root)), copying.encode())
+        plan = self.run_plan()
+        task = next(iter(plan['tasks'].values()))
+        self.assertEqual(task['kind'], 'COPY')
+        self.assertFalse(task['completion_verified'])
+        self.assertEqual(task['lease_observation'], 'NO_HOLDER_OBSERVED')
+        self.put('.tmp/native-ABC', b'partial output')
+        plan = self.run_plan()
+        row = next(row for row in plan['entries'] if row['path'] == '.tmp/native-ABC')
+        self.assertEqual(row['task_references'][0]['role'], 'output')
+        for bad in (copying.replace('kind=COPY', 'kind=UNKNOWN'),
+                    copying.replace('name=native-ABC', 'name=../escape'),
+                    copying + '[output_module]\nname=unexpected\n'):
+            self.put(str(record.relative_to(self.root)), bad.encode())
+            self.run_plan(success=False)
+
     def generation(self, digit, *, tbset=None):
         stem = SOURCE + "-" + digit * 64
         manifest = dict(self.manifest, module=stem + ".so", native=stem + ".native",
