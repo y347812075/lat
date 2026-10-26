@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glib.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -184,35 +185,74 @@ out:
     return result;
 }
 
+static bool record_write_fault(const char *point)
+{
+    const char *fault = getenv("LATCD_TEST_RETIREMENT_IO");
+    if (!fault) return false;
+    if (g_str_has_prefix(fault, "crash:") && !strcmp(fault + 6, point)) {
+        raise(SIGKILL);
+        _exit(127);
+    }
+    if (g_str_has_prefix(fault, "error:") && !strcmp(fault + 6, point)) {
+        errno = EIO;
+        return true;
+    }
+    return false;
+}
+
 static int write_record(int directory, const char *name, GKeyFile *record)
 {
     gsize size;
     char *data = g_key_file_to_data(record, &size, NULL);
-    char *uuid = g_uuid_string_random();
-    char *temporary = g_strdup_printf(".write-%s", uuid);
-    g_free(uuid);
-    int fd = openat(directory, temporary,
+    char *temporary = NULL;
+    int fd = -1;
+    /* A forked writer may share the parent's random state. Never remove an
+     * existing writer's evidence on O_EXCL collision. */
+    for (int attempt = 0; attempt < 16; attempt++) {
+        char *uuid = g_uuid_string_random();
+        g_free(temporary);
+        temporary = g_strdup_printf(".write-%s", uuid);
+        g_free(uuid);
+        fd = openat(directory, temporary,
                     O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd >= 0 || errno != EEXIST) break;
+    }
+    bool created = fd >= 0;
     int result = -1;
+    int saved;
     if (fd < 0) goto out;
+    if (record_write_fault("created")) goto close_out;
     size_t offset = 0;
     while (offset < size) {
-        ssize_t count = write(fd, data + offset, size - offset);
+        /* Exercise an interrupted short write without changing normal I/O. */
+        size_t chunk = size - offset;
+        const char *fault = getenv("LATCD_TEST_RETIREMENT_IO");
+        if (!offset && fault && g_str_has_suffix(fault, ":partial-write"))
+            chunk = MAX((size_t)1, chunk / 2);
+        ssize_t count = write(fd, data + offset, chunk);
         if (count < 0 && errno == EINTR) continue;
         if (count <= 0) goto close_out;
         offset += count;
+        if (record_write_fault("partial-write")) goto close_out;
     }
-    if (fchmod(fd, 0400) || fsync(fd)) goto close_out;
+    if (record_write_fault("written") || fchmod(fd, 0400) ||
+        record_write_fault("chmod") || fsync(fd) ||
+        record_write_fault("file-synced")) goto close_out;
     if (close(fd)) { fd = -1; goto out; }
     fd = -1;
-    if (renameat(directory, temporary, directory, name) || fsync(directory)) goto out;
+    if (record_write_fault("closed") ||
+        renameat(directory, temporary, directory, name) ||
+        record_write_fault("renamed") || fsync(directory) ||
+        record_write_fault("directory-synced")) goto out;
     result = 0;
 close_out:
     if (fd >= 0) close(fd);
 out:
-    if (result) unlinkat(directory, temporary, 0);
+    saved = errno;
+    if (result && created) unlinkat(directory, temporary, 0);
     g_free(temporary);
     g_free(data);
+    errno = saved;
     return result;
 }
 

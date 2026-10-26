@@ -174,6 +174,90 @@ static void test_reboot(void)
     g_free(root);
 }
 
+static void test_record_write_fault(const char *point, bool crash,
+                                    bool finishing, bool initial)
+{
+    char *root = root_new(), *current = current_path(root);
+    char *transaction = NULL, error[256];
+    if (initial) put(current, old);
+    if (finishing) {
+        assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
+                                         &transaction, error, sizeof(error)));
+        put(current, next);
+    }
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        char *setting = g_strdup_printf("%s:%s", crash ? "crash" : "error", point);
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", setting, 1));
+        int result = finishing ?
+            latcd_retirement_finish(root, transaction, error, sizeof(error)) :
+            latcd_retirement_prepare(root, source, next, strlen(next), NULL,
+                                      &transaction, error, sizeof(error));
+        assert(!crash && result < 0);
+        _exit(0);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child);
+    if (crash) assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    else assert(WIFEXITED(status) && !WEXITSTATUS(status));
+
+    bool renamed = !strcmp(point, "renamed") || !strcmp(point, "directory-synced");
+    unsigned expected = finishing || renamed;
+    char *store = g_build_filename(root, ".gc", "transactions", NULL);
+    GDir *directory = g_dir_open(store, 0, NULL);
+    assert(directory);
+    const char *name;
+    unsigned records = 0, temporaries = 0;
+    char *record_path = NULL;
+    while ((name = g_dir_read_name(directory))) {
+        if (g_str_has_prefix(name, ".write-")) temporaries++;
+        else {
+            records++;
+            g_free(record_path);
+            record_path = g_build_filename(store, name, NULL);
+        }
+    }
+    g_dir_close(directory);
+    assert(records == expected);
+    assert(temporaries == (unsigned)(crash && !renamed));
+    /* Until rename, the previous complete record must remain byte-valid. */
+    GKeyFile *record = g_key_file_new();
+    if (expected) {
+        assert(g_key_file_load_from_file(record, record_path, 0, NULL));
+        char *state = g_key_file_get_string(record, "transaction", "state", NULL);
+        assert(!strcmp(state, finishing && renamed ? "RETIRED" : "PREPARED"));
+        g_free(state);
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        unsigned recovered;
+        int recovery = latcd_retirement_recover(root, &recovered, error, sizeof(error));
+        if (recovery) fprintf(stderr, "recovery %s crash=%d finish=%d initial=%d pass=%d: %s root=%s\n",
+            point, crash, finishing, initial, pass, error, root);
+        assert(!recovery);
+        assert(recovered == expected);
+        if (expected) {
+            assert(g_key_file_load_from_file(record, record_path, 0, NULL));
+            char *state = g_key_file_get_string(record, "transaction", "state", NULL);
+            assert(!strcmp(state, finishing ? "RETIRED" : "ABORTED"));
+            g_free(state);
+        }
+        char *contents = NULL;
+        if (finishing || initial) {
+            assert(g_file_get_contents(current, &contents, NULL, NULL));
+            assert(!strcmp(contents, finishing ? next : old));
+        } else assert(access(current, F_OK));
+        g_free(contents);
+    }
+    g_key_file_unref(record);
+    g_free(record_path);
+    g_free(store);
+    g_free(transaction);
+    g_free(current);
+    remove_root(root);
+    g_free(root);
+}
+
 static void test_object_identity(int mutation)
 {
     char *root = root_new(), *current = current_path(root);
@@ -395,6 +479,13 @@ int main(void)
     for (int mutation = 0; mutation < 7; mutation++) test_object_identity(mutation);
     test_legacy_and_schema();
     test_manifest_binding();
+    const char *points[] = {"created", "partial-write", "written", "chmod",
+        "file-synced", "closed", "renamed", "directory-synced"};
+    for (size_t i = 0; i < G_N_ELEMENTS(points); i++)
+        for (int crash = 0; crash < 2; crash++)
+            for (int finishing = 0; finishing < 2; finishing++)
+                for (int initial = 0; initial < 2; initial++)
+                    test_record_write_fault(points[i], crash, finishing, initial);
     puts("test-cache-retirement: PASS");
     return 0;
 }

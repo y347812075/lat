@@ -12,7 +12,8 @@ a61370722e98609342278591c755a1632bf52281b0a054f2ef8a550ef456e799 parson.c
 ea4347d6cdbf46b37f436d02150fc7c4167280e8d0c3269b5d61ef1d0a002542 LICENSE
 ```
 
-Local changes: nesting capped at 32; json_parse_string rejects trailing input;
+Local changes: four trailing whitespace lines removed; nesting capped at 32;
+json_parse_string rejects trailing input;
 parsed numbers retain their original token with lat_json_number_token for exact
 uint64 validation. Only retirement metadata uses this parser. No serializer or
 untrusted format-string interface is used by that validation path.
