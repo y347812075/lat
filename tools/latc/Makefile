@@ -110,6 +110,21 @@ $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
 
+$(BUILD)/latcd/latcd $(BUILD)/tests/test-journal-store \
+$(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
+		$(BUILD)/latcd/cache-retirement.o
+
+$(BUILD)/tests/test-cache-retirement: tests/test-cache-retirement.c \
+		$(BUILD)/latcd/cache-retirement.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+.PHONY: test-cache-retirement
+test-cache-retirement: $(BUILD)/tests/test-cache-retirement
+	$(BUILD)/tests/test-cache-retirement
+
+test: test-cache-retirement
+
 $(BUILD)/tests/cfg-fixture: tests/cfg-fixture.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<

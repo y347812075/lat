@@ -574,6 +574,7 @@ int main(int argc, char **argv)
     g_assert_cmpstr(concurrent_manifest, ==, hook_contents);
     g_free(concurrent_manifest);
     g_assert_true(g_file_set_contents(manifest, selected_manifest, -1, NULL));
+    g_assert_cmpint(chmod(manifest, 0444), ==, 0);
     g_free(selected_manifest);
     read_hook = assert_unlocked_read;
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,

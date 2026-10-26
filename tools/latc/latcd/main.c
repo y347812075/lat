@@ -10,6 +10,7 @@
 #include "module-inspect.h"
 #include "precompile.h"
 #include "journal-store.h"
+#include "cache-retirement.h"
 
 #include <dlfcn.h>
 #include <elf.h>
@@ -1718,19 +1719,44 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         result = fail(error, error_size, "cannot write current index: %s",
                       strerror(errno));
     }
-    g_string_free(contents, TRUE);
+    char *transaction = NULL;
     if (close(fd) && !result) {
         result = fail(error, error_size, "cannot close current index: %s",
                       strerror(errno));
     }
     char *final = g_strdup_printf("%s/%s.current", config->cache_dir, hex);
-    if (!result && rename(temporary, final)) {
-        result = fail(error, error_size, "cannot publish current index: %s",
-                      strerror(errno));
+    if (!result && latcd_retirement_prepare(config->cache_dir, hex,
+            contents->str, contents->len, &transaction, error, error_size)) {
+        result = -1;
+    }
+    g_string_free(contents, TRUE);
+    const char *crash = getenv("LATCD_TEST_RETIREMENT_CRASH");
+    if (!result && crash && !strcmp(crash, "prepared")) raise(SIGKILL);
+    if (!result) {
+        if (rename(temporary, final)) {
+            result = fail(error, error_size, "cannot publish current index: %s",
+                          strerror(errno));
+        } else if (crash && !strcmp(crash, "current")) {
+            raise(SIGKILL);
+        } else if (!sync_directory(config->cache_dir, error, error_size) &&
+                   crash && !strcmp(crash, "current-synced")) {
+            raise(SIGKILL);
+        }
     }
     if (result) {
         unlink(temporary);
     }
+    if (transaction) {
+        char retirement_error[256] = {0};
+        if (latcd_retirement_finish(config->cache_dir, transaction,
+                                    retirement_error, sizeof(retirement_error))) {
+            /* current rename is the commit point. Recovery retains PREPARED. */
+            fprintf(stderr, "latcd: %s; transaction retained for recovery\n",
+                    retirement_error);
+        }
+    }
+    if (!result && crash && !strcmp(crash, "retired")) raise(SIGKILL);
+    g_free(transaction);
     close(source_lock_fd);
     g_free(final);
     g_free(temporary);
@@ -4725,6 +4751,13 @@ int main(int argc, char **argv)
     int cache_owner = acquire_cache_owner(&config, error, sizeof(error));
     if (cache_owner < 0) {
         fprintf(stderr, "latcd: %s\n", error);
+        return 1;
+    }
+    unsigned recovered_retirements;
+    if (latcd_retirement_recover(config.cache_dir, &recovered_retirements,
+                                 error, sizeof(error))) {
+        fprintf(stderr, "latcd: %s\n", error);
+        close(cache_owner);
         return 1;
     }
     int result = serve ? run_service(&config) : run_once(&config);

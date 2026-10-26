@@ -2,11 +2,14 @@
 """Read-only AOT cache inventory. A plan never authorizes deletion."""
 
 import argparse
+import base64
+import configparser
 import json
 import os
 import re
 import stat
 import sys
+import uuid
 
 
 SHA = r"[0-9a-f]{64}"
@@ -77,6 +80,8 @@ class Inventory:
         self.manifests = {}
         self.errors = []
         self.refs = {}
+        self.transaction_refs = {}
+        self.transactions = {}
         self.frozen = set()
         self.freeze_all = False
         self.count = 0
@@ -111,6 +116,8 @@ class Inventory:
                     self.entries[relative] = row
                     if not prefix and CURRENT.fullmatch(name):
                         self.read_manifest(fd, name, st)
+                    if prefix == ".gc/transactions" and not name.startswith(".write-"):
+                        self.read_transaction(fd, name, st)
                     if stat.S_ISDIR(st.st_mode):
                         child = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
                                         os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=fd)
@@ -124,6 +131,56 @@ class Inventory:
                     self.error(relative, "unreadable_or_changed", str(exc))
         if identity(os.fstat(fd)) != identity(before):
             self.error(prefix or ".", "concurrent_change", "directory changed during scan")
+
+    def read_transaction(self, directory, name, before):
+        relative = ".gc/transactions/" + name
+        try:
+            if (not name.endswith(".ini") or str(uuid.UUID(name[:-4])) != name[:-4] or
+                    not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
+                    before.st_nlink != 1 or before.st_mode & 0o222 or
+                    not 0 < before.st_size <= 32768):
+                raise ValueError("unsafe retirement transaction")
+            fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW |
+                         os.O_NONBLOCK, dir_fd=directory)
+            try:
+                raw = os.read(fd, 32769)
+                if identity(os.fstat(fd)) != identity(before) or len(raw) != before.st_size:
+                    raise ValueError("transaction changed during read")
+            finally:
+                os.close(fd)
+            parser = configparser.ConfigParser(interpolation=None, strict=True)
+            parser.read_string(raw.decode("ascii"))
+            if parser.sections() != ["transaction"] or parser.defaults():
+                raise ValueError("invalid transaction sections")
+            value = dict(parser["transaction"])
+            required = {"version", "source", "state", "previous", "next"}
+            optional = {"prepared_boot", "prepared_boottime_us", "retired_boot", "retired_boottime_us"}
+            if not required <= value.keys() or value.keys() - required - optional:
+                raise ValueError("unsupported transaction fields")
+            source, state = value["source"], value["state"]
+            if (value["version"] != "1" or not re.fullmatch(SHA, source) or
+                    state not in {"PREPARED", "RETIRED", "ABORTED", "UNKNOWN"}):
+                raise ValueError("invalid transaction identity/state")
+            snapshots = {}
+            for role in ("previous", "next"):
+                raw_manifest = base64.b64decode(value[role], validate=True)
+                if not raw_manifest and role == "previous":
+                    continue
+                if not 0 < len(raw_manifest) < MAX_MANIFEST:
+                    raise ValueError("invalid transaction snapshot size")
+                snapshots[role] = parse_manifest(raw_manifest, source)
+            for role, manifest in snapshots.items():
+                for field in ("module", "native", "tbset"):
+                    if manifest[field]:
+                        self.transaction_refs.setdefault(manifest[field], []).append(
+                            {"transaction": relative, "snapshot": role,
+                             "role": field, "state": state})
+            self.transactions[relative] = value
+            if state == "UNKNOWN":
+                self.frozen.add(source)
+        except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
+            self.freeze_all = True
+            self.error(relative, "invalid_transaction", str(exc))
 
     def read_manifest(self, directory, name, before):
         source = CURRENT.fullmatch(name)[1]
@@ -212,6 +269,8 @@ class Inventory:
                 category, reasons = "current_artifact", ["current_reference"]
                 if any(r["role"] == "native" for r in referrers):
                     reasons.append("incremental_baseline")
+            elif relative in self.transaction_refs:
+                category, reasons = "transaction_artifact", ["persistent_transaction_hold"]
             elif relative.startswith(".superseded/"):
                 category, reasons = "legacy_retired", ["legacy_reference_contract_unknown"]
             elif relative.startswith(".tmp/"):
@@ -221,7 +280,7 @@ class Inventory:
             elif relative.startswith(".identities/"):
                 category, reasons = "source_identity", ["source_identity_state"]
             elif relative.startswith(".gc/"):
-                category, reasons = "gc_metadata", ["transaction_schema_not_implemented"]
+                category, reasons = "gc_metadata", ["persistent_lifecycle_state"]
             elif relative.startswith(".journals/"):
                 category, reasons = "journal", ["recovery_state"]
             elif relative == ".latcd.lock":
@@ -236,6 +295,7 @@ class Inventory:
                 reasons.append("lifecycle_and_mount_admission_unverified")
             result = {k: v for k, v in row.items() if not k.startswith("_")}
             result.update(category=category, reasons=reasons, references=referrers,
+                          transaction_references=self.transaction_refs.get(relative, []),
                           delete_authorized=False)
             output.append(result)
             group = groups.setdefault(category, {"entries": 0, "logical_bytes": 0,
@@ -248,6 +308,7 @@ class Inventory:
                 "delete_authorized": False, "complete": not self.errors,
                 "snapshot_atomic": False, "content_validated": False,
                 "liveness_verified": False, "manifest_count": len(self.manifests),
+                "transaction_count": len(self.transactions),
                 "totals": {"path_count": len(output), "unique_objects": len(unique),
                            "logical_bytes": sum(r["logical_bytes"] for r in unique),
                            "allocated_bytes": sum(r["allocated_bytes"] for r in unique)},

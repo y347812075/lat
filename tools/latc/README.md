@@ -886,8 +886,20 @@ before reading the manifest and retain a shared lease on the selected module
 until process exit. Publication takes the matching exclusive latch only for the
 current-index commit. Native and tbset readers use the same shared file-lease
 primitive while copying. Runtime-owned source and module fds are hidden from
-guest `close`, `dup`, `fcntl`, and SCM_RIGHTS mutations; fork preserves the open
+guest `close`, `dup`, `fcntl`, `flock`, and SCM_RIGHTS mutations; fork preserves the open
 file descriptions and CLOEXEC releases them on a successful exec.
+
+Publication persists a versioned `.gc/transactions/<uuid>.ini` PREPARED record
+containing exact previous/next manifest snapshots before replacing current.
+After current and its parent directory are synchronized, the record becomes
+RETIRED. Startup under the cache owner lock reconciles PREPARED against current:
+an exact next snapshot is RETIRED, an exact previous snapshot (including an
+initially absent current) is ABORTED, and any other result is UNKNOWN. Recovery
+does not recompile, move, or remove generation files. RETIRED timestamps use
+boot ID and CLOCK_BOOTTIME; a changed boot ID restarts the observation window.
+These records are evidence and conservative planner roots, not deletion permits.
+Controlled-domain admission, object-identity tombstones, partial-delete recovery,
+automatic expiry scheduling, and capacity reclamation remain disabled/pending.
 
 On LoongArch, validate a copied LAT runner and real x86 guest with:
 

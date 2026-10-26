@@ -2,6 +2,7 @@
 """Exercise the read-only planner without opening any user cache."""
 
 import importlib.util
+import base64
 import json
 import os
 from pathlib import Path
@@ -80,14 +81,33 @@ class PlannerTest(unittest.TestCase):
         self.put(".superseded/legacy/" + STEM + ".so", b"old")
         self.put(".tmp/part.native", b"work")
         self.put(".tbsets/" + SOURCE + ".tbset", b"keys")
-        self.put(".gc/transactions/pending.json", b"{}")
+        self.put(".gc/notes", b"opaque lifecycle metadata")
         plan = self.run_plan()
         rows = {r["path"]: r for r in plan["entries"]}
         self.assertEqual(plan["manifest_count"], 1)
         self.assertIn("incremental_baseline", rows[STEM + ".native"]["reasons"])
         self.assertEqual(rows[".superseded/legacy/" + STEM + ".so"]["category"], "legacy_retired")
         self.assertEqual(rows[".tmp/part.native"]["category"], "temporary")
-        self.assertEqual(rows[".gc/transactions/pending.json"]["category"], "gc_metadata")
+        self.assertEqual(rows[".gc/notes"]["category"], "gc_metadata")
+
+    def test_transaction_roots_and_corruption(self):
+        previous = dict(self.manifest, module=SOURCE + ".so", native=SOURCE + ".native")
+        for suffix in (".so", ".native"):
+            self.put(SOURCE + suffix, b"previous generation")
+        path = ".gc/transactions/12345678-1234-4234-8234-123456789abc.ini"
+        record = ("[transaction]\nversion=1\nsource=" + SOURCE +
+                  "\nstate=RETIRED\nprevious=" +
+                  base64.b64encode(json.dumps(previous).encode()).decode() +
+                  "\nnext=" + base64.b64encode(json.dumps(self.manifest).encode()).decode() + "\n")
+        self.put(path, record.encode())
+        plan = self.run_plan()
+        self.assertEqual(plan["transaction_count"], 1)
+        rows = {r["path"]: r for r in plan["entries"]}
+        self.assertEqual(rows[SOURCE + ".native"]["category"], "transaction_artifact")
+        self.assertEqual(rows[SOURCE + ".native"]["transaction_references"][0]["state"], "RETIRED")
+        self.put(path, record.replace("version=1", "version=1\nversion=2").encode())
+        plan = self.run_plan(False)
+        self.assertTrue(any(e["reason"] == "invalid_transaction" for e in plan["errors"]))
 
     def test_missing_target(self):
         (self.root / (STEM + ".native")).unlink()
