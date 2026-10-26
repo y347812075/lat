@@ -5,12 +5,17 @@
 #include "module-loader.h"
 
 #include "internal-fd-registry.h"
+#include "cache-lifecycle.h"
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static void fill(unsigned char value, unsigned char output[32])
@@ -18,8 +23,78 @@ static void fill(unsigned char value, unsigned char output[32])
     memset(output, value, 32);
 }
 
+static int exec_holder(int argc, char **argv)
+{
+    if (argc != 5) return 2;
+    int pin = atoi(argv[2]), ready = atoi(argv[3]), release = atoi(argv[4]);
+    if (fcntl(pin, F_GETFD) != 0) return 1;
+    if (!strcmp(argv[1], "--inherited-holder")) {
+        uint64_t count, bytes;
+        char error[256];
+        struct stat st;
+        if (fstat(pin, &st) || lat_aot_v2_module_retain_inherited(
+                &count, &bytes, error, sizeof(error)) || count != 1 ||
+            bytes != (uint64_t)st.st_size ||
+            !lat_aot_v2_internal_fd_is_protected(pin) ||
+            lat_aot_v2_internal_fd_close_guest(pin) != -1 || errno != EACCES ||
+            lat_aot_v2_internal_fd_try_flock(pin, LOCK_UN) != -1 || errno != EACCES ||
+            lat_aot_v2_internal_fd_fcntl(pin, F_SETFD, FD_CLOEXEC) != -1 || errno != EACCES)
+            return 1;
+        if (lat_aot_v2_internal_fd_is_protected(ready) ||
+            lat_aot_v2_internal_fd_is_protected(release)) return 1;
+        /* Recognition preserves ordinary inherited descriptors and offsets. */
+        int ordinary = open("/dev/null", O_RDONLY);
+        if (ordinary < 0 || lat_aot_v2_internal_fd_close_guest(ordinary)) return 1;
+    }
+    char byte = 'x';
+    if (write(ready, &byte, 1) != 1 || read(release, &byte, 1) != 1) return 1;
+    return 0;
+}
+
+static int test_exec_lease(const char *path, const LatAotExpectedV2 *expected,
+                           bool retain_in_new_image)
+{
+    int ready[2], release[2];
+    if (pipe(ready) || pipe(release)) return -1;
+    pid_t child = fork();
+    if (child < 0) return -1;
+    if (!child) {
+        alarm(10);
+        close(ready[0]); close(release[1]);
+        LatAotLoadedModuleV2 loaded;
+        char error[256], pin[32], output[32], input[32];
+        if (lat_aot_v2_module_open(path, expected, &loaded, error, sizeof(error))) _exit(1);
+        execl("/nonexistent-lat-aot-v2-exec-test", "missing", (char *)NULL);
+        if (errno != ENOENT || fcntl(loaded.backing_fd, F_GETFD) != 0) _exit(2);
+        int probe = open(path, O_RDONLY | O_CLOEXEC);
+        if (probe < 0 || !flock(probe, LOCK_EX | LOCK_NB) || errno != EWOULDBLOCK) _exit(3);
+        close(probe);
+        snprintf(pin, sizeof(pin), "%d", loaded.backing_fd);
+        snprintf(output, sizeof(output), "%d", ready[1]);
+        snprintf(input, sizeof(input), "%d", release[0]);
+        execl("/proc/self/exe", "test-loader", retain_in_new_image ?
+              "--inherited-holder" : "--native-holder", pin, output, input, (char *)NULL);
+        _exit(4);
+    }
+    close(ready[1]); close(release[0]);
+    char byte;
+    int result = read(ready[0], &byte, 1) != 1;
+    int probe = open(path, O_RDONLY | O_CLOEXEC);
+    if (probe < 0 || !flock(probe, LOCK_EX | LOCK_NB) || errno != EWOULDBLOCK) result = -1;
+    byte = 'x';
+    if (write(release[1], &byte, 1) != 1) result = -1;
+    int status;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) ||
+        probe < 0 || flock(probe, LOCK_EX | LOCK_NB)) result = -1;
+    if (probe >= 0) close(probe);
+    close(ready[0]); close(release[1]);
+    return result;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && (!strcmp(argv[1], "--inherited-holder") ||
+                      !strcmp(argv[1], "--native-holder"))) return exec_holder(argc, argv);
     int expect_reject = argc == 3 && !strcmp(argv[1], "--expect-reject");
     int expect_pc_reject =
         argc == 3 && !strcmp(argv[1], "--expect-pc-map-reject");
@@ -41,6 +116,12 @@ int main(int argc, char **argv)
     LatAotLoadedModuleV2 module;
     char error[256] = {0};
     const char *module_path = argv[expect_reject || expect_pc_reject ? 2 : 1];
+    if (!expect_reject && !expect_pc_reject &&
+        (test_exec_lease(module_path, &expected, true) ||
+         test_exec_lease(module_path, &expected, false))) {
+        fprintf(stderr, "module exec lease test failed\n");
+        return 1;
+    }
     int open_result = lat_aot_v2_module_open(module_path, &expected, &module,
                                              error, sizeof(error));
     if (expect_reject) {
@@ -61,13 +142,13 @@ int main(int argc, char **argv)
     }
     if (open_result) {
         fprintf(stderr, "cannot load fixture: %s\n", error);
+        return 1;
+    }
     if (!lat_aot_v2_internal_fd_is_protected(module.backing_fd)) {
         fprintf(stderr, "loaded module fd is not guest-close protected\n");
         return 1;
     }
-        return 1;
-    }
-    if (module.backing_fd < 0 || fcntl(module.backing_fd, F_GETFD) < 0) {
+    if (module.backing_fd < 0 || fcntl(module.backing_fd, F_GETFD) != 0) {
         fprintf(stderr, "validated module backing fd was not retained\n");
         return 1;
     }
@@ -133,6 +214,8 @@ int main(int argc, char **argv)
         return 1;
     }
     lat_aot_v2_registry_destroy(&registry);
+    dlclose(module.dl_handle);
+    if (lat_aot_v2_cache_close_fd(module.backing_fd, true, error, sizeof(error))) return 1;
     puts("test-aot-v2-loader: PASS");
     return 0;
 }

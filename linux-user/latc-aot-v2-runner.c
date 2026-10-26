@@ -399,6 +399,20 @@ void latc_aot_v2_consume_environment(void)
     key_journal_enabled = getenv("LATX_AOT_V2_KEY_JOURNAL") != NULL;
 }
 
+int latc_aot_v2_retain_inherited_pins(void)
+{
+    uint64_t count, bytes;
+    char error[256] = {0};
+    if (lat_aot_v2_module_retain_inherited(&count, &bytes, error, sizeof(error))) {
+        fprintf(stderr, "latx: %s\n", error);
+        return -1;
+    }
+    if (getenv("LATX_AOT_V2_REPORT"))
+        fprintf(stderr, "latx: inherited AOT pins retained=%" PRIu64
+                " retained_bytes=%" PRIu64 " release=process-exit\n", count, bytes);
+    return 0;
+}
+
 bool latc_aot_v2_strict_enabled(void)
 {
     return aot_v2_strict;

@@ -1670,6 +1670,7 @@ int main(int argc, char **argv, char **envp)
 
 #ifdef CONFIG_LATX
     latc_aot_v2_consume_environment();
+    if (latc_aot_v2_retain_inherited_pins()) return EXIT_FAILURE;
 #endif
     int latc_bundle = latc_bundle_inject_argv(&argc, &argv);
     if (latc_bundle < 0) {

@@ -37,6 +37,7 @@ typedef enum LatcAotV2InvalidationReason {
 
 /* Serialize AOT state across fork and retain registered modules in the child. */
 void latc_aot_v2_consume_environment(void);
+int latc_aot_v2_retain_inherited_pins(void);
 bool latc_aot_v2_strict_enabled(void);
 void latc_aot_v2_fork_start(void);
 void latc_aot_v2_fork_end(CPUState *cpu, bool child);

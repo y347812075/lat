@@ -8,6 +8,7 @@
 #include "elf-validate.h"
 
 #include <dlfcn.h>
+#include <dirent.h>
 #include "internal-fd-registry.h"
 #include <elf.h>
 #include <errno.h>
@@ -19,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static int fail(char *error, size_t error_size, const char *format, ...)
@@ -30,6 +32,89 @@ static int fail(char *error, size_t error_size, const char *format, ...)
         va_end(arguments);
     }
     return -1;
+}
+
+/* Recognition only: no execution, compatibility admission, or fd reclamation.
+ * Bounded pread avoids mapping arbitrary inherited files that may be truncated. */
+static bool inherited_aot_fd(int fd, struct stat *status)
+{
+    Elf64_Ehdr header;
+    if (fstat(fd, status) || !S_ISREG(status->st_mode) ||
+        (status->st_mode & (S_IWGRP | S_IWOTH)) ||
+        pread(fd, &header, sizeof(header), 0) != sizeof(header) ||
+        memcmp(header.e_ident, ELFMAG, SELFMAG) ||
+        header.e_ident[EI_CLASS] != ELFCLASS64 ||
+        header.e_ident[EI_DATA] != ELFDATA2LSB || header.e_type != ET_DYN ||
+        header.e_machine != EM_LOONGARCH || header.e_phentsize != sizeof(Elf64_Phdr) ||
+        !header.e_phnum || header.e_phnum > 128 || header.e_phoff > 1024 * 1024)
+        return false;
+    for (unsigned i = 0; i < header.e_phnum; i++) {
+        Elf64_Phdr phdr;
+        if (pread(fd, &phdr, sizeof(phdr), header.e_phoff + i * sizeof(phdr)) != sizeof(phdr))
+            return false;
+        if (phdr.p_type != PT_NOTE || phdr.p_filesz > 65536 ||
+            phdr.p_offset > INT64_MAX - 65536) continue;
+        uint64_t offset = 0;
+        while (offset + sizeof(Elf64_Nhdr) <= phdr.p_filesz) {
+            Elf64_Nhdr note;
+            if (pread(fd, &note, sizeof(note), phdr.p_offset + offset) != sizeof(note))
+                return false;
+            offset += sizeof(note);
+            uint64_t names = ((uint64_t)note.n_namesz + 3) & ~UINT64_C(3);
+            uint64_t desc = ((uint64_t)note.n_descsz + 3) & ~UINT64_C(3);
+            if (names > phdr.p_filesz - offset || desc > phdr.p_filesz - offset - names)
+                return false;
+            if (note.n_type == LAT_AOT_V2_NOTE_TYPE &&
+                note.n_namesz == sizeof(LAT_AOT_V2_NOTE_NAME) &&
+                note.n_descsz == sizeof(LatAotNoteV2)) {
+                char name[sizeof(LAT_AOT_V2_NOTE_NAME)];
+                LatAotNoteV2 value;
+                if (pread(fd, name, sizeof(name), phdr.p_offset + offset) == sizeof(name) &&
+                    !memcmp(name, LAT_AOT_V2_NOTE_NAME, sizeof(name)) &&
+                    pread(fd, &value, sizeof(value), phdr.p_offset + offset + names) == sizeof(value) &&
+                    lat_aot_v2_magic_valid(value.magic) &&
+                    value.abi_version == LAT_AOT_V2_ABI_VERSION &&
+                    value.struct_size == sizeof(value)) return true;
+            }
+            offset += names + desc;
+        }
+    }
+    return false;
+}
+
+int lat_aot_v2_module_retain_inherited(uint64_t *count, uint64_t *bytes,
+                                      char *error, size_t error_size)
+{
+    if (!count || !bytes) { errno = EINVAL; return -1; }
+    *count = *bytes = 0;
+    /* Startup only, before guest execution or other fd-mutating threads. */
+    DIR *directory = opendir("/proc/self/fd");
+    if (!directory) return fail(error, error_size, "cannot inspect inherited AOT pins: %s", strerror(errno));
+    lat_aot_v2_internal_fd_allocation_lock();
+    int result = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) { if (errno) result = -1; break; }
+        char *end;
+        unsigned long number = strtoul(entry->d_name, &end, 10);
+        if (!*entry->d_name || *end || number > INT32_MAX || (int)number == dirfd(directory)) continue;
+        int fd = number;
+        int flags = fcntl(fd, F_GETFD);
+        int mode = fcntl(fd, F_GETFL);
+        if (flags < 0 || (flags & FD_CLOEXEC) || mode < 0 ||
+            (mode & O_ACCMODE) != O_RDONLY) continue;
+        struct stat status;
+        if (!inherited_aot_fd(fd, &status)) continue;
+        if (lat_aot_v2_internal_fd_register_locked(fd)) { result = -1; break; }
+        (*count)++;
+        *bytes += status.st_size;
+    }
+    int saved = errno;
+    lat_aot_v2_internal_fd_unlock();
+    closedir(directory);
+    errno = saved;
+    return result ? fail(error, error_size, "cannot protect inherited AOT pins: %s", strerror(errno)) : 0;
 }
 
 static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
@@ -185,7 +270,8 @@ int lat_aot_v2_module_open(const char *path,
     memset(module, 0, sizeof(*module));
     module->backing_fd = -1;
     lat_aot_v2_internal_fd_allocation_lock();
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    /* Keep the lease across exec until a trusted handoff can release it. */
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
     if (fd < 0) {
         int saved = errno;
         lat_aot_v2_internal_fd_unlock();

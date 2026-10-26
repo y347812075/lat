@@ -77,6 +77,11 @@ void latc_aot_v2_consume_environment(void)
 {
 }
 
+int latc_aot_v2_retain_inherited_pins(void)
+{
+    return 0;
+}
+
 bool latc_aot_v2_strict_enabled(void)
 {
     return false;
