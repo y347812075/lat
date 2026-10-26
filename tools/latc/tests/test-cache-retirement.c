@@ -845,6 +845,117 @@ static void test_deleted_transaction_recovery(int mutation)
     g_free(marker); g_free(current); remove_root(root); g_free(root);
 }
 
+static void test_recovery_cursor(int mutation, bool tombstones)
+{
+    char *root = root_new(), error[256], *transaction = NULL;
+    char *names[3], *paths[3];
+    const char *suffixes[] = {".so", ".native", ".tbset"};
+    char *payload = g_strnfill(192 * 1024 + 1, 'x');
+    for (size_t i = 0; i < 3; i++) {
+        names[i] = g_strconcat(source, suffixes[i], NULL);
+        paths[i] = g_build_filename(root, names[i], NULL);
+        put(paths[i], payload);
+    }
+    char *manifest = g_strdup_printf("{\"version\":2,\"module\":\"%s\",\"native\":\"%s\","
+        "\"tbset\":\"%s\",\"source_sha256\":\"%s\",\"codegen_id\":\"%s\",\"published_sequence\":1}",
+        names[0], names[1], names[2], source, source);
+    char *evidence = latcd_retirement_capture_objects(root, source, (const char *const *)names, 3);
+    assert(evidence);
+    char *current = current_path(root), *record_path;
+    if (tombstones) {
+        const char *capture[] = {names[0]};
+        char *single = latcd_retirement_capture_objects(root, source, capture, 1);
+        int fd = open(paths[0], O_RDONLY | O_CLOEXEC);
+        assert(single && fd >= 0 && !latcd_retirement_tombstone(root, source, names[0], fd,
+            single, error, sizeof(error)));
+        close(fd); g_free(single);
+        record_path = g_build_filename(root, ".gc", "tombstones", names[0], NULL);
+    } else {
+        assert(!latcd_retirement_prepare(root, source, manifest, strlen(manifest), evidence,
+                                         &transaction, error, sizeof(error)));
+        put(current, manifest);
+        assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+        record_path = single_record(root);
+    }
+    LatcdRecoveryCursor *cursor = latcd_recovery_open(root, tombstones, error, sizeof(error));
+    assert(cursor);
+    LatcdRecoveryProgress progress = {0}, prior = {0};
+    int result;
+    unsigned steps = 0;
+    do {
+        prior = progress;
+        result = latcd_recovery_step(cursor, 1, 65536, 100000, &progress, error, sizeof(error));
+        assert(result >= 0 && progress.visited - prior.visited <= 1 &&
+            progress.recovered - prior.recovered <= 1 &&
+            progress.hashed_bytes - prior.hashed_bytes <= 65536);
+        assert(++steps < 100);
+    } while (!progress.hashed_bytes);
+    assert(result == 1 && progress.recovered == 0 && progress.hashed_bytes == 65536);
+    int contender = open(paths[0], O_RDONLY | O_CLOEXEC);
+    assert(contender >= 0 && flock(contender, LOCK_EX | LOCK_NB) && errno == EWOULDBLOCK);
+    close(contender);
+    if (mutation == 1) put(paths[0], payload);
+    if (mutation == 2) {
+        char *raw = NULL;
+        assert(g_file_get_contents(record_path, &raw, NULL, NULL));
+        put(record_path, raw); g_free(raw);
+    }
+    if (mutation == 3) {
+        latcd_recovery_close(cursor);
+        contender = open(paths[0], O_RDONLY | O_CLOEXEC);
+        assert(contender >= 0 && !flock(contender, LOCK_EX | LOCK_NB));
+        close(contender);
+        cursor = latcd_recovery_open(root, tombstones, error, sizeof(error));
+        assert(cursor); progress = (LatcdRecoveryProgress){0};
+    }
+    do {
+        prior = progress;
+        result = latcd_recovery_step(cursor, 1, 65536, 100000, &progress, error, sizeof(error));
+        assert(progress.visited - prior.visited <= 1 && progress.recovered - prior.recovered <= 1 &&
+            progress.hashed_bytes - prior.hashed_bytes <= 65536);
+        assert(++steps < 100);
+    } while (result > 0);
+    if (mutation == 2) {
+        assert(result < 0);
+        assert(latcd_recovery_step(cursor, 1, 65536, 100000, &progress, error, sizeof(error)) < 0);
+    } else {
+        assert(!result && progress.recovered == 1);
+        if (tombstones) assert_tombstone_status(record_path, mutation == 1 ? "UNKNOWN" : "MATCHED");
+        else assert_state(root, mutation == 1 ? "UNKNOWN" : "RETIRED");
+        if (mutation != 1)
+            assert(progress.hashed_bytes == strlen(payload) * (tombstones ? 1 : 3));
+    }
+    latcd_recovery_close(cursor);
+    for (size_t i = 0; i < 3; i++) { assert(!access(paths[i], F_OK)); g_free(paths[i]); g_free(names[i]); }
+    g_free(record_path); g_free(current); g_free(payload); g_free(evidence);
+    g_free(manifest); g_free(transaction); remove_root(root); g_free(root);
+}
+
+static void test_recovery_entry_budget(void)
+{
+    char *root = root_new(), error[256], *transaction = NULL;
+    assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
+                                     &transaction, error, sizeof(error)));
+    char *store = g_build_filename(root, ".gc", "transactions", NULL);
+    for (unsigned i = 0; i < 80; i++) {
+        char *name = g_strdup_printf("%s/.write-%u", store, i);
+        put(name, "incomplete write"); g_free(name);
+    }
+    LatcdRecoveryCursor *cursor = latcd_recovery_open(root, false, error, sizeof(error));
+    assert(cursor);
+    LatcdRecoveryProgress progress = {0};
+    int result; unsigned steps = 0;
+    assert(latcd_recovery_step(cursor, 0, 1, 1, &progress, error, sizeof(error)) < 0);
+    do {
+        unsigned before = progress.visited;
+        result = latcd_recovery_step(cursor, 3, 1, 100000, &progress, error, sizeof(error));
+        assert(result >= 0 && progress.visited - before <= 3 && ++steps < 100);
+    } while (result > 0);
+    assert(steps >= 27 && progress.visited == 81 && progress.recovered == 1 && !progress.hashed_bytes);
+    latcd_recovery_close(cursor);
+    g_free(store); g_free(transaction); remove_root(root); g_free(root);
+}
+
 static void test_partial_generation_delete(void)
 {
     char *root = root_new(), error[256];
@@ -894,6 +1005,11 @@ int main(void)
     test_reboot();
     for (int mutation = 0; mutation < 7; mutation++) test_object_identity(mutation);
     test_legacy_and_schema();
+    test_recovery_entry_budget();
+    for (int mutation = 0; mutation < 4; mutation++) {
+        test_recovery_cursor(mutation, false);
+        test_recovery_cursor(mutation, true);
+    }
     for (int mutation = 0; mutation < 15; mutation++) test_deleted_transaction_recovery(mutation);
     test_manifest_binding();
     test_tombstone();

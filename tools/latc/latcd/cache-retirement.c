@@ -46,6 +46,31 @@ static bool object_stat_equal(const struct stat *a, const struct stat *b)
         a->st_ctim.tv_sec == b->st_ctim.tv_sec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
 }
 
+typedef struct RecoveryObject {
+    struct stat identity;
+    char *evidence;
+} RecoveryObject;
+
+struct LatcdRecoveryCursor {
+    char *root_path;
+    int root;
+    DIR *directory;
+    bool tombstones, done, failed, yielded;
+    char *pending;
+    struct stat pending_identity;
+    GHashTable *verified;
+    int hash_fd;
+    char *hash_name;
+    struct stat hash_identity;
+    GChecksum *hash;
+    uint64_t offset, bytes_left;
+    int64_t deadline;
+    LatcdRecoveryProgress progress;
+};
+
+static char *recovery_capture(int root, const char *source, const char *name,
+                              LatcdRecoveryCursor *cursor);
+
 static char *capture_objects(int directory, const char *source,
                              const char *const *names, size_t count)
 {
@@ -626,7 +651,7 @@ static bool completed_removal(int root, const char *source, const char *name,
 }
 
 static int verify_objects(int root, const char *source, const char *encoded,
-                           bool content, bool allow_removed)
+                           bool content, bool allow_removed, LatcdRecoveryCursor *cursor)
 {
     if (!encoded) return -1;
     if (!*encoded) return 2;
@@ -683,7 +708,13 @@ static int verify_objects(int root, const char *source, const char *encoded,
             } else if (content) {
                 /* Reuse the same fd/lease/hash checks as publication capture. */
                 const char *names[] = {name};
-                char *actual = capture_objects(root, source, names, 1);
+                char *actual = cursor ? recovery_capture(root, source, name, cursor) :
+                    capture_objects(root, source, names, 1);
+                if (cursor && cursor->yielded) {
+                    g_free(hash); g_free(name);
+                    result = 3;
+                    break;
+                }
                 GKeyFile *observed = g_key_file_new();
                 char *actual_hash = NULL;
                 if (actual && g_key_file_load_from_data(observed, actual, -1, 0, NULL))
@@ -707,7 +738,8 @@ out:
     return result;
 }
 
-static int recover_record(int root, int store, const char *name, bool content)
+static int recover_record(int root, int store, const char *name, bool content,
+                           LatcdRecoveryCursor *cursor)
 {
     char *raw = NULL;
     size_t size;
@@ -735,13 +767,14 @@ static int recover_record(int root, int store, const char *name, bool content)
     if (version == 2) {
         char *encoded = g_key_file_get_string(record, "transaction", "objects", NULL);
         int object_result = verify_objects(root, source, encoded, content,
-                                           !strcmp(state, "RETIRED"));
+                                           !strcmp(state, "RETIRED"), cursor);
         gsize object_size = 0;
         guchar *object_data = encoded ? g_base64_decode(encoded, &object_size) : NULL;
         bool bound = object_size && !latcd_retirement_validate_binding(source,
             (char *)old, old_size, (char *)next, new_size, (char *)object_data, object_size);
         g_free(object_data);
         g_free(encoded);
+        if (object_result == 3) { result = 1; goto snapshots_out; }
         if (object_result < 0) goto snapshots_out;
         g_key_file_set_string(record, "transaction", "binding_status",
                               bound ? "COMPLETE" : "UNPROVEN");
@@ -810,7 +843,7 @@ int latcd_retirement_finish(const char *root, const char *transaction,
     int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     int store = root_fd < 0 ? -1 : open_store(root_fd, false);
     int result = store < 0 || fsync(root_fd) ? -1 :
-                 recover_record(root_fd, store, transaction, false);
+                 recover_record(root_fd, store, transaction, false, NULL);
     if (store >= 0) close(store);
     if (root_fd >= 0) close(root_fd);
     return result ? fail(error, error_size, "cannot complete retirement transaction") : 0;
@@ -820,33 +853,15 @@ int latcd_retirement_recover(const char *root, unsigned *recovered,
                             char *error, size_t error_size)
 {
     *recovered = 0;
-    int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    int store = root_fd < 0 ? -1 : open_store(root_fd, false);
-    if (store < 0) {
-        int saved = errno;
-        if (root_fd >= 0) close(root_fd);
-        return saved == ENOENT ? 0 : fail(error, error_size, "unsafe retirement store");
-    }
-    DIR *directory = fdopendir(store);
-    int result = directory ? 0 : -1;
-    if (!directory) close(store);
-    struct dirent *entry;
-    while (!result) {
-        errno = 0;
-        entry = readdir(directory);
-        if (!entry) { if (errno) result = -1; break; }
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
-        /* Interrupted record writes are evidence, not deletion candidates. */
-        if (g_str_has_prefix(entry->d_name, ".write-")) continue;
-        if (*recovered >= 100000 || recover_record(root_fd, store, entry->d_name, true)) {
-            result = -1;
-            break;
-        }
-        (*recovered)++;
-    }
-    if (directory) closedir(directory);
-    close(root_fd);
-    return result ? fail(error, error_size, "retirement recovery rejected unknown record") : 0;
+    LatcdRecoveryCursor *cursor = latcd_recovery_open(root, false, error, error_size);
+    if (!cursor) return -1;
+    LatcdRecoveryProgress progress;
+    int result;
+    do { result = latcd_recovery_step(cursor, 32, 4 * 1024 * 1024, 10000,
+                                      &progress, error, error_size); } while (result > 0);
+    *recovered = progress.recovered;
+    latcd_recovery_close(cursor);
+    return result;
 }
 
 static bool tombstone_shape(GKeyFile *record, const char *name,
@@ -899,7 +914,7 @@ static bool tombstone_shape(GKeyFile *record, const char *name,
 }
 
 static int recover_tombstone(const char *root_path, int root, int store,
-                              const char *name, bool remove_object)
+                              const char *name, bool remove_object, LatcdRecoveryCursor *cursor)
 {
     char *raw = NULL, *source = NULL, *hash = NULL;
     size_t size;
@@ -929,7 +944,12 @@ static int recover_tombstone(const char *root_path, int root, int store,
             observation = errno == EWOULDBLOCK ? "BUSY" : "UNKNOWN";
         } else {
             const char *names[] = {name};
-            char *actual = !fstat(object, &before) ? capture_objects(root, source, names, 1) : NULL;
+            char *actual = !fstat(object, &before) ?
+                (cursor ? recovery_capture(root, source, name, cursor) :
+                 capture_objects(root, source, names, 1)) : NULL;
+            if (cursor && cursor->yielded) {
+                g_free(prior); result = 1; goto out;
+            }
             GKeyFile *captured = g_key_file_new();
             char *actual_hash = NULL;
             if (actual && g_key_file_load_from_data(captured, actual, -1, 0, NULL))
@@ -1007,32 +1027,15 @@ int latcd_tombstone_recover(const char *root, unsigned *recovered,
                             char *error, size_t error_size)
 {
     *recovered = 0;
-    int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    int gc = root_fd < 0 ? -1 : open_directory(root_fd, ".gc", false);
-    int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
-    int saved = errno;
-    if (gc >= 0) close(gc);
-    if (store < 0) {
-        if (root_fd >= 0) close(root_fd);
-        return saved == ENOENT ? 0 : fail(error, error_size, "unsafe tombstone store");
-    }
-    DIR *directory = fdopendir(store);
-    int result = directory ? 0 : -1;
-    if (!directory) close(store);
-    unsigned visited = 0;
-    while (!result) {
-        errno = 0;
-        struct dirent *entry = readdir(directory);
-        if (!entry) { if (errno) result = -1; break; }
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
-        if (++visited > 100000) { result = -1; break; }
-        if (g_str_has_prefix(entry->d_name, ".write-")) continue;
-        if (recover_tombstone(root, root_fd, store, entry->d_name, false)) { result = -1; break; }
-        (*recovered)++;
-    }
-    if (directory) closedir(directory);
-    close(root_fd);
-    return result ? fail(error, error_size, "tombstone recovery rejected unknown record") : 0;
+    LatcdRecoveryCursor *cursor = latcd_recovery_open(root, true, error, error_size);
+    if (!cursor) return -1;
+    LatcdRecoveryProgress progress;
+    int result;
+    do { result = latcd_recovery_step(cursor, 32, 4 * 1024 * 1024, 10000,
+                                      &progress, error, error_size); } while (result > 0);
+    *recovered = progress.recovered;
+    latcd_recovery_close(cursor);
+    return result;
 }
 
 int latcd_tombstone_delete(const char *root, const char *name,
@@ -1047,9 +1050,186 @@ int latcd_tombstone_delete(const char *root, const char *name,
     int directory = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
     int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
-    int result = store < 0 ? -1 : recover_tombstone(root, directory, store, name, true);
+    int result = store < 0 ? -1 : recover_tombstone(root, directory, store, name, true, NULL);
     if (store >= 0) close(store);
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
     return result ? fail(error, error_size, "object deletion deferred or rejected") : 0;
+}
+
+static void recovery_object_free(gpointer pointer)
+{
+    RecoveryObject *object = pointer;
+    g_free(object->evidence);
+    g_free(object);
+}
+
+static void recovery_hash_clear(LatcdRecoveryCursor *cursor)
+{
+    if (cursor->hash_fd >= 0) close(cursor->hash_fd);
+    cursor->hash_fd = -1;
+    g_clear_pointer(&cursor->hash_name, g_free);
+    g_clear_pointer(&cursor->hash, g_checksum_free);
+    cursor->offset = 0;
+}
+
+static char *recovery_capture(int root, const char *source, const char *name,
+                              LatcdRecoveryCursor *cursor)
+{
+    if (!source_valid(source) || !object_name_valid(source, name)) return NULL;
+    struct stat path, after;
+    RecoveryObject *cached = g_hash_table_lookup(cursor->verified, name);
+    if (cached) {
+        return !fstatat(root, name, &path, AT_SYMLINK_NOFOLLOW) &&
+            object_stat_equal(&path, &cached->identity) ? g_strdup(cached->evidence) : NULL;
+    }
+    if (cursor->hash_fd >= 0 && g_strcmp0(cursor->hash_name, name)) {
+        recovery_hash_clear(cursor);
+        return NULL;
+    }
+    if (cursor->hash_fd < 0) {
+        cursor->hash_fd = openat(root, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (cursor->hash_fd < 0 || flock(cursor->hash_fd, LOCK_SH | LOCK_NB) ||
+            fstat(cursor->hash_fd, &cursor->hash_identity) ||
+            !S_ISREG(cursor->hash_identity.st_mode) || cursor->hash_identity.st_uid != geteuid() ||
+            cursor->hash_identity.st_nlink != 1 || cursor->hash_identity.st_mode & 0222 ||
+            cursor->hash_identity.st_size <= 0) goto invalid;
+        cursor->hash_name = g_strdup(name);
+        cursor->hash = g_checksum_new(G_CHECKSUM_SHA256);
+    }
+    if (fstat(cursor->hash_fd, &after) || !object_stat_equal(&after, &cursor->hash_identity) ||
+        fstatat(root, name, &path, AT_SYMLINK_NOFOLLOW) ||
+        !object_stat_equal(&path, &cursor->hash_identity)) goto invalid;
+    while (cursor->offset < (uint64_t)cursor->hash_identity.st_size) {
+        if (!cursor->bytes_left || g_get_monotonic_time() >= cursor->deadline) {
+            cursor->yielded = true;
+            return NULL;
+        }
+        unsigned char buffer[65536];
+        size_t length = MIN((uint64_t)sizeof(buffer), cursor->bytes_left);
+        length = MIN(length, (uint64_t)cursor->hash_identity.st_size - cursor->offset);
+        ssize_t count = read(cursor->hash_fd, buffer, length);
+        if (count < 0 && errno == EINTR) {
+            cursor->yielded = true;
+            return NULL;
+        }
+        if (count <= 0) goto invalid;
+        cursor->offset += count;
+        cursor->bytes_left -= count;
+        cursor->progress.hashed_bytes += count;
+        g_checksum_update(cursor->hash, buffer, count);
+    }
+    if (fstat(cursor->hash_fd, &after) || !object_stat_equal(&after, &cursor->hash_identity) ||
+        fstatat(root, name, &path, AT_SYMLINK_NOFOLLOW) ||
+        !object_stat_equal(&path, &cursor->hash_identity)) goto invalid;
+    GKeyFile *record = g_key_file_new();
+    g_key_file_set_integer(record, "objects", "count", 1);
+    g_key_file_set_string(record, "object0", "name", name);
+    g_key_file_set_uint64(record, "object0", "device", after.st_dev);
+    g_key_file_set_uint64(record, "object0", "inode", after.st_ino);
+    g_key_file_set_uint64(record, "object0", "size", after.st_size);
+    g_key_file_set_uint64(record, "object0", "allocated", (uint64_t)after.st_blocks * 512);
+    g_key_file_set_string(record, "object0", "sha256", g_checksum_get_string(cursor->hash));
+    RecoveryObject *object = g_new0(RecoveryObject, 1);
+    object->identity = after;
+    object->evidence = g_key_file_to_data(record, NULL, NULL);
+    g_key_file_unref(record);
+    g_hash_table_insert(cursor->verified, g_strdup(name), object);
+    recovery_hash_clear(cursor);
+    return g_strdup(object->evidence);
+invalid:
+    recovery_hash_clear(cursor);
+    return NULL;
+}
+
+void latcd_recovery_close(LatcdRecoveryCursor *cursor)
+{
+    if (!cursor) return;
+    recovery_hash_clear(cursor);
+    if (cursor->directory) closedir(cursor->directory);
+    if (cursor->root >= 0) close(cursor->root);
+    g_hash_table_unref(cursor->verified);
+    g_free(cursor->root_path); g_free(cursor->pending); g_free(cursor);
+}
+
+LatcdRecoveryCursor *latcd_recovery_open(const char *root, bool tombstones,
+                                        char *error, size_t error_size)
+{
+    LatcdRecoveryCursor *cursor = g_new0(LatcdRecoveryCursor, 1);
+    cursor->root = -1;
+    cursor->hash_fd = -1;
+    cursor->tombstones = tombstones;
+    cursor->root_path = g_strdup(root);
+    cursor->verified = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, recovery_object_free);
+    cursor->root = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (cursor->root < 0) goto invalid;
+    int gc = open_directory(cursor->root, ".gc", false);
+    int store = gc < 0 ? -1 : open_directory(gc, tombstones ? "tombstones" : "transactions", false);
+    int saved = errno;
+    if (gc >= 0) close(gc);
+    if (store < 0) {
+        if (saved != ENOENT) goto invalid;
+        cursor->done = true;
+    } else {
+        cursor->directory = fdopendir(store);
+        if (!cursor->directory) { close(store); goto invalid; }
+    }
+    return cursor;
+invalid:
+    latcd_recovery_close(cursor);
+    fail(error, error_size, "unsafe recovery store");
+    return NULL;
+}
+
+int latcd_recovery_step(LatcdRecoveryCursor *cursor, unsigned entries,
+                        uint64_t hash_bytes, uint64_t time_us,
+                        LatcdRecoveryProgress *progress, char *error, size_t error_size)
+{
+    if (!cursor || !progress || !entries || !hash_bytes || !time_us ||
+        time_us > INT64_MAX - (uint64_t)g_get_monotonic_time())
+        return fail(error, error_size, "invalid recovery budget");
+    *progress = cursor->progress;
+    if (cursor->failed) return fail(error, error_size, "recovery cursor previously failed");
+    if (cursor->done) return 0;
+    cursor->bytes_left = hash_bytes;
+    cursor->deadline = g_get_monotonic_time() + time_us;
+    cursor->yielded = false;
+    unsigned visited = 0;
+    while (visited < entries && g_get_monotonic_time() < cursor->deadline) {
+        if (!cursor->pending) {
+            errno = 0;
+            struct dirent *entry = readdir(cursor->directory);
+            if (!entry) {
+                if (errno) goto invalid;
+                cursor->done = true;
+                break;
+            }
+            visited++;
+            if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+            if (++cursor->progress.visited > 100000) goto invalid;
+            if (g_str_has_prefix(entry->d_name, ".write-")) continue;
+            cursor->pending = g_strdup(entry->d_name);
+            if (fstatat(dirfd(cursor->directory), cursor->pending, &cursor->pending_identity,
+                         AT_SYMLINK_NOFOLLOW)) goto invalid;
+        } else visited++;
+        struct stat record;
+        if (fstatat(dirfd(cursor->directory), cursor->pending, &record, AT_SYMLINK_NOFOLLOW) ||
+            !object_stat_equal(&record, &cursor->pending_identity)) goto invalid;
+        int result = cursor->tombstones ? recover_tombstone(cursor->root_path, cursor->root,
+            dirfd(cursor->directory), cursor->pending, false, cursor) :
+            recover_record(cursor->root, dirfd(cursor->directory), cursor->pending, true, cursor);
+        if (result < 0) goto invalid;
+        if (result > 0) break;
+        cursor->progress.recovered++;
+        g_clear_pointer(&cursor->pending, g_free);
+        g_hash_table_remove_all(cursor->verified);
+        recovery_hash_clear(cursor);
+    }
+    *progress = cursor->progress;
+    return cursor->done ? 0 : 1;
+invalid:
+    cursor->failed = true;
+    recovery_hash_clear(cursor);
+    *progress = cursor->progress;
+    return fail(error, error_size, "recovery rejected unknown or changed record");
 }

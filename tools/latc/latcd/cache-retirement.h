@@ -2,6 +2,25 @@
 #define LATCD_CACHE_RETIREMENT_H
 
 #include <stddef.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+typedef struct LatcdRecoveryCursor LatcdRecoveryCursor;
+typedef struct LatcdRecoveryProgress {
+    unsigned visited;
+    unsigned recovered;
+    uint64_t hashed_bytes;
+} LatcdRecoveryProgress;
+
+/* Owner lease required throughout cursor lifetime. Each step has entry/hash-byte
+ * and soft wall-time budgets; individual syscalls/fsync may exceed the latter.
+ * Returns 1 for pending, 0 for complete, -1 on error. No removal is authorized. */
+LatcdRecoveryCursor *latcd_recovery_open(const char *root, bool tombstones,
+                                        char *error, size_t error_size);
+int latcd_recovery_step(LatcdRecoveryCursor *cursor, unsigned entries,
+                        uint64_t hash_bytes, uint64_t time_us,
+                        LatcdRecoveryProgress *progress, char *error, size_t error_size);
+void latcd_recovery_close(LatcdRecoveryCursor *cursor);
 
 /* Capture at most six immutable objects outside the daemon metadata lock.
  * Returned structured evidence is owned by the caller; NULL means unproven. */

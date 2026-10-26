@@ -493,6 +493,24 @@ static void signal_stop(int signal_number)
     stop_requested = 1;
 }
 
+static int recover_lifecycle(const char *root, bool tombstones,
+                             char *error, size_t error_size)
+{
+    LatcdRecoveryCursor *cursor = latcd_recovery_open(root, tombstones, error, error_size);
+    if (!cursor) return -1;
+    LatcdRecoveryProgress progress = {0};
+    int result = 1;
+    while (!stop_requested && result > 0)
+        result = latcd_recovery_step(cursor, 32, 4 * 1024 * 1024, 10000,
+                                     &progress, error, error_size);
+    latcd_recovery_close(cursor);
+    fprintf(stderr, "latcd: %s recovery %s visited=%u recovered=%u hashed_bytes=%" PRIu64 "\n",
+        tombstones ? "tombstone" : "retirement", stop_requested ? "interrupted" :
+        result < 0 ? "failed" : "complete", progress.visited, progress.recovered,
+        progress.hashed_bytes);
+    return stop_requested ? 1 : result;
+}
+
 static int ensure_private_directory(const char *path, char *error,
                                     size_t error_size)
 {
@@ -4279,7 +4297,6 @@ static int run_service(const LatcdConfig *config)
     sigemptyset(&action.sa_mask);
     sigaction(SIGINT, &action, NULL);
     sigaction(SIGTERM, &action, NULL);
-    stop_requested = 0;
     GError *pool_error = NULL;
     GThreadPool *precompile_pool = g_thread_pool_new(
         precompile_request_worker, NULL, 1, FALSE, &pool_error);
@@ -4890,19 +4907,17 @@ int main(int argc, char **argv)
         fprintf(stderr, "latcd: %s\n", error);
         return 1;
     }
-    unsigned recovered_retirements;
-    if (latcd_retirement_recover(config.cache_dir, &recovered_retirements,
-                                 error, sizeof(error))) {
-        fprintf(stderr, "latcd: %s\n", error);
+    struct sigaction recovery_action = { .sa_handler = signal_stop };
+    sigemptyset(&recovery_action.sa_mask);
+    sigaction(SIGINT, &recovery_action, NULL);
+    sigaction(SIGTERM, &recovery_action, NULL);
+    int recovery = recover_lifecycle(config.cache_dir, false, error, sizeof(error));
+    if (!recovery) recovery = recover_lifecycle(config.cache_dir, true, error, sizeof(error));
+    if (recovery) {
+        if (recovery < 0) fprintf(stderr, "latcd: %s\n", error);
+        else fprintf(stderr, "latcd: recovery deferred by stop request\n");
         close(cache_owner);
-        return 1;
-    }
-    unsigned recovered_tombstones;
-    if (latcd_tombstone_recover(config.cache_dir, &recovered_tombstones,
-                                error, sizeof(error))) {
-        fprintf(stderr, "latcd: %s\n", error);
-        close(cache_owner);
-        return 1;
+        return recovery < 0 ? 1 : 0;
     }
     int result = serve ? run_service(&config) : run_once(&config);
     close(cache_owner);

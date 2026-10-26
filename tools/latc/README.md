@@ -914,6 +914,15 @@ A valid current manifest must exist and must not reference that name. Plain
 ENOENT, an unfinished receipt, a new object at the same name or any mismatch
 remains unproven. The read-only planner reports reconciled names as `removed`;
 this describes durable namespace removal, not physical block release.
+Startup recovery uses an owner-lease cursor with per-step limits of 32 directory
+entries, 4 MiB of content hashing, and a 10 ms soft time budget. Hash state and
+the shared object lease survive between steps; record and object identities are
+rechecked. Interrupted record-write entries also consume the entry budget.
+SIGINT/SIGTERM stop recovery between steps without opening the request socket.
+Restart repeats validation from the durable records; the cursor is not a durable
+checkpoint. Individual filesystem calls can exceed the soft budget, and total
+startup recovery still precedes service admission. This is not background GC or
+a bounded total startup-latency guarantee.
 Version 2 additionally records the old/new immutable objects' basename, device,
 inode, length, allocated bytes and SHA256. Collection holds shared file leases
 outside the daemon metadata lock. Startup rechecks those identities and hashes;
