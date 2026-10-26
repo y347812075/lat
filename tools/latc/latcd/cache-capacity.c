@@ -105,6 +105,7 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
 {
     pthread_mutex_lock(&capacity->lock);
     bool busy = capacity->reserved || capacity->transient_reserved || capacity->recovered_reserved ||
+        (capacity->unknown_tasks && g_hash_table_size(capacity->unknown_tasks)) ||
         (capacity->expected_names && g_hash_table_size(capacity->expected_names));
     pthread_mutex_unlock(&capacity->lock);
     if (busy) return -1;
@@ -139,7 +140,9 @@ static int reserve_bytes(LatcdCacheCapacity *capacity, uint64_t bytes,
 {
     pthread_mutex_lock(&capacity->lock);
     check_changes(capacity);
-    bool fits = capacity->ready && capacity->committed <= limit &&
+    bool fits = capacity->ready &&
+        (!capacity->unknown_tasks || !g_hash_table_size(capacity->unknown_tasks)) &&
+        capacity->committed <= limit &&
         capacity->reserved <= limit - capacity->committed &&
         capacity->transient_reserved <= limit - capacity->committed - capacity->reserved &&
         capacity->recovered_reserved <= limit - capacity->committed - capacity->reserved - capacity->transient_reserved &&
@@ -201,6 +204,8 @@ void latcd_cache_capacity_close(LatcdCacheCapacity *capacity)
     if (capacity->recovered_tasks) g_hash_table_unref(capacity->recovered_tasks);
     capacity->recovered_tasks = NULL;
     capacity->recovered_reserved = 0;
+    if (capacity->unknown_tasks) g_hash_table_unref(capacity->unknown_tasks);
+    capacity->unknown_tasks = NULL;
     capacity->ready = false;
 }
 
@@ -217,9 +222,20 @@ int latcd_cache_capacity_restore_task(LatcdCacheCapacity *capacity, const char *
         g_hash_table_insert(capacity->recovered_tasks, g_strdup(id), value);
         capacity->recovered_reserved += bytes;
     }
+    if (!result && capacity->unknown_tasks) g_hash_table_remove(capacity->unknown_tasks, id);
     if (result) capacity->ready = false;
     pthread_mutex_unlock(&capacity->lock);
     return result ? -1 : 0;
+}
+
+void latcd_cache_capacity_unknown_task(LatcdCacheCapacity *capacity, const char *id)
+{
+    pthread_mutex_lock(&capacity->lock);
+    if (!capacity->unknown_tasks) capacity->unknown_tasks = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, NULL);
+    if (!capacity->recovered_tasks || !g_hash_table_contains(capacity->recovered_tasks, id))
+        g_hash_table_add(capacity->unknown_tasks, g_strdup(id));
+    pthread_mutex_unlock(&capacity->lock);
 }
 
 void latcd_cache_capacity_release_task(LatcdCacheCapacity *capacity, const char *id)
@@ -230,6 +246,7 @@ void latcd_cache_capacity_release_task(LatcdCacheCapacity *capacity, const char 
         capacity->recovered_reserved -= *bytes;
         g_hash_table_remove(capacity->recovered_tasks, id);
     }
+    if (capacity->unknown_tasks) g_hash_table_remove(capacity->unknown_tasks, id);
     pthread_mutex_unlock(&capacity->lock);
 }
 

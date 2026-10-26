@@ -90,6 +90,13 @@ int main(void)
     latcd_cache_capacity_release_task(&capacity, "task-a");
     latcd_cache_capacity_release_task(&capacity, "task-a");
     assert(!capacity.recovered_reserved);
+    latcd_cache_capacity_unknown_task(&capacity, "legacy");
+    latcd_cache_capacity_unknown_task(&capacity, "legacy");
+    assert(g_hash_table_size(capacity.unknown_tasks) == 1);
+    assert(latcd_cache_capacity_reserve(&capacity, 0, UINT64_MAX, NULL, 0));
+    assert(latcd_cache_capacity_reserve_transient(&capacity, 1, UINT64_MAX, NULL, 0));
+    latcd_cache_capacity_release_task(&capacity, "legacy");
+    assert(!g_hash_table_size(capacity.unknown_tasks));
     assert(!latcd_cache_capacity_reserve(&capacity, 5, 20, error, sizeof(error)));
     assert(latcd_cache_capacity_reserve(&capacity, 1, 20, error, sizeof(error)));
     latcd_cache_capacity_finish(&capacity, 5, false);

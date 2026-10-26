@@ -668,9 +668,12 @@ static void test_compiler_input_recovery(void)
     g_assert_cmpuint(record_hits, ==, 1);
     g_assert_cmpint(restore_compiler_budgets(&config, error, sizeof(error)), ==, 0);
     g_assert_cmpuint(generation_capacity.recovered_reserved, ==, 0);
+    g_assert_cmpuint(g_hash_table_size(generation_capacity.unknown_tasks), ==, 1);
+    g_assert_cmpint(latcd_cache_capacity_reserve(&generation_capacity, 1, UINT64_MAX, NULL, 0), ==, -1);
     g_assert_cmpint(record_compiler_budget(&config, id, &budget_task, 12345), ==, 0);
     g_assert_cmpint(restore_compiler_budgets(&config, error, sizeof(error)), ==, 0);
     g_assert_cmpuint(generation_capacity.recovered_reserved, ==, 12345);
+    g_assert_cmpuint(g_hash_table_size(generation_capacity.unknown_tasks), ==, 0);
     g_assert_cmpint(restore_compiler_budgets(&config, error, sizeof(error)), ==, 0);
     g_assert_cmpuint(generation_capacity.recovered_reserved, ==, 12345);
     char *name = g_strdup_printf("%s.ini", id);

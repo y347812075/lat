@@ -151,17 +151,39 @@ def run(prefix, guest, work):
                 # A restarted daemon must not infer input release from the old
                 # daemon's death while the compiler retains the task SH OFD.
                 service_socket.unlink(missing_ok=True)
+                if incremental:
+                    # Simulate an absent legacy/lost budget without touching
+                    # user caches: task and inherited SH remain intact.
+                    (cache / '.gc/compiler-budgets' / task_record.name).unlink()
                 daemon = start(prefix / 'bin/latc', log)
                 deadline = time.monotonic() + 10
                 while True:
                     value = json.loads(stats.read_bytes())
                     if value['cache_owner_pid'] == daemon.pid:
-                        assert value['recovered_compiler_reserved_bytes'] >= 64 * 1024 * 1024, value
+                        if incremental:
+                            assert value['unknown_compiler_budget_tasks'] == 1, value
+                        else:
+                            assert value['recovered_compiler_reserved_bytes'] >= 64 * 1024 * 1024, value
+                            assert value['unknown_compiler_budget_tasks'] == 0, value
                         break
                     assert time.monotonic() < deadline
                     time.sleep(.01)
                 assert_pinned()
                 task_plan('HELD_OBSERVED')
+                if incremental:
+                    other = directory / 'other.elf'
+                    other.write_bytes(guest.read_bytes() + b'capacity-unknown-source')
+                    other.chmod(0o700)
+                    other_keys = directory / 'other.tbset'
+                    subprocess.run([sys.executable, str(Path(__file__).with_name('make-tbset.py')),
+                        str(other), str(other_keys)], env=env, stdout=log, stderr=log, check=True)
+                    subprocess.run([str(latcd), '--submit', '--socket', str(service_socket),
+                        '--tbset', str(other_keys), str(other)], env=env,
+                        stdout=log, stderr=log, check=True, timeout=30)
+                    rejected = subprocess.run([str(latcd), '--flush-source', '--socket',
+                        str(service_socket), str(other)], env=env, capture_output=True, timeout=30)
+                    assert rejected.returncode != 0, rejected.stdout + rejected.stderr
+                    assert b'capacity:' in (directory / 'daemon.log').read_bytes()
                 channel.sendall(b'f')
                 child = json.loads(stream.readline())['child']
                 (directory / 'descendant.json').write_text(json.dumps(dict(child=child)))
@@ -197,6 +219,7 @@ def run(prefix, guest, work):
                 assert not recovered['completion_verified']
                 daemon.terminate()
                 assert daemon.wait(timeout=30) == 0
+                assert json.loads(stats.read_bytes())['unknown_compiler_budget_tasks'] == 0
             finally:
                 if compiler_pid is not None:
                     try:

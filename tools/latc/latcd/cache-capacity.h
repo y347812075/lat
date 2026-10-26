@@ -13,6 +13,7 @@ typedef struct LatcdCacheCapacity {
     uint64_t transient_reserved;
     uint64_t recovered_reserved;
     void *recovered_tasks;
+    void *unknown_tasks;
     bool ready;
     int watch_fd;
     int root_watch;
@@ -37,6 +38,7 @@ void latcd_cache_capacity_finish_transient(LatcdCacheCapacity *capacity, uint64_
                                            bool retained);
 /* Restore persistent task reservations before serving; release by exact task id. */
 int latcd_cache_capacity_restore_task(LatcdCacheCapacity *capacity, const char *id, uint64_t bytes);
+void latcd_cache_capacity_unknown_task(LatcdCacheCapacity *capacity, const char *id);
 void latcd_cache_capacity_release_task(LatcdCacheCapacity *capacity, const char *id);
 /* Bracket owned root namespace writes; unexpected changes invalidate admission.
  * Names stay registered through cleanup, including while cache_lock is dropped. */

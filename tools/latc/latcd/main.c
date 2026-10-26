@@ -1436,6 +1436,69 @@ static int restore_compiler_budgets(const LatcdConfig *config, char *error, size
         g_key_file_free(record);
         if (!valid) break;
     }
+    if (!result) {
+        int scan = openat(tasks, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        DIR *task_directory = scan < 0 ? NULL : fdopendir(scan);
+        if (!task_directory) {
+            if (scan >= 0) close(scan);
+            result = -1;
+        }
+        while (task_directory) {
+            errno = 0;
+            struct dirent *entry = readdir(task_directory);
+            if (!entry) { if (errno) result = -1; break; }
+            const char *name = entry->d_name;
+            if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
+            result = -1;
+            if (++visited > 100000 || stop_requested || strlen(name) != 40 ||
+                strcmp(name + 36, ".ini")) break;
+            char id[37];
+            memcpy(id, name, 36);
+            id[36] = 0;
+            if (!g_uuid_string_is_valid(id)) break;
+            struct stat budget;
+            if (!fstatat(budgets, name, &budget, AT_SYMLINK_NOFOLLOW)) {
+                result = 0;
+                continue; /* Already validated and charged in the first pass. */
+            }
+            if (errno != ENOENT) break;
+            int fd = openat(tasks, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+            struct stat before, after;
+            char data[65536];
+            GKeyFile *record = g_key_file_new();
+            bool valid = fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) &&
+                before.st_uid == geteuid() && before.st_nlink == 1 && !(before.st_mode & 0222) &&
+                before.st_size > 0 && (uint64_t)before.st_size <= sizeof(data) &&
+                pread(fd, data, before.st_size, 0) == before.st_size &&
+                !fstat(fd, &after) && metadata_equal(&before, &after) &&
+                g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
+            char *version = g_key_file_get_string(record, "task", "version", NULL);
+            bool copying = version && !strcmp(version, "2");
+            valid &= version && (!strcmp(version, "1") || copying);
+            g_free(version);
+            const char *fields[] = {"id", "state", "kind"};
+            const char *values[] = {id, "BOUND", "COPY"};
+            for (unsigned i = 0; valid && i < (copying ? 3u : 2u); i++) {
+                char *value = g_key_file_get_string(record, "task", fields[i], NULL);
+                valid = value && !strcmp(value, values[i]);
+                g_free(value);
+            }
+            const char *identities[] = {"device", "inode"};
+            uint64_t expected[] = {cache.st_dev, cache.st_ino};
+            for (unsigned i = 0; valid && i < G_N_ELEMENTS(identities); i++) {
+                GError *parse_error = NULL;
+                guint64 value = g_key_file_get_uint64(record, "cache", identities[i], &parse_error);
+                valid = !parse_error && value == expected[i];
+                g_clear_error(&parse_error);
+            }
+            if (fd >= 0) close(fd);
+            g_key_file_free(record);
+            if (!valid) break;
+            if (!copying) latcd_cache_capacity_unknown_task(&generation_capacity, id);
+            result = 0;
+        }
+        if (task_directory) closedir(task_directory);
+    }
 out:
     if (directory) closedir(directory);
     if (tasks >= 0) close(tasks);
@@ -3659,6 +3722,8 @@ static void write_stats_locked(LatcdService *service)
     uint64_t publication_bytes = generation_capacity.reserved;
     uint64_t transient_bytes = generation_capacity.transient_reserved;
     uint64_t recovered_bytes = generation_capacity.recovered_reserved;
+    unsigned unknown_budgets = generation_capacity.unknown_tasks ?
+        g_hash_table_size(generation_capacity.unknown_tasks) : 0;
     bool capacity_ready = generation_capacity.ready;
     pthread_mutex_unlock(&generation_capacity.lock);
     int length = snprintf(contents, sizeof(contents),
@@ -3672,6 +3737,7 @@ static void write_stats_locked(LatcdService *service)
         ",\"cache_owner_pid\":%ld,\"generation_logical_bytes\":%" PRIu64
         ",\"publication_reserved_bytes\":%" PRIu64 ",\"compiler_peak_reserved_bytes\":%" PRIu64
         ",\"recovered_compiler_reserved_bytes\":%" PRIu64
+        ",\"unknown_compiler_budget_tasks\":%u"
         ",\"generation_capacity_ready\":%s}\n",
         service->requests, service->queued, service->deduplicated,
         service->cache_hits, service->compiled, service->failed,
@@ -3680,7 +3746,7 @@ static void write_stats_locked(LatcdService *service)
         g_hash_table_size(service->active),
         g_hash_table_size(service->running_sources), service->config->workers,
         service->config->max_cache_bytes, (long)getpid(), generation_bytes,
-        publication_bytes, transient_bytes, recovered_bytes, capacity_ready ? "true" : "false");
+        publication_bytes, transient_bytes, recovered_bytes, unknown_budgets, capacity_ready ? "true" : "false");
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
         ssize_t written = write(fd, contents, length);
