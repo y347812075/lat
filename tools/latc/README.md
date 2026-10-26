@@ -881,6 +881,25 @@ changing inventory exits nonzero while still emitting the report. Directory
 modes, hardlink aliases, lifecycle pins, and mount references still have to be
 admitted by the later reclamation batches.
 
+Generation capacity is inventoried once before service admission, outside
+`cache_lock`. The index counts logical bytes of legal top-level generation
+objects (including legacy unversioned names) and `.superseded` objects, deduped
+by device/inode. Publication reserves additional bytes against the index under
+a separate short lock. Success commits them; failure releases them only after
+staged paths are removed, retaining the charge on cleanup failure. It does not
+scan directories or evict generations during publication. Statistics expose
+`generation_logical_bytes`, `publication_reserved_bytes` and
+`generation_capacity_ready`.
+
+Inotify detects unexpected root generation or legacy-subtree changes and queue
+overflow, invalidating subsequent capacity admission until startup inventory.
+Owned publication names stay registered through cleanup. This is conservative
+change detection, not an enforceable same-UID access boundary or hard quota:
+external races during owned-name writes and mmap writes are not proven covered.
+This index does not yet charge temporary snapshots, journals, all metadata or
+cross-daemon filesystem reservations. Startup inventory is entry-limited but
+still synchronous, not a bounded-latency background scan.
+
 `retirement_plan` deduplicates transaction object names and reports `held`,
 `grace`, or `due` using a diagnostic 600-second window. A shared object starts
 its window only when a RETIRED publication stops naming it in the next snapshot;

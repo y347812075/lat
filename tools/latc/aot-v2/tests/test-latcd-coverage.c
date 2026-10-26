@@ -183,8 +183,8 @@ static void cleanup_during_digest(int fd)
     (void)fd;
     char error[256];
     g_assert_cmpint(pthread_mutex_trylock(&cache_lock), ==, 0);
-    g_assert_cmpint(cache_make_room(cleanup_config, 0, "", true,
-        error, sizeof(error)), ==, 0);
+    g_assert_cmpint(latcd_cache_capacity_reserve(&generation_capacity, 0,
+        cleanup_config->max_cache_bytes, error, sizeof(error)), ==, 0);
     for (unsigned i = 0; i < G_N_ELEMENTS(cleanup_names); i++) {
         if (!cleanup_names[i]) continue;
         char *path = g_build_filename(cleanup_config->cache_dir,
@@ -193,18 +193,9 @@ static void cleanup_during_digest(int fd)
         g_free(path);
     }
     /* Capacity pressure must not evict the old rollback during publication. */
-    LatcdConfig pressure = *cleanup_config;
-    pressure.max_cache_bytes = 0;
-    for (unsigned i = 0; i < G_N_ELEMENTS(cleanup_names); i++) {
-        if (!cleanup_names[i]) continue;
-        char *path = g_build_filename(pressure.cache_dir, cleanup_names[i], NULL);
-        pressure.max_cache_bytes = cache_add_regular_file_size(
-            pressure.max_cache_bytes, path);
-        g_free(path);
-    }
-    pressure.max_cache_bytes--;
-    g_assert_cmpint(cache_make_room(&pressure, 0, "", true,
-        error, sizeof(error)), ==, -1);
+    g_assert_cmpuint(generation_capacity.committed, >, 0);
+    g_assert_cmpint(latcd_cache_capacity_reserve(&generation_capacity, 0,
+        generation_capacity.committed - 1, error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "safe retirement GC"));
     LatcdCurrentManifest selected = {0};
     g_assert_cmpint(current_manifest_read(cleanup_config, cleanup_hex,
@@ -248,6 +239,7 @@ static void test_publication_cleanup(void)
     char error[256];
     g_assert_cmpint(lat_aot_v2_module_inspect_file(module, &info,
         error, sizeof(error)), ==, 0);
+    generation_capacity.committed = 100;
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[0],
         names[1], names[2], &info, 1, true, error, sizeof(error)), ==, 0);
@@ -300,6 +292,7 @@ static void test_publication_cleanup(void)
         names[4], names[5], &info, 6, true, error, sizeof(error)), ==, -1);
     pthread_mutex_unlock(&cache_lock);
     cleanup_config = NULL;
+    generation_capacity.committed = 0;
     hook_read_path = NULL;
     for (unsigned i = 0; i < G_N_ELEMENTS(names); i++) {
         cleanup_names[i] = NULL;
@@ -464,7 +457,11 @@ int main(int argc, char **argv)
         puts(LATC_BUILD_ID);
         return 0;
     }
-    if (argc == 1) test_compile_space();
+    if (argc == 1) {
+        test_compile_space();
+        generation_capacity.ready = true;
+        generation_capacity.expected_names = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    }
     if (argc > 1 && !strcmp(argv[1], "compile-module")) {
         char *marker = g_strconcat(argv[2], ".mode", NULL);
         char *partial = NULL;

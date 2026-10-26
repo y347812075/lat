@@ -112,7 +112,18 @@ $(BUILD)/%.o: %.c
 
 $(BUILD)/latcd/latcd $(BUILD)/tests/test-journal-store \
 $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
-		$(BUILD)/latcd/cache-retirement.o $(BUILD)/latcd/parson/parson.o
+		$(BUILD)/latcd/cache-retirement.o $(BUILD)/latcd/cache-capacity.o \
+		$(BUILD)/latcd/parson/parson.o
+
+$(BUILD)/tests/test-cache-capacity: tests/test-cache-capacity.c $(BUILD)/latcd/cache-capacity.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
+
+.PHONY: test-cache-capacity
+test-cache-capacity: $(BUILD)/tests/test-cache-capacity
+	$(BUILD)/tests/test-cache-capacity
+
+test: test-cache-capacity
 
 $(BUILD)/tests/test-cache-retirement: tests/test-cache-retirement.c \
 		$(BUILD)/latcd/cache-retirement.o $(BUILD)/latcd/parson/parson.o \

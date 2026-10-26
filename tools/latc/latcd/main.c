@@ -11,6 +11,7 @@
 #include "precompile.h"
 #include "journal-store.h"
 #include "cache-retirement.h"
+#include "cache-capacity.h"
 
 #include <dlfcn.h>
 #include <elf.h>
@@ -213,6 +214,7 @@ typedef struct LatcdPrecompileRequest {
 static volatile sig_atomic_t stop_requested;
 static volatile sig_atomic_t compiler_process_groups[LATCD_MAX_WORKERS];
 static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
+static LatcdCacheCapacity generation_capacity = LATCD_CACHE_CAPACITY_INIT;
 
 static int fail(char *error, size_t error_size, const char *format, ...);
 
@@ -1590,100 +1592,6 @@ static int cached_module_inspect(const char *path, const uint8_t digest[32],
            !memcmp(info->note.codegen_id, codegen_id, 32);
 }
 
-static bool cache_generated_name(const char *name)
-{
-    size_t length = strlen(name);
-    bool suffix = g_str_has_suffix(name, ".so") ||
-                  g_str_has_suffix(name, ".native") ||
-                  g_str_has_suffix(name, ".tbset");
-    if (!suffix || length < 68 || name[64] != '-') return false;
-    for (size_t i = 0; i < 64; i++) {
-        if (!g_ascii_isxdigit(name[i])) return false;
-    }
-    return true;
-}
-
-static uint64_t cache_add_regular_file_size(uint64_t total, const char *path)
-{
-    struct stat status;
-    if (lstat(path, &status) || !S_ISREG(status.st_mode) ||
-        status.st_size < 0) {
-        return total;
-    }
-    uint64_t size = (uint64_t)status.st_size;
-    return size > UINT64_MAX - total ? UINT64_MAX : total + size;
-}
-
-static uint64_t superseded_generations_size(const LatcdConfig *config,
-                                            uint64_t total)
-{
-    char *root = g_build_filename(config->cache_dir,
-                                  LATCD_SUPERSEDED_DIRNAME, NULL);
-    GDir *directory = g_dir_open(root, 0, NULL);
-    if (!directory) {
-        g_free(root);
-        return total;
-    }
-    const char *batch_name;
-    while ((batch_name = g_dir_read_name(directory))) {
-        char *batch = g_build_filename(root, batch_name, NULL);
-        GDir *batch_directory = g_dir_open(batch, 0, NULL);
-        if (batch_directory) {
-            const char *name;
-            while ((name = g_dir_read_name(batch_directory))) {
-                char *path = g_build_filename(batch, name, NULL);
-                total = cache_add_regular_file_size(total, path);
-                g_free(path);
-            }
-            g_dir_close(batch_directory);
-        }
-        g_free(batch);
-    }
-    g_dir_close(directory);
-    g_free(root);
-    return total;
-}
-
-static bool cache_fits(uint64_t total, uint64_t incoming, uint64_t limit)
-{
-    return total <= limit && incoming <= limit - total;
-}
-
-static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
-                           const char *incoming_name, bool evict,
-                           char *error, size_t error_size)
-{
-    (void)incoming_name;
-    (void)evict;
-    if (incoming > config->max_cache_bytes) {
-        return fail(error, error_size,
-                    "compiled module exceeds cache capacity");
-    }
-    GError *directory_error = NULL;
-    GDir *directory = g_dir_open(config->cache_dir, 0, &directory_error);
-    if (!directory) {
-        int result = fail(error, error_size, "cannot scan cache: %s",
-                          directory_error ? directory_error->message :
-                          "unknown error");
-        g_clear_error(&directory_error);
-        return result;
-    }
-    uint64_t total = superseded_generations_size(config, 0);
-    const char *name;
-    while ((name = g_dir_read_name(directory))) {
-        if (!cache_generated_name(name)) continue;
-        char *path = g_build_filename(config->cache_dir, name, NULL);
-        total = cache_add_regular_file_size(total, path);
-        g_free(path);
-    }
-    g_dir_close(directory);
-    if (!cache_fits(total, incoming, config->max_cache_bytes)) {
-        return fail(error, error_size,
-                    "cache capacity requires safe retirement GC");
-    }
-    return 0;
-}
-
 static void current_manifest_clear(LatcdCurrentManifest *manifest)
 {
     g_free(manifest->module);
@@ -2001,6 +1909,9 @@ static int publish_covered_tbset(const LatcdConfig *config,
     char *module_path = NULL;
     char *native_path = NULL;
     bool tbset_staged = false;
+    uint64_t capacity_reservation = 0;
+    bool capacity_retained = false;
+    bool capacity_expected = false;
     int result = -1;
     memcpy(response->source_sha256, digest, 32);
     if (!g_file_get_contents(complete_tbset, &tbset_data,
@@ -2063,9 +1974,21 @@ static int publish_covered_tbset(const LatcdConfig *config,
         goto out;
     }
     if (strcmp(manifest.tbset, tbset_name)) {
-        if (cache_make_room(config, tbset_size, manifest.module, false,
-                            error, sizeof(error)) ||
-            rename(temporary, final_tbset)) {
+        if (latcd_cache_capacity_reserve(&generation_capacity, tbset_size,
+                                         config->max_cache_bytes, error, sizeof(error))) {
+            current_manifest_clear(&manifest);
+            pthread_mutex_unlock(&cache_lock);
+            goto out;
+        }
+        capacity_reservation = tbset_size;
+        if (latcd_cache_capacity_expect(&generation_capacity, (const char *const *)&tbset_name, 1,
+                                        error, sizeof(error))) {
+            current_manifest_clear(&manifest);
+            pthread_mutex_unlock(&cache_lock);
+            goto out;
+        }
+        capacity_expected = true;
+        if (rename(temporary, final_tbset)) {
             if (!error[0]) {
                 fail(error, sizeof(error),
                      "cannot publish complete TB set: %s", strerror(errno));
@@ -2106,12 +2029,7 @@ static int publish_covered_tbset(const LatcdConfig *config,
                 "latcd: committed covered-TB manifest sync failed: %s\n",
                 sync_error);
     }
-    char cleanup_error[128] = {0};
-    if (cache_make_room(config, 0, "", true, cleanup_error,
-                        sizeof(cleanup_error))) {
-        fprintf(stderr, "latcd: post-publish cache cleanup failed: %s\n",
-                cleanup_error);
-    }
+    capacity_retained = true;
     utimensat(AT_FDCWD, module_path, NULL, AT_SYMLINK_NOFOLLOW);
     snprintf(error, sizeof(error), "published covered TB set: %s",
              module_path);
@@ -2128,7 +2046,11 @@ out:
         g_strlcpy(response->message, error, sizeof(response->message));
     }
     if (temporary && *temporary) unlink(temporary);
-    if (tbset_staged) unlink(final_tbset);
+    if (tbset_staged && unlink(final_tbset) && errno != ENOENT) capacity_retained = true;
+    if (capacity_expected)
+        latcd_cache_capacity_complete(&generation_capacity, (const char *const *)&tbset_name, 1);
+    if (capacity_reservation)
+        latcd_cache_capacity_finish(&generation_capacity, capacity_reservation, capacity_retained);
     g_free(native_path);
     g_free(module_path);
     g_free(tbset_name);
@@ -2224,6 +2146,9 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     bool module_staged = false;
     bool native_staged = false;
     bool tbset_staged = false;
+    uint64_t capacity_reservation = 0;
+    bool capacity_retained = false;
+    bool capacity_expected = false;
     int status = LATCD_STATUS_IO_ERROR;
     memcpy(response->source_sha256, digest, 32);
     char hex[65];
@@ -2534,13 +2459,22 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         pthread_mutex_unlock(&cache_lock);
         goto out;
     }
-    uint64_t incoming = (uint64_t)module_status.st_size +
-                        (uint64_t)native_status.st_size + tbset_size;
-    if (cache_make_room(config, incoming, module_name, false,
-                        error, sizeof(error))) {
+    uint64_t incoming = 0;
+    if (!space_add(&incoming, module_status.st_size, 1) ||
+        !space_add(&incoming, native_status.st_size, 1) || !space_add(&incoming, tbset_size, 1) ||
+        latcd_cache_capacity_reserve(&generation_capacity, incoming, config->max_cache_bytes,
+                                     error, sizeof(error))) {
         pthread_mutex_unlock(&cache_lock);
         goto out;
     }
+    capacity_reservation = incoming;
+    const char *capacity_names[] = {module_name, native_name, tbset_name};
+    if (latcd_cache_capacity_expect(&generation_capacity, capacity_names, complete_tbset ? 3 : 2,
+                                    error, sizeof(error))) {
+        pthread_mutex_unlock(&cache_lock);
+        goto out;
+    }
+    capacity_expected = true;
     if (!link(module, final_module)) {
         module_staged = true;
     }
@@ -2595,17 +2529,12 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         goto out;
     }
     module_staged = native_staged = tbset_staged = false;
+    capacity_retained = true;
     char sync_error[128] = {0};
     if (sync_directory(config->cache_dir, sync_error,
                        sizeof(sync_error))) {
         fprintf(stderr, "latcd: committed manifest directory sync failed: %s\n",
                 sync_error);
-    }
-    char cleanup_error[128] = {0};
-    if (cache_make_room(config, 0, "", true, cleanup_error,
-                        sizeof(cleanup_error))) {
-        fprintf(stderr, "latcd: post-publish cache cleanup failed: %s\n",
-                cleanup_error);
     }
     pthread_mutex_unlock(&cache_lock);
     snprintf(error, sizeof(error), "published: %s", final_module);
@@ -2617,9 +2546,15 @@ out:
     if (module && *module) unlink(module);
     if (native && *native) unlink(native);
     if (tbset_copy && *tbset_copy) unlink(tbset_copy);
-    if (module_staged) unlink(final_module);
-    if (native_staged) unlink(final_native);
-    if (tbset_staged) unlink(final_tbset);
+    if (module_staged && unlink(final_module) && errno != ENOENT) capacity_retained = true;
+    if (native_staged && unlink(final_native) && errno != ENOENT) capacity_retained = true;
+    if (tbset_staged && unlink(final_tbset) && errno != ENOENT) capacity_retained = true;
+    if (capacity_expected) {
+        const char *names[] = {module_name, native_name, tbset_name};
+        latcd_cache_capacity_complete(&generation_capacity, names, complete_tbset ? 3 : 2);
+    }
+    if (capacity_reservation)
+        latcd_cache_capacity_finish(&generation_capacity, capacity_reservation, capacity_retained);
     g_free(tbset_data);
     if (retained_tbset) {
         unlink(retained_tbset);
@@ -2791,6 +2726,11 @@ static void write_stats_locked(LatcdService *service)
     char *temporary = g_strdup_printf("%s.tmp.%ld",
         service->config->stats_path, (long)getpid());
     char contents[1024];
+    pthread_mutex_lock(&generation_capacity.lock);
+    uint64_t generation_bytes = generation_capacity.committed;
+    uint64_t publication_bytes = generation_capacity.reserved;
+    bool capacity_ready = generation_capacity.ready;
+    pthread_mutex_unlock(&generation_capacity.lock);
     int length = snprintf(contents, sizeof(contents),
         "{\"requests\":%" PRIu64 ",\"queued\":%" PRIu64
         ",\"deduplicated\":%" PRIu64 ",\"cache_hits\":%" PRIu64
@@ -2799,14 +2739,16 @@ static void write_stats_locked(LatcdService *service)
         ",\"queue_depth\":%u,\"queue_bytes\":%" PRIu64
         ",\"active_jobs\":%u,\"running_sources\":%u,\"workers\":%u"
         ",\"max_cache_bytes\":%" PRIu64
-        ",\"cache_owner_pid\":%ld}\n",
+        ",\"cache_owner_pid\":%ld,\"generation_logical_bytes\":%" PRIu64
+        ",\"publication_reserved_bytes\":%" PRIu64 ",\"generation_capacity_ready\":%s}\n",
         service->requests, service->queued, service->deduplicated,
         service->cache_hits, service->compiled, service->failed,
         service->negative_hits, service->queue_full, service->queue->len,
         service->queued_bytes,
         g_hash_table_size(service->active),
         g_hash_table_size(service->running_sources), service->config->workers,
-        service->config->max_cache_bytes, (long)getpid());
+        service->config->max_cache_bytes, (long)getpid(), generation_bytes,
+        publication_bytes, capacity_ready ? "true" : "false");
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
         ssize_t written = write(fd, contents, length);
@@ -4919,7 +4861,13 @@ int main(int argc, char **argv)
         close(cache_owner);
         return recovery < 0 ? 1 : 0;
     }
+    if (latcd_cache_capacity_scan(&generation_capacity, config.cache_dir, error, sizeof(error))) {
+        fprintf(stderr, "latcd: %s\n", error);
+        close(cache_owner);
+        return 1;
+    }
     int result = serve ? run_service(&config) : run_once(&config);
+    latcd_cache_capacity_close(&generation_capacity);
     close(cache_owner);
     return result;
 }

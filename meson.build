@@ -669,6 +669,7 @@ if 'CONFIG_LATX' in config_host
       'tools/latc/latcd/precompile.c',
       'tools/latc/latcd/journal-store.c',
       'tools/latc/latcd/cache-retirement.c',
+      'tools/latc/latcd/cache-capacity.c',
       'tools/latc/latcd/parson/parson.c',
       'tools/latc/aot-v2/common/tb-key-set.c',
       'tools/latc/aot-v2/common/key-journal.c',
