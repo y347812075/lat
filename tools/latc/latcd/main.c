@@ -1602,6 +1602,17 @@ static void current_manifest_clear(LatcdCurrentManifest *manifest)
     memset(manifest, 0, sizeof(*manifest));
 }
 
+static bool current_manifest_equal(const LatcdCurrentManifest *first,
+                                    const LatcdCurrentManifest *second)
+{
+    return !g_strcmp0(first->module, second->module) &&
+        !g_strcmp0(first->native, second->native) &&
+        !g_strcmp0(first->tbset, second->tbset) &&
+        !g_strcmp0(first->module_sha256, second->module_sha256) &&
+        !g_strcmp0(first->native_sha256, second->native_sha256) &&
+        first->published_sequence == second->published_sequence;
+}
+
 static int validate_current_replacement(const LatcdConfig *config,
                                  const char *hex, const char *candidate,
                                  const LatAotModuleInfoV2 *info,
@@ -1673,9 +1684,22 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
                                                      object_names, object_count);
     char *module_sha256 = pinned ? cached_fd_digest(module_fd) : NULL;
     char *native_sha256 = pinned ? cached_fd_digest(native_fd) : NULL;
+    /* Never wait for S while holding C. Keep object leases until S is held. */
+    const char *notify = getenv("LATCD_TEST_SOURCE_COMMIT_FD");
+    if (notify) {
+        char *end;
+        long number = strtol(notify, &end, 10);
+        if (*notify && !*end && number >= 0 && number <= INT_MAX) {
+            char byte = 'x';
+            ssize_t ignored = write((int)number, &byte, 1);
+            (void)ignored;
+        }
+    }
+    source_lock_fd = lat_aot_v2_cache_source_lock(
+        config->cache_dir, hex, LOCK_EX, false, error, error_size);
     pthread_mutex_lock(&cache_lock);
     bool latest_valid = !current_manifest_read(config, hex, &latest);
-    bool unchanged = pinned && !lstat(module_path, &module_after) &&
+    bool unchanged = source_lock_fd >= 0 && pinned && !lstat(module_path, &module_after) &&
         !lstat(native_path, &native_after) &&
         metadata_equal(&module_before, &module_after) &&
         metadata_equal(&native_before, &native_after) &&
@@ -1685,12 +1709,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
          metadata_equal(&tbset_before, &tbset_after) &&
          tbset_before.st_mode == tbset_after.st_mode)) &&
         selected_valid == latest_valid && (!selected_valid ||
-        (!strcmp(selected.module, latest.module) &&
-         !strcmp(selected.native, latest.native) &&
-         !strcmp(selected.tbset, latest.tbset) &&
-         !g_strcmp0(selected.module_sha256, latest.module_sha256) &&
-         !g_strcmp0(selected.native_sha256, latest.native_sha256) &&
-         selected.published_sequence == latest.published_sequence));
+        current_manifest_equal(&selected, &latest));
     if (module_fd >= 0) close(module_fd);
     if (native_fd >= 0) close(native_fd);
     if (tbset_fd >= 0) close(tbset_fd);
@@ -1700,19 +1719,12 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     g_free(native_path);
     g_free(tbset_path);
     if (!unchanged || !module_sha256 || !native_sha256) {
+        if (source_lock_fd >= 0) close(source_lock_fd);
         g_free(objects);
         g_free(module_sha256);
         g_free(native_sha256);
         return fail(error, error_size,
                     "published file set or current changed during digest");
-    }
-    source_lock_fd = lat_aot_v2_cache_source_lock(
-        config->cache_dir, hex, LOCK_EX, false, error, error_size);
-    if (source_lock_fd < 0) {
-        g_free(objects);
-        g_free(module_sha256);
-        g_free(native_sha256);
-        return -1;
     }
     const char *candidates[] = {module_name, native_name, tbset_name};
     for (size_t i = 0; i < G_N_ELEMENTS(candidates); i++) {
