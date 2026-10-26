@@ -466,6 +466,41 @@ static bool manifest_references(const char *source, const char *raw, size_t size
     return valid;
 }
 
+/* Caller serializes publishers under the owner contract. This bounded final
+ * check is defense in depth, not a persistent reference index or domain gate. */
+static int object_current_status(int root, const char *name)
+{
+    int copy = openat(root, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    DIR *directory = copy < 0 ? NULL : fdopendir(copy);
+    if (!directory) { if (copy >= 0) close(copy); return -1; }
+    struct stat before = {0}, after;
+    int result = fstat(root, &before) ? -1 : 0;
+    unsigned visited = 0;
+    int64_t started = g_get_monotonic_time();
+    while (!result) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) { if (errno) result = -1; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (++visited > 4096 || g_get_monotonic_time() - started >= 10000) { result = -1; break; }
+        if (!g_str_has_suffix(entry->d_name, ".current")) continue;
+        char source[65] = {0};
+        if (strlen(entry->d_name) == 72) memcpy(source, entry->d_name, 64);
+        char *raw = NULL;
+        size_t size;
+        GHashTable *refs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+        bool valid = source_valid(source) &&
+            !read_file(root, entry->d_name, MANIFEST_LIMIT, &raw, &size) &&
+            manifest_references(source, raw, size, refs);
+        result = !valid ? -1 : g_hash_table_contains(refs, name) ? 1 : 0;
+        g_hash_table_unref(refs);
+        g_free(raw);
+    }
+    if (fstat(root, &after) || !object_stat_equal(&before, &after)) result = -1;
+    closedir(directory);
+    return result;
+}
+
 int latcd_retirement_validate_binding(const char *source,
                                       const char *previous, size_t previous_size,
                                       const char *next, size_t next_size,
@@ -1036,7 +1071,8 @@ int latcd_retirement_tombstone(const char *root, const char *source,
         g_hash_table_unref(references);
         if (!safe) goto out;
     }
-    if (object_hold_status(directory, name, &before) || object_task_status(directory, name, &before) ||
+    if (object_current_status(directory, name) ||
+        object_hold_status(directory, name, &before) || object_task_status(directory, name, &before) ||
         object_transaction_status(directory, name, &before, NULL) ||
         fstat(object_fd, &after) || !object_stat_equal(&before, &after) ||
         fstatat(directory, name, &path, AT_SYMLINK_NOFOLLOW) ||
@@ -1473,7 +1509,8 @@ static int recover_tombstone(const char *root_path, int root, int store,
         }
     }
     if (remove_object && !strcmp(observation, "MATCHED")) {
-        int held = object_hold_status(root, name, &after);
+        int held = object_current_status(root, name);
+        if (!held) held = object_hold_status(root, name, &after);
         if (!held) held = object_task_status(root, name, &after);
         if (!held) held = object_transaction_status(root, name, &after, grace_us);
         if (held) observation = held < 0 ? "UNKNOWN" : "BUSY";

@@ -518,6 +518,42 @@ static void test_tombstone(void)
     remove_root(root); g_free(root);
 }
 
+static void test_other_current(unsigned mutation, bool executor)
+{
+    char *root = root_new(), error[256];
+    char *name = g_strconcat(source, ".native", NULL);
+    char *path = g_build_filename(root, name, NULL);
+    put(path, "retired object\n");
+    const char *names[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(fd >= 0 && evidence);
+    if (executor) {
+        assert(!latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+        close(fd); fd = -1;
+    }
+    char *other = g_strnfill(64, 'b');
+    char *manifest = g_strdup_printf("{\"version\":2,\"module\":\"%s.so\","
+        "\"native\":\"%s.native\",\"tbset\":\"\",\"source_sha256\":\"%s\","
+        "\"codegen_id\":\"%s\",\"published_sequence\":1}", other, other, other, other);
+    char *current = g_strdup_printf("%s/%s.current", root, mutation == 1 ? "unattributed" : other);
+    put(current, mutation == 0 ? "corrupt current" : manifest);
+    char *alias = g_strconcat(current, ".alias", NULL);
+    if (mutation == 2) assert(!chmod(current, 0600));
+    if (mutation == 3) assert(!link(current, alias));
+    if (mutation == 4) {
+        assert(!rename(current, alias));
+        assert(!symlink(alias, current));
+    }
+    int result = executor ? latcd_tombstone_delete(root, name, error, sizeof(error)) :
+        latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error));
+    assert((result == 0) == (mutation == 5));
+    assert((access(path, F_OK) != 0) == (executor && mutation == 5));
+    if (fd >= 0) close(fd);
+    g_free(alias); g_free(current); g_free(manifest); g_free(other);
+    g_free(evidence); g_free(path); g_free(name); remove_root(root); g_free(root);
+}
+
 static void test_tombstone_crash(const char *point, bool crash)
 {
     char *root = root_new(), *name = g_strdup_printf("%s.native", source);
@@ -1515,6 +1551,10 @@ static void test_hold_crash(bool release, const char *point)
 
 int main(void)
 {
+    for (unsigned mutation = 0; mutation < 6; mutation++) {
+        test_other_current(mutation, false);
+        test_other_current(mutation, true);
+    }
     test_explicit_holds();
     test_due_without_retirement();
     for (unsigned mutation = 0; mutation < 15; mutation++) {
