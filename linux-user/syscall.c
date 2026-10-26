@@ -11471,6 +11471,8 @@ static int do_futex_time64(CPUState *cpu, target_ulong uaddr, int op,
 }
 #endif
 
+static bool latx_guest_path_protected(int dirfd, const char *pathname);
+
 #if defined(TARGET_NR_name_to_handle_at) && defined(CONFIG_OPEN_BY_HANDLE)
 static abi_long do_name_to_handle_at(abi_long dirfd, abi_long pathname,
                                      abi_long handle, abi_long mount_id,
@@ -11490,6 +11492,10 @@ static abi_long do_name_to_handle_at(abi_long dirfd, abi_long pathname,
     name = lock_user_string(pathname);
     if (!name) {
         return -TARGET_EFAULT;
+    }
+    if (latx_guest_path_protected(dirfd, name)) {
+        unlock_user(name, pathname, 0);
+        return -TARGET_EACCES;
     }
 
     total_size = sizeof(struct file_handle) + size;
@@ -11550,6 +11556,10 @@ static abi_long do_open_by_handle_at(abi_long mount_fd, abi_long handle,
 
     ret = get_errno(open_by_handle_at(mount_fd, fh,
                     target_to_host_bitmask(flags, fcntl_flags_tbl)));
+    if (ret >= 0 && latc_aot_v2_fd_is_protected(ret)) {
+        close(ret);
+        ret = -TARGET_EACCES;
+    }
 
     g_free(fh);
 
