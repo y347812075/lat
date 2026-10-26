@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Require guest isolation of a real journal fd, with controlled fd disclosure.
 
-Build x86-journal-fd.S with -DATTACK=0..4 as guest-control/truncate/setfl/
-overwrite/dup in GUEST_DIR. Run with PREFIX GUEST_DIR NEW_WORKDIR (under ~/tmp).
-This standalone regression is intentionally RED until fd isolation is fixed;
-it is not part of the default suite and never treats corruption as a pass.
+Build x86-journal-fd.S with -DATTACK=0..5 and x86-journal-exec.S into GUEST_DIR.
+Run with PREFIX GUEST_DIR NEW_WORKDIR (under ~/tmp). The opt-in regression
+requires the installed writer fd to remain private in the main guest table,
+across fork and exec, and never treats corruption as a pass.
 """
 
 import argparse
@@ -24,7 +24,7 @@ import time
 from tb_key_set import read_key_set
 
 
-MODES = ('control', 'truncate', 'setfl', 'overwrite', 'dup')
+MODES = ('control', 'truncate', 'setfl', 'overwrite', 'dup', 'collision')
 
 
 def require(condition, message):
@@ -49,15 +49,49 @@ def exact(stream, count):
     return output
 
 
-def fd_snapshot(pid, fd):
-    path = Path(f'/proc/{pid}/fd/{fd}')
+def fd_snapshot(table, fd):
+    path = table / str(fd)
     try:
         stat = path.stat()
         return {'target': os.readlink(path), 'device': stat.st_dev,
                 'inode': stat.st_ino,
-                'fdinfo': Path(f'/proc/{pid}/fdinfo/{fd}').read_text()}
+                'fdinfo': (table.parent / 'fdinfo' / str(fd)).read_text()}
     except FileNotFoundError:
         return None
+
+
+def descriptors_for_inode(table, stat):
+    descriptors = []
+    try:
+        paths = list(table.iterdir())
+    except FileNotFoundError:
+        return descriptors
+    for path in paths:
+        if not path.name.isdigit():
+            continue
+        snap = fd_snapshot(table, int(path.name))
+        if snap and (snap['device'], snap['inode']) == (stat.st_dev, stat.st_ino):
+            descriptors.append(int(path.name))
+    return descriptors
+
+
+def inherited_runner_environment(pid):
+    values = {}
+    for item in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0'):
+        if b'=' not in item:
+            continue
+        key, value = item.split(b'=', 1)
+        name = key.decode('ascii', 'replace')
+        if name.startswith(('LAT', 'LD_')) or name in ('HOME', 'TMPDIR'):
+            values[name] = value.decode('utf-8', 'replace')
+    return values
+
+
+def process_executable_identity(pid):
+    path = Path(f'/proc/{pid}/exe')
+    stat = path.stat()
+    return {'path': os.readlink(path), 'device': stat.st_dev,
+            'inode': stat.st_ino, 'sha256': digest(path)}
 
 
 def collect(endpoint, work):
@@ -92,6 +126,17 @@ def receipt_keys(path, guest):
     return keys
 
 
+def guest_environment(prefix, work, root, endpoint):
+    env = {key: os.environ[key] for key in ('PATH', 'LANG', 'LC_ALL', 'TZ')
+           if key in os.environ}
+    env.update(HOME=str(work), TMPDIR=str(root), LATX_AOT='0', LATX_AOT_V2='1',
+               LATX_AOT_V2_AUTOSTART='0', LATX_AOT_V2_REPORT='1',
+               LATX_AOT_V2_CACHE_DIR=str(work / 'cache'),
+               LATX_AOT_V2_LATCD_SOCKET=endpoint, LATX_AOT_V2_KEY_JOURNAL='1',
+               LATC_DISABLE_PRETRANSLATE='1', LD_LIBRARY_PATH=str(prefix / 'lib'))
+    return env
+
+
 def run_case(prefix, guests, root, mode):
     work = root / mode
     work.mkdir(mode=0o700)
@@ -100,13 +145,7 @@ def run_case(prefix, guests, root, mode):
     endpoint = str(work / 'socket')
     require(len(os.fsencode(endpoint)) < 108, 'use a shorter work path for AF_UNIX')
     guest = guests / ('guest-' + mode)
-    env = {key: os.environ[key] for key in ('PATH', 'LANG', 'LC_ALL', 'TZ')
-           if key in os.environ}
-    env.update(HOME=str(work), TMPDIR=str(root), LATX_AOT='0', LATX_AOT_V2='1',
-               LATX_AOT_V2_AUTOSTART='0', LATX_AOT_V2_REPORT='1',
-               LATX_AOT_V2_CACHE_DIR=str(cache), LATX_AOT_V2_LATCD_SOCKET=endpoint,
-               LATX_AOT_V2_KEY_JOURNAL='1', LATC_DISABLE_PRETRANSLATE='1',
-               LD_LIBRARY_PATH=str(prefix / 'lib'))
+    env = guest_environment(prefix, work, root, endpoint)
     evidence = {'mode': mode, 'environment': env, 'commands': [],
                 'scope': 'controlled host-fd disclosure; no natural discovery or sandbox claim',
                 'guest_sha256': digest(guest),
@@ -145,18 +184,32 @@ def run_case(prefix, guests, root, mode):
             require(len(journals) == 1, 'expected one registered journal')
             journal = journals[0]
             stat = journal.stat()
-            descriptors = []
-            for path in Path(f'/proc/{runner.pid}/fd').iterdir():
-                snap = fd_snapshot(runner.pid, int(path.name))
-                if snap and (snap['device'], snap['inode']) == (stat.st_dev, stat.st_ino):
-                    descriptors.append(int(path.name))
-            require(len(descriptors) == 1, 'expected one internal writer fd')
-            fd = descriptors[0]
+            main_table = Path(f'/proc/{runner.pid}/fd')
+            main_descriptors = descriptors_for_inode(main_table, stat)
+            directory_stat = journal.parent.stat()
+            main_directory_descriptors = descriptors_for_inode(
+                main_table, directory_stat)
+            private = []
+            for task in Path(f'/proc/{runner.pid}/task').iterdir():
+                descriptors = descriptors_for_inode(task / 'fd', stat)
+                private.extend((int(task.name), fd) for fd in descriptors)
+            require(not main_descriptors,
+                    'journal descriptor remained in the guest-visible main fd table')
+            require(not main_directory_descriptors,
+                    'journal directory remained in the guest-visible main fd table')
+            require(len(private) == 1,
+                    f'expected one private journal descriptor, got {private}')
+            owner_tid, fd = private[0]
+            require(not (main_table / str(fd)).exists(),
+                    'private journal fd number collides with a main-table descriptor')
             before = journal.read_bytes()
             require(len(before) >= 224, 'short initial journal')
             target = struct.unpack_from('<QQQQ', before, 192)
             require(target[0] == 3 and target[2:] == (3, 0), 'entry slot not committed')
-            evidence.update(journal_fd=fd, fd_before=fd_snapshot(runner.pid, fd),
+            evidence.update(journal_fd=fd, owner_tid=owner_tid,
+                            main_journal_descriptors=main_descriptors,
+                            main_journal_directory_descriptors=main_directory_descriptors,
+                            fd_before=fd_snapshot(Path(f'/proc/{runner.pid}/task/{owner_tid}/fd'), fd),
                             entry_record=target)
             (work / 'journal-before.gz').write_bytes(gzip.compress(before, mtime=0))
             runner.stdin.write(struct.pack('<i', fd))
@@ -164,14 +217,20 @@ def run_case(prefix, guests, root, mode):
             try:
                 result = struct.unpack('<q', exact(runner.stdout, 8))[0]
                 evidence['guest_result'] = result
-                evidence['fd_after'] = fd_snapshot(runner.pid, fd)
+                evidence['fd_after'] = fd_snapshot(
+                    Path(f'/proc/{runner.pid}/task/{owner_tid}/fd'), fd)
+                evidence['main_fd_after'] = fd_snapshot(main_table, fd)
                 if mode == 'dup' and result >= 0:
-                    evidence['dup_fd'] = fd_snapshot(runner.pid, result)
+                    evidence['dup_fd'] = fd_snapshot(main_table, result)
                     if evidence['dup_fd'] and (
                             evidence['dup_fd']['device'], evidence['dup_fd']['inode']) == (
                             stat.st_dev, stat.st_ino):
                         failures.append('guest duplicated the internal journal')
-                if result != -errno.EBADF:
+                if mode == 'collision':
+                    if result < 0:
+                        failures.append(
+                            f'guest fd number collision returned {result}, expected usable guest fd')
+                elif result != -errno.EBADF:
                     failures.append(f'internal descriptor syscall returned {result}, expected EBADF')
                 runner.stdin.write(b'x')
                 runner.stdin.flush()
@@ -229,17 +288,179 @@ def run_case(prefix, guests, root, mode):
     return not failures
 
 
+def inspect_journal_descriptors(pid, journal):
+    stat = journal.stat()
+    main_table = Path(f'/proc/{pid}/fd')
+    private = []
+    for task in Path(f'/proc/{pid}/task').iterdir():
+        for fd in descriptors_for_inode(task / 'fd', stat):
+            private.append((int(task.name), fd))
+    return {
+        'main_file': descriptors_for_inode(main_table, stat),
+        'main_directory': descriptors_for_inode(main_table, journal.parent.stat()),
+        'private': private,
+    }
+
+
+def run_exec_case(prefix, guests, root):
+    work = root / 'exec'
+    work.mkdir(mode=0o700)
+    cache = work / 'cache'
+    cache.mkdir()
+    endpoint = str(work / 'socket')
+    require(len(os.fsencode(endpoint)) < 108, 'use a shorter work path for AF_UNIX')
+    guest = guests / 'guest-exec'
+    env = guest_environment(prefix, work, root, endpoint)
+    evidence = {
+        'mode': 'exec',
+        'environment': env,
+        'commands': [],
+        'scope': 'real exec with controlled two-phase guest handshakes',
+        'guest_sha256': digest(guest),
+        'installed_sha256': {name: digest(prefix / name) for name in
+            ('bin/latx-x86_64', 'bin/latc', 'bin/latcd',
+             'lib/liblat-aot-runtime.so.2')},
+    }
+    daemon = runner = None
+    failures = []
+    try:
+        command = ['python3', str(Path(__file__).with_name('make-symbol-tbset.py')),
+                   str(guest), '_start|first_phase|second_phase|second_delivery',
+                   str(work / 'expected.tbset')]
+        evidence['commands'].append(command)
+        subprocess.run(command, check=True)
+        _, _, expected = read_key_set(work / 'expected.tbset')
+        evidence['expected_keys'] = sorted(expected)
+        with (work / 'daemon.log').open('wb') as daemon_log, \
+             (work / 'runner.log').open('wb') as runner_log:
+            command = [str(prefix / 'bin/latcd'), '--serve', '--socket', endpoint,
+                       '--cache-dir', str(cache), '--latc', str(prefix / 'bin/latc'),
+                       '--runner', str(prefix / 'bin/latx-x86_64'), '--runtime-dir',
+                       str(prefix / 'lib'), '--workers', '1', '--idle-seconds', '0',
+                       '--flush-only']
+            evidence['commands'].append(command)
+            daemon = subprocess.Popen(command, env=env, stdout=daemon_log,
+                                      stderr=daemon_log)
+            deadline = time.monotonic() + 10
+            while not Path(endpoint).exists():
+                require(daemon.poll() is None and time.monotonic() < deadline,
+                        'daemon startup failed')
+                time.sleep(.01)
+            command = [str(prefix / 'bin/latx-x86_64'), str(guest)]
+            evidence['commands'].append(command)
+            runner = subprocess.Popen(command, env=env, stdin=subprocess.PIPE,
+                                      stdout=subprocess.PIPE, stderr=runner_log)
+            require(exact(runner.stdout, 1) == b'A', 'missing first-phase output')
+            journals = list((cache / '.journals').glob('*/keys'))
+            require(len(journals) == 1, 'expected one registered exec journal')
+            journal = journals[0]
+            before = inspect_journal_descriptors(runner.pid, journal)
+            require(not before['main_file'], 'main table exposed journal file before exec')
+            require(not before['main_directory'],
+                    'main table exposed journal directory before exec')
+            require(len(before['private']) == 1,
+                    f'expected one private fd before exec, got {before["private"]}')
+            pre_tid, pre_fd = before['private'][0]
+            evidence.update(before_exec=before, pre_owner_tid=pre_tid,
+                            pre_journal_fd=pre_fd,
+                            pre_process_exe=process_executable_identity(runner.pid),
+                            pre_process_environment=inherited_runner_environment(runner.pid))
+            runner.stdin.write(b'x')
+            runner.stdin.flush()
+            require(exact(runner.stdout, 1) == b'B', 'missing post-exec output')
+            runner.stdin.write(b'y')
+            runner.stdin.flush()
+            require(exact(runner.stdout, 1) == b'C', 'missing post-exec delivery output')
+            journals_after = list((cache / '.journals').glob('*/keys'))
+            after_by_journal = {
+                str(path.parent.name): inspect_journal_descriptors(runner.pid, path)
+                for path in journals_after
+            }
+            evidence['after_exec'] = after_by_journal
+            evidence['post_process_exe'] = process_executable_identity(runner.pid)
+            evidence['post_process_environment'] = inherited_runner_environment(
+                runner.pid)
+            require(all(not state['main_file'] and not state['main_directory']
+                        for state in after_by_journal.values()),
+                    'main table exposed a journal file or directory after exec')
+            private = [(name, task_fd)
+                       for name, state in after_by_journal.items()
+                       for task_fd in state['private']]
+            require(len(private) == 1,
+                    f'expected one private fd after exec, got {private}')
+            post_journal_name, (post_tid, post_fd) = private[0]
+            require(post_tid != pre_tid, 'exec retained the prior owner thread')
+            evidence.update(post_owner_tid=post_tid, post_journal_fd=post_fd,
+                            post_journal=post_journal_name)
+            runner.stdin.write(b'z')
+            runner.stdin.flush()
+            producer_rc = runner.wait(timeout=30)
+            evidence['producer_rc'] = producer_rc
+            require(producer_rc == 42, f'exec guest returned {producer_rc}, expected 42')
+        status = collect(endpoint, work)
+        evidence['collector_status'] = status
+        require(status == 0, 'collector rejected exec journal')
+        receipts = {}
+        received = set()
+        for journal_path in journals_after:
+            receipt = journal_path.parent / 'received.tbset'
+            require(receipt.exists(),
+                    f'collector did not publish receipt for {journal_path.parent.name}')
+            receipt_data = receipt.read_bytes()
+            destination = work / f'received-{journal_path.parent.name}.tbset'
+            destination.write_bytes(receipt_data)
+            receipts[journal_path.parent.name] = {
+                'sha256': hashlib.sha256(receipt_data).hexdigest(),
+                'keys': receipt_keys(receipt, guest),
+            }
+            received.update((rva, flags) for rva, flags, _ in receipts[
+                journal_path.parent.name]['keys'])
+        evidence['receipts'] = receipts
+        missing = set(expected) - received
+        require(not missing, f'exec receipt missed fixture keys: {sorted(missing)}')
+    except (AssertionError, OSError, subprocess.SubprocessError) as error:
+        failures.append(str(error))
+    finally:
+        if runner is not None and runner.poll() is None:
+            runner.kill()
+            runner.wait(timeout=10)
+        if daemon is not None:
+            if daemon.poll() is None:
+                daemon.terminate()
+            try:
+                evidence['daemon_rc'] = daemon.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+                evidence['daemon_rc'] = daemon.wait(timeout=10)
+            if evidence['daemon_rc'] != 0:
+                failures.append('daemon did not exit cleanly')
+        evidence['failures'] = failures
+        (work / 'evidence.json').write_text(json.dumps(evidence, indent=2) + '\n')
+    print('exec: ' + ('FAIL: ' + '; '.join(failures) if failures else 'PASS'),
+          flush=True)
+    return not failures
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('prefix', type=Path)
     parser.add_argument('guest_dir', type=Path)
     parser.add_argument('workdir', type=Path)
+    parser.add_argument('--mode', action='append', choices=MODES + ('exec',),
+                        help='run only the selected mode; default is all modes')
     args = parser.parse_args()
     root = args.workdir.resolve()
     require(root.is_relative_to((Path.home() / 'tmp').resolve()), 'workdir must be under ~/tmp')
     root.mkdir(mode=0o700)
-    results = {mode: run_case(args.prefix.resolve(), args.guest_dir.resolve(), root, mode)
-               for mode in MODES}
+    selected = args.mode or list(MODES) + ['exec']
+    results = {}
+    for mode in selected:
+        if mode == 'exec':
+            results[mode] = run_exec_case(args.prefix.resolve(),
+                                          args.guest_dir.resolve(), root)
+        else:
+            results[mode] = run_case(args.prefix.resolve(),
+                                     args.guest_dir.resolve(), root, mode)
     (root / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
     return 0 if all(results.values()) else 1
 

@@ -1351,7 +1351,15 @@ $(BUILD)/tests/test-posix-lock-lifetime: tests/test-posix-lock-lifetime.c
 test-aot-v2-journal-fd:
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(GUEST_DIR)" -a -n "$(WORK)" || \
 	  { echo "usage: make test-aot-v2-journal-fd INSTALL_PREFIX=... GUEST_DIR=... WORK=..."; exit 2; }
-	python3 tests/test-aot-v2-journal-fd.py "$(INSTALL_PREFIX)" "$(GUEST_DIR)" "$(WORK)"
+	sh tests/test-aot-v2-journal-fd.sh "$(INSTALL_PREFIX)" "$(GUEST_DIR)" "$(WORK)"
+
+.PHONY: test-aot-v2-journal-fork
+test-aot-v2-journal-fork:
+	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_ROOTFS)" -a -n "$(X86_GUEST)" \
+	  -a -n "$(FIXTURE_DIR)" -a -n "$(WORK)" || \
+	  { echo "usage: make test-aot-v2-journal-fork INSTALL_PREFIX=... X86_ROOTFS=... X86_GUEST=... FIXTURE_DIR=... WORK=..."; exit 2; }
+	sh tests/test-aot-v2-journal-fork.sh "$(INSTALL_PREFIX)" "$(X86_ROOTFS)" \
+	  "$(X86_GUEST)" "$(WORK)" 60 "$(FIXTURE_DIR)"
 
 .PHONY: test-latcd-async-flush
 test-latcd-async-flush:

@@ -14,7 +14,20 @@ _start:
     cmp $4, %eax
     jne failed
     mov descriptor(%rip), %edi
-#if ATTACK == 1
+#if ATTACK == 5
+    mov $292, %eax
+    mov $1, %edi
+    mov descriptor(%rip), %esi
+    mov $02000000, %edx
+    syscall
+    test %rax, %rax
+    js operation_done
+    mov %eax, %edi
+    mov $72, %eax
+    mov $3, %esi
+    syscall
+    jmp operation_done
+#elif ATTACK == 1
     mov $77, %eax
     xor %esi, %esi
 #elif ATTACK == 2
@@ -32,7 +45,10 @@ _start:
     mov $72, %eax
     mov $3, %esi
 #endif
+#if ATTACK != 5
     syscall
+#endif
+operation_done:
     mov %rax, result(%rip)
     mov $1, %eax
     mov $1, %edi

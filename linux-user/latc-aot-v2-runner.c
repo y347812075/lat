@@ -24,8 +24,11 @@
 #include "translate.h"
 
 #include <elf.h>
+#include <dirent.h>
 #include <glib.h>
 #include <math.h>
+#include <sched.h>
+#include <sys/resource.h>
 
 /* Loongnix 20 predates the public LoongArch HWCAP names. */
 #ifndef HWCAP_LOONGARCH_LSX
@@ -52,6 +55,8 @@ typedef enum LatAotV2ModuleState {
     LAT_AOT_V2_MODULE_INACTIVE,
 } LatAotV2ModuleState;
 
+typedef struct LatAotV2JournalOwner LatAotV2JournalOwner;
+
 typedef struct LatAotV2ModuleStats {
     uint8_t source_sha256[32];
     _Atomic uint64_t guest_begin;
@@ -71,8 +76,26 @@ typedef struct LatAotV2ModuleStats {
     LatGuestElfRangeV2 key_exec_ranges[LAT_GUEST_ELF_MAX_EXEC_RANGES];
     LatKeyJournal journal;
     LatKeyJournalIdentity journal_identity;
+    LatAotV2JournalOwner *journal_owner;
     struct LatAotV2ModuleStats *next;
 } LatAotV2ModuleStats;
+
+struct LatAotV2JournalOwner {
+    pthread_mutex_t mutex;
+    pthread_cond_t condition;
+    pthread_t thread;
+    LatAotV2ModuleStats *stats;
+    pid_t pid;
+    int directory_fd;
+    int journal_fd_target;
+    LatTbKey request;
+    bool request_pending;
+    bool request_done;
+    bool request_ok;
+    bool ready;
+    bool stop;
+    char error[256];
+};
 
 typedef struct LatAotV2TbsetEntry {
     uint64_t rva;
@@ -207,6 +230,251 @@ typedef struct LatAotV2KeyRetry {
     bool resume_jrra;
 } LatAotV2KeyRetry;
 static __thread LatAotV2KeyRetry key_retry;
+
+static void key_journal_view_reset(LatKeyJournal *journal)
+{
+    memset(journal, 0, sizeof(*journal));
+    journal->fd = -1;
+}
+
+/*
+ * The owner thread starts with a private copy of files_struct. Remove every
+ * inherited guest descriptor before opening a journal so closes, pipe EOF and
+ * fd allocation in the guest table remain independent of this thread.
+ */
+static int key_journal_owner_close_guest_fds(int keep_fd, char *error,
+                                             size_t error_size)
+{
+    DIR *directory = opendir("/proc/thread-self/fd");
+    GArray *fds;
+    struct dirent *entry;
+    int directory_fd;
+
+    if (!directory) {
+        snprintf(error, error_size, "cannot enumerate private fd table: %s",
+                 strerror(errno));
+        return -1;
+    }
+    directory_fd = dirfd(directory);
+    fds = g_array_new(FALSE, FALSE, sizeof(int));
+    while ((entry = readdir(directory))) {
+        char *end;
+        long fd;
+
+        errno = 0;
+        fd = strtol(entry->d_name, &end, 10);
+        if (errno || end == entry->d_name || *end || fd < 0 || fd > INT_MAX ||
+            fd == directory_fd || fd == keep_fd) {
+            continue;
+        }
+        int value = fd;
+        g_array_append_val(fds, value);
+    }
+    if (closedir(directory)) {
+        snprintf(error, error_size, "cannot close private fd directory: %s",
+                 strerror(errno));
+        g_array_free(fds, TRUE);
+        return -1;
+    }
+    for (guint i = 0; i < fds->len; i++) {
+        close(g_array_index(fds, int, i));
+    }
+    g_array_free(fds, TRUE);
+    return 0;
+}
+
+static int key_journal_owner_find_spare_fd(void)
+{
+    struct rlimit limit;
+    rlim_t maximum = 4096;
+
+    if (getrlimit(RLIMIT_NOFILE, &limit) || limit.rlim_cur == 0) {
+        return -1;
+    }
+    if (limit.rlim_cur != RLIM_INFINITY && limit.rlim_cur < maximum) {
+        maximum = limit.rlim_cur;
+    }
+    for (int fd = 128; fd < 4096 && (rlim_t)fd < maximum; fd++) {
+        if (fcntl(fd, F_GETFD) < 0 && errno == EBADF) {
+            return fd;
+        }
+    }
+    return -1;
+}
+
+static void *key_journal_owner_thread(void *opaque)
+{
+    LatAotV2JournalOwner *owner = opaque;
+    LatAotV2ModuleStats *stats = owner->stats;
+    char error[256] = {0};
+    bool ready = true;
+
+    if (unshare(CLONE_FILES)) {
+        snprintf(error, sizeof(error), "cannot isolate journal fd table: %s",
+                 strerror(errno));
+        ready = false;
+    } else if (key_journal_owner_close_guest_fds(owner->directory_fd, error,
+                                                  sizeof(error))) {
+        ready = false;
+    } else if (lat_key_journal_open_at(owner->directory_fd, "keys",
+                                       &stats->journal_identity, true,
+                                       &stats->journal, error, sizeof(error))) {
+        ready = false;
+    }
+    if (ready && owner->journal_fd_target >= 0 &&
+        owner->journal_fd_target != stats->journal.fd) {
+        if (dup3(stats->journal.fd, owner->journal_fd_target, O_CLOEXEC) < 0) {
+            int saved = errno;
+            snprintf(error, sizeof(error), "cannot place private journal fd: %s",
+                     strerror(saved));
+            ready = false;
+        } else {
+            close(stats->journal.fd);
+            stats->journal.fd = owner->journal_fd_target;
+        }
+    }
+    if (ready) {
+        close(owner->directory_fd);
+    }
+
+    pthread_mutex_lock(&owner->mutex);
+    owner->ready = true;
+    if (!ready) {
+        memcpy(owner->error, error, sizeof(owner->error));
+    }
+    pthread_cond_broadcast(&owner->condition);
+    if (!ready) {
+        pthread_mutex_unlock(&owner->mutex);
+        return NULL;
+    }
+    while (!owner->stop) {
+        while (!owner->request_pending && !owner->stop) {
+            pthread_cond_wait(&owner->condition, &owner->mutex);
+        }
+        if (owner->stop) {
+            break;
+        }
+        owner->request_ok = !lat_key_journal_append(
+            &stats->journal, &owner->request, NULL, owner->error,
+            sizeof(owner->error));
+        owner->request_pending = false;
+        owner->request_done = true;
+        pthread_cond_broadcast(&owner->condition);
+    }
+    pthread_mutex_unlock(&owner->mutex);
+    lat_key_journal_close(&stats->journal);
+    return NULL;
+}
+
+static int start_key_journal_owner(LatAotV2ModuleStats *stats, char *error,
+                                   size_t error_size)
+{
+    LatAotV2JournalOwner *owner;
+    bool mutex_initialized = false;
+    bool condition_initialized = false;
+    int result;
+
+    if (stats->journal_owner) {
+        return 0;
+    }
+    if (stats->journal_directory < 0) {
+        snprintf(error, error_size, "journal directory capability is absent");
+        return -1;
+    }
+    owner = g_new0(LatAotV2JournalOwner, 1);
+    owner->stats = stats;
+    owner->pid = getpid();
+    owner->directory_fd = stats->journal_directory;
+    owner->journal_fd_target = key_journal_owner_find_spare_fd();
+    result = pthread_mutex_init(&owner->mutex, NULL);
+    if (!result) {
+        mutex_initialized = true;
+        result = pthread_cond_init(&owner->condition, NULL);
+    }
+    if (!result) {
+        condition_initialized = true;
+        result = pthread_create(&owner->thread, NULL, key_journal_owner_thread,
+                                owner);
+    }
+    if (result) {
+        snprintf(error, error_size, "cannot start journal fd owner: %s",
+                 strerror(result));
+        if (condition_initialized) {
+            pthread_cond_destroy(&owner->condition);
+        }
+        if (mutex_initialized) {
+            pthread_mutex_destroy(&owner->mutex);
+        }
+        g_free(owner);
+        return -1;
+    }
+
+    pthread_mutex_lock(&owner->mutex);
+    while (!owner->ready) {
+        pthread_cond_wait(&owner->condition, &owner->mutex);
+    }
+    result = owner->error[0] != '\0';
+    if (result) {
+        snprintf(error, error_size, "%s", owner->error);
+    }
+    pthread_mutex_unlock(&owner->mutex);
+    if (result) {
+        pthread_join(owner->thread, NULL);
+        pthread_cond_destroy(&owner->condition);
+        pthread_mutex_destroy(&owner->mutex);
+        g_free(owner);
+        return -1;
+    }
+
+    stats->journal_owner = owner;
+    stats->journal_directory = -1;
+    close(owner->directory_fd);
+    pthread_detach(owner->thread);
+    return 0;
+}
+
+static int key_journal_owner_append(LatAotV2ModuleStats *stats,
+                                    const LatTbKey *key, char *error,
+                                    size_t error_size)
+{
+    LatAotV2JournalOwner *owner = stats->journal_owner;
+
+    if (!owner || owner->pid != getpid()) {
+        snprintf(error, error_size, "journal fd owner is unavailable");
+        return -1;
+    }
+    pthread_mutex_lock(&owner->mutex);
+    if (owner->request_pending) {
+        pthread_mutex_unlock(&owner->mutex);
+        snprintf(error, error_size, "journal fd owner is already busy");
+        return -1;
+    }
+    owner->request = *key;
+    owner->request_pending = true;
+    owner->request_done = false;
+    pthread_cond_broadcast(&owner->condition);
+    while (!owner->request_done) {
+        pthread_cond_wait(&owner->condition, &owner->mutex);
+    }
+    bool ok = owner->request_ok;
+    if (!ok) {
+        snprintf(error, error_size, "%s", owner->error);
+    }
+    pthread_mutex_unlock(&owner->mutex);
+    return ok ? 0 : -1;
+}
+
+static void key_journal_owner_after_fork_child(LatAotV2ModuleStats *stats)
+{
+    if (stats->journal_owner) {
+        /* The owner thread does not survive fork; do not operate on its
+         * inherited synchronization objects from the child. */
+        g_free(stats->journal_owner);
+        stats->journal_owner = NULL;
+        stats->journal_directory = -1;
+    }
+    key_journal_view_reset(&stats->journal);
+}
 
 void latc_aot_v2_consume_environment(void)
 {
@@ -451,7 +719,7 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
     submission_thread_started = false;
     memset(&key_retry, 0, sizeof(key_retry));
     for (LatAotV2ModuleStats *stats = atomic_load(&module_stats); stats; stats = stats->next) {
-        lat_key_journal_close(&stats->journal);
+        key_journal_owner_after_fork_child(stats);
     }
 #ifdef CONFIG_LATX_FAST_JMPCACHE
     if (cpu) {
@@ -832,8 +1100,7 @@ retry:
             goto out;
         }
         for (LatAotV2ModuleStats *stats = atomic_load(&module_stats); stats; stats = stats->next) {
-            if (relocate_source_fd(&stats->journal_directory, fd) ||
-                relocate_source_fd(&stats->journal.fd, fd)) {
+            if (relocate_source_fd(&stats->journal_directory, fd)) {
                 result = -1;
                 goto out;
             }
@@ -2869,6 +3136,9 @@ static int prepare_key_journal_config(CPUArchState *env, char *error, size_t siz
 
 static int open_key_journal(LatAotV2ModuleStats *stats, char *error, size_t size)
 {
+    if (stats->journal_owner) {
+        return 0;
+    }
     if (stats->journal_directory < 0) {
         char epoch[33];
         uint64_t request = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
@@ -2890,10 +3160,7 @@ static int open_key_journal(LatAotV2ModuleStats *stats, char *error, size_t size
         memcpy(stats->journal_identity.config_sha256, key_journal_config_digest, 32);
         digest_bytes(LATC_BUILD_ID, strlen(LATC_BUILD_ID), stats->journal_identity.codegen_sha256);
     }
-    if (stats->journal.fd < 0)
-        return lat_key_journal_open_at(stats->journal_directory, "keys", &stats->journal_identity,
-                                       true, &stats->journal, error, size);
-    return 0;
+    return start_key_journal_owner(stats, error, size);
 }
 
 bool latc_aot_v2_key_retry_service(CPUState *cpu)
@@ -2928,7 +3195,7 @@ bool latc_aot_v2_key_retry_service(CPUState *cpu)
             bool available = atomic_load(&submission_channel) >= 0 || lat_aot_ensure_daemon();
             if (!available) snprintf(error, sizeof(error), "latcd unavailable for journal registration");
             ok = available && !open_key_journal(stats, error, sizeof(error)) &&
-                !lat_key_journal_append(&stats->journal, &key, NULL, error, sizeof(error));
+                !key_journal_owner_append(stats, &key, error, sizeof(error));
             if (ok) {
                 LatAotV2TbsetEntry *entry = g_new(LatAotV2TbsetEntry, 1);
                 *entry = candidate;

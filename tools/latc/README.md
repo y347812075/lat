@@ -174,12 +174,13 @@ cold-start validation remain incomplete. Config is still incomplete/quarantined;
 receipt collection does not admit compilation, recover jobs or publish modules.
 See `docs/aot-v2-handoff/runtime-key-delivery.md` and `STATUS.md`.
 
-`test-aot-v2-journal-fd` is an opt-in real guest integrity regression and is
-currently expected to fail until guest descriptor isolation is implemented.
-Build `tests/x86-journal-fd.S` on an x86 Docker toolchain with
+`test-aot-v2-journal-fd` is an opt-in real guest integrity regression. Build
+`tests/x86-journal-fd.S` on an x86 Docker toolchain with
 `gcc -nostdlib -static -no-pie -Wl,--build-id=none -DATTACK=N`, using values
-0 through 4 for `guest-control`, `guest-truncate`, `guest-setfl`,
-`guest-overwrite`, and `guest-dup`. Put the five executables in `GUEST_DIR`:
+0 through 5 for `guest-control`, `guest-truncate`, `guest-setfl`,
+`guest-overwrite`, `guest-dup`, and `guest-collision`. Build
+`tests/x86-journal-exec.S` with `gcc -nostdlib -static -no-pie
+-Wl,--build-id=none` as `guest-exec`. Put all seven executables in `GUEST_DIR`:
 
 ```sh
 make -C tools/latc test-aot-v2-journal-fd \
@@ -188,11 +189,24 @@ make -C tools/latc test-aot-v2-journal-fd \
 ```
 
 The test discloses the real internal journal fd to each guest through stdin;
-this is not a natural-discovery or sandbox claim. All operations must return
-`EBADF`, the guest must continue, and collection after SIGKILL must preserve
-both executed fixture keys. Each case records product hashes, commands,
-fd state, before/after journals, raw collector replies and available receipts.
+this is not a natural-discovery or hostile same-UID process claim. Attack
+operations must return `EBADF`, the guest must continue, and collection after
+SIGKILL must preserve both executed fixture keys. The collision case reuses the
+private numeric fd for a normal guest stdout alias. The exec case verifies that
+the old owner is gone, the new owner has a new TID and epoch journal, and the
+union of both receipts covers all executed phases. The Make target enters a
+private user/mount namespace and binds the installed runner over the binfmt
+interpreter so guest exec cannot silently select a system runner. Each case
+records product hashes, commands, fd state, before/after journals, raw collector
+replies and available receipts.
 Corruption is reported as failure, never accepted as the expected test result.
+
+`test-aot-v2-journal-fork` runs the existing dynamic fork fixture with the
+journal enabled only for the final runner. It builds the hot module first,
+starts a private flush-only service, and verifies that both parent and child
+continue with AOT after the private writer owner has been discarded in the
+fork child. It requires `INSTALL_PREFIX`, `X86_ROOTFS`, `X86_GUEST`,
+`FIXTURE_DIR`, and `WORK`.
 
 `make -C tools/latc test-posix-lock-lifetime WORK="$HOME/tmp"` runs a native
 Linux descriptor-lifetime oracle. It requires permission to `unshare(CLONE_FILES)`
