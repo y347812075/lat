@@ -86,6 +86,30 @@ static void test_config_plan(const unsigned char *original, size_t size)
            migration.deferred_static_keys.keys[0].guest_rva == 0x70);
     assert(!migration.configuration_contract_complete);
     assert(!migration.reuse_authorized && !migration.movement_certified);
+
+    unsigned char delta_data[8192] = {0};
+    memcpy(delta_data, data, size);
+    LatNativeImageHeaderV2 *delta_header = (void *)delta_data;
+    memcpy(delta_data + size, bytes, length);
+    delta_header->translation_config_size = length;
+    memcpy(delta_header->translation_config_sha256,
+           migration.target_config_sha256, 32);
+    LatNativeTuMigrationBinding binding = {0};
+    assert(!lat_native_tu_migration_bind_delta(data,
+        size + h->translation_config_size, delta_data, size + length,
+        &migration, &binding, error, sizeof(error)));
+    assert(binding.status == LAT_NATIVE_TU_MIGRATION_BIND_EXPAND_AND_RECOMPILE);
+    assert(binding.collision_keys.count == 1 &&
+           binding.collision_keys.keys[0].guest_rva == 0x50);
+    assert(binding.missing_required_keys.count == 1 &&
+           binding.missing_required_keys.keys[0].guest_rva == 0x60);
+    assert(!binding.covers_required_keys);
+    lat_native_tu_migration_binding_destroy(&binding);
+    delta_header->lat_build_id[0] ^= 1;
+    assert(lat_native_tu_migration_bind_delta(data,
+        size + h->translation_config_size, delta_data, size + length,
+        &migration, &binding, error, sizeof(error)));
+    delta_header->lat_build_id[0] ^= 1;
     lat_native_tu_migration_plan_destroy(&migration);
 
     runtime.source_sha256[0] ^= 1;
@@ -122,9 +146,39 @@ static void test_config_plan(const unsigned char *original, size_t size)
     }
     assert(!lat_native_tu_migration_plan(
         all_data, size + h->translation_config_size, bytes, length,
-        NULL, NULL, &migration, error, sizeof(error)));
+        &runtime, NULL, &migration, error, sizeof(error)));
     assert(migration.kind == LAT_NATIVE_TU_MIGRATION_FULL);
     assert(migration.affected_keys.count == 6 && !migration.retained_keys.count);
+
+    unsigned char full_delta[8192] = {0};
+    memcpy(full_delta, all_data, size);
+    LatNativeImageHeaderV2 *full_delta_header = (void *)full_delta;
+    memcpy(full_delta + size, bytes, length);
+    full_delta_header->translation_config_size = length;
+    memcpy(full_delta_header->translation_config_sha256,
+           migration.target_config_sha256, 32);
+    assert(!lat_native_tu_migration_bind_delta(
+        data, size + h->translation_config_size,
+        full_delta, size + length, &migration, &binding,
+        error, sizeof(error)));
+    assert(binding.status == LAT_NATIVE_TU_MIGRATION_BIND_REJECT);
+    assert(!binding.collision_keys.count &&
+           binding.missing_required_keys.count == 1 &&
+           binding.missing_required_keys.keys[0].guest_rva == 0x60);
+    lat_native_tu_migration_binding_destroy(&binding);
+    lat_native_tu_migration_plan_destroy(&migration);
+
+    assert(!lat_native_tu_migration_plan(
+        all_data, size + h->translation_config_size, bytes, length,
+        NULL, NULL, &migration, error, sizeof(error)));
+    assert(migration.kind == LAT_NATIVE_TU_MIGRATION_FULL);
+    assert(!lat_native_tu_migration_bind_delta(
+        data, size + h->translation_config_size,
+        full_delta, size + length, &migration, &binding,
+        error, sizeof(error)));
+    assert(binding.status == LAT_NATIVE_TU_MIGRATION_BIND_READY);
+    assert(!binding.collision_keys.count && !binding.missing_required_keys.count);
+    lat_native_tu_migration_binding_destroy(&binding);
     lat_native_tu_migration_plan_destroy(&migration);
     if (LAT_AOT_V2_TBSET_RECORD_LIMIT >= 6) {
         tus[4].config_dependency_version = 0;

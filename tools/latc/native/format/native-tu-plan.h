@@ -51,6 +51,32 @@ int lat_native_tu_migration_plan(const void *data, size_t size,
     LatNativeTuMigrationPlan *plan, char *error, size_t error_size);
 void lat_native_tu_migration_plan_destroy(LatNativeTuMigrationPlan *plan);
 
+typedef enum LatNativeTuMigrationBindStatus {
+    LAT_NATIVE_TU_MIGRATION_BIND_REJECT = 0,
+    LAT_NATIVE_TU_MIGRATION_BIND_READY = 1,
+    LAT_NATIVE_TU_MIGRATION_BIND_EXPAND_AND_RECOMPILE = 2,
+} LatNativeTuMigrationBindStatus;
+
+/* Bind a quarantined target-native delta to an existing plan. Structural or
+ * identity mismatches fail the call; overlapping actual keys request an
+ * expanded plan. READY only means the delta can enter the later coverage and
+ * movement verification stage; it is not a publication or execution grant. */
+/* Initialize the binding to zero before its first use. */
+typedef struct LatNativeTuMigrationBinding {
+    LatNativeTuMigrationBindStatus status;
+    LatTbKeySet delta_keys;
+    LatTbKeySet collision_keys;
+    LatTbKeySet missing_required_keys;
+    bool covers_required_keys;
+} LatNativeTuMigrationBinding;
+
+int lat_native_tu_migration_bind_delta(const void *old_data, size_t old_size,
+    const void *delta_data, size_t delta_size,
+    const LatNativeTuMigrationPlan *plan,
+    LatNativeTuMigrationBinding *binding, char *error, size_t error_size);
+void lat_native_tu_migration_binding_destroy(
+    LatNativeTuMigrationBinding *binding);
+
 /* Compact the complement of the closed removal plan. Experimental replay images
  * only: the unchanged CONFIG_UNVERIFIED flag prohibits execution/publication.
  * This remaps recorded references, not a certificate of machine-code mobility.

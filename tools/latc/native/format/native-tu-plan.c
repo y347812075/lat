@@ -335,6 +335,87 @@ out:
     return result;
 }
 
+void lat_native_tu_migration_binding_destroy(
+    LatNativeTuMigrationBinding *binding)
+{
+    if (!binding) return;
+    lat_tb_key_set_destroy(&binding->delta_keys);
+    lat_tb_key_set_destroy(&binding->collision_keys);
+    lat_tb_key_set_destroy(&binding->missing_required_keys);
+    memset(binding, 0, sizeof(*binding));
+}
+
+int lat_native_tu_migration_bind_delta(const void *old_data, size_t old_size,
+    const void *delta_data, size_t delta_size,
+    const LatNativeTuMigrationPlan *plan,
+    LatNativeTuMigrationBinding *binding, char *error, size_t error_size)
+{
+    if (!old_data || !delta_data || !plan || !binding) {
+        return fail(error, error_size, "missing migration binding input");
+    }
+    lat_native_tu_migration_binding_destroy(binding);
+    if (lat_native_image_validate(old_data, old_size, error, error_size) ||
+        lat_native_image_validate(delta_data, delta_size, error, error_size)) {
+        goto failed;
+    }
+    const LatNativeImageHeaderV2 *old_header = old_data;
+    const LatNativeImageHeaderV2 *delta_header = delta_data;
+    if (!(delta_header->flags & LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED) ||
+        memcmp(old_header->guest_sha256, delta_header->guest_sha256, 32) ||
+        memcmp(old_header->lat_build_id, delta_header->lat_build_id,
+               sizeof(old_header->lat_build_id)) ||
+        old_header->preferred_guest_base != delta_header->preferred_guest_base ||
+        memcmp(old_header->translation_config_sha256,
+               plan->old_config_sha256, 32) ||
+        memcmp(delta_header->translation_config_sha256,
+               plan->target_config_sha256, 32)) {
+        fail(error, error_size,
+             "target delta source, build, base, or configuration identity mismatch");
+        goto failed;
+    }
+    const LatTbKeySet *plan_sets[] = {
+        &plan->affected_keys, &plan->retained_keys,
+        &plan->compile_required_keys, &plan->deferred_static_keys,
+    };
+    for (size_t i = 0; i < G_N_ELEMENTS(plan_sets); i++) {
+        if (memcmp(plan_sets[i]->source_sha256,
+                   old_header->guest_sha256, 32)) {
+            fail(error, error_size, "migration plan source identity mismatch");
+            goto failed;
+        }
+    }
+
+    const LatNativeTbV1 *delta_tbs = (const void *)((const uint8_t *)delta_data +
+                                                     delta_header->tb_table_offset);
+    LatTbKeySet delta_without_retained = {0};
+    if (native_key_set(delta_header, delta_tbs, &binding->delta_keys,
+                       error, error_size) ||
+        lat_tb_key_set_difference(&binding->delta_keys, &plan->retained_keys,
+            &delta_without_retained, error, error_size) ||
+        lat_tb_key_set_difference(&binding->delta_keys, &delta_without_retained,
+            &binding->collision_keys, error, error_size) ||
+        lat_tb_key_set_difference(&plan->compile_required_keys,
+            &binding->delta_keys, &binding->missing_required_keys,
+            error, error_size)) {
+        lat_tb_key_set_destroy(&delta_without_retained);
+        goto failed;
+    }
+    lat_tb_key_set_destroy(&delta_without_retained);
+    binding->covers_required_keys = !binding->missing_required_keys.count;
+    if (binding->collision_keys.count) {
+        binding->status = LAT_NATIVE_TU_MIGRATION_BIND_EXPAND_AND_RECOMPILE;
+    } else if (!binding->covers_required_keys) {
+        binding->status = LAT_NATIVE_TU_MIGRATION_BIND_REJECT;
+    } else {
+        binding->status = LAT_NATIVE_TU_MIGRATION_BIND_READY;
+    }
+    return 0;
+
+failed:
+    lat_native_tu_migration_binding_destroy(binding);
+    return -1;
+}
+
 typedef struct ExtractRange {
     uint64_t old_offset, size, new_offset;
 } ExtractRange;
