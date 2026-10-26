@@ -813,7 +813,7 @@ static bool tombstone_shape(GKeyFile *record, const char *name,
 {
     const char *required[] = {"version", "source", "name", "state", "device",
         "inode", "size", "allocated", "sha256"};
-    const char *optional[] = {"recovery_status"};
+    const char *optional[] = {"recovery_status", "deletion_status"};
     gsize count;
     char **groups = g_key_file_get_groups(record, &count);
     bool valid = count == 1 && !strcmp(groups[0], "tombstone");
@@ -834,13 +834,15 @@ static bool tombstone_shape(GKeyFile *record, const char *name,
     char *stored_name = g_key_file_get_string(record, "tombstone", "name", NULL);
     char *state = g_key_file_get_string(record, "tombstone", "state", NULL);
     char *observation = g_key_file_get_string(record, "tombstone", "recovery_status", NULL);
+    char *deletion = g_key_file_get_string(record, "tombstone", "deletion_status", NULL);
     *source = g_key_file_get_string(record, "tombstone", "source", NULL);
     *hash = g_key_file_get_string(record, "tombstone", "sha256", NULL);
     valid = valid && !g_strcmp0(version, "1") && source_valid(*source) &&
         object_name_valid(*source, name) && !g_strcmp0(name, stored_name) &&
         !g_strcmp0(state, "DELETING") && digest_valid(*hash) &&
         (!observation || !strcmp(observation, "MATCHED") || !strcmp(observation, "MISSING") ||
-         !strcmp(observation, "UNKNOWN") || !strcmp(observation, "BUSY"));
+         !strcmp(observation, "UNKNOWN") || !strcmp(observation, "BUSY")) &&
+        (!deletion || !strcmp(deletion, "UNLINKED"));
     const char *fields[] = {"device", "inode", "size", "allocated"};
     for (size_t i = 0; valid && i < G_N_ELEMENTS(fields); i++) {
         char *text = g_key_file_get_string(record, "tombstone", fields[i], NULL);
@@ -851,12 +853,12 @@ static bool tombstone_shape(GKeyFile *record, const char *name,
             end && !*end && !errno && (i != 2 || values[i]);
         g_free(text);
     }
-    g_free(version); g_free(stored_name); g_free(state); g_free(observation);
+    g_free(version); g_free(stored_name); g_free(state); g_free(observation); g_free(deletion);
     return valid;
 }
 
 static int recover_tombstone(const char *root_path, int root, int store,
-                              const char *name)
+                              const char *name, bool remove_object)
 {
     char *raw = NULL, *source = NULL, *hash = NULL;
     size_t size;
@@ -869,6 +871,7 @@ static int recover_tombstone(const char *root_path, int root, int store,
     char *prior = g_key_file_get_string(record, "tombstone", "recovery_status", NULL);
     bool unknown = !g_strcmp0(prior, "UNKNOWN");
     bool was_missing = !g_strcmp0(prior, "MISSING");
+    bool was_unlinked = g_key_file_has_key(record, "tombstone", "deletion_status", NULL);
     const char *observation = unknown ? "UNKNOWN" : "MATCHED";
     bool missing = false;
     struct stat before = {0}, after, path;
@@ -879,7 +882,7 @@ static int recover_tombstone(const char *root_path, int root, int store,
         if (object < 0) {
             missing = errno == ENOENT;
             observation = missing ? "MISSING" : "UNKNOWN";
-        } else if (was_missing) {
+        } else if (was_missing || was_unlinked) {
             observation = "UNKNOWN";
         } else if (flock(object, LOCK_SH | LOCK_NB)) {
             observation = errno == EWOULDBLOCK ? "BUSY" : "UNKNOWN";
@@ -929,8 +932,27 @@ static int recover_tombstone(const char *root_path, int root, int store,
                 observation = "UNKNOWN";
         }
     }
+    if (remove_object && (!strcmp(observation, "MATCHED") || !strcmp(observation, "MISSING"))) {
+        /* Persist/confirm intent before dropping S. Readers refuse this name;
+         * G remains exclusive through unlink, fsync and progress publication. */
+        if (fsync(store)) { g_free(prior); goto out; }
+        close(latch);
+        latch = -1;
+        if (!strcmp(observation, "MATCHED")) {
+            if (record_write_fault("before-unlink") ||
+                unlinkat(root, name, 0) || record_write_fault("unlinked")) {
+                g_free(prior); goto out;
+            }
+        }
+        if (fsync(root) || record_write_fault("unlink-synced")) {
+            g_free(prior); goto out;
+        }
+        g_key_file_set_string(record, "tombstone", "deletion_status", "UNLINKED");
+        observation = "MISSING";
+    }
     g_key_file_set_string(record, "tombstone", "recovery_status", observation);
-    result = !g_strcmp0(prior, observation) ? 0 : write_record(store, name, record);
+    result = !remove_object && !g_strcmp0(prior, observation) ? 0 : write_record(store, name, record);
+    if (remove_object && strcmp(observation, "MISSING")) result = -1;
     g_free(prior);
 out:
     if (object >= 0) close(object);
@@ -964,10 +986,29 @@ int latcd_tombstone_recover(const char *root, unsigned *recovered,
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         if (++visited > 100000) { result = -1; break; }
         if (g_str_has_prefix(entry->d_name, ".write-")) continue;
-        if (recover_tombstone(root, root_fd, store, entry->d_name)) { result = -1; break; }
+        if (recover_tombstone(root, root_fd, store, entry->d_name, false)) { result = -1; break; }
         (*recovered)++;
     }
     if (directory) closedir(directory);
     close(root_fd);
     return result ? fail(error, error_size, "tombstone recovery rejected unknown record") : 0;
+}
+
+int latcd_tombstone_delete(const char *root, const char *name,
+                            char *error, size_t error_size)
+{
+    if (!name || strlen(name) < 64 || strchr(name, '/'))
+        return fail(error, error_size, "invalid deletion object name");
+    char source[65];
+    memcpy(source, name, 64); source[64] = 0;
+    if (!source_valid(source) || !object_name_valid(source, name))
+        return fail(error, error_size, "invalid deletion object name");
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
+    int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
+    int result = store < 0 ? -1 : recover_tombstone(root, directory, store, name, true);
+    if (store >= 0) close(store);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    return result ? fail(error, error_size, "object deletion deferred or rejected") : 0;
 }

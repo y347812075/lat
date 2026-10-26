@@ -926,6 +926,14 @@ also becomes UNKNOWN. MISSING is persisted only after syncing the root directory
 and is an absence observation, not proof of released disk space. Recovery never
 unlinks objects or removes tombstones. Malformed records reject startup intact.
 
+An internal single-object executor can resume an existing tombstone, revalidate
+identity/current/leases, unlink, sync the directory, and persist UNLINKED progress.
+It never clears a tombstone or claims released physical bytes. A replacement at
+the same name becomes UNKNOWN. This executor has no CLI or automatic caller:
+controlled access/mount admission, all reference roots and elapsed grace must be
+proved before any product path may invoke it. Isolated tests cover interrupted
+unlink/progress publication and partial multi-object recovery.
+
 Before starting a compiler child, latcd estimates temporary translation/merge/link
 coexistence from input sizes and checks `statvfs` for both temporary and output
 filesystems. Per-worker reservations are serialized and summed by filesystem;

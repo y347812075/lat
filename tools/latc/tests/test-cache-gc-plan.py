@@ -166,6 +166,9 @@ class PlannerTest(unittest.TestCase):
         plan = self.run_plan(False)
         self.assertEqual(plan["tombstone_count"], 1)
         self.assertEqual(plan["tombstones"][path]["recovery_status"], "MISSING")
+        self.put(path, (raw + "deletion_status=UNLINKED\n").encode())
+        completed = self.run_plan(False)
+        self.assertEqual(completed["tombstones"][path]["deletion_status"], "UNLINKED")
         for bad in (raw.replace("version=1", "version=1\nversion=1"),
                     raw.replace("source=" + SOURCE, "source=" + OTHER),
                     raw.replace("size=7", "size=-1"),

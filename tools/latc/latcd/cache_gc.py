@@ -158,7 +158,7 @@ class Inventory:
             value = dict(parser["tombstone"])
             required = {"version", "source", "name", "state", "device", "inode",
                         "size", "allocated", "sha256"}
-            if not required <= value.keys() or value.keys() - required - {"recovery_status"}:
+            if not required <= value.keys() or value.keys() - required - {"recovery_status", "deletion_status"}:
                 raise ValueError("invalid tombstone fields")
             if (value["version"] != "1" or value["source"] != match[1] or
                     value["name"] != name or value["state"] != "DELETING" or
@@ -166,6 +166,8 @@ class Inventory:
                     value.get("recovery_status", "MATCHED") not in
                     {"MATCHED", "MISSING", "UNKNOWN", "BUSY"}):
                 raise ValueError("invalid tombstone identity/state")
+            if value.get("deletion_status", "UNLINKED") != "UNLINKED":
+                raise ValueError("invalid tombstone deletion status")
             for field in ("device", "inode", "size", "allocated"):
                 if not re.fullmatch(r"[0-9]+", value[field]) or int(value[field]) >= 2**64:
                     raise ValueError("invalid tombstone integer")

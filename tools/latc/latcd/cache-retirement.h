@@ -38,4 +38,11 @@ int latcd_retirement_recover(const char *root, unsigned *recovered,
 int latcd_tombstone_recover(const char *root, unsigned *recovered,
                             char *error, size_t error_size);
 
+/* Internal executor, not a domain admission API. Caller owns management lease
+ * and guarantees controlled access/mounts, elapsed grace, no rollback/migration/
+ * worker/publication/transaction roots. One pre-existing tombstone only; checks
+ * current and immutable identity again. No CLI/automatic caller is enabled. */
+int latcd_tombstone_delete(const char *root, const char *name,
+                            char *error, size_t error_size);
+
 #endif
