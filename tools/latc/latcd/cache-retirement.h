@@ -33,4 +33,9 @@ int latcd_retirement_finish(const char *root, const char *transaction,
 int latcd_retirement_recover(const char *root, unsigned *recovered,
                             char *error, size_t error_size);
 
+/* Reconcile deletion evidence under the cache owner lease. Observation only:
+ * no unlink, no admission, and MISSING does not prove released disk blocks. */
+int latcd_tombstone_recover(const char *root, unsigned *recovered,
+                            char *error, size_t error_size);
+
 #endif

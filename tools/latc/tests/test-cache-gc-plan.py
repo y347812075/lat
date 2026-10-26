@@ -154,6 +154,26 @@ class PlannerTest(unittest.TestCase):
         rows = {row["path"]: row for row in plan["entries"]}
         self.assertIn("invalid_source_manifest", rows[STEM + ".so"]["reasons"])
 
+    def test_structured_tombstone(self):
+        name = STEM + ".native"
+        st = (self.root / name).stat()
+        raw = ("[tombstone]\nversion=1\nsource=" + SOURCE + "\nname=" + name +
+               "\nstate=DELETING\ndevice=" + str(st.st_dev) + "\ninode=" + str(st.st_ino) +
+               "\nsize=" + str(st.st_size) + "\nallocated=" + str(st.st_blocks * 512) +
+               "\nsha256=" + "f" * 64 + "\nrecovery_status=MISSING\n")
+        path = ".gc/tombstones/" + name
+        self.put(path, raw.encode())
+        plan = self.run_plan(False)
+        self.assertEqual(plan["tombstone_count"], 1)
+        self.assertEqual(plan["tombstones"][path]["recovery_status"], "MISSING")
+        for bad in (raw.replace("version=1", "version=1\nversion=1"),
+                    raw.replace("source=" + SOURCE, "source=" + OTHER),
+                    raw.replace("size=7", "size=-1"),
+                    raw.replace("recovery_status=MISSING", "recovery_status=DELETED")):
+            self.put(path, bad.encode())
+            changed = self.run_plan(False)
+            self.assertEqual(changed["tombstone_count"], 0)
+
     def test_bad_manifests(self):
         variants = [b"{", b"[]", b"{\"version\":2,\"version\":2}"]
         for key, value in [("module", "../escape.so"), ("version", True),

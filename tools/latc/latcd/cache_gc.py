@@ -82,6 +82,7 @@ class Inventory:
         self.refs = {}
         self.transaction_refs = {}
         self.transactions = {}
+        self.tombstones = {}
         self.frozen = set()
         self.freeze_all = False
         self.count = 0
@@ -118,6 +119,8 @@ class Inventory:
                         self.read_manifest(fd, name, st)
                     if prefix == ".gc/transactions" and not name.startswith(".write-"):
                         self.read_transaction(fd, name, st)
+                    if prefix == ".gc/tombstones" and not name.startswith(".write-"):
+                        self.read_tombstone(fd, name, st)
                     if stat.S_ISDIR(st.st_mode):
                         child = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
                                         os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=fd)
@@ -131,6 +134,47 @@ class Inventory:
                     self.error(relative, "unreadable_or_changed", str(exc))
         if identity(os.fstat(fd)) != identity(before):
             self.error(prefix or ".", "concurrent_change", "directory changed during scan")
+
+    def read_tombstone(self, directory, name, before):
+        relative = ".gc/tombstones/" + name
+        try:
+            match = GENERATED.fullmatch(name)
+            if (not match or not stat.S_ISREG(before.st_mode) or
+                    before.st_uid != os.geteuid() or before.st_nlink != 1 or
+                    before.st_mode & 0o222 or not 0 < before.st_size <= 65536):
+                raise ValueError("unsafe tombstone")
+            fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW |
+                         os.O_NONBLOCK, dir_fd=directory)
+            try:
+                raw = os.read(fd, 65537)
+                if identity(os.fstat(fd)) != identity(before) or len(raw) != before.st_size:
+                    raise ValueError("tombstone changed during read")
+            finally:
+                os.close(fd)
+            parser = configparser.ConfigParser(interpolation=None, strict=True)
+            parser.read_string(raw.decode("ascii"))
+            if parser.sections() != ["tombstone"] or parser.defaults():
+                raise ValueError("invalid tombstone sections")
+            value = dict(parser["tombstone"])
+            required = {"version", "source", "name", "state", "device", "inode",
+                        "size", "allocated", "sha256"}
+            if not required <= value.keys() or value.keys() - required - {"recovery_status"}:
+                raise ValueError("invalid tombstone fields")
+            if (value["version"] != "1" or value["source"] != match[1] or
+                    value["name"] != name or value["state"] != "DELETING" or
+                    not re.fullmatch(SHA, value["sha256"]) or
+                    value.get("recovery_status", "MATCHED") not in
+                    {"MATCHED", "MISSING", "UNKNOWN", "BUSY"}):
+                raise ValueError("invalid tombstone identity/state")
+            for field in ("device", "inode", "size", "allocated"):
+                if not re.fullmatch(r"[0-9]+", value[field]) or int(value[field]) >= 2**64:
+                    raise ValueError("invalid tombstone integer")
+                value[field] = int(value[field])
+            if not value["size"]:
+                raise ValueError("empty tombstone object")
+            self.tombstones[relative] = value
+        except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
+            self.error(relative, "invalid_tombstone", str(exc))
 
     def read_transaction(self, directory, name, before):
         relative = ".gc/transactions/" + name
@@ -295,7 +339,8 @@ class Inventory:
 
     def report(self):
         for relative in self.entries:
-            if relative.startswith(".gc/tombstones/"):
+            if (relative.startswith(".gc/tombstones/") and
+                    not relative.removeprefix(".gc/tombstones/").startswith(".write-")):
                 name = relative.removeprefix(".gc/tombstones/")
                 match = GENERATED.fullmatch(name)
                 if match:
@@ -378,6 +423,7 @@ class Inventory:
                 "liveness_verified": False, "manifest_count": len(self.manifests),
                 "transaction_count": len(self.transactions),
                 "transactions": self.transactions,
+                "tombstone_count": len(self.tombstones), "tombstones": self.tombstones,
                 "totals": {"path_count": len(output), "unique_objects": len(unique),
                            "logical_bytes": sum(r["logical_bytes"] for r in unique),
                            "allocated_bytes": sum(r["allocated_bytes"] for r in unique)},

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "../latcd/cache-retirement.h"
+#include "../aot-v2/runtime/cache-lifecycle.h"
 
 #include <assert.h>
 #include <fcntl.h>
@@ -560,6 +561,135 @@ static void test_tombstone_crash(const char *point, bool crash)
     remove_root(root); g_free(root);
 }
 
+static void assert_tombstone_status(const char *marker, const char *expected)
+{
+    GKeyFile *record = g_key_file_new();
+    assert(g_key_file_load_from_file(record, marker, 0, NULL));
+    char *value = g_key_file_get_string(record, "tombstone", "recovery_status", NULL);
+    assert(!g_strcmp0(value, expected));
+    g_free(value);
+    g_key_file_unref(record);
+}
+
+static void test_tombstone_recovery(int mutation)
+{
+    char *root = root_new(), *name = g_strdup_printf("%s.native", source);
+    char *path = g_build_filename(root, name, NULL), error[256];
+    char *marker = g_build_filename(root, ".gc", "tombstones", name, NULL);
+    put(path, "retired immutable native\n");
+    const char *names[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+    assert(evidence);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    assert(fd >= 0 && !latcd_retirement_tombstone(root, source, name, fd, evidence,
+                                                error, sizeof(error)));
+    close(fd);
+    const char *expected = "MATCHED";
+    char *alias = g_build_filename(root, "alias", NULL);
+    char *current = current_path(root);
+    if (mutation == 1) { assert(!unlink(path)); expected = "MISSING"; }
+    if (mutation == 2) { put(path, "replaced inode\n"); expected = "UNKNOWN"; }
+    if (mutation == 3) {
+        assert(!chmod(path, 0600));
+        fd = open(path, O_WRONLY);
+        assert(fd >= 0 && write(fd, "X", 1) == 1);
+        close(fd); fd = -1;
+        assert(!chmod(path, 0400)); expected = "UNKNOWN";
+    }
+    if (mutation == 4) { assert(!link(path, alias)); expected = "UNKNOWN"; }
+    if (mutation == 5) {
+        assert(!rename(path, alias) && !symlink(alias, path)); expected = "UNKNOWN";
+    }
+    if (mutation == 6) { put(current, "broken current\n"); expected = "UNKNOWN"; }
+    if (mutation == 7) {
+        char *manifest = g_strdup_printf("{\"version\":2,\"module\":\"%s.so\","
+            "\"native\":\"%s\",\"tbset\":\"\",\"source_sha256\":\"%s\","
+            "\"codegen_id\":\"%s\",\"published_sequence\":1}", source, name, source, source);
+        put(current, manifest); g_free(manifest); expected = "UNKNOWN";
+    }
+    if (mutation == 8) {
+        fd = open(path, O_RDONLY | O_CLOEXEC);
+        assert(fd >= 0 && !flock(fd, LOCK_SH)); expected = "BUSY";
+    }
+    if (mutation == 9) {
+        put(marker, "[tombstone]\nversion=1\nversion=1\n");
+        unsigned recovered;
+        assert(latcd_tombstone_recover(root, &recovered, error, sizeof(error)));
+        assert(!access(path, F_OK));
+        goto out;
+    }
+    if (mutation == 10) {
+        fd = lat_aot_v2_cache_source_lock(root, source, LOCK_SH, false, error, sizeof(error));
+        assert(fd >= 0); expected = "BUSY";
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        unsigned recovered;
+        assert(!latcd_tombstone_recover(root, &recovered, error, sizeof(error)) && recovered == 1);
+        assert_tombstone_status(marker, expected);
+        assert((access(path, F_OK) == 0) == (mutation != 1));
+    }
+    if (mutation == 8 || mutation == 10) {
+        close(fd); fd = -1;
+        unsigned recovered;
+        assert(!latcd_tombstone_recover(root, &recovered, error, sizeof(error)));
+        assert_tombstone_status(marker, "MATCHED");
+    }
+    if (mutation == 1) {
+        put(path, "reappeared object\n");
+        unsigned recovered;
+        assert(!latcd_tombstone_recover(root, &recovered, error, sizeof(error)));
+        assert_tombstone_status(marker, "UNKNOWN");
+    }
+    if (mutation == 6 || mutation == 7) {
+        assert(!unlink(current));
+        unsigned recovered;
+        assert(!latcd_tombstone_recover(root, &recovered, error, sizeof(error)));
+        assert_tombstone_status(marker, "UNKNOWN");
+    }
+out:
+    if ((mutation == 8 || mutation == 10) && fd >= 0) close(fd);
+    g_free(current); g_free(alias); g_free(evidence); g_free(marker); g_free(path); g_free(name);
+    remove_root(root); g_free(root);
+}
+
+static void test_tombstone_recovery_crash(const char *point, bool crash, bool missing)
+{
+    char *root = root_new(), *name = g_strdup_printf("%s.native", source);
+    char *path = g_build_filename(root, name, NULL), error[256];
+    char *marker = g_build_filename(root, ".gc", "tombstones", name, NULL);
+    put(path, "immutable recovery baseline\n");
+    const char *names[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+    assert(evidence);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(fd >= 0 && !latcd_retirement_tombstone(root, source, name, fd, evidence,
+                                                error, sizeof(error)));
+    close(fd);
+    if (missing) assert(!unlink(path));
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        char *setting = g_strdup_printf("%s:%s", crash ? "crash" : "error", point);
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", setting, 1));
+        unsigned recovered;
+        int result = latcd_tombstone_recover(root, &recovered, error, sizeof(error));
+        assert(!crash && result < 0);
+        _exit(0);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child);
+    if (crash) assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    else assert(WIFEXITED(status) && !WEXITSTATUS(status));
+    for (int pass = 0; pass < 2; pass++) {
+        unsigned recovered;
+        assert(!latcd_tombstone_recover(root, &recovered, error, sizeof(error)) && recovered == 1);
+        assert_tombstone_status(marker, missing ? "MISSING" : "MATCHED");
+        assert((!access(path, F_OK)) == !missing);
+    }
+    g_free(marker); g_free(evidence); g_free(path); g_free(name);
+    remove_root(root); g_free(root);
+}
+
 int main(void)
 {
     for (int phase = 0; phase < 3; phase++) {
@@ -572,6 +702,7 @@ int main(void)
     test_legacy_and_schema();
     test_manifest_binding();
     test_tombstone();
+    for (int mutation = 0; mutation < 11; mutation++) test_tombstone_recovery(mutation);
     const char *points[] = {"created", "partial-write", "written", "chmod",
         "file-synced", "closed", "renamed", "directory-synced"};
     for (size_t i = 0; i < G_N_ELEMENTS(points); i++)
@@ -582,6 +713,10 @@ int main(void)
     for (size_t i = 0; i < G_N_ELEMENTS(points); i++)
         for (int crash = 0; crash < 2; crash++)
             test_tombstone_crash(points[i], crash);
+    for (size_t i = 0; i < G_N_ELEMENTS(points); i++)
+        for (int crash = 0; crash < 2; crash++)
+            for (int missing = 0; missing < 2; missing++)
+                test_tombstone_recovery_crash(points[i], crash, missing);
     puts("test-cache-retirement: PASS");
     return 0;
 }

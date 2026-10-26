@@ -918,6 +918,13 @@ objects. The intent writer records immutable identity but is not exposed as a GC
 command: controlled-domain admission, complete reference checks and deletion
 recovery are still required before any unlink can be enabled. The planner freezes
 unrecovered intent. These protections do not authorize cleaning historical caches.
+
+Daemon startup reconciles each well-formed tombstone as MATCHED, MISSING, BUSY or
+UNKNOWN. Hashing happens outside the source latch, followed by nonblocking source
+and inode revalidation. UNKNOWN is sticky; an object reappearing after MISSING
+also becomes UNKNOWN. MISSING is persisted only after syncing the root directory
+and is an absence observation, not proof of released disk space. Recovery never
+unlinks objects or removes tombstones. Malformed records reject startup intact.
 Controlled-domain admission, object-identity tombstones, partial-delete recovery,
 automatic expiry scheduling, and capacity reclamation remain disabled/pending.
 

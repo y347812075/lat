@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "cache-retirement.h"
+#include "../aot-v2/runtime/cache-lifecycle.h"
 #include "parson/parson.h"
 
 #include <dirent.h>
@@ -805,4 +806,168 @@ int latcd_retirement_recover(const char *root, unsigned *recovered,
     if (directory) closedir(directory);
     close(root_fd);
     return result ? fail(error, error_size, "retirement recovery rejected unknown record") : 0;
+}
+
+static bool tombstone_shape(GKeyFile *record, const char *name,
+                             char **source, uint64_t values[4], char **hash)
+{
+    const char *required[] = {"version", "source", "name", "state", "device",
+        "inode", "size", "allocated", "sha256"};
+    const char *optional[] = {"recovery_status"};
+    gsize count;
+    char **groups = g_key_file_get_groups(record, &count);
+    bool valid = count == 1 && !strcmp(groups[0], "tombstone");
+    g_strfreev(groups);
+    char **keys = g_key_file_get_keys(record, "tombstone", &count, NULL);
+    GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
+    for (gsize i = 0; valid && i < count; i++) {
+        bool known = false;
+        for (size_t j = 0; j < G_N_ELEMENTS(required); j++) known |= !strcmp(keys[i], required[j]);
+        for (size_t j = 0; j < G_N_ELEMENTS(optional); j++) known |= !strcmp(keys[i], optional[j]);
+        valid = known && g_hash_table_add(seen, keys[i]);
+    }
+    for (size_t i = 0; valid && i < G_N_ELEMENTS(required); i++)
+        valid = g_hash_table_contains(seen, required[i]);
+    g_hash_table_unref(seen);
+    g_strfreev(keys);
+    char *version = g_key_file_get_string(record, "tombstone", "version", NULL);
+    char *stored_name = g_key_file_get_string(record, "tombstone", "name", NULL);
+    char *state = g_key_file_get_string(record, "tombstone", "state", NULL);
+    char *observation = g_key_file_get_string(record, "tombstone", "recovery_status", NULL);
+    *source = g_key_file_get_string(record, "tombstone", "source", NULL);
+    *hash = g_key_file_get_string(record, "tombstone", "sha256", NULL);
+    valid = valid && !g_strcmp0(version, "1") && source_valid(*source) &&
+        object_name_valid(*source, name) && !g_strcmp0(name, stored_name) &&
+        !g_strcmp0(state, "DELETING") && digest_valid(*hash) &&
+        (!observation || !strcmp(observation, "MATCHED") || !strcmp(observation, "MISSING") ||
+         !strcmp(observation, "UNKNOWN") || !strcmp(observation, "BUSY"));
+    const char *fields[] = {"device", "inode", "size", "allocated"};
+    for (size_t i = 0; valid && i < G_N_ELEMENTS(fields); i++) {
+        char *text = g_key_file_get_string(record, "tombstone", fields[i], NULL);
+        char *end = NULL;
+        errno = 0;
+        values[i] = text ? g_ascii_strtoull(text, &end, 10) : 0;
+        valid = text && *text && strspn(text, "0123456789") == strlen(text) &&
+            end && !*end && !errno && (i != 2 || values[i]);
+        g_free(text);
+    }
+    g_free(version); g_free(stored_name); g_free(state); g_free(observation);
+    return valid;
+}
+
+static int recover_tombstone(const char *root_path, int root, int store,
+                              const char *name)
+{
+    char *raw = NULL, *source = NULL, *hash = NULL;
+    size_t size;
+    uint64_t values[4] = {0};
+    GKeyFile *record = g_key_file_new();
+    int result = -1, object = -1, latch = -1;
+    if (read_file(store, name, RECORD_LIMIT, &raw, &size) || memchr(raw, 0, size) ||
+        !g_key_file_load_from_data(record, raw, size, 0, NULL) ||
+        !tombstone_shape(record, name, &source, values, &hash)) goto out;
+    char *prior = g_key_file_get_string(record, "tombstone", "recovery_status", NULL);
+    bool unknown = !g_strcmp0(prior, "UNKNOWN");
+    bool was_missing = !g_strcmp0(prior, "MISSING");
+    const char *observation = unknown ? "UNKNOWN" : "MATCHED";
+    bool missing = false;
+    struct stat before = {0}, after, path;
+    /* Hash outside S. Release this pin before S acquisition; final metadata
+     * equality under S+G detects replacement/mutation during the handoff. */
+    if (!unknown) {
+        object = openat(root, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (object < 0) {
+            missing = errno == ENOENT;
+            observation = missing ? "MISSING" : "UNKNOWN";
+        } else if (was_missing) {
+            observation = "UNKNOWN";
+        } else if (flock(object, LOCK_SH | LOCK_NB)) {
+            observation = errno == EWOULDBLOCK ? "BUSY" : "UNKNOWN";
+        } else {
+            const char *names[] = {name};
+            char *actual = !fstat(object, &before) ? capture_objects(root, source, names, 1) : NULL;
+            GKeyFile *captured = g_key_file_new();
+            char *actual_hash = NULL;
+            if (actual && g_key_file_load_from_data(captured, actual, -1, 0, NULL))
+                actual_hash = g_key_file_get_string(captured, "object0", "sha256", NULL);
+            if (g_strcmp0(actual_hash, hash) ||
+                (uint64_t)before.st_dev != values[0] || (uint64_t)before.st_ino != values[1] ||
+                (uint64_t)before.st_size != values[2] || (uint64_t)before.st_blocks * 512 != values[3] ||
+                fstat(object, &after) || !object_stat_equal(&before, &after) ||
+                fstatat(root, name, &path, AT_SYMLINK_NOFOLLOW) || !object_stat_equal(&before, &path))
+                observation = "UNKNOWN";
+            g_free(actual_hash); g_free(actual); g_key_file_unref(captured);
+        }
+        if (object >= 0) { close(object); object = -1; }
+    }
+    latch = lat_aot_v2_cache_source_lock(root_path, source, LOCK_EX | LOCK_NB,
+                                         false, NULL, 0);
+    if (latch < 0) {
+        observation = !strcmp(observation, "UNKNOWN") || errno != EWOULDBLOCK ? "UNKNOWN" : "BUSY";
+    } else {
+        char *current = g_strdup_printf("%s.current", source), *manifest = NULL;
+        size_t manifest_size = 0;
+        int status = read_file(root, current, MANIFEST_LIMIT, &manifest, &manifest_size);
+        if (status < 0) observation = "UNKNOWN";
+        if (!status) {
+            GHashTable *references = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+            if (!manifest_references(source, manifest, manifest_size, references) ||
+                g_hash_table_contains(references, name)) observation = "UNKNOWN";
+            g_hash_table_unref(references);
+        }
+        g_free(current); g_free(manifest);
+        if (!strcmp(observation, "MATCHED")) {
+            object = openat(root, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+            if (object < 0) observation = "UNKNOWN";
+            else if (flock(object, LOCK_EX | LOCK_NB))
+                observation = errno == EWOULDBLOCK ? "BUSY" : "UNKNOWN";
+            else if (fstat(object, &after) || !object_stat_equal(&before, &after) ||
+                fstatat(root, name, &path, AT_SYMLINK_NOFOLLOW) || !object_stat_equal(&before, &path))
+                observation = "UNKNOWN";
+        } else if (!strcmp(observation, "MISSING")) {
+            if (!fstatat(root, name, &path, AT_SYMLINK_NOFOLLOW) || errno != ENOENT || fsync(root))
+                observation = "UNKNOWN";
+        }
+    }
+    g_key_file_set_string(record, "tombstone", "recovery_status", observation);
+    result = !g_strcmp0(prior, observation) ? 0 : write_record(store, name, record);
+    g_free(prior);
+out:
+    if (object >= 0) close(object);
+    if (latch >= 0) close(latch);
+    g_free(raw); g_free(source); g_free(hash);
+    g_key_file_unref(record);
+    return result;
+}
+
+int latcd_tombstone_recover(const char *root, unsigned *recovered,
+                            char *error, size_t error_size)
+{
+    *recovered = 0;
+    int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int gc = root_fd < 0 ? -1 : open_directory(root_fd, ".gc", false);
+    int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
+    int saved = errno;
+    if (gc >= 0) close(gc);
+    if (store < 0) {
+        if (root_fd >= 0) close(root_fd);
+        return saved == ENOENT ? 0 : fail(error, error_size, "unsafe tombstone store");
+    }
+    DIR *directory = fdopendir(store);
+    int result = directory ? 0 : -1;
+    if (!directory) close(store);
+    unsigned visited = 0;
+    while (!result) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) { if (errno) result = -1; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (++visited > 100000) { result = -1; break; }
+        if (g_str_has_prefix(entry->d_name, ".write-")) continue;
+        if (recover_tombstone(root, root_fd, store, entry->d_name)) { result = -1; break; }
+        (*recovered)++;
+    }
+    if (directory) closedir(directory);
+    close(root_fd);
+    return result ? fail(error, error_size, "tombstone recovery rejected unknown record") : 0;
 }

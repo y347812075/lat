@@ -4791,6 +4791,13 @@ int main(int argc, char **argv)
         close(cache_owner);
         return 1;
     }
+    unsigned recovered_tombstones;
+    if (latcd_tombstone_recover(config.cache_dir, &recovered_tombstones,
+                                error, sizeof(error))) {
+        fprintf(stderr, "latcd: %s\n", error);
+        close(cache_owner);
+        return 1;
+    }
     int result = serve ? run_service(&config) : run_once(&config);
     close(cache_owner);
     return result;

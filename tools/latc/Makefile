@@ -115,9 +115,11 @@ $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
 		$(BUILD)/latcd/cache-retirement.o $(BUILD)/latcd/parson/parson.o
 
 $(BUILD)/tests/test-cache-retirement: tests/test-cache-retirement.c \
-		$(BUILD)/latcd/cache-retirement.o $(BUILD)/latcd/parson/parson.o
+		$(BUILD)/latcd/cache-retirement.o $(BUILD)/latcd/parson/parson.o \
+		$(BUILD)/aot-v2/runtime/cache-lifecycle.o \
+		$(BUILD)/aot-v2/runtime/internal-fd-registry.o
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 
 .PHONY: test-cache-retirement
 test-cache-retirement: $(BUILD)/tests/test-cache-retirement
