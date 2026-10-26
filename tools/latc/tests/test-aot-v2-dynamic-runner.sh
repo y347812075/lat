@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 022
 
 if [ "$#" -ne 7 ]; then
     echo "usage: $0 LATC RUNNER RUNTIME_DIR ROOTFS X86_GUEST WORKDIR TIMEOUT" >&2

@@ -285,7 +285,7 @@ print(json.load(open(sys.argv[1]))["module"])
 PY
 )
 test "$cache/$module_name" != "$stale_module"
-test ! -e "$stale_module"
+test -e "$stale_module" # retained until the lifecycle GC contract is active
 "$latc" inspect-module --json "$cache/$module_name" | \
   grep -q "\"codegen_id\":\"$codegen\""
 

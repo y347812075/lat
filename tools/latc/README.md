@@ -859,9 +859,11 @@ the complete `.tbset` and manifest; it does not invoke translation or linking,
 and the `.so` and `.native` remain unchanged. It does not keep a list of
 incremental modules. The three
 immutable generation files are synchronized before an atomic manifest rename;
-only after that commit does `latcd` remove the superseded generation. A failed
-compile, merge, link, or pre-manifest publication leaves the prior manifest and
-all files it names unchanged. This manifest has no older-format parser.
+the previous generation remains in place until the lifecycle GC contract proves
+that no reader or required baseline can use it. While retirement recovery is not
+enabled, cache-capacity pressure fails the new publication instead of evicting a
+current generation. A failed compile, merge, link, or pre-manifest publication
+leaves the prior manifest and all files it names unchanged.
 
 Inspect a cache domain without opening the daemon, taking its owner lock, or
 authorizing cleanup:
@@ -878,6 +880,14 @@ total. Every row keeps `delete_authorized=false`; an incomplete or concurrently
 changing inventory exits nonzero while still emitting the report. Directory
 modes, hardlink aliases, lifecycle pins, and mount references still have to be
 admitted by the later reclamation batches.
+
+Managed loads take a shared latch from `.gc/source-locks/<source-sha256>.lock`
+before reading the manifest and retain a shared lease on the selected module
+until process exit. Publication takes the matching exclusive latch only for the
+current-index commit. Native and tbset readers use the same shared file-lease
+primitive while copying. Runtime-owned source and module fds are hidden from
+guest `close`, `dup`, `fcntl`, and SCM_RIGHTS mutations; fork preserves the open
+file descriptions and CLOEXEC releases them on a successful exec.
 
 On LoongArch, validate a copied LAT runner and real x86 guest with:
 

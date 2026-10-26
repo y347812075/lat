@@ -19,6 +19,7 @@ run_timeout=${10}
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 rm -rf "$work"
 mkdir -p "$work/empty-cache" "$work/hot-cache"
+chmod 700 "$work/empty-cache" "$work/hot-cache"
 
 interp=$(readlink -f "$rootfs/lib64/ld-linux-x86-64.so.2")
 libc=$(readlink -f "$rootfs/lib/x86_64-linux-gnu/libc.so.6")

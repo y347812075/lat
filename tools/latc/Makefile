@@ -100,6 +100,8 @@ $(BUILD)/latcd/latcd: $(BUILD)/latcd/main.o $(BUILD)/latcd/protocol.o \
 		$(BUILD)/latcd/journal-store.o $(BUILD)/aot-v2/common/key-journal.o \
 		$(BUILD)/aot-v2/common/translation-config.o \
 		$(BUILD)/aot-v2/common/tb-key-set.o \
+		$(BUILD)/aot-v2/runtime/cache-lifecycle.o \
+		$(BUILD)/aot-v2/runtime/internal-fd-registry.o \
 		$(BUILD)/aot-v2/compiler/module-inspect.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread -ldl
@@ -115,6 +117,10 @@ $(BUILD)/tests/cfg-fixture: tests/cfg-fixture.S
 $(BUILD)/tests/x86-exit42: tests/x86-exit42.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-cache-fd-close-sleep: tests/x86-cache-fd-close-sleep.S
+	@mkdir -p $(dir $@)
+	$(X86_CC) -nostdlib -static -Wl,--build-id=none -o $@ $<
 
 $(BUILD)/tests/x86-bounded-pic: tests/x86-bounded-pic.S
 	@mkdir -p $(dir $@)
@@ -422,6 +428,7 @@ $(BUILD)/tests/test-native-migration-v12 \
 	$(BUILD)/tests/test-tb-key-set
 	$(BUILD)/tests/test-key-journal
 	$(BUILD)/tests/test-guest-fd-table
+	$(BUILD)/tests/test-cache-lifecycle
 	$(BUILD)/tests/test-journal-store
 	$(BUILD)/tests/test-latcd-coverage
 	$(BUILD)/tests/test-latcd-channel
@@ -563,6 +570,15 @@ test: $(BUILD)/tests/test-tb-key-set
 test: $(BUILD)/tests/test-key-journal
 test: $(BUILD)/tests/test-journal-store
 test: $(BUILD)/tests/test-guest-fd-table
+test: $(BUILD)/tests/test-cache-lifecycle
+
+$(BUILD)/tests/test-cache-lifecycle: tests/test-cache-lifecycle.c \
+		aot-v2/runtime/cache-lifecycle.c aot-v2/runtime/cache-lifecycle.h \
+		aot-v2/runtime/internal-fd-registry.c \
+		aot-v2/runtime/internal-fd-registry.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test-cache-lifecycle.c \
+	  aot-v2/runtime/cache-lifecycle.c aot-v2/runtime/internal-fd-registry.c -pthread
 
 $(BUILD)/tests/test-guest-fd-table: tests/test-guest-fd-table.c \
 		aot-v2/common/guest-fd-table.c aot-v2/include/guest-fd-table.h
@@ -576,7 +592,9 @@ $(BUILD)/tests/test-journal-store: aot-v2/tests/test-journal-store.c latcd/main.
 		$(BUILD)/latcd/journal-store.o $(BUILD)/aot-v2/common/key-journal.o \
 		$(BUILD)/aot-v2/common/translation-config.o $(BUILD)/latcd/protocol.o \
 		$(BUILD)/latcd/precompile.o $(BUILD)/aot-v2/compiler/module-inspect.o \
-		$(BUILD)/aot-v2/runtime/elf-validate.o $(BUILD)/aot-v2/common/tb-key-set.o
+		$(BUILD)/aot-v2/runtime/elf-validate.o $(BUILD)/aot-v2/common/tb-key-set.o \
+		$(BUILD)/aot-v2/runtime/cache-lifecycle.o \
+		$(BUILD)/aot-v2/runtime/internal-fd-registry.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ aot-v2/tests/test-journal-store.c \
 	  $(filter %.o,$^) $(LDLIBS) -pthread -ldl
@@ -599,7 +617,9 @@ $(BUILD)/tests/test-latcd-channel: aot-v2/tests/test-latcd-channel.c \
 		aot-v2/runtime/latcd-client.c $(BUILD)/latcd/protocol.o \
 		$(BUILD)/latcd/precompile.o $(BUILD)/aot-v2/compiler/module-inspect.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o \
-		$(BUILD)/aot-v2/common/tb-key-set.o
+		$(BUILD)/aot-v2/common/tb-key-set.o \
+		$(BUILD)/aot-v2/runtime/cache-lifecycle.o \
+		$(BUILD)/aot-v2/runtime/internal-fd-registry.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
 	  aot-v2/tests/test-latcd-channel.c aot-v2/runtime/latcd-client.c \
@@ -668,7 +688,9 @@ $(BUILD)/tests/test-latcd-coverage: aot-v2/tests/test-latcd-coverage.c \
 		aot-v2/tests/elf-fixture.c $(BUILD)/latcd/protocol.o \
 		$(BUILD)/latcd/precompile.o $(BUILD)/aot-v2/compiler/module-inspect.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o \
-		$(BUILD)/aot-v2/common/tb-key-set.o
+		$(BUILD)/aot-v2/common/tb-key-set.o \
+		$(BUILD)/aot-v2/runtime/cache-lifecycle.o \
+		$(BUILD)/aot-v2/runtime/internal-fd-registry.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iaot-v2/tests -o $@ \
 	  aot-v2/tests/test-latcd-coverage.c aot-v2/tests/elf-fixture.c \
@@ -831,6 +853,8 @@ $(BUILD)/aot-v2/fixture-stack-delta.so: aot-v2/tests/fixture.c \
 
 $(BUILD)/tests/test-aot-v2-loader: aot-v2/tests/test-loader.c \
 		$(BUILD)/aot-v2/runtime/module-loader.o \
+		$(BUILD)/aot-v2/runtime/cache-lifecycle.o \
+		$(BUILD)/aot-v2/runtime/internal-fd-registry.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o \
 		$(BUILD)/aot-v2/runtime/registry.o \
 		$(BUILD)/aot-v2/liblat-aot-runtime.so.2
@@ -838,6 +862,8 @@ $(BUILD)/tests/test-aot-v2-loader: aot-v2/tests/test-loader.c \
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
 	  aot-v2/tests/test-loader.c \
 	  $(BUILD)/aot-v2/runtime/module-loader.o \
+	  $(BUILD)/aot-v2/runtime/cache-lifecycle.o \
+	  $(BUILD)/aot-v2/runtime/internal-fd-registry.o \
 	  $(BUILD)/aot-v2/runtime/elf-validate.o \
 	  $(BUILD)/aot-v2/runtime/registry.o \
 	  -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
@@ -846,6 +872,8 @@ $(BUILD)/tests/test-aot-v2-loader: aot-v2/tests/test-loader.c \
 $(BUILD)/tests/test-aot-v2-translated-module: \
 		aot-v2/tests/test-translated-module.c \
 		$(BUILD)/aot-v2/runtime/module-loader.o \
+		$(BUILD)/aot-v2/runtime/cache-lifecycle.o \
+		$(BUILD)/aot-v2/runtime/internal-fd-registry.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o \
 		$(BUILD)/aot-v2/runtime/registry.o \
 		$(BUILD)/aot-v2/compiler/module-pack.o \
@@ -857,6 +885,8 @@ $(BUILD)/tests/test-aot-v2-translated-module: \
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
 	  aot-v2/tests/test-translated-module.c \
 	  $(BUILD)/aot-v2/runtime/module-loader.o \
+	  $(BUILD)/aot-v2/runtime/cache-lifecycle.o \
+	  $(BUILD)/aot-v2/runtime/internal-fd-registry.o \
 	  $(BUILD)/aot-v2/runtime/elf-validate.o \
 	  $(BUILD)/aot-v2/runtime/registry.o \
 	  $(BUILD)/aot-v2/compiler/module-pack.o \

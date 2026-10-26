@@ -1,9 +1,17 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "module-loader.h"
 
+#include "internal-fd-registry.h"
+#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/file.h>
+#include <unistd.h>
 
 static void fill(unsigned char value, unsigned char output[32])
 {
@@ -53,12 +61,25 @@ int main(int argc, char **argv)
     }
     if (open_result) {
         fprintf(stderr, "cannot load fixture: %s\n", error);
+    if (!lat_aot_v2_internal_fd_is_protected(module.backing_fd)) {
+        fprintf(stderr, "loaded module fd is not guest-close protected\n");
+        return 1;
+    }
         return 1;
     }
     if (module.backing_fd < 0 || fcntl(module.backing_fd, F_GETFD) < 0) {
         fprintf(stderr, "validated module backing fd was not retained\n");
         return 1;
     }
+    int contender = open(module_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (contender < 0 || !flock(contender, LOCK_EX | LOCK_NB) ||
+        errno != EWOULDBLOCK) {
+        fprintf(stderr, "loaded module does not retain a shared GC lease\n");
+        if (contender >= 0) close(contender);
+        return 1;
+    }
+    close(contender);
+
 
     LatAotRegistryV2 registry;
     if (lat_aot_v2_registry_init(&registry)) {

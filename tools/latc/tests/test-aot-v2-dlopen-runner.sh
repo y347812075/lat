@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 022
 
 if [ "$#" -ne 8 ]; then
     echo "usage: $0 LATC RUNNER RUNTIME_DIR ROOTFS MAIN PLUGIN WORKDIR TIMEOUT" >&2

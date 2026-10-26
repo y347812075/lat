@@ -42,6 +42,12 @@ static void replace_during_read(int fd)
 {
     struct stat status;
     g_assert_cmpint(pthread_mutex_trylock(&cache_lock), ==, 0);
+    int contender = open(hook_read_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    g_assert_cmpint(contender, >=, 0);
+    errno = 0;
+    g_assert_cmpint(flock(contender, LOCK_EX | LOCK_NB), ==, -1);
+    g_assert_cmpint(errno, ==, EWOULDBLOCK);
+    close(contender);
     g_assert_cmpint(fstat(fd, &status), ==, 0);
     g_assert_cmpuint(status.st_nlink, ==, 1);
     if (hook_mutate) {
@@ -160,10 +166,15 @@ static void publish_during_digest(int fd)
     (void)fd;
     char error[256];
     g_assert_cmpint(pthread_mutex_trylock(&cache_lock), ==, 0);
+    int contender = open(hook_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    g_assert_cmpint(contender, >=, 0);
+    errno = 0;
+    g_assert_cmpint(flock(contender, LOCK_EX | LOCK_NB), ==, -1);
+    g_assert_cmpint(errno, ==, EWOULDBLOCK);
+    close(contender);
     g_assert_cmpint(publish_current_index(cleanup_config, cleanup_hex,
         cleanup_names[0], cleanup_names[1], cleanup_names[2], cleanup_info,
         5, true, error, sizeof(error)), ==, 0);
-    g_assert_nonnull(publication_pins); /* Outer pin outlives nested commit. */
     pthread_mutex_unlock(&cache_lock);
 }
 
@@ -194,7 +205,7 @@ static void cleanup_during_digest(int fd)
     pressure.max_cache_bytes--;
     g_assert_cmpint(cache_make_room(&pressure, 0, "", true,
         error, sizeof(error)), ==, -1);
-    g_assert_nonnull(strstr(error, "non-evictable"));
+    g_assert_nonnull(strstr(error, "safe retirement GC"));
     LatcdCurrentManifest selected = {0};
     g_assert_cmpint(current_manifest_read(cleanup_config, cleanup_hex,
         &selected), ==, 0);
@@ -263,7 +274,6 @@ static void test_publication_cleanup(void)
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[3],
         names[4], names[5], &info, 3, true, error, sizeof(error)), ==, 0);
     g_assert_null(read_hook);
-    g_assert_null(publication_pins);
     /* A path pin constrains internal cleanup, not external replacement. */
     char *new_tbset = g_build_filename(directory, names[5], NULL);
     hook_path = new_tbset;
@@ -273,14 +283,12 @@ static void test_publication_cleanup(void)
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[3],
         names[4], names[5], &info, 4, true, error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "changed during digest"));
-    g_assert_null(publication_pins);
     g_assert_cmpint(g_chmod(new_tbset, 0444), ==, 0);
     cleanup_info = &info;
     read_hook = publish_during_digest;
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[3],
         names[4], names[5], &info, 4, true, error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "changed during digest"));
-    g_assert_null(publication_pins);
     LatcdCurrentManifest latest = {0};
     g_assert_cmpint(current_manifest_read(&config, cleanup_hex, &latest), ==, 0);
     g_assert_cmpuint(latest.published_sequence, ==, 5);
@@ -290,7 +298,6 @@ static void test_publication_cleanup(void)
     g_assert_cmpint(g_unlink(new_tbset), ==, 0);
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[3],
         names[4], names[5], &info, 6, true, error, sizeof(error)), ==, -1);
-    g_assert_null(publication_pins);
     pthread_mutex_unlock(&cache_lock);
     cleanup_config = NULL;
     hook_read_path = NULL;

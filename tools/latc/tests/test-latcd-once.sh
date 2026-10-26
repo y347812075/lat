@@ -175,6 +175,37 @@ stats = json.load(open(sys.argv[1]))
 assert stats["runtime_file_tb_gen_attempts"] == 0, stats
 PY
 
+latch_ready=$work/source-latch.ready
+latch_release=$work/source-latch.release
+source_latch=$cache/.gc/source-locks/$source_sha.lock
+rm -f "$latch_ready" "$latch_release"
+LD_LIBRARY_PATH="$runtime_dir" \
+LATX_AOT_V2_CACHE_DIR="$cache" \
+LATX_AOT_V2_AUTOSTART=0 \
+LATX_AOT_V2_STRICT=1 \
+LATX_AOT_V2_TEST_SOURCE_LATCH_READY="$latch_ready" \
+LATX_AOT_V2_TEST_SOURCE_LATCH_RELEASE="$latch_release" \
+LATC_DISABLE_PRETRANSLATE=1 \
+LATC_STRICT_AOT=1 \
+  timeout 60 "$runner" "$guest" >"$work/latch.stdout" \
+  2>"$work/latch.stderr" &
+latch_pid=$!
+n=0
+while [ ! -e "$latch_ready" ] && kill -0 "$latch_pid" 2>/dev/null; do
+  n=$((n + 1))
+  test "$n" -lt 3000
+  sleep 0.01
+done
+test -e "$latch_ready"
+if flock -n "$source_latch" -c true; then
+  echo "runner did not hold the source latch after manifest read" >&2
+  kill -TERM "$latch_pid" 2>/dev/null || true
+  exit 1
+fi
+touch "$latch_release"
+wait "$latch_pid"
+flock -n "$source_latch" -c true
+
 start_once "$work/hit.sock" "$cache" "$script_dir/fake-latc-fail.sh"
 submit_once "$work/hit.sock" "$guest" "$guest_tbset" "$work/hit.client"
 wait "$server_pid"
@@ -231,18 +262,20 @@ PY
 )
 start_once "$work/eviction.sock" "$eviction_cache" "$latc" \
   --max-cache-bytes "$cache_limit"
+set +e
 timeout 60 "$latcd" --submit --socket "$work/eviction.sock" \
   --tbset "$eviction_tbset" "$work/eviction-input.elf" >"$work/eviction.client"
-wait "$server_pid"
-eviction_module=$(python3 - "$eviction_cache/$eviction_sha.current" <<'PY'
-import json
-import sys
-print(json.load(open(sys.argv[1]))["module"])
-PY
-)
-test -f "$eviction_cache/$eviction_module"
-test ! -e "$eviction_cache/$module_name"
-test ! -e "$eviction_cache/$source_sha.current"
+submit_status=$?
+set -e
+test "$submit_status" -ne 0
+if wait "$server_pid"; then
+  echo "latcd evicted a cache entry without lifecycle GC" >&2
+  exit 1
+fi
+grep -q 'cache capacity requires safe retirement GC' "$work/eviction.client"
+test -f "$eviction_cache/$module_name"
+test -f "$eviction_cache/$source_sha.current"
+test ! -e "$eviction_cache/$eviction_sha.current"
 
 versioned_cache=$work/versioned-eviction-cache
 mkdir -m 700 "$versioned_cache"
@@ -267,18 +300,20 @@ chmod 0444 "$versioned_cache/$source_sha.current"
 touch -t 200001010000 "$versioned_cache/$old_name"
 start_once "$work/versioned-eviction.sock" "$versioned_cache" "$latc" \
   --max-cache-bytes "$cache_limit"
+set +e
 timeout 60 "$latcd" --submit --socket "$work/versioned-eviction.sock" \
   --tbset "$eviction_tbset" "$work/eviction-input.elf" \
   >"$work/versioned-eviction.client"
-wait "$server_pid"
-eviction_module=$(python3 - "$versioned_cache/$eviction_sha.current" <<'PY'
-import json
-import sys
-print(json.load(open(sys.argv[1]))["module"])
-PY
-)
-test -f "$versioned_cache/$eviction_module"
-test ! -e "$versioned_cache/$old_name"
-test ! -e "$versioned_cache/$source_sha.current"
+submit_status=$?
+set -e
+test "$submit_status" -ne 0
+if wait "$server_pid"; then
+  echo "latcd evicted a versioned entry without lifecycle GC" >&2
+  exit 1
+fi
+grep -q 'cache capacity requires safe retirement GC' \
+  "$work/versioned-eviction.client"
+test -f "$versioned_cache/$source_sha.current"
+test -f "$versioned_cache/$old_name"
 
 echo "test-latcd-once: PASS source=$source_sha"

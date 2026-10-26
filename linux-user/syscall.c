@@ -15437,6 +15437,12 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #ifdef CONFIG_LATX
         latx_syscall_fd_begin();
 #endif
+        if (latc_aot_v2_fd_is_protected(arg1)) {
+#ifdef CONFIG_LATX
+            latx_syscall_fd_end();
+#endif
+            return -TARGET_EACCES;
+        }
 #ifdef TARGET_I386
         ret = guest_exe_identity_relocate(cpu_env, arg1);
         if (ret) {
@@ -18538,6 +18544,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return do_ppoll(arg1, arg2, arg3, arg4, arg5, true, true);
 #endif
     case TARGET_NR_flock:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
         /* NOTE: the flock constant seems to be the same for every
            Linux platform */
         return get_errno(safe_flock(arg1, arg2));

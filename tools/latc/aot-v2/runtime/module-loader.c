@@ -4,9 +4,11 @@
 
 #include "module-loader.h"
 
+#include "cache-lifecycle.h"
 #include "elf-validate.h"
 
 #include <dlfcn.h>
+#include "internal-fd-registry.h"
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -16,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 static int fail(char *error, size_t error_size, const char *format, ...)
@@ -181,21 +184,40 @@ int lat_aot_v2_module_open(const char *path,
     }
     memset(module, 0, sizeof(*module));
     module->backing_fd = -1;
+    lat_aot_v2_internal_fd_lock();
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
+        int saved = errno;
+        lat_aot_v2_internal_fd_unlock();
+        errno = saved;
         return fail(error, error_size, "cannot open AOT module: %s",
                     strerror(errno));
+    }
+    if (lat_aot_v2_cache_lock_fd(fd, LOCK_SH | LOCK_NB,
+                                 error, error_size) ||
+        lat_aot_v2_internal_fd_register_locked(fd)) {
+        int saved = errno;
+        close(fd);
+        lat_aot_v2_internal_fd_unlock();
+        errno = saved;
+        if (saved == ENOMEM) {
+            return fail(error, error_size,
+                        "cannot protect AOT module fd: out of memory");
+        }
+        return -1;
     }
     LatAotNoteV2 note;
     if (lat_aot_v2_elf_validate_fd(fd, expected, &note,
                                    error, error_size)) {
-        close(fd);
+        lat_aot_v2_internal_fd_unregister_close_locked(fd);
+        lat_aot_v2_internal_fd_unlock();
         return -1;
     }
     char fd_path[64];
     int length = snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
     if (length < 0 || (size_t)length >= sizeof(fd_path)) {
-        close(fd);
+        lat_aot_v2_internal_fd_unregister_close_locked(fd);
+        lat_aot_v2_internal_fd_unlock();
         errno = ENAMETOOLONG;
         return fail(error, error_size, "AOT module fd path is too long");
     }
@@ -203,7 +225,8 @@ int lat_aot_v2_module_open(const char *path,
     void *handle = dlopen(fd_path, RTLD_NOW | RTLD_LOCAL);
     const char *dl_error = dlerror();
     if (!handle) {
-        close(fd);
+        lat_aot_v2_internal_fd_unregister_close_locked(fd);
+        lat_aot_v2_internal_fd_unlock();
         return fail(error, error_size, "cannot load AOT module: %s",
                     dl_error ? dl_error : "unknown dlopen failure");
     }
@@ -218,12 +241,14 @@ int lat_aot_v2_module_open(const char *path,
                  dl_error);
         }
         dlclose(handle);
-        close(fd);
+        lat_aot_v2_internal_fd_unregister_close_locked(fd);
+        lat_aot_v2_internal_fd_unlock();
         return -1;
     }
     module->dl_handle = handle;
     module->backing_fd = fd;
     module->descriptor = descriptor;
     module->note = note;
+    lat_aot_v2_internal_fd_unlock();
     return 0;
 }

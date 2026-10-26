@@ -1,0 +1,113 @@
+#include "internal-fd-registry.h"
+
+#include <errno.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+static pthread_mutex_t registry_lock = PTHREAD_MUTEX_INITIALIZER;
+static int *protected_fds;
+static size_t protected_count;
+static size_t protected_capacity;
+static pthread_once_t atfork_once = PTHREAD_ONCE_INIT;
+
+static void registry_atfork_prepare(void)
+{
+    pthread_mutex_lock(&registry_lock);
+}
+
+static void registry_atfork_release(void)
+{
+    pthread_mutex_unlock(&registry_lock);
+}
+
+static void register_atfork_handlers(void)
+{
+    (void)pthread_atfork(registry_atfork_prepare, registry_atfork_release,
+                         registry_atfork_release);
+}
+
+__attribute__((constructor))
+static void initialize_internal_fd_registry(void)
+{
+    (void)pthread_once(&atfork_once, register_atfork_handlers);
+}
+
+void lat_aot_v2_internal_fd_lock(void)
+{
+    pthread_mutex_lock(&registry_lock);
+}
+
+void lat_aot_v2_internal_fd_unlock(void)
+{
+    pthread_mutex_unlock(&registry_lock);
+}
+
+static size_t fd_lower_bound(int fd)
+{
+    size_t low = 0;
+    size_t high = protected_count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (protected_fds[middle] < fd) low = middle + 1;
+        else high = middle;
+    }
+    return low;
+}
+
+int lat_aot_v2_internal_fd_register_locked(int fd)
+{
+    if (fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t index = fd_lower_bound(fd);
+    if (index < protected_count && protected_fds[index] == fd) return 0;
+    if (protected_count == protected_capacity) {
+        size_t capacity = protected_capacity ? protected_capacity * 2 : 32;
+        if (capacity < protected_capacity ||
+            capacity > SIZE_MAX / sizeof(*protected_fds)) {
+            errno = ENOMEM;
+            return -1;
+        }
+        int *grown = realloc(protected_fds,
+                             capacity * sizeof(*protected_fds));
+        if (!grown) {
+            errno = ENOMEM;
+            return -1;
+        }
+        protected_fds = grown;
+        protected_capacity = capacity;
+    }
+    for (size_t i = protected_count; i > index; i--) {
+        protected_fds[i] = protected_fds[i - 1];
+    }
+    protected_fds[index] = fd;
+    protected_count++;
+    return 0;
+}
+
+int lat_aot_v2_internal_fd_unregister_close_locked(int fd)
+{
+    size_t index = fd_lower_bound(fd);
+    if (index == protected_count || protected_fds[index] != fd) {
+        errno = EBADF;
+        return -1;
+    }
+    for (size_t i = index + 1; i < protected_count; i++) {
+        protected_fds[i - 1] = protected_fds[i];
+    }
+    protected_count--;
+    return close(fd);
+}
+
+bool lat_aot_v2_internal_fd_is_protected(int fd)
+{
+    if (fd < 0) return false;
+    lat_aot_v2_internal_fd_lock();
+    size_t index = fd_lower_bound(fd);
+    bool protected = index < protected_count && protected_fds[index] == fd;
+    lat_aot_v2_internal_fd_unlock();
+    return protected;
+}

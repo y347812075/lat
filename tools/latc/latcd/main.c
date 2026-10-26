@@ -5,6 +5,7 @@
 #include "latcd-protocol.h"
 #include "lat-aot-v2.h"
 #include "lat-tb-key-set.h"
+#include "cache-lifecycle.h"
 #include "latc-build-id.h"
 #include "module-inspect.h"
 #include "precompile.h"
@@ -32,7 +33,6 @@
 #include <sys/stat.h>
 #include <time.h>
 
-static long superseded_grace_seconds(void);
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -211,30 +211,6 @@ typedef struct LatcdPrecompileRequest {
 static volatile sig_atomic_t stop_requested;
 static volatile sig_atomic_t compiler_process_groups[LATCD_MAX_WORKERS];
 static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
-
-/* Stack-owned entries exist only while a publisher drops cache_lock. */
-typedef struct LatcdPublicationPin {
-    const char *cache_dir;
-    const char *names[6];
-    struct LatcdPublicationPin *next;
-} LatcdPublicationPin;
-static LatcdPublicationPin *publication_pins;
-
-static bool cache_publication_pinned(const LatcdConfig *config,
-                                      const char *name, bool source)
-{
-    for (LatcdPublicationPin *pin = publication_pins; pin; pin = pin->next) {
-        if (strcmp(pin->cache_dir, config->cache_dir)) continue;
-        for (unsigned i = 0; i < G_N_ELEMENTS(pin->names); i++) {
-            const char *pinned = pin->names[i];
-            if (pinned && *pinned && (source ? !strncmp(name, pinned, 64) :
-                                             !strcmp(name, pinned))) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
 
 static LatcdSourceState *source_state_locked(LatcdService *service,
                                              const char *source_key);
@@ -1261,6 +1237,11 @@ static int open_cached_file(const char *source, uint64_t max_size,
                     "cannot open canonical native image: %s",
                     strerror(errno));
     }
+    if (lat_aot_v2_cache_lock_fd(input, LOCK_SH | LOCK_NB,
+                                 error, error_size)) {
+        close(input);
+        return -1;
+    }
     return input;
 }
 
@@ -1482,64 +1463,6 @@ static int cached_module_inspect(const char *path, const uint8_t digest[32],
            !memcmp(info->note.codegen_id, codegen_id, 32);
 }
 
-typedef struct LatcdCacheEntry {
-    char *module_path;
-    char *native_path;
-    char *tbset_path;
-    char *index_path;
-    char *module_name;
-    uint64_t size;
-    struct timespec modified;
-} LatcdCacheEntry;
-
-static void cache_entry_free(gpointer opaque)
-{
-    LatcdCacheEntry *entry = opaque;
-    g_free(entry->module_path);
-    g_free(entry->native_path);
-    g_free(entry->tbset_path);
-    g_free(entry->index_path);
-    g_free(entry->module_name);
-    g_free(entry);
-}
-
-static int cache_entry_compare(gconstpointer left, gconstpointer right)
-{
-    const LatcdCacheEntry *a = *(LatcdCacheEntry *const *)left;
-    const LatcdCacheEntry *b = *(LatcdCacheEntry *const *)right;
-    if (a->modified.tv_sec != b->modified.tv_sec) {
-        return a->modified.tv_sec < b->modified.tv_sec ? -1 : 1;
-    }
-    if (a->modified.tv_nsec != b->modified.tv_nsec) {
-        return a->modified.tv_nsec < b->modified.tv_nsec ? -1 : 1;
-    }
-    return strcmp(a->module_path, b->module_path);
-}
-
-static bool cache_module_name(const char *name, char digest_text[65])
-{
-    size_t length = strlen(name);
-    if (length != 67 && length != 132) {
-        return false;
-    }
-    if (strcmp(name + length - 3, ".so") ||
-        (length == 132 && name[64] != '-')) {
-        return false;
-    }
-    size_t hex_length = length == 67 ? 64 : 129;
-    for (size_t i = 0; i < hex_length; i++) {
-        if (i == 64) {
-            continue;
-        }
-        if (!g_ascii_isxdigit(name[i])) {
-            return false;
-        }
-    }
-    memcpy(digest_text, name, 64);
-    digest_text[64] = '\0';
-    return true;
-}
-
 static bool cache_generated_name(const char *name)
 {
     size_t length = strlen(name);
@@ -1551,25 +1474,6 @@ static bool cache_generated_name(const char *name)
         if (!g_ascii_isxdigit(name[i])) return false;
     }
     return true;
-}
-
-static bool cache_index_points_to(const char *path, const char *module_name)
-{
-    gchar *contents = NULL;
-    gsize size = 0;
-    if (!g_file_get_contents(path, &contents, &size, NULL)) {
-        return false;
-    }
-    char *expected = g_strdup_printf("\"%s\"", module_name);
-    bool matches = strstr(contents, expected) != NULL;
-    g_free(expected);
-    g_free(contents);
-    return matches;
-}
-
-static bool cache_grace_elapsed(time_t now, time_t then, long grace)
-{
-    return now >= then && (uint64_t)(now - then) >= (uint64_t)grace;
 }
 
 static uint64_t cache_add_regular_file_size(uint64_t total, const char *path)
@@ -1613,165 +1517,6 @@ static uint64_t superseded_generations_size(const LatcdConfig *config,
     return total;
 }
 
-static bool cache_current_generation_name(const LatcdConfig *config,
-                                          const char *name)
-{
-    if (!cache_generated_name(name)) {
-        return false;
-    }
-    char source_hex[65];
-    memcpy(source_hex, name, 64);
-    source_hex[64] = '\0';
-    LatcdCurrentManifest manifest = {0};
-    int manifest_result = current_manifest_read(config, source_hex, &manifest);
-    if (manifest_result) {
-        current_manifest_clear(&manifest);
-        /* A malformed or unreadable current manifest is not evidence that
-         * generated files are orphaned.  Preserve them until the manifest
-         * can be read again; only ENOENT means no current generation. */
-        return manifest_result > 0 ? false : true;
-    }
-    bool current = !strcmp(name, manifest.module) ||
-                   !strcmp(name, manifest.native) ||
-                   (*manifest.tbset && !strcmp(name, manifest.tbset));
-    current_manifest_clear(&manifest);
-    return current;
-}
-
-static void prune_superseded_generations(const LatcdConfig *config)
-{
-    char *root = g_build_filename(config->cache_dir,
-                                  LATCD_SUPERSEDED_DIRNAME, NULL);
-    GDir *directory = g_dir_open(root, 0, NULL);
-    if (!directory) {
-        g_free(root);
-        return;
-    }
-    long grace = superseded_grace_seconds();
-    time_t now = time(NULL);
-    const char *batch_name;
-    while ((batch_name = g_dir_read_name(directory))) {
-        char *batch = g_build_filename(root, batch_name, NULL);
-        struct stat status;
-        if (lstat(batch, &status) || !S_ISDIR(status.st_mode)) {
-            g_free(batch);
-            continue;
-        }
-        if (now < status.st_mtime) {
-            struct timespec times[2] = {
-                { .tv_nsec = UTIME_OMIT },
-                { .tv_nsec = UTIME_NOW },
-            };
-            if (utimensat(AT_FDCWD, batch, times, AT_SYMLINK_NOFOLLOW)) {
-                fprintf(stderr,
-                        "latcd: cannot normalize superseded batch time %s: %s\n",
-                        batch, strerror(errno));
-                g_free(batch);
-                continue;
-            }
-            status.st_mtime = now;
-        }
-        if (!cache_grace_elapsed(now, status.st_mtime, grace)) {
-            g_free(batch);
-            continue;
-        }
-        GDir *batch_directory = g_dir_open(batch, 0, NULL);
-        if (batch_directory) {
-            const char *name;
-            while ((name = g_dir_read_name(batch_directory))) {
-                char *path = g_build_filename(batch, name, NULL);
-                if (unlink(path) && errno != ENOENT) {
-                    fprintf(stderr,
-                            "latcd: cannot remove superseded file %s: %s\n",
-                            path, strerror(errno));
-                }
-                g_free(path);
-            }
-            g_dir_close(batch_directory);
-        }
-        if (rmdir(batch) && errno != ENOENT) {
-            fprintf(stderr, "latcd: cannot remove superseded batch %s: %s\n",
-                    batch, strerror(errno));
-        }
-        g_free(batch);
-    }
-    g_dir_close(directory);
-    g_free(root);
-}
-
-static char *create_superseded_batch(const LatcdConfig *config,
-                                     const char *source_hex)
-{
-    char *root = g_build_filename(config->cache_dir,
-                                  LATCD_SUPERSEDED_DIRNAME, NULL);
-    if (mkdir(root, 0700) && errno != EEXIST) {
-        fprintf(stderr, "latcd: cannot create superseded directory %s: %s\n",
-                root, strerror(errno));
-        g_free(root);
-        return NULL;
-    }
-    time_t now = time(NULL);
-    for (unsigned int attempt = 0; attempt < 1000; attempt++) {
-        char *batch = g_strdup_printf("%s/%s-%lld-%ld-%u", root, source_hex,
-                                      (long long)now, (long)getpid(), attempt);
-        if (!mkdir(batch, 0700)) {
-            g_free(root);
-            return batch;
-        }
-        if (errno != EEXIST) {
-            fprintf(stderr, "latcd: cannot create superseded batch %s: %s\n",
-                    batch, strerror(errno));
-            g_free(batch);
-            g_free(root);
-            return NULL;
-        }
-        g_free(batch);
-    }
-    g_free(root);
-    return NULL;
-}
-
-static void reconcile_superseded_generations(const LatcdConfig *config)
-{
-    GDir *directory = g_dir_open(config->cache_dir, 0, NULL);
-    if (!directory) {
-        return;
-    }
-    char *batch = NULL;
-    unsigned int moved = 0;
-    const char *name;
-    while ((name = g_dir_read_name(directory))) {
-        if (!cache_generated_name(name) ||
-            cache_publication_pinned(config, name, false) ||
-            cache_current_generation_name(config, name)) {
-            continue;
-        }
-        if (!batch) {
-            batch = create_superseded_batch(config, "reconcile");
-        }
-        if (!batch) {
-            break;
-        }
-        char *path = g_build_filename(config->cache_dir, name, NULL);
-        char *retired = g_build_filename(batch, name, NULL);
-        if (rename(path, retired)) {
-            if (errno != ENOENT) {
-                fprintf(stderr, "latcd: cannot reconcile superseded file %s: %s\n",
-                        path, strerror(errno));
-            }
-        } else {
-            moved++;
-        }
-        g_free(retired);
-        g_free(path);
-    }
-    g_dir_close(directory);
-    if (batch && !moved) {
-        rmdir(batch);
-    }
-    g_free(batch);
-}
-
 static bool cache_fits(uint64_t total, uint64_t incoming, uint64_t limit)
 {
     return total <= limit && incoming <= limit - total;
@@ -1781,12 +1526,12 @@ static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
                            const char *incoming_name, bool evict,
                            char *error, size_t error_size)
 {
+    (void)incoming_name;
+    (void)evict;
     if (incoming > config->max_cache_bytes) {
         return fail(error, error_size,
                     "compiled module exceeds cache capacity");
     }
-    reconcile_superseded_generations(config);
-    prune_superseded_generations(config);
     GError *directory_error = NULL;
     GDir *directory = g_dir_open(config->cache_dir, 0, &directory_error);
     if (!directory) {
@@ -1797,126 +1542,19 @@ static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
         return result;
     }
     uint64_t total = superseded_generations_size(config, 0);
-    GPtrArray *entries = g_ptr_array_new_with_free_func(cache_entry_free);
     const char *name;
     while ((name = g_dir_read_name(directory))) {
-        char digest_text[65];
-        bool is_module = cache_module_name(name, digest_text);
-        if (!is_module && !cache_generated_name(name)) {
-            continue;
-        }
-        char *module_path = g_build_filename(config->cache_dir, name, NULL);
-        struct stat status;
-        if (lstat(module_path, &status) || !S_ISREG(status.st_mode) ||
-            status.st_size < 0) {
-            g_free(module_path);
-            continue;
-        }
-        if ((uint64_t)status.st_size > UINT64_MAX - total) {
-            total = UINT64_MAX;
-        } else {
-            total += status.st_size;
-        }
-        if (!is_module) {
-            g_free(module_path);
-            continue;
-        }
-        uint8_t digest[32];
-        for (size_t i = 0; i < 32; i++) {
-            int high = g_ascii_xdigit_value(digest_text[i * 2]);
-            int low = g_ascii_xdigit_value(digest_text[i * 2 + 1]);
-            digest[i] = (high << 4) | low;
-        }
-        if (!strcmp(name, incoming_name) ||
-            cache_publication_pinned(config, name, true)) {
-            g_free(module_path);
-            continue;
-        }
-        /* Keep the currently published generation for this source until the
-         * new manifest becomes the commit point. */
-        if (!strncmp(name, incoming_name, 64)) {
-            g_free(module_path);
-            continue;
-        }
-        LatAotModuleInfoV2 info;
-        if (owned_module_inspect(module_path, &info) &&
-            !memcmp(info.note.source_sha256, digest, 32)) {
-            LatcdCurrentManifest manifest = {0};
-            if (current_manifest_read(config, digest_text, &manifest) ||
-                strcmp(manifest.module, name)) {
-                current_manifest_clear(&manifest);
-                g_free(module_path);
-                continue;
-            }
-            LatcdCacheEntry *entry = g_new0(LatcdCacheEntry, 1);
-            entry->module_path = module_path;
-            entry->index_path = g_strdup_printf("%s/%s.current",
-                                                config->cache_dir,
-                                                digest_text);
-            entry->module_name = g_strdup(name);
-            entry->size = status.st_size;
-            entry->native_path = g_build_filename(config->cache_dir,
-                                                    manifest.native, NULL);
-            if (*manifest.tbset) {
-                entry->tbset_path = g_build_filename(config->cache_dir,
-                                                       manifest.tbset, NULL);
-            }
-            struct stat auxiliary;
-            if (!lstat(entry->native_path, &auxiliary) &&
-                S_ISREG(auxiliary.st_mode) && auxiliary.st_size > 0) {
-                entry->size += auxiliary.st_size;
-            }
-            if (entry->tbset_path &&
-                !lstat(entry->tbset_path, &auxiliary) &&
-                S_ISREG(auxiliary.st_mode) && auxiliary.st_size > 0) {
-                entry->size += auxiliary.st_size;
-            }
-            entry->modified = status.st_mtim;
-            g_ptr_array_add(entries, entry);
-            current_manifest_clear(&manifest);
-        } else {
-            g_free(module_path);
-        }
+        if (!cache_generated_name(name)) continue;
+        char *path = g_build_filename(config->cache_dir, name, NULL);
+        total = cache_add_regular_file_size(total, path);
+        g_free(path);
     }
     g_dir_close(directory);
-    g_ptr_array_sort(entries, cache_entry_compare);
-    uint64_t evictable = 0;
-    for (guint i = 0; i < entries->len; i++) {
-        LatcdCacheEntry *entry = g_ptr_array_index(entries, i);
-        if (cache_index_points_to(entry->index_path, entry->module_name)) {
-            evictable = entry->size > UINT64_MAX - evictable ?
-                UINT64_MAX : evictable + entry->size;
-        }
-    }
     if (!cache_fits(total, incoming, config->max_cache_bytes)) {
-        uint64_t after = total > evictable ? total - evictable : 0;
-        if (!cache_fits(after, incoming, config->max_cache_bytes)) {
-            g_ptr_array_free(entries, TRUE);
-            return fail(error, error_size,
-                        "cache capacity is occupied by non-evictable files");
-        }
-        if (!evict) {
-            g_ptr_array_free(entries, TRUE);
-            return 0;
-        }
+        return fail(error, error_size,
+                    "cache capacity requires safe retirement GC");
     }
-    for (guint i = 0;
-         !cache_fits(total, incoming, config->max_cache_bytes) &&
-         i < entries->len;
-         i++) {
-        LatcdCacheEntry *entry = g_ptr_array_index(entries, i);
-        if (cache_index_points_to(entry->index_path, entry->module_name) &&
-            !unlink(entry->index_path)) {
-            unlink(entry->module_path);
-            if (entry->native_path) unlink(entry->native_path);
-            if (entry->tbset_path) unlink(entry->tbset_path);
-            total = total > entry->size ? total - entry->size : 0;
-        }
-    }
-    int result = cache_fits(total, incoming, config->max_cache_bytes) ? 0 :
-        fail(error, error_size, "cannot reclaim enough cache capacity");
-    g_ptr_array_free(entries, TRUE);
-    return result;
+    return 0;
 }
 
 static void current_manifest_clear(LatcdCurrentManifest *manifest)
@@ -1962,6 +1600,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
                                  bool new_pair,
                                  char *error, size_t error_size)
 {
+    int source_lock_fd = -1;
     char *candidate = g_build_filename(config->cache_dir, module_name, NULL);
     int validation = validate_current_replacement(config, hex, candidate,
                                                    info, error, error_size);
@@ -1984,12 +1623,8 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     bool pinned = module_fd >= 0 && native_fd >= 0 &&
         !fstat(module_fd, &module_before) && !fstat(native_fd, &native_before) &&
         (!tbset_path || (tbset_fd >= 0 && !fstat(tbset_fd, &tbset_before)));
-    LatcdPublicationPin pin = {.cache_dir = config->cache_dir,
-        .names = {module_name, native_name, tbset_name, selected.module,
-                  selected.native, selected.tbset}, .next = publication_pins};
-    publication_pins = &pin;
-    /* No publication/eviction lock is needed for the expensive content hashes.
-     * Open fds pin both inodes; path and generation checks below guard commit. */
+    /* Open descriptors hold shared leases while expensive hashes run.
+     * Path and generation checks below guard the source-latched commit. */
     pthread_mutex_unlock(&cache_lock);
     char *module_sha256 = pinned ? cached_fd_digest(module_fd) : NULL;
     char *native_sha256 = pinned ? cached_fd_digest(native_fd) : NULL;
@@ -2011,9 +1646,6 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
          !g_strcmp0(selected.module_sha256, latest.module_sha256) &&
          !g_strcmp0(selected.native_sha256, latest.native_sha256) &&
          selected.published_sequence == latest.published_sequence));
-    LatcdPublicationPin **link = &publication_pins;
-    while (*link != &pin) link = &(*link)->next;
-    *link = pin.next;
     if (module_fd >= 0) close(module_fd);
     if (native_fd >= 0) close(native_fd);
     if (tbset_fd >= 0) close(tbset_fd);
@@ -2028,6 +1660,13 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         return fail(error, error_size,
                     "published file set or current changed during digest");
     }
+    source_lock_fd = lat_aot_v2_cache_source_lock(
+        config->cache_dir, hex, LOCK_EX, false, error, error_size);
+    if (source_lock_fd < 0) {
+        g_free(module_sha256);
+        g_free(native_sha256);
+        return -1;
+    }
     LatcdCurrentManifest previous = {0};
     bool same_pair = !current_manifest_read(config, hex, &previous) &&
         !strcmp(previous.module, module_name) &&
@@ -2038,6 +1677,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         ((previous.module_sha256 && strcmp(previous.module_sha256, module_sha256)) ||
          (previous.native_sha256 && strcmp(previous.native_sha256, native_sha256)))) {
         current_manifest_clear(&previous);
+        close(source_lock_fd);
         g_free(module_sha256);
         g_free(native_sha256);
         return fail(error, error_size, "current module/native pair content changed");
@@ -2047,6 +1687,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     char *temporary = g_build_filename(temporary_dir, "current-XXXXXX", NULL);
     int fd = g_mkstemp_full(temporary, O_RDWR | O_CLOEXEC, 0600);
     if (fd < 0) {
+        close(source_lock_fd);
         g_free(module_sha256);
         g_free(native_sha256);
         g_free(temporary_dir);
@@ -2090,6 +1731,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     if (result) {
         unlink(temporary);
     }
+    close(source_lock_fd);
     g_free(final);
     g_free(temporary);
     g_free(temporary_dir);
@@ -2157,76 +1799,6 @@ static int current_manifest_read(const LatcdConfig *config, const char *hex,
         errno = ENOEXEC;
     }
     return result;
-}
-
-/*
- * 被取代的模块代在宽限期内不得删除：运行中的进程可能仍映射并执行它们。
- * 默认 600 秒，可用 LATCD_SUPERSEDED_GRACE_SECONDS 调整（0 表示立即删除）。
- */
-static long superseded_grace_seconds(void)
-{
-    const char *text = getenv("LATCD_SUPERSEDED_GRACE_SECONDS");
-    if (text && *text) {
-        char *end = NULL;
-        errno = 0;
-        long parsed = strtol(text, &end, 10);
-        if (!errno && end && *end == '\0' && parsed >= 0 &&
-            parsed <= INT_MAX) {
-            return parsed;
-        }
-    }
-    return 600;
-}
-
-static void remove_superseded_generation(const LatcdConfig *config,
-                                         const char *source_hex,
-                                         const char *module_name,
-                                         const char *native_name,
-                                         const char *tbset_name)
-{
-    GDir *directory = g_dir_open(config->cache_dir, 0, NULL);
-    if (!directory) return;
-    char prefix[66];
-    snprintf(prefix, sizeof(prefix), "%s-", source_hex);
-    char *batch = NULL;
-    unsigned int moved = 0;
-    const char *name;
-    while ((name = g_dir_read_name(directory))) {
-        bool generated = g_str_has_suffix(name, ".so") ||
-                         g_str_has_suffix(name, ".native") ||
-                         g_str_has_suffix(name, ".tbset");
-        if (!generated || !g_str_has_prefix(name, prefix) ||
-            cache_publication_pinned(config, name, false) ||
-            !strcmp(name, module_name) || !strcmp(name, native_name) ||
-            !strcmp(name, tbset_name)) {
-            continue;
-        }
-        char *path = g_build_filename(config->cache_dir, name, NULL);
-        if (!batch) {
-            batch = create_superseded_batch(config, source_hex);
-        }
-        if (!batch) {
-            g_free(path);
-            break;
-        }
-        char *retired = g_build_filename(batch, name, NULL);
-        if (rename(path, retired)) {
-            if (errno != ENOENT) {
-                fprintf(stderr, "latcd: cannot retire superseded file %s: %s\n",
-                        path, strerror(errno));
-            }
-        } else {
-            moved++;
-        }
-        g_free(retired);
-        g_free(path);
-    }
-    g_dir_close(directory);
-    if (batch && !moved) {
-        rmdir(batch);
-    }
-    g_free(batch);
-    prune_superseded_generations(config);
 }
 
 /* Publish a newer complete observed-key set when the current module already
@@ -2359,8 +1931,6 @@ static int publish_covered_tbset(const LatcdConfig *config,
         fprintf(stderr, "latcd: post-publish cache cleanup failed: %s\n",
                 cleanup_error);
     }
-    remove_superseded_generation(config, source_hex, manifest.module,
-                                 manifest.native, tbset_name);
     utimensat(AT_FDCWD, module_path, NULL, AT_SYMLINK_NOFOLLOW);
     snprintf(error, sizeof(error), "published covered TB set: %s",
              module_path);
@@ -2568,8 +2138,6 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
                     "latcd: committed cache-hit manifest sync failed: %s\n",
                     sync_error);
         }
-        remove_superseded_generation(config, hex, module_name, native_name,
-                                     tbset_name);
         utimensat(AT_FDCWD, final_module, NULL, AT_SYMLINK_NOFOLLOW);
         pthread_mutex_unlock(&cache_lock);
         snprintf(error, sizeof(error), "cache hit: %s", final_module);
@@ -2852,8 +2420,6 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         fprintf(stderr, "latcd: committed manifest directory sync failed: %s\n",
                 sync_error);
     }
-    remove_superseded_generation(config, hex, module_name, native_name,
-                                 tbset_name);
     char cleanup_error[128] = {0};
     if (cache_make_room(config, 0, "", true, cleanup_error,
                         sizeof(cleanup_error))) {

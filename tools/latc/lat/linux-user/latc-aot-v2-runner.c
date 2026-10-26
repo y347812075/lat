@@ -19,6 +19,8 @@
 #include "latx-config.h"
 #include "guest-elf-map.h"
 #include "module-loader.h"
+#include "cache-lifecycle.h"
+#include "internal-fd-registry.h"
 #include "qemu-def.h"
 #include "translate.h"
 
@@ -26,6 +28,7 @@
 #include <glib.h>
 #include <math.h>
 #include <sched.h>
+#include <sys/file.h>
 
 /* Loongnix 20 predates the public LoongArch HWCAP names. */
 #ifndef HWCAP_LOONGARCH_LSX
@@ -201,6 +204,8 @@ static pthread_mutex_t protected_object_lock = PTHREAD_MUTEX_INITIALIZER;
 static LatAotV2ProtectedObject protected_objects[
     LAT_AOT_V2_PROTECTED_OBJECT_LIMIT];
 static size_t protected_object_count;
+static char protected_cache_root[PATH_MAX + 1];
+static bool protected_cache_root_initialized;
 static char protected_journal_root[PATH_MAX + 1];
 static bool protected_journal_root_initialized;
 
@@ -231,6 +236,18 @@ static bool protected_object_locked(const struct stat *st)
     return false;
 }
 
+static bool initialize_protected_cache_root_locked(void)
+{
+    if (protected_cache_root_initialized) {
+        return protected_cache_root[0] != '\0';
+    }
+    const char *cache = lat_aot_cache_path();
+    if (!cache || !*cache) return false;
+    if (!realpath(cache, protected_cache_root)) return false;
+    protected_cache_root_initialized = true;
+    return true;
+}
+
 static bool initialize_protected_journal_root_locked(void)
 {
     if (protected_journal_root_initialized) {
@@ -246,11 +263,13 @@ static bool initialize_protected_journal_root_locked(void)
     return protected_journal_root[0] != '\0';
 }
 
-static bool protected_path_prefix(const char *path)
+static bool protected_path_prefix(const char *path, const char *root)
 {
-    size_t length = strlen(protected_journal_root);
+    size_t length = strlen(root);
 
-    return !strncmp(path, protected_journal_root, length) &&
+    if (!length) return false;
+
+    return !strncmp(path, root, length) &&
         (path[length] == '\0' || path[length] == '/');
 }
 
@@ -288,12 +307,12 @@ bool latc_aot_v2_path_is_protected(const char *host_path)
 
     if (!host_path || !*host_path) return false;
     pthread_mutex_lock(&protected_object_lock);
-    if (initialize_protected_journal_root_locked()) {
-        if (realpath(host_path, resolved) && protected_path_prefix(resolved)) {
+    if (initialize_protected_cache_root_locked()) {
+        if (realpath(host_path, resolved) &&
+            protected_path_prefix(resolved, protected_cache_root)) {
             protected = true;
         } else {
             char parent[PATH_MAX + 1];
-            struct stat st;
             size_t length = strlen(host_path);
             if (length < sizeof(parent)) {
                 memcpy(parent, host_path, length + 1);
@@ -302,13 +321,14 @@ bool latc_aot_v2_path_is_protected(const char *host_path)
                     if (slash == parent) slash[1] = '\0';
                     else *slash = '\0';
                     protected = realpath(parent, resolved) &&
-                        protected_path_prefix(resolved);
+                        protected_path_prefix(resolved, protected_cache_root);
                 }
             }
-            protected = protected || (!stat(host_path, &st) &&
-                                       protected_object_locked(&st));
         }
     }
+    struct stat st;
+    protected = protected || (!stat(host_path, &st) &&
+                               protected_object_locked(&st));
     pthread_mutex_unlock(&protected_object_lock);
     return protected;
 }
@@ -318,6 +338,7 @@ bool latc_aot_v2_fd_is_protected(int host_fd)
     struct stat st;
     bool protected;
 
+    if (lat_aot_v2_internal_fd_is_protected(host_fd)) return true;
     if (host_fd < 0 || fstat(host_fd, &st)) return false;
     pthread_mutex_lock(&protected_object_lock);
     protected = protected_object_locked(&st);
@@ -2517,6 +2538,113 @@ static int run_lifecycle_stress(LatAotV2RuntimeModule *module)
     return 0;
 }
 
+static void close_protected_cache_fd(int fd)
+{
+    char error[128];
+    if (fd >= 0) {
+        (void)lat_aot_v2_cache_close_fd(fd, true, error, sizeof(error));
+    }
+}
+
+static int source_latch_test_barrier(char *error, size_t error_size)
+{
+    const char *ready = getenv("LATX_AOT_V2_TEST_SOURCE_LATCH_READY");
+    const char *release = getenv("LATX_AOT_V2_TEST_SOURCE_LATCH_RELEASE");
+    if (!ready || !*ready || !release || !*release) return 0;
+    int fd = open(ready, O_WRONLY | O_CREAT | O_EXCL |
+                  O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0 && errno != EEXIST) {
+        snprintf(error, error_size, "cannot create source latch marker: %s",
+                 strerror(errno));
+        return -1;
+    }
+    if (fd >= 0) close(fd);
+    int64_t deadline = g_get_monotonic_time() + 30 * G_TIME_SPAN_SECOND;
+    while (access(release, F_OK)) {
+        if (errno != ENOENT || g_get_monotonic_time() >= deadline) {
+            snprintf(error, error_size,
+                     "source latch test barrier timed out");
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        g_usleep(1000);
+    }
+    return 0;
+}
+
+static int open_manifest_module(const char *cache, const char *source_hex,
+                                const LatAotExpectedV2 *expected,
+                                LatAotV2RuntimeModule **opened,
+                                bool *retry_manifest,
+                                char *error, size_t error_size)
+{
+    *opened = NULL;
+    *retry_manifest = false;
+    int source_lock = lat_aot_v2_cache_source_lock(
+        cache, source_hex, LOCK_SH, true, error, error_size);
+    if (source_lock < 0) return -1;
+    GPtrArray *basenames = read_module_manifest(
+        cache, source_hex, error, error_size);
+    if (!basenames) {
+        int saved_errno = errno;
+        close_protected_cache_fd(source_lock);
+        errno = saved_errno;
+        return saved_errno == ENOENT ? 0 : -1;
+    }
+    if (source_latch_test_barrier(error, error_size)) {
+        int saved_errno = errno;
+        close_protected_cache_fd(source_lock);
+        errno = saved_errno;
+        return -1;
+    }
+    int result = 0;
+    for (guint i = 0; i < basenames->len; i++) {
+        const char *basename = g_ptr_array_index(basenames, i);
+        char *path = g_build_filename(cache, basename, NULL);
+        LatAotV2RuntimeModule *module = g_new0(LatAotV2RuntimeModule, 1);
+        if (!path || !module) {
+            g_free(path);
+            g_free(module);
+            errno = ENOMEM;
+            result = -1;
+            break;
+        }
+        errno = 0;
+        if (lat_aot_v2_module_open(path, expected, &module->loaded,
+                                   error, error_size)) {
+            int saved_errno = errno;
+            if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
+                fprintf(stderr,
+                        "latx: AOT v2 module open failed path=%s "
+                        "errno=%d error=%s\n",
+                        path, saved_errno, error);
+            }
+            g_free(path);
+            g_free(module);
+            if (saved_errno == EBUSY || saved_errno == ENOENT) {
+                *retry_manifest = true;
+            } else {
+                result = -1;
+            }
+            errno = saved_errno;
+            break;
+        }
+        if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
+            fprintf(stderr,
+                    "latx: AOT v2 module open path=%s codegen=8388230...\n",
+                    path);
+        }
+        module->path = path;
+        *opened = module;
+        break;
+    }
+    g_ptr_array_free(basenames, TRUE);
+    int saved_errno = errno;
+    close_protected_cache_fd(source_lock);
+    errno = saved_errno;
+    return result;
+}
+
 static int register_discovered_module(const LatGuestElfInfoV2 *info,
                                       LatAotV2RuntimeInstance **instance,
                                       char *error, size_t error_size)
@@ -2546,92 +2674,44 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
         digest_bytes(LATC_BUILD_ID, strlen(LATC_BUILD_ID),
                      expected.codegen_id);
         expected.available_features = available_aot_features();
+        module = NULL;
         for (unsigned int attempt = 0; attempt < 2; attempt++) {
-            GPtrArray *basenames = read_module_manifest(
-                cache, source_hex, error, error_size);
-            if (!basenames) {
-                if (errno == ENOENT) {
-                    error[0] = '\0';
-                    return 0;
-                }
+            bool retry_manifest = false;
+            if (open_manifest_module(cache, source_hex, &expected, &module,
+                                     &retry_manifest, error, error_size)) {
                 return -1;
             }
-            bool retry_manifest = false;
-            for (guint i = 0; i < basenames->len; i++) {
-                const char *basename = g_ptr_array_index(basenames, i);
-                char *path = g_build_filename(cache, basename, NULL);
-                module = g_new0(LatAotV2RuntimeModule, 1);
-                if (!path || !module) {
-                    g_free(module);
-                    g_free(path);
-                    g_ptr_array_free(basenames, TRUE);
-                    errno = ENOMEM;
-                    return -1;
-                }
-                errno = 0;
-                if (lat_aot_v2_module_open(path, &expected, &module->loaded,
-                                           error, error_size)) {
-                    int saved_errno = errno;
-                    if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
-                        fprintf(stderr,
-                                "latx: AOT v2 module open failed path=%s "
-                                "errno=%d error=%s\n",
-                                path, saved_errno, error);
-                    }
-                    g_free(module);
-                    g_free(path);
-                    if (saved_errno == ENOENT && attempt == 0) {
-                        retry_manifest = true;
-                        break;
-                    }
-                    g_ptr_array_free(basenames, TRUE);
-                    errno = saved_errno;
-                    return -1;
-                }
-                if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
-                    fprintf(stderr,
-                            "latx: AOT v2 module open path=%s codegen=8388230...\n",
-                            path);
-                }
-                if (register_host_module(module)) {
-                    int saved_errno = errno;
-                    if (!error[0]) {
-                        snprintf(error, error_size,
-                                 "cannot index AOT v2 host module: %s",
-                                 strerror(saved_errno));
-                    }
-                    if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
-                        fprintf(stderr,
-                                "latx: AOT v2 host index failed path=%s: %s\n",
-                                path, error);
-                    }
-                    g_free(module);
-                    g_free(path);
-                    g_ptr_array_free(basenames, TRUE);
-                    errno = saved_errno;
-                    return -1;
-                }
-                /* The untagged legacy cache is only safe for immutable
-                 * non-PIE ET_EXEC mappings. */
-                module->legacy_fast_cache =
-                    info->elf_type == ET_EXEC && info->load_bias == 0;
-                module->path = path;
-                module->next = runtime_modules;
-                runtime_modules = module;
-                if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
-                    fprintf(stderr,
-                            "latx: AOT v2 module loaded path=%s\n", path);
-                }
-            }
-            g_ptr_array_free(basenames, TRUE);
-            if (!retry_manifest) {
-                break;
-            }
+            if (module) break;
+            if (!retry_manifest) return 0;
             error[0] = '\0';
             if (attempt == 1) {
                 errno = ENOENT;
                 return -1;
             }
+        }
+        if (register_host_module(module)) {
+            int saved_errno = errno;
+            if (!error[0]) {
+                snprintf(error, error_size,
+                         "cannot index AOT v2 host module: %s",
+                         strerror(saved_errno));
+            }
+            if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
+                fprintf(stderr,
+                        "latx: AOT v2 host index failed path=%s: %s\n",
+                        module->path, error);
+            }
+            errno = saved_errno;
+            return -1;
+        }
+        /* The untagged legacy cache is only safe for immutable non-PIE ET_EXEC. */
+        module->legacy_fast_cache =
+            info->elf_type == ET_EXEC && info->load_bias == 0;
+        module->next = runtime_modules;
+        runtime_modules = module;
+        if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
+            fprintf(stderr, "latx: AOT v2 module loaded path=%s\n",
+                    module->path);
         }
     }
     if (info->load_bias > UINT64_MAX - info->preferred_base) {
@@ -3152,14 +3232,37 @@ int latc_aot_v2_prepare(CPUArchState *env)
         !module ||
         inspect_source(source_path, &expected, &guest_base, &guest_end,
                        exec_ranges, &exec_range_count,
-                       error, sizeof(error)) ||
-        lat_aot_v2_module_open(module_path, &expected, &module->loaded,
-                               error, sizeof(error))) {
+                       error, sizeof(error))) {
         fprintf(stderr, "latx: cannot prepare AOT v2 module: %s\n",
                 error[0] ? error : strerror(errno));
         g_free(module);
         return strict ? -1 : 0;
     }
+    int source_lock = -1;
+    const char *cache = lat_aot_cache_path();
+    if (cache && *cache) {
+        char source_hex[65];
+        digest_hex(expected.source_sha256, source_hex);
+        source_lock = lat_aot_v2_cache_source_lock(
+            cache, source_hex, LOCK_SH, true, error, sizeof(error));
+        if (source_lock < 0) {
+            fprintf(stderr, "latx: cannot pin AOT v2 cache source: %s\n",
+                    error[0] ? error : strerror(errno));
+            g_free(module);
+            return strict ? -1 : 0;
+        }
+    }
+    if (lat_aot_v2_module_open(module_path, &expected, &module->loaded,
+                               error, sizeof(error))) {
+        int saved_errno = errno;
+        if (source_lock >= 0) close_protected_cache_fd(source_lock);
+        fprintf(stderr, "latx: cannot prepare AOT v2 module: %s\n",
+                error[0] ? error : strerror(saved_errno));
+        g_free(module);
+        errno = saved_errno;
+        return strict ? -1 : 0;
+    }
+    if (source_lock >= 0) close_protected_cache_fd(source_lock);
     module->path = g_strdup(module_path);
     module->legacy_fast_cache = true;
     if (register_host_module(module)) {
