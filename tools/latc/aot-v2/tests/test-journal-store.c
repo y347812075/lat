@@ -154,6 +154,54 @@ static void check_shared_capacity(const LatcdConfig *original, int source, int c
     g_free(temporary); g_free(native); g_free(name); g_free(socket); g_free(cache);
 }
 
+static void check_anonymous_snapshot(const char *parent, int source, int configuration)
+{
+    char *root = g_build_filename(parent, "anonymous", NULL), error[256];
+    g_assert_cmpint(mkdir(root, 0700), ==, 0);
+    const char *points[] = {"created", "partial", "synced"};
+    for (unsigned i = 0; i < G_N_ELEMENTS(points); i++) {
+        pid_t child = fork();
+        g_assert_cmpint(child, >=, 0);
+        if (!child) {
+            int fd = -1;
+            uint8_t digest[32];
+            g_assert_cmpint(setenv("LATCD_TEST_JOURNAL_SNAPSHOT_CRASH", points[i], 1), ==, 0);
+            snapshot_source_copy(source, root, 4096, NULL, digest, NULL, &fd, error, sizeof(error));
+            _exit(127);
+        }
+        int status;
+        g_assert_cmpint(waitpid(child, &status, 0), ==, child);
+        g_assert_true(WIFSIGNALED(status));
+        g_assert_cmpint(WTERMSIG(status), ==, SIGKILL);
+        GDir *directory = g_dir_open(root, 0, NULL);
+        g_assert_nonnull(directory);
+        g_assert_null(g_dir_read_name(directory));
+        g_dir_close(directory);
+    }
+    uint8_t digest[32], build[32], codegen[32];
+    int fd = -1;
+    g_assert_cmpint(snapshot_source_copy(source, root, 4096, NULL, digest, NULL, &fd,
+                                        error, sizeof(error)), ==, 0);
+    struct stat st;
+    g_assert_cmpint(fstat(fd, &st), ==, 0);
+    g_assert_cmpuint(st.st_nlink, ==, 0);
+    g_assert_cmpint(journal_build_id(build), ==, 0);
+    expected_codegen_id(codegen);
+    char stream[33];
+    g_assert_cmpint(latcd_journal_register_fd(root, source, digest, build, codegen,
+        configuration, 2, 1048576, stream, NULL, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(latcd_journal_register_fd(root, fd, digest, build, codegen,
+        configuration, 2, 1048576, stream, NULL, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(fstat(fd, &st), ==, 0);
+    g_assert_cmpuint(st.st_nlink, ==, 1);
+    close(fd);
+    unsigned count;
+    g_assert_cmpint(latcd_journal_recover(root, build, codegen, 1048576, &count,
+                                         error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(count, ==, 1);
+    remove_tree(root); g_free(root);
+}
+
 static void check_collection(const LatcdConfig *config, int stream,
                               const LatKeyJournalIdentity *identity)
 {
@@ -633,6 +681,7 @@ int main(void)
     g_assert_cmpint(fcntl(configuration, F_ADD_SEALS,
         F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL), ==, 0);
     check_shared_capacity(&config, source, configuration);
+    check_anonymous_snapshot(directory, source, configuration);
     g_assert_cmpint(request(&config, source, configuration, 0).status, !=, LATCD_STATUS_OK);
     LatcdResponseV2 registered = request(&config, source, configuration, 4);
     g_assert_cmpint(registered.status, ==, LATCD_STATUS_OK);

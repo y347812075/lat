@@ -520,7 +520,7 @@ out:
     return result;
 }
 
-static int register_stream(const char *cache, const char *snapshot,
+static int register_stream(const char *cache, const char *snapshot, int snapshot_fd,
     const uint8_t source_sha[32], const uint8_t build[32], const uint8_t codegen[32],
     int config_fd, uint64_t capacity, uint64_t max_bytes,
     char stream[33], int *directory_fd, char *error, size_t error_size)
@@ -552,7 +552,8 @@ static int register_stream(const char *cache, const char *snapshot,
     unsigned count;
     uint64_t bytes;
     if (scan(root, build, codegen, max_bytes, &count, &bytes, NULL, error, error_size) ||
-        count >= LATCD_JOURNAL_MAX_STREAMS || stat(snapshot, &st) || st.st_size < 0) {
+        count >= LATCD_JOURNAL_MAX_STREAMS ||
+        (snapshot_fd < 0 ? stat(snapshot, &st) : fstat(snapshot_fd, &st)) || st.st_size < 0) {
         close(root);
         return fail(error, error_size, "journal store invalid or full");
     }
@@ -574,7 +575,10 @@ static int register_stream(const char *cache, const char *snapshot,
     int directory = directory_at(root, name, false);
     bool ok = directory >= 0;
     /* Pin the verified snapshot without duplicating the large source bytes. */
-    ok = ok && !linkat(AT_FDCWD, snapshot, directory, "source", 0) &&
+    char descriptor[64];
+    if (snapshot_fd >= 0) snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", snapshot_fd);
+    ok = ok && !linkat(AT_FDCWD, snapshot_fd < 0 ? snapshot : descriptor, directory,
+                        "source", snapshot_fd < 0 ? 0 : AT_SYMLINK_FOLLOW) &&
         !fchmodat(directory, "source", 0400, 0) &&
         write_file(directory, "config", config, config_size);
     LatKeyJournal journal;
@@ -603,7 +607,7 @@ int latcd_journal_register(const char *cache, const char *snapshot,
     int config_fd, uint64_t capacity, uint64_t max_bytes,
     char stream[33], char *error, size_t error_size)
 {
-    return register_stream(cache, snapshot, source_sha, build, codegen, config_fd,
+    return register_stream(cache, snapshot, -1, source_sha, build, codegen, config_fd,
                            capacity, max_bytes, stream, NULL, error, error_size);
 }
 
@@ -616,6 +620,20 @@ int latcd_journal_register_capability(const char *cache, const char *snapshot,
         errno = EINVAL;
         return fail(error, error_size, "missing journal directory output");
     }
-    return register_stream(cache, snapshot, source_sha, build, codegen, config_fd,
+    return register_stream(cache, snapshot, -1, source_sha, build, codegen, config_fd,
                            capacity, max_bytes, stream, directory_fd, error, error_size);
+}
+
+int latcd_journal_register_fd(const char *cache, int snapshot_fd,
+    const uint8_t source_sha[32], const uint8_t build[32], const uint8_t codegen[32],
+    int config_fd, uint64_t capacity, uint64_t max_bytes,
+    char stream[33], int *directory_fd, char *error, size_t error_size)
+{
+    struct stat st;
+    int flags = fcntl(snapshot_fd, F_GETFL);
+    if (snapshot_fd < 0 || flags < 0 || (flags & O_TMPFILE) != O_TMPFILE ||
+        fstat(snapshot_fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() || st.st_nlink)
+        return fail(error, error_size, "journal requires an anonymous source snapshot");
+    return register_stream(cache, NULL, snapshot_fd, source_sha, build, codegen,
+        config_fd, capacity, max_bytes, stream, directory_fd, error, error_size);
 }

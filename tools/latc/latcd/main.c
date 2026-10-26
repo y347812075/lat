@@ -681,9 +681,10 @@ static int metadata_equal(const struct stat *before, const struct stat *after)
            before->st_ctim.tv_nsec == after->st_ctim.tv_nsec;
 }
 
-static int snapshot_source(int source_fd, const char *temporary_dir,
+static int snapshot_source_copy(int source_fd, const char *temporary_dir,
                            uint64_t max_input, char **snapshot_path,
                            uint8_t digest[32], struct stat *identity,
+                           int *anonymous_fd,
                            char *error, size_t error_size)
 {
     struct stat before;
@@ -697,13 +698,16 @@ static int snapshot_source(int source_fd, const char *temporary_dir,
     if (validate_x86_elf(source_fd, before.st_size, error, error_size)) {
         return -1;
     }
-    char *path = g_build_filename(temporary_dir, "source-XXXXXX", NULL);
-    int output = g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
+    char *path = anonymous_fd ? NULL : g_build_filename(temporary_dir, "source-XXXXXX", NULL);
+    int output = anonymous_fd ? open(temporary_dir, O_TMPFILE | O_RDWR | O_CLOEXEC, 0600) :
+        g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
     if (output < 0) {
         g_free(path);
         return fail(error, error_size, "cannot create source snapshot: %s",
                     strerror(errno));
     }
+    const char *snapshot_crash = anonymous_fd ? getenv("LATCD_TEST_JOURNAL_SNAPSHOT_CRASH") : NULL;
+    if (snapshot_crash && !strcmp(snapshot_crash, "created")) raise(SIGKILL);
     GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
     unsigned char buffer[128 * 1024];
     off_t offset = 0;
@@ -734,6 +738,7 @@ static int snapshot_source(int source_fd, const char *temporary_dir,
         }
         g_checksum_update(checksum, buffer, count);
         offset += count;
+        if (snapshot_crash && !strcmp(snapshot_crash, "partial")) raise(SIGKILL);
     }
     struct stat after;
     if (fstat(source_fd, &after) || !metadata_equal(&before, &after)) {
@@ -745,22 +750,37 @@ static int snapshot_source(int source_fd, const char *temporary_dir,
              strerror(errno));
         goto out;
     }
+    if (snapshot_crash && !strcmp(snapshot_crash, "synced")) raise(SIGKILL);
     gsize digest_size = 32;
     g_checksum_get_digest(checksum, digest, &digest_size);
     if (identity) {
         *identity = before;
     }
-    *snapshot_path = path;
-    path = NULL;
+    if (anonymous_fd) {
+        *anonymous_fd = output;
+        output = -1;
+    } else {
+        *snapshot_path = path;
+        path = NULL;
+    }
     result = 0;
 out:
     g_checksum_free(checksum);
-    close(output);
+    if (output >= 0) close(output);
     if (path) {
         unlink(path);
         g_free(path);
     }
     return result;
+}
+
+static int snapshot_source(int source_fd, const char *temporary_dir,
+                           uint64_t max_input, char **snapshot_path,
+                           uint8_t digest[32], struct stat *identity,
+                           char *error, size_t error_size)
+{
+    return snapshot_source_copy(source_fd, temporary_dir, max_input, snapshot_path,
+        digest, identity, NULL, error, error_size);
 }
 
 static int hash_source(int source_fd, uint64_t max_input, uint8_t digest[32],
@@ -5216,7 +5236,7 @@ static void register_journal(const LatcdConfig *config, int source, int config_f
     uint8_t build[32], codegen[32];
     char error[sizeof(response->message)] = {0};
     char *temporary = g_build_filename(config->cache_dir, ".tmp", NULL);
-    char *snapshot = NULL;
+    int snapshot = -1;
     uint64_t reservation = 0;
     bool reserved = false, filesystem_reserved = false;
     struct stat before, copied;
@@ -5238,29 +5258,25 @@ static void register_journal(const LatcdConfig *config, int source, int config_f
         goto cleanup;
     }
     filesystem_reserved = true;
-    if (snapshot_source(source, temporary, before.st_size,
-            &snapshot, response->source_sha256, &copied, error, sizeof(error)) ||
+    if (snapshot_source_copy(source, temporary, before.st_size,
+            NULL, response->source_sha256, &copied, &snapshot, error, sizeof(error)) ||
         !metadata_equal(&before, &copied)) {
         response->status = LATCD_STATUS_BAD_SOURCE;
     } else {
         char stream[33];
         int result;
-        if (request->operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY) {
-            result = latcd_journal_register_capability(config->cache_dir, snapshot,
-                response->source_sha256, build, codegen, config_fd, request->sequence,
-                config->max_cache_bytes, stream, directory_fd, error, sizeof(error));
-        } else {
-            result = latcd_journal_register(config->cache_dir, snapshot, response->source_sha256,
-                build, codegen, config_fd, request->sequence, config->max_cache_bytes,
-                stream, error, sizeof(error));
-        }
+        result = latcd_journal_register_fd(config->cache_dir, snapshot,
+            response->source_sha256, build, codegen, config_fd, request->sequence,
+            config->max_cache_bytes, stream,
+            request->operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY ? directory_fd : NULL,
+            error, sizeof(error));
         unsigned count;
         uint64_t total;
         char inventory_error[256] = {0};
         bool valid = !latcd_journal_inventory(config->cache_dir, build, codegen,
             config->max_cache_bytes, &count, &total, inventory_error, sizeof(inventory_error));
-        if (unlink(snapshot) && errno != ENOENT) valid = false;
-        else { g_free(snapshot); snapshot = NULL; }
+        if (close(snapshot)) valid = false;
+        snapshot = -1;
         if (latcd_cache_capacity_journal(&generation_capacity, total, reservation, valid)) {
             fprintf(stderr, "latcd: journal capacity reconciliation failed: %s\n", inventory_error);
             if (*directory_fd >= 0) { close(*directory_fd); *directory_fd = -1; }
@@ -5274,13 +5290,12 @@ static void register_journal(const LatcdConfig *config, int source, int config_f
         }
     }
 cleanup:
-    bool removed = !snapshot || !unlink(snapshot) || errno == ENOENT;
+    bool removed = snapshot < 0 || !close(snapshot);
     if (reserved) {
         if (removed) latcd_cache_capacity_finish(&generation_capacity, reservation, false);
         else latcd_cache_capacity_journal(&generation_capacity, 0, reservation, false);
     }
     if (filesystem_reserved) release_compile_space(LATCD_MAX_WORKERS);
-    g_free(snapshot);
     g_free(temporary);
     if (response->status != LATCD_STATUS_OK)
         g_strlcpy(response->message, error[0] ? error : "journal registration failed",

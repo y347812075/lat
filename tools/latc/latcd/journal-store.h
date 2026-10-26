@@ -21,6 +21,12 @@ int latcd_journal_register(const char *cache, const char *snapshot,
     const uint8_t source_sha[32], const uint8_t build[32], const uint8_t codegen[32],
     int config_fd, uint64_t capacity, uint64_t max_bytes,
     char stream[33], char *error, size_t error_size);
+/* Anonymous O_TMPFILE snapshot; caller retains ownership until registration
+ * finishes, then closes it. No named temporary snapshot is created. */
+int latcd_journal_register_fd(const char *cache, int snapshot_fd,
+    const uint8_t source_sha[32], const uint8_t build[32], const uint8_t codegen[32],
+    int config_fd, uint64_t capacity, uint64_t max_bytes,
+    char stream[33], int *directory_fd, char *error, size_t error_size);
 /* Returns ownership of a CLOEXEC stream directory, not the cache/root directory.
  * Fork children close inherited writers and open a fresh OFD via this directory.
  */
