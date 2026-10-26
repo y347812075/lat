@@ -881,6 +881,16 @@ changing inventory exits nonzero while still emitting the report. Directory
 modes, hardlink aliases, lifecycle pins, and mount references still have to be
 admitted by the later reclamation batches.
 
+`retirement_plan` deduplicates transaction object names and reports `held`,
+`grace`, or `due` using a diagnostic 600-second window. A shared object starts
+its window only when a RETIRED publication stops naming it in the next snapshot;
+later unrelated publications do not refresh it. All current manifests are roots.
+Unresolved transactions, missing or conflicting evidence, replaced objects and
+missing current roots hold candidates. Deadlines use boot ID and CLOCK_BOOTTIME;
+a different boot requires persistent recovery, and missing or future timestamps
+never establish expiry. Even `due` is not permission to delete: the complete
+worker, migration, rollback, reader and mount graph is not verified by this plan.
+
 Managed loads take a shared latch from `.gc/source-locks/<source-sha256>.lock`
 before reading the manifest and retain a shared lease on the selected module
 until process exit. Publication takes the matching exclusive latch only for the

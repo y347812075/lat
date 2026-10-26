@@ -3,6 +3,7 @@
 
 import importlib.util
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 
 
 LATCD = Path(sys.argv.pop(1)).resolve()
@@ -20,6 +22,7 @@ SPEC = importlib.util.spec_from_file_location(
     "cache_gc", Path(__file__).resolve().parents[1] / "latcd/cache_gc.py")
 GC = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GC)
+BOOT = "12345678-1234-4234-8234-123456789abc"
 
 
 class PlannerTest(unittest.TestCase):
@@ -76,6 +79,158 @@ class PlannerTest(unittest.TestCase):
             result[str(p.relative_to(self.root))] = (st.st_ino, st.st_size,
                 st.st_mtime_ns, st.st_ctime_ns, st.st_mode, st.st_nlink)
         return result
+
+    def generation(self, digit, *, tbset=None):
+        stem = SOURCE + "-" + digit * 64
+        manifest = dict(self.manifest, module=stem + ".so", native=stem + ".native",
+                        tbset=tbset or stem + ".tbset")
+        for role in ("module", "native", "tbset"):
+            if not (self.root / manifest[role]).exists():
+                self.put(manifest[role], (digit + role).encode())
+        return manifest
+
+    def transaction(self, previous, following, stamp=1000000, state="RETIRED", boot=BOOT):
+        names = sorted({manifest[role] for manifest in (previous, following) if manifest
+                        for role in ("module", "native", "tbset") if manifest[role]})
+        evidence = f"[objects]\ncount={len(names)}\n"
+        for i, name in enumerate(names):
+            p = self.root / name
+            st = p.stat()
+            evidence += (f"[object{i}]\nname={name}\ndevice={st.st_dev}\ninode={st.st_ino}\n"
+                         f"size={st.st_size}\nallocated={st.st_blocks * 512}\n"
+                         f"sha256={hashlib.sha256(p.read_bytes()).hexdigest()}\n")
+        encode = lambda data: base64.b64encode(data).decode()
+        record = (f"[transaction]\nversion=2\nsource={SOURCE}\nstate={state}\n"
+                  f"previous={encode(json.dumps(previous).encode()) if previous else ''}\n"
+                  f"next={encode(json.dumps(following).encode())}\n"
+                  f"objects={encode(evidence.encode())}\nobjects_status=RECORDED\n"
+                  "binding_status=COMPLETE\n")
+        if stamp is not None:
+            record += f"retired_boot={boot}\nretired_boottime_us={stamp}\n"
+        path = ".gc/transactions/" + str(uuid.uuid4()) + ".ini"
+        self.put(path, record.encode())
+        return path
+
+    def selected(self, now=601000000, boot=BOOT):
+        before = self.snapshot()
+        inventory = GC.Inventory(str(self.root), clock=(boot, now))
+        fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            inventory.scan(fd)
+            inventory.verify(fd)
+        finally:
+            os.close(fd)
+        plan = inventory.report()
+        self.assertEqual(before, self.snapshot())
+        self.assertFalse(plan["retirement_plan"]["full_reference_graph_verified"])
+        self.assertTrue(all(not row["delete_authorized"]
+                            for row in plan["retirement_plan"]["candidates"]))
+        return plan, {row["name"]: row for row in plan["retirement_plan"]["candidates"]}
+
+    def test_shared_objects_and_independent_deadlines(self):
+        old = self.generation("1")
+        middle = self.generation("2", tbset=old["tbset"])
+        first = self.transaction(old, middle)
+        self.transaction(middle, self.manifest, stamp=500000000)
+        plan, rows = self.selected()
+        self.assertTrue(plan["complete"])
+        self.assertEqual(rows[old["module"]]["selection_status"], "due")
+        self.assertEqual(rows[old["module"]]["retirement_transactions"], [first])
+        self.assertEqual(rows[old["module"]]["deadline_boottime_us"], 601000000)
+        self.assertEqual(rows[old["tbset"]]["selection_status"], "grace")
+        self.assertEqual(rows[old["tbset"]]["deadline_boottime_us"], 1100000000)
+        self.assertIn("current_reference", rows[self.manifest["native"]]["holds"])
+        newer = self.generation("3")
+        self.transaction(self.manifest, newer, stamp=600000000)
+        self.write_manifest(json.dumps(newer).encode())
+        _, changed = self.selected()
+        self.assertEqual(rows[old["module"]], changed[old["module"]])
+        self.assertEqual(changed[self.manifest["module"]]["selection_status"], "grace")
+        _, earlier = self.selected(now=600999999)
+        self.assertEqual(earlier[old["module"]]["remaining_grace_us"], 1)
+        _, later = self.selected(now=1100000000)
+        self.assertEqual(later[old["tbset"]]["selection_status"], "due")
+        self.run_plan()
+
+    def test_unresolved_transaction_roots_hold(self):
+        old = self.generation("1")
+        self.transaction(old, self.manifest)
+        for state in ("PREPARED", "ABORTED", "UNKNOWN"):
+            with self.subTest(state=state):
+                path = self.transaction(old, self.manifest, state=state)
+                _, rows = self.selected()
+                self.assertEqual(rows[old["module"]]["selection_status"], "held")
+                self.assertIn(state.lower() + "_transaction", rows[old["module"]]["holds"])
+                (self.root / path).unlink()
+
+    def test_retirement_clock_recovery_and_validation(self):
+        old = self.generation("1")
+        cases = ((None, BOOT, "missing_retirement_clock"),
+                 (1000000, "22345678-1234-4234-8234-123456789abc", "reboot_recovery_required"),
+                 (601000001, BOOT, "future_retirement_clock"))
+        for stamp, boot, reason in cases:
+            with self.subTest(reason=reason):
+                path = self.transaction(old, self.manifest, stamp=stamp, boot=boot)
+                plan, rows = self.selected()
+                self.assertTrue(plan["complete"])
+                self.assertIn(reason, rows[old["module"]]["holds"])
+                self.assertIsNone(rows[old["module"]]["deadline_boottime_us"])
+                (self.root / path).unlink()
+        path = self.transaction(old, self.manifest)
+        original = (self.root / path).read_text()
+        for bad in ("-1", "18446744073709551616", "1.5", ""):
+            self.put(path, original.replace("retired_boottime_us=1000000",
+                                           "retired_boottime_us=" + bad).encode())
+            self.run_plan(False)
+        for bad in (original.replace("retired_boot=" + BOOT + "\n", ""),
+                    original.replace("retired_boot=" + BOOT, "retired_boot=invalid")):
+            self.put(path, bad.encode())
+            self.run_plan(False)
+
+    def test_candidate_identity_and_missing_current(self):
+        old = self.generation("1")
+        self.transaction(old, self.manifest)
+        name = old["native"]
+        p = self.root / name
+        p.rename(self.root / "held-old-inode")
+        self.put(name, b"replacement")
+        _, rows = self.selected()
+        self.assertIn("object_identity_changed", rows[name]["holds"])
+        (self.root / (SOURCE + ".current")).unlink()
+        _, rows = self.selected()
+        self.assertIn("missing_current_root", rows[old["module"]]["holds"])
+
+    def test_shared_current_and_conflicting_evidence(self):
+        old = self.generation("1", tbset=self.manifest["tbset"])
+        self.transaction(old, self.manifest)
+        _, rows = self.selected()
+        self.assertIn("current_reference", rows[old["tbset"]]["holds"])
+        self.assertIn("no_proven_retirement", rows[old["tbset"]]["holds"])
+        # Same basename with new identity must not be merged into old evidence.
+        self.put(old["native"], b"changed object")
+        self.transaction(old, self.manifest, stamp=500000000)
+        _, rows = self.selected()
+        self.assertIn("conflicting_object_evidence", rows[old["native"]]["holds"])
+
+    def test_unproven_evidence_and_unavailable_clock(self):
+        old = self.generation("1")
+        path = self.transaction(old, self.manifest)
+        original = (self.root / path).read_text()
+        self.put(path, original.replace("objects_status=RECORDED",
+                                        "objects_status=MISMATCH").encode())
+        _, rows = self.selected()
+        self.assertIn("unproven_object_evidence", rows[old["module"]]["holds"])
+        self.put(path, original.encode())
+        inventory = GC.Inventory(str(self.root), clock=False)
+        fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            inventory.scan(fd)
+            inventory.verify(fd)
+        finally:
+            os.close(fd)
+        rows = {row["name"]: row for row in inventory.report()["retirement_plan"]["candidates"]}
+        self.assertIn("clock_unavailable", rows[old["module"]]["holds"])
+        self.assertIsNone(rows[old["module"]]["deadline_boottime_us"])
 
     def test_current_and_inventory(self):
         self.put(".superseded/legacy/" + STEM + ".so", b"old")

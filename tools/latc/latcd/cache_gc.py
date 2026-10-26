@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import sys
+import time
 import uuid
 
 
@@ -18,6 +19,18 @@ GENERATED = re.compile(rf"({SHA})(?:-{SHA})?\.(so|native|tbset)\Z")
 MAX_MANIFEST = 4096
 MAX_ENTRIES = 100000
 MAX_DEPTH = 12
+DEFAULT_GRACE_US = 600 * 1000000
+
+
+def boot_clock():
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as stream:
+            boot = stream.read(128).strip()
+        if str(uuid.UUID(boot)) != boot:
+            return None
+        return boot, time.clock_gettime_ns(time.CLOCK_BOOTTIME) // 1000
+    except (OSError, ValueError):
+        return None
 
 
 def identity(st):
@@ -73,7 +86,7 @@ def invalid(message):
 
 
 class Inventory:
-    def __init__(self, root):
+    def __init__(self, root, *, clock=None, grace_us=DEFAULT_GRACE_US):
         self.root = root
         self.entries = {}
         self.directories = {}
@@ -82,10 +95,13 @@ class Inventory:
         self.refs = {}
         self.transaction_refs = {}
         self.transactions = {}
+        self.snapshots = {}
         self.tombstones = {}
         self.frozen = set()
         self.freeze_all = False
         self.count = 0
+        self.clock = boot_clock() if clock is None else clock
+        self.grace_us = grace_us
 
     def error(self, path, reason, detail):
         self.errors.append({"path": path, "reason": reason, "detail": detail})
@@ -208,6 +224,15 @@ class Inventory:
             if (value["version"] not in {"1", "2"} or not re.fullmatch(SHA, source) or
                     state not in {"PREPARED", "RETIRED", "ABORTED", "UNKNOWN"}):
                 raise ValueError("invalid transaction identity/state")
+            for prefix in ("prepared", "retired"):
+                boot_key, time_key = prefix + "_boot", prefix + "_boottime_us"
+                if (boot_key in value) != (time_key in value):
+                    raise ValueError("incomplete transaction clock")
+                if boot_key in value:
+                    if (str(uuid.UUID(value[boot_key])) != value[boot_key] or
+                            not re.fullmatch(r"[0-9]+", value[time_key]) or
+                            int(value[time_key]) >= 2**64):
+                        raise ValueError("invalid transaction clock")
             snapshots = {}
             for role in ("previous", "next"):
                 raw_manifest = base64.b64decode(value[role], validate=True)
@@ -280,6 +305,7 @@ class Inventory:
                             {"transaction": relative, "snapshot": role,
                              "role": field, "state": state})
             self.transactions[relative] = value
+            self.snapshots[relative] = snapshots
             if state == "UNKNOWN":
                 self.frozen.add(source)
         except (OSError, ValueError, KeyError, UnicodeError, configparser.Error) as exc:
@@ -338,6 +364,73 @@ class Inventory:
             if relative and (relative not in self.entries or
                              self.entries[relative]["_identity"] != before):
                 self.error(relative, "concurrent_change", "directory changed before scan")
+
+    def retirement_plan(self, objects):
+        """Select diagnostic deadlines, not live-safe deletion candidates."""
+        output = []
+        for name, references in sorted(self.transaction_refs.items()):
+            row = self.entries.get(name)
+            source = GENERATED.fullmatch(name)[1]
+            holds, events, evidence = set(), [], []
+            for reference in references:
+                path = reference["transaction"]
+                transaction = self.transactions[path]
+                state = transaction["state"]
+                snapshots = self.snapshots[path]
+                if state != "RETIRED":
+                    holds.add(state.lower() + "_transaction")
+                # Sharing a filename into the next generation does not retire it.
+                next_names = {snapshots["next"][role] for role in ("module", "native", "tbset")}
+                if (state == "RETIRED" and reference["snapshot"] == "previous" and
+                        name not in next_names):
+                    events.append(path)
+                matching = [obj for obj in transaction["object_identities"] if obj["name"] == name]
+                if (not transaction["binding_verified"] or
+                        transaction.get("objects_status") != "RECORDED" or not matching):
+                    holds.add("unproven_object_evidence")
+                evidence.extend(matching)
+            events = sorted(set(events))
+            aliases = objects.get((row["device"], row["inode"]), []) if row else []
+            current = [ref for alias in aliases for ref in self.refs.get(alias["path"], [])]
+            if current:
+                holds.add("current_reference")
+            if source + ".current" not in self.manifests:
+                holds.add("missing_current_root")
+            if self.freeze_all or source in self.frozen or self.errors:
+                holds.add("inventory_or_source_unknown")
+            if not events:
+                holds.add("no_proven_retirement")
+            if (not row or not stat.S_ISREG(row["_mode"]) or row["_uid"] != os.geteuid() or
+                    row["_mode"] & 0o222 or row["links"] != 1 or not row["logical_bytes"]):
+                holds.add("missing_or_unsafe_object")
+            if evidence and any(obj != evidence[0] for obj in evidence):
+                holds.add("conflicting_object_evidence")
+            if row and any((obj["device"], obj["inode"], obj["size"], obj["allocated"]) !=
+                           (row["device"], row["inode"], row["logical_bytes"], row["allocated_bytes"])
+                           for obj in evidence):
+                holds.add("object_identity_changed")
+            deadlines = []
+            for path in events:
+                transaction = self.transactions[path]
+                boot, stamp = transaction.get("retired_boot"), transaction.get("retired_boottime_us")
+                if not self.clock:
+                    holds.add("clock_unavailable")
+                elif boot is None or stamp is None:
+                    holds.add("missing_retirement_clock")
+                elif boot != self.clock[0]:
+                    holds.add("reboot_recovery_required")
+                elif int(stamp) > self.clock[1]:
+                    holds.add("future_retirement_clock")
+                else:
+                    deadlines.append(int(stamp) + self.grace_us)
+            deadline = max(deadlines) if events and len(deadlines) == len(events) else None
+            remaining = max(0, deadline - self.clock[1]) if deadline is not None else None
+            status = "held" if holds else "grace" if remaining else "due"
+            output.append({"name": name, "source": source, "selection_status": status,
+                           "holds": sorted(holds), "retirement_transactions": events,
+                           "current_references": current, "deadline_boottime_us": deadline,
+                           "remaining_grace_us": remaining, "delete_authorized": False})
+        return output
 
     def report(self):
         for relative in self.entries:
@@ -425,6 +518,11 @@ class Inventory:
                 "liveness_verified": False, "manifest_count": len(self.manifests),
                 "transaction_count": len(self.transactions),
                 "transactions": self.transactions,
+                "retirement_plan": {"grace_us": self.grace_us,
+                                    "clock": ({"boot_id": self.clock[0], "boottime_us": self.clock[1]}
+                                              if self.clock else None),
+                                    "full_reference_graph_verified": False,
+                                    "candidates": self.retirement_plan(objects)},
                 "tombstone_count": len(self.tombstones), "tombstones": self.tombstones,
                 "totals": {"path_count": len(output), "unique_objects": len(unique),
                            "logical_bytes": sum(r["logical_bytes"] for r in unique),
