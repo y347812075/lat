@@ -20,6 +20,7 @@ import signal
 import socket
 import struct
 import subprocess
+import threading
 import time
 
 from tb_key_set import read_key_set
@@ -27,7 +28,10 @@ from tb_key_set import read_key_set
 
 MODES = ('control', 'truncate', 'setfl', 'overwrite', 'dup', 'collision',
          'path-control', 'path', 'hardlink', 'symlink', 'scm-control', 'scm',
-         'background', 'restart')
+         'background', 'restart', 'background-active', 'background-retry')
+
+
+BACKGROUND_MODES = ('background', 'background-active', 'background-retry')
 
 
 def require(condition, message):
@@ -123,6 +127,94 @@ def collect(endpoint, work):
     return {'status': status, 'accepted': accepted, 'published': published}
 
 
+def open_channel(endpoint):
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    peer.settimeout(5)
+    peer.connect(endpoint)
+    request = struct.pack('<IHHIIQQ', 0x4c415444, 2, 32, 7, 0, 1, 0)
+    if peer.send(request) != len(request):
+        raise AssertionError('short channel-open request')
+    response, ancillary, flags, _ = peer.recvmsg(265, socket.CMSG_SPACE(0))
+    if len(response) != 264 or ancillary or flags:
+        raise AssertionError('invalid channel-open response')
+    if struct.unpack_from('<i', response, 8)[0] != 0:
+        raise AssertionError('daemon rejected an active test channel')
+    return peer
+
+
+def channel_reply_worker(reply, stop, responses, errors, worker):
+    reply.settimeout(.2)
+    while not stop.is_set():
+        try:
+            response, ancillary, flags, _ = reply.recvmsg(
+                265, socket.CMSG_SPACE(0))
+        except TimeoutError:
+            continue
+        except OSError as error:
+            if not stop.is_set():
+                errors.append(f'active reply {worker}: {error}')
+            return
+        if len(response) != 264 or ancillary or flags:
+            errors.append(f'active reply {worker}: invalid response')
+            stop.set()
+            return
+        if struct.unpack_from('<i', response, 8)[0] != 1:
+            errors.append(f'active reply {worker}: unexpected status')
+            stop.set()
+            return
+        responses[0] += 1
+
+
+def channel_flood_worker(endpoint, stop, completed, errors, worker):
+    peer = reply_send = reply_recv = receiver = None
+    responses = [0]
+    receiver_stop = threading.Event()
+    try:
+        peer = open_channel(endpoint)
+        reply_send, reply_recv = socket.socketpair(
+            socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        receiver = threading.Thread(
+            target=channel_reply_worker,
+            args=(reply_recv, receiver_stop, responses, errors, worker),
+            daemon=True)
+        receiver.start()
+        fds = array.array('i', [reply_send.fileno()])
+        while not stop.is_set():
+            request = struct.pack('<IHHIIQQ', 0x4c415443, 2, 32, 5, 0,
+                                  worker * 1000000 + completed[worker], 0)
+            if peer.sendmsg(
+                    [request],
+                    [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)]) != len(request):
+                raise AssertionError('short active-channel request')
+            completed[worker] += 1
+    except (AssertionError, OSError, BrokenPipeError) as error:
+        if not stop.is_set():
+            errors.append(f'active channel {worker}: {error}')
+    finally:
+        receiver_stop.set()
+        if peer is not None:
+            peer.close()
+        if reply_send is not None:
+            reply_send.close()
+        if receiver is not None:
+            receiver.join(timeout=2)
+        if reply_recv is not None:
+            reply_recv.close()
+
+
+def start_channel_floods(endpoint, count=4):
+    stop = threading.Event()
+    completed = [0] * count
+    errors = []
+    threads = [threading.Thread(
+        target=channel_flood_worker,
+        args=(endpoint, stop, completed, errors, worker), daemon=True)
+        for worker in range(count)]
+    for thread in threads:
+        thread.start()
+    return stop, threads, completed, errors
+
+
 def receipt_keys(path, guest):
     raw = path.read_bytes()
     require(len(raw) >= 64, 'short receipt')
@@ -138,8 +230,8 @@ def receipt_keys(path, guest):
 
 
 def wait_for_module(prefix, cache, source_digest, expected, work, evidence,
-                    daemon, name):
-    deadline = time.monotonic() + 120
+                    daemon, name, timeout=120):
+    deadline = time.monotonic() + timeout
     modules = []
     while not modules:
         modules = list(cache.glob(source_digest.hex() + '-*.so'))
@@ -180,7 +272,7 @@ def run_case(prefix, guests, root, mode):
         guest = guests / 'guest-hardlink'
     elif mode in ('scm-control', 'scm'):
         guest = guests / 'guest-scm'
-    elif mode in ('background', 'restart'):
+    elif mode in BACKGROUND_MODES + ('restart',):
         guest = guests / 'guest-overwrite'
     else:
         guest = guests / ('guest-path' if mode in
@@ -195,6 +287,8 @@ def run_case(prefix, guests, root, mode):
                      'lib/liblat-aot-runtime.so.2')}}
     daemon = runner = stdin_peer = None
     failures = []
+    flood_stop = flood_threads = flood_completed = flood_errors = None
+    retry_attempts = None
     try:
         command = ['python3', str(Path(__file__).with_name('make-symbol-tbset.py')),
                    str(guest), '_start|delivery_target', str(work / 'expected.tbset')]
@@ -204,13 +298,33 @@ def run_case(prefix, guests, root, mode):
         require(len(expected) == 2, 'expected distinct entry and delivery target keys')
         evidence['expected_keys'] = sorted(expected)
         with (work / 'daemon.log').open('wb') as log, (work / 'runner.log').open('wb') as err:
+            latc = prefix / 'bin/latc'
+            if mode == 'background-retry':
+                latc = work / 'fail-once-latc.sh'
+                retry_attempts = work / 'latc-attempts'
+                (work / 'real-latc').symlink_to(prefix / 'bin/latc')
+                latc.write_text(
+                    '#!/bin/sh\n'
+                    'set -u\n'
+                    'script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)\n'
+                    'if [ "${1:-}" = compile-module ]; then\n'
+                    '    printf "attempt\\n" >> "$script_dir/latc-attempts"\n'
+                    '    if [ ! -e "$script_dir/latc-failed-once" ]; then\n'
+                    '        : > "$script_dir/latc-failed-once"\n'
+                    '        exit 75\n'
+                    '    fi\n'
+                    'fi\n'
+                    'exec "$script_dir/real-latc" "$@"\n')
+                latc.chmod(0o700)
             command = [str(prefix / 'bin/latcd'), '--serve', '--socket', endpoint,
-                       '--cache-dir', str(cache), '--latc', str(prefix / 'bin/latc'),
+                       '--cache-dir', str(cache), '--latc', str(latc),
                        '--runner', str(prefix / 'bin/latx-x86_64'), '--runtime-dir',
                        str(prefix / 'lib'), '--workers', '1', '--idle-seconds', '0',
                        '--flush-only']
-            if mode == 'background':
+            if mode in BACKGROUND_MODES:
                 command.remove('--flush-only')
+            if mode == 'background-retry':
+                command.extend(('--negative-ms', '100'))
             evidence['commands'].append(command)
             daemon = subprocess.Popen(command, env=env, stdout=log, stderr=log)
             deadline = time.monotonic() + 10
@@ -218,6 +332,8 @@ def run_case(prefix, guests, root, mode):
                 require(daemon.poll() is None and time.monotonic() < deadline,
                         'daemon startup failed')
                 time.sleep(.01)
+            if mode == 'background-active':
+                time.sleep(1.1)
             command = [str(prefix / 'bin/latx-x86_64'), str(guest)]
             evidence['commands'].append(command)
             runner_stdin = subprocess.PIPE
@@ -229,6 +345,8 @@ def run_case(prefix, guests, root, mode):
             if mode in ('scm-control', 'scm'):
                 runner_stdin.close()
             require(exact(runner.stdout, 1) == b'R', 'missing guest ready handshake')
+            if mode in BACKGROUND_MODES:
+                runner.send_signal(signal.SIGSTOP)
             journals = list((cache / '.journals').glob('*/keys'))
             require(len(journals) == 1, 'expected one registered journal')
             journal = journals[0]
@@ -248,6 +366,33 @@ def run_case(prefix, guests, root, mode):
                     'journal directory remained in the guest-visible main fd table')
             require(not private,
                     f'runner task held a journal descriptor: {private}')
+            if mode == 'background-active':
+                (flood_stop, flood_threads,
+                 flood_completed, flood_errors) = start_channel_floods(endpoint)
+            if mode in BACKGROUND_MODES:
+                status = Path(f'/proc/{runner.pid}/status').read_text()
+                evidence['producer_state'] = next(
+                    line for line in status.splitlines() if line.startswith('State:'))
+                require('(stopped)' in evidence['producer_state'],
+                        'producer was not stopped before journal-only admission')
+                evidence['background_module'] = wait_for_module(
+                    prefix, cache, source_digest, expected, work, evidence,
+                    daemon, mode, timeout=45)
+                if mode == 'background-active':
+                    flood_stop.set()
+                    for thread in flood_threads:
+                        thread.join(timeout=10)
+                    evidence['active_channel_requests'] = flood_completed
+                    evidence['active_channel_errors'] = flood_errors
+                    if not all(flood_completed):
+                        failures.append('active channels did not remain busy')
+                    failures.extend(flood_errors)
+                if mode == 'background-retry':
+                    attempts = len(retry_attempts.read_text().splitlines())
+                    evidence['latc_attempts'] = attempts
+                    if attempts < 2:
+                        failures.append('failed receipt was not retried')
+                runner.send_signal(signal.SIGCONT)
             fd = None if mode in ('path-control', 'path', 'hardlink', 'symlink',
                                   'scm-control', 'scm') else \
                 unused_main_fd(main_table)
@@ -337,10 +482,6 @@ def run_case(prefix, guests, root, mode):
                 require(exact(runner.stdout, 1) == b'T', 'target did not execute after operation')
             except (AssertionError, BrokenPipeError) as error:
                 failures.append(str(error))
-            if mode == 'background':
-                evidence['background_module'] = wait_for_module(
-                    prefix, cache, source_digest, expected, work, evidence,
-                    daemon, 'background')
             if runner.poll() is None:
                 runner.kill()
             producer_rc = runner.wait(timeout=10)
@@ -408,6 +549,10 @@ def run_case(prefix, guests, root, mode):
     except (AssertionError, OSError, subprocess.SubprocessError) as error:
         failures.append(str(error))
     finally:
+        if flood_stop is not None:
+            flood_stop.set()
+            for thread in flood_threads:
+                thread.join(timeout=10)
         if runner is not None and runner.poll() is None:
             runner.kill()
             runner.wait(timeout=10)

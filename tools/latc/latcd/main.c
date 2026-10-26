@@ -147,6 +147,11 @@ typedef struct LatcdNegativeEntry {
     int64_t retry_at_us;
 } LatcdNegativeEntry;
 
+typedef struct LatcdJournalReceiptState {
+    char digest[65];
+    uint8_t source_sha256[32];
+} LatcdJournalReceiptState;
+
 typedef struct LatcdStaticBarrier {
     char source_key[65];
     uint64_t first_sequence;
@@ -3156,6 +3161,20 @@ static void negative_record_locked(LatcdService *service, const char *key,
         (int64_t)service->config->negative_ms * 1000 * (UINT64_C(1) << shift);
 }
 
+static void journal_receipt_admission_failed_locked(LatcdService *service,
+                                                    const LatcdJob *job)
+{
+    GHashTableIter iterator;
+    gpointer value;
+    g_hash_table_iter_init(&iterator, service->journal_receipts);
+    while (g_hash_table_iter_next(&iterator, NULL, &value)) {
+        LatcdJournalReceiptState *receipt = value;
+        if (!memcmp(receipt->source_sha256, job->digest,
+                    sizeof(receipt->source_sha256)))
+            g_hash_table_iter_remove(&iterator);
+    }
+}
+
 static void mark_job_failed_locked(LatcdService *service, const LatcdJob *job)
 {
     if (job->static_tbset) {
@@ -3337,6 +3356,7 @@ static void *compiler_worker(void *opaque)
             service->failed++;
             /* This failed job is removed, including requests accepted while
              * it was running. None can wait for a nonexistent retry job. */
+            journal_receipt_admission_failed_locked(service, job);
             mark_job_failed_locked(service, job);
             negative_record_locked(service, job->key, response.status);
             fprintf(stderr, "latcd: job %s failed status=%d: %s\n",
@@ -3905,9 +3925,10 @@ static int journal_queue_receipts(const LatcdConfig *config,
                 snprintf(error, sizeof(error), "cannot hash journal receipt");
             }
             pthread_mutex_lock(&service->lock);
-            const char *previous = g_hash_table_lookup(
+            const LatcdJournalReceiptState *previous = g_hash_table_lookup(
                 service->journal_receipts, name);
-            bool unchanged = previous && !strcmp(previous, digest);
+            bool unchanged = previous &&
+                !strcmp(previous->digest, digest);
             pthread_mutex_unlock(&service->lock);
             if (skip_unchanged && unchanged) {
                 skipped++;
@@ -3931,8 +3952,13 @@ static int journal_queue_receipts(const LatcdConfig *config,
                 snprintf(error, sizeof(error), "%s", item.message);
             } else {
                 pthread_mutex_lock(&service->lock);
+                LatcdJournalReceiptState *receipt_state =
+                    g_new0(LatcdJournalReceiptState, 1);
+                g_strlcpy(receipt_state->digest, digest,
+                          sizeof(receipt_state->digest));
+                memcpy(receipt_state->source_sha256, item.source_sha256, 32);
                 g_hash_table_insert(service->journal_receipts,
-                                    g_strdup(name), g_strdup(digest));
+                                    g_strdup(name), receipt_state);
                 pthread_mutex_unlock(&service->lock);
                 queued++;
             }
@@ -3962,6 +3988,29 @@ static int journal_queue_receipts(const LatcdConfig *config,
              "receipts=%u keys=%llu queued=%u skipped=%u", count,
              (unsigned long long)received, queued, skipped);
     return 0;
+}
+
+static void admit_journal_receipts_periodically(
+    const LatcdConfig *config, LatcdService *service,
+    const uint8_t build[32], const uint8_t codegen[32],
+    int64_t *last_admission, bool *had_error)
+{
+    int64_t now = g_get_monotonic_time();
+    if (now - *last_admission < G_USEC_PER_SEC) return;
+
+    LatcdResponseV2 admitted = {0};
+    response_init(&admitted, 1);
+    bool failed = journal_queue_receipts(
+        config, service, build, codegen, true, &admitted);
+    if (failed && !*had_error) {
+        fprintf(stderr,
+                "latcd: periodic journal admission failed: %s\n",
+                admitted.message);
+    } else if (!failed && *had_error) {
+        fprintf(stderr, "latcd: periodic journal admission recovered\n");
+    }
+    *had_error = failed;
+    *last_admission = g_get_monotonic_time();
 }
 
 static int source_flush_state_locked(LatcdService *service,
@@ -4521,29 +4570,14 @@ static int run_service(const LatcdConfig *config)
     GPtrArray *pending_flushes = g_ptr_array_new();
     while (!stop_requested) {
         finish_flush_requests(&service, pending_flushes, false);
+        admit_journal_receipts_periodically(
+            config, &service, journal_build, journal_codegen,
+            &last_journal_admission, &journal_admission_error);
         int available = poll(channels, channel_count, 250);
         if (available < 0 && errno == EINTR) {
             continue;
         }
         if (available <= 0) {
-            int64_t now = g_get_monotonic_time();
-            if (!stop_requested &&
-                now - last_journal_admission >= G_USEC_PER_SEC) {
-                LatcdResponseV2 admitted = {0};
-                response_init(&admitted, 1);
-                bool failed = journal_queue_receipts(
-                    config, &service, journal_build, journal_codegen, true,
-                    &admitted);
-                if (failed && !journal_admission_error) {
-                    fprintf(stderr,
-                            "latcd: periodic journal admission failed: %s\n",
-                            admitted.message);
-                } else if (!failed && journal_admission_error) {
-                    fprintf(stderr, "latcd: periodic journal admission recovered\n");
-                }
-                journal_admission_error = failed;
-                last_journal_admission = now;
-            }
             pthread_mutex_lock(&service.lock);
             bool busy = channel_count > 1 || pending_flushes->len || service.queue->len ||
                 g_hash_table_size(service.running_sources);
