@@ -1338,6 +1338,15 @@ test-aot-v2-install:
 	sh tests/test-aot-v2-install.sh $(INSTALL_PREFIX) $(X86_ROOTFS) \
 	  $(X86_GUEST) $(BUILD)/aot-v2-install-test
 
+.PHONY: test-posix-lock-lifetime
+test-posix-lock-lifetime: $(BUILD)/tests/test-posix-lock-lifetime
+	@test -n "$(WORK)" || { echo "usage: make test-posix-lock-lifetime WORK=..."; exit 2; }
+	timeout 30 $(BUILD)/tests/test-posix-lock-lifetime "$(WORK)"
+
+$(BUILD)/tests/test-posix-lock-lifetime: tests/test-posix-lock-lifetime.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $< -pthread
+
 .PHONY: test-aot-v2-journal-fd
 test-aot-v2-journal-fd:
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(GUEST_DIR)" -a -n "$(WORK)" || \

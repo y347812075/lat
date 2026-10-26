@@ -194,6 +194,16 @@ both executed fixture keys. Each case records product hashes, commands,
 fd state, before/after journals, raw collector replies and available receipts.
 Corruption is reported as failure, never accepted as the expected test result.
 
+`make -C tools/latc test-posix-lock-lifetime WORK="$HOME/tmp"` runs a native
+Linux descriptor-lifetime oracle. It requires permission to `unshare(CLONE_FILES)`
+and is intentionally opt-in. Independent processes check traditional record-lock
+conflicts and reported PIDs. The oracle demonstrates why retiring an original
+backend fd can release a later lock, and compares native exec, exec from a
+different thread, and exec by a private-files lock owner, including CLOEXEC
+descriptors and same-inode aliases. It tests kernel semantics and an isolated
+owner prototype, not product fd integration, blocking lock/close races, or
+journal protection. A watchdog timeout is a failure, not an accepted outcome.
+
 In service mode, `flush-source` and `flush-all` freeze the accepted sequence
 for each applicable source when admitted. They wait for those targets without
 blocking the request loop or extending the barrier to later submissions.
