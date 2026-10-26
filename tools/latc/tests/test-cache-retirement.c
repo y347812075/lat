@@ -1105,6 +1105,102 @@ static void test_explicit_holds(void)
     remove_root(root); g_free(root);
 }
 
+static void test_task_root_admission(bool copying, bool executor)
+{
+    char *root = root_new(), error[256];
+    char *name = g_strconcat(source, ".native", NULL), *path = g_build_filename(root, name, NULL);
+    put(path, "task root object\n");
+    char *tasks = g_build_filename(root, ".gc", "tasks", NULL);
+    char *temporary = g_build_filename(root, ".tmp", NULL);
+    assert(!g_mkdir_with_parents(tasks, 0700) && !mkdir(temporary, 0700));
+    const char *names[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+    assert(evidence);
+    if (executor) {
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        assert(fd >= 0 && !latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+        close(fd);
+    }
+    char *id = g_uuid_string_random(), *filename = g_strdup_printf("%s.ini", id);
+    char *task_path = g_build_filename(tasks, filename, NULL);
+    struct stat cache, object;
+    assert(!stat(root, &cache) && !stat(path, &object));
+    char *record = g_strdup_printf("[task]\nversion=%d\nid=%s\nstate=BOUND\nsource=%s\nbuild_id=%s\n%s=%s\n"
+        "[cache]\ndevice=%llu\ninode=%llu\nsize=0\nmode=16832\nuid=0\nmtime_sec=0\nmtime_nsec=0\n"
+        "[temporary]\ndevice=0\ninode=0\nsize=0\nmode=16832\nuid=0\nmtime_sec=0\nmtime_nsec=0\n"
+        "[%s]\nname=%s\ndirectory=cache\ndevice=%llu\ninode=%llu\nsize=%llu\nmode=%u\nuid=%u\nmtime_sec=0\nmtime_nsec=0\n"
+        "[%s]\nname=task-output\n%s", copying ? 2 : 1, id, source, source,
+        copying ? "kind" : "environment_sha256", copying ? "COPY" : source,
+        (unsigned long long)cache.st_dev, (unsigned long long)cache.st_ino,
+        copying ? "input" : "source", name, (unsigned long long)object.st_dev,
+        (unsigned long long)object.st_ino, (unsigned long long)object.st_size,
+        object.st_mode, object.st_uid, copying ? "output" : "output_native",
+        copying ? "" : "[output_module]\nname=task-module\n");
+    put(task_path, record);
+    int task = open(task_path, O_RDONLY | O_CLOEXEC);
+    assert(task >= 0 && !flock(task, LOCK_SH | LOCK_NB));
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(fd >= 0);
+    int result = executor ? latcd_tombstone_delete(root, name, error, sizeof(error)) :
+        latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error));
+    assert(result && !access(path, F_OK));
+    close(fd);
+    char *release_dir = g_build_filename(root, ".gc", copying ? "copy-releases" : "compiler-releases", NULL);
+    assert(!mkdir(release_dir, 0700));
+    char *release_path = g_build_filename(release_dir, filename, NULL);
+    struct stat task_identity;
+    assert(!fstat(task, &task_identity));
+    char *release = g_strdup_printf("[handoff]\nversion=1\ntask_id=%s\nstate=%s\ntask_device=%llu\ntask_inode=%llu\n",
+        id, copying ? "RELEASED" : "INPUTS_RELEASED", (unsigned long long)task_identity.st_dev,
+        (unsigned long long)task_identity.st_ino);
+    put(release_path, release);
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    result = executor ? latcd_tombstone_delete(root, name, error, sizeof(error)) :
+        latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error));
+    assert(result && !access(path, F_OK));
+    close(fd); close(task);
+    const char *bad_receipts[] = {"[handoff]\nversion=9\n", "[handoff]\nstate=INPUTS_RELEASED\n"};
+    for (unsigned i = 0; i < G_N_ELEMENTS(bad_receipts); i++) {
+        put(release_path, bad_receipts[i]);
+        fd = open(path, O_RDONLY | O_CLOEXEC);
+        assert(fd >= 0);
+        result = executor ? latcd_tombstone_delete(root, name, error, sizeof(error)) :
+            latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error));
+        assert(result && !access(path, F_OK));
+        close(fd);
+    }
+    put(release_path, release);
+    if (executor) {
+        /* UNKNOWN is sticky after corrupt metadata; a new test tombstone is
+         * needed to exercise successful release without pretending recovery. */
+        char *marker = g_build_filename(root, ".gc", "tombstones", name, NULL);
+        assert(!unlink(marker));
+        g_free(marker);
+        fd = open(path, O_RDONLY | O_CLOEXEC);
+        assert(!latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+        close(fd);
+    }
+    if (copying) {
+        char *output = g_build_filename(temporary, "task-output", NULL);
+        put(output, "copy output still exists\n");
+        fd = open(path, O_RDONLY | O_CLOEXEC);
+        result = executor ? latcd_tombstone_delete(root, name, error, sizeof(error)) :
+            latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error));
+        assert(result && !access(path, F_OK));
+        close(fd); assert(!unlink(output)); g_free(output);
+    }
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    result = executor ? latcd_tombstone_delete(root, name, error, sizeof(error)) :
+        latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error));
+    assert(!result);
+    close(fd);
+    if (!executor) assert(!latcd_tombstone_delete(root, name, error, sizeof(error)));
+    assert(access(path, F_OK));
+    g_free(release); g_free(release_path); g_free(release_dir); g_free(record); g_free(filename);
+    g_free(id); g_free(task_path); g_free(tasks); g_free(temporary); g_free(evidence); g_free(path); g_free(name);
+    remove_root(root); g_free(root);
+}
+
 static void test_hold_crash(bool release, const char *point)
 {
     char *root = root_new(), error[256];
@@ -1137,6 +1233,10 @@ static void test_hold_crash(bool release, const char *point)
 int main(void)
 {
     test_explicit_holds();
+    for (unsigned copying = 0; copying < 2; copying++) {
+        test_task_root_admission(copying, false);
+        test_task_root_admission(copying, true);
+    }
     const char *hold_points[] = {"created", "written", "file-synced", "renamed", "directory-synced"};
     for (unsigned i = 0; i < G_N_ELEMENTS(hold_points); i++) {
         test_hold_crash(false, hold_points[i]);

@@ -609,6 +609,190 @@ static int object_hold_status(int root, const char *name, const struct stat *obj
     return result;
 }
 
+static bool record_string_is(GKeyFile *record, const char *group,
+                              const char *key, const char *expected)
+{
+    char *value = g_key_file_get_string(record, group, key, NULL);
+    bool equal = !g_strcmp0(value, expected);
+    g_free(value);
+    return equal;
+}
+
+static bool record_uint64(GKeyFile *record, const char *group, const char *key,
+                           uint64_t *number)
+{
+    char *value = g_key_file_get_string(record, group, key, NULL), *end = NULL;
+    errno = 0;
+    *number = value ? g_ascii_strtoull(value, &end, 10) : 0;
+    bool valid = value && *value && strspn(value, "0123456789") == strlen(value) &&
+        !errno && end && !*end;
+    g_free(value);
+    return valid;
+}
+
+static bool task_identity_valid(GKeyFile *record, const char *group)
+{
+    const char *numbers[] = {"device", "inode", "size", "mode", "uid", "mtime_nsec"};
+    uint64_t value;
+    for (unsigned i = 0; i < G_N_ELEMENTS(numbers); i++) {
+        if (!record_uint64(record, group, numbers[i], &value) ||
+            (i == 5 && value >= 1000000000)) return false;
+    }
+    char *seconds = g_key_file_get_string(record, group, "mtime_sec", NULL), *end = NULL;
+    const char *digits = seconds && *seconds == '-' ? seconds + 1 : seconds;
+    errno = 0;
+    if (seconds) (void)g_ascii_strtoll(seconds, &end, 10);
+    bool valid = digits && *digits && strspn(digits, "0123456789") == strlen(digits) &&
+        !errno && end && !*end;
+    g_free(seconds);
+    return valid;
+}
+
+/* A release receipt is effective only with an exact task inode and no holder.
+ * Missing receipt is a hold, not evidence of task completion. */
+static int task_inputs_released(int gc, const char *name, bool copying,
+                                 int task, const struct stat *identity)
+{
+    int releases = open_directory(gc, copying ? "copy-releases" : "compiler-releases", false);
+    if (releases < 0) return errno == ENOENT ? 0 : -1;
+    char *raw = NULL;
+    size_t size;
+    int status = read_file(releases, name, MANIFEST_LIMIT, &raw, &size);
+    close(releases);
+    if (status) return status == 1 ? 0 : -1;
+    GKeyFile *record = g_key_file_new();
+    const char *keys[] = {"version", "task_id", "state", "task_device", "task_inode"};
+    gsize count;
+    char id[37];
+    memcpy(id, name, 36); id[36] = 0;
+    bool valid = !memchr(raw, 0, size) && g_key_file_load_from_data(record, raw, size, 0, NULL);
+    char **groups = g_key_file_get_groups(record, &count);
+    uint64_t device, inode;
+    valid = valid && count == 1 && !strcmp(groups[0], "handoff") &&
+        exact_keys(record, "handoff", keys, G_N_ELEMENTS(keys)) &&
+        record_string_is(record, "handoff", "version", "1") &&
+        record_string_is(record, "handoff", "task_id", id) &&
+        record_string_is(record, "handoff", "state", copying ? "RELEASED" : "INPUTS_RELEASED") &&
+        record_uint64(record, "handoff", "task_device", &device) && device == (uint64_t)identity->st_dev &&
+        record_uint64(record, "handoff", "task_inode", &inode) && inode == (uint64_t)identity->st_ino;
+    g_strfreev(groups); g_free(raw); g_key_file_unref(record);
+    if (!valid) return -1;
+    if (flock(task, LOCK_EX | LOCK_NB)) return errno == EWOULDBLOCK ? 0 : -1;
+    return 1;
+}
+
+/* Defense in depth, not the full reference graph. The management owner must
+ * serialize local publisher transitions. No unbounded task walk under S. */
+static int object_task_status(int root, const char *name, const struct stat *object)
+{
+    int gc = open_directory(root, ".gc", false);
+    if (gc < 0) return errno == ENOENT ? 0 : -1;
+    int tasks = open_directory(gc, "tasks", false);
+    if (tasks < 0) { int result = errno == ENOENT ? 0 : -1; close(gc); return result; }
+    DIR *directory = fdopendir(tasks);
+    if (!directory) { close(tasks); close(gc); return -1; }
+    struct stat cache;
+    int result = fstat(root, &cache) ? -1 : 0;
+    unsigned visited = 0;
+    int64_t started = g_get_monotonic_time();
+    while (!result) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) { if (errno) result = -1; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (++visited > 128 || g_get_monotonic_time() - started >= 10000 ||
+            !name_valid(entry->d_name)) { result = -1; break; }
+        int task = openat(tasks, entry->d_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        struct stat before, after, path;
+        char *raw = NULL;
+        size_t size;
+        GKeyFile *record = g_key_file_new();
+        bool valid = task >= 0 && !fstat(task, &before) &&
+            !read_file(tasks, entry->d_name, RECORD_LIMIT, &raw, &size) &&
+            !fstat(task, &after) && object_stat_equal(&before, &after) &&
+            !fstatat(tasks, entry->d_name, &path, AT_SYMLINK_NOFOLLOW) && object_stat_equal(&before, &path) &&
+            !memchr(raw, 0, size) && g_key_file_load_from_data(record, raw, size, 0, NULL);
+        char id[37];
+        memcpy(id, entry->d_name, 36); id[36] = 0;
+        bool copying = record_string_is(record, "task", "version", "2");
+        const char *task_keys[] = {"version", "id", "state", "source", "build_id",
+                                  copying ? "kind" : "environment_sha256"};
+        valid = valid && (copying || record_string_is(record, "task", "version", "1")) &&
+            exact_keys(record, "task", task_keys, G_N_ELEMENTS(task_keys)) &&
+            record_string_is(record, "task", "id", id) && record_string_is(record, "task", "state", "BOUND");
+        if (copying) valid &= record_string_is(record, "task", "kind", "COPY");
+        const char *digests[] = {"source", "build_id", "environment_sha256"};
+        for (unsigned i = 0; valid && i < (copying ? 2u : 3u); i++) {
+            char *value = g_key_file_get_string(record, "task", digests[i], NULL);
+            valid = digest_valid(value); g_free(value);
+        }
+        uint64_t device, inode;
+        valid = valid && record_uint64(record, "cache", "device", &device) && device == (uint64_t)cache.st_dev &&
+            record_uint64(record, "cache", "inode", &inode) && inode == (uint64_t)cache.st_ino;
+        bool referenced = false;
+        const char *roles[] = {"source", "tbset", "base_native", "base_module", "input"};
+        gsize count;
+        char **groups = g_key_file_get_groups(record, &count);
+        for (gsize i = 0; valid && i < count; i++) {
+            const char *group = groups[i];
+            bool input = false;
+            for (unsigned j = 0; j < G_N_ELEMENTS(roles); j++) input |= !strcmp(group, roles[j]);
+            if (!input) {
+                if (!strcmp(group, "task")) continue;
+                bool location = !strcmp(group, "cache") || !strcmp(group, "temporary") || !strcmp(group, "collected");
+                bool output = !strcmp(group, copying ? "output" : "output_native") ||
+                    (!copying && !strcmp(group, "output_module"));
+                const char *identity_fields[] = {"device", "inode", "size", "mode", "uid", "mtime_sec", "mtime_nsec"};
+                const char *output_fields[] = {"name"};
+                valid = location ? exact_keys(record, group, identity_fields, G_N_ELEMENTS(identity_fields)) &&
+                    task_identity_valid(record, group) : output && exact_keys(record, group, output_fields, 1);
+                if (valid && output) {
+                    char *value = g_key_file_get_string(record, group, "name", NULL);
+                    valid = value && *value && !strchr(value, '/') && strcmp(value, ".") && strcmp(value, "..");
+                    g_free(value);
+                }
+                continue;
+            }
+            const char *fields[] = {"name", "directory", "device", "inode", "size", "mode", "uid", "mtime_sec", "mtime_nsec"};
+            char *input_name = g_key_file_get_string(record, group, "name", NULL);
+            char *location = g_key_file_get_string(record, group, "directory", NULL);
+            valid = exact_keys(record, group, fields, G_N_ELEMENTS(fields)) && input_name && *input_name &&
+                !strchr(input_name, '/') && strcmp(input_name, ".") && strcmp(input_name, "..") &&
+                (!g_strcmp0(location, "cache") || !g_strcmp0(location, "temporary") || !g_strcmp0(location, "collected")) &&
+                task_identity_valid(record, group) &&
+                record_uint64(record, group, "device", &device) && record_uint64(record, group, "inode", &inode);
+            valid &= copying ? !strcmp(group, "input") : strcmp(group, "input") != 0;
+            if (valid) referenced |= (!strcmp(location, "cache") && !strcmp(input_name, name)) ||
+                (device == (uint64_t)object->st_dev && inode == (uint64_t)object->st_ino);
+            g_free(input_name); g_free(location);
+        }
+        valid = valid && g_key_file_has_group(record, copying ? "input" : "source") &&
+            g_key_file_has_group(record, "temporary") &&
+            g_key_file_has_group(record, copying ? "output" : "output_native") &&
+            (copying || g_key_file_has_group(record, "output_module"));
+        g_strfreev(groups);
+        if (!valid) result = -1;
+        else if (referenced) {
+            int released = task_inputs_released(gc, entry->d_name, copying, task, &before);
+            if (released > 0 && copying) {
+                char *output = g_key_file_get_string(record, "output", "name", NULL);
+                int temporary = open_directory(root, ".tmp", false);
+                struct stat st;
+                if (!output || !*output || strchr(output, '/') || !strcmp(output, ".") || !strcmp(output, "..") ||
+                    temporary < 0 || !fstatat(temporary, output, &st, AT_SYMLINK_NOFOLLOW) || errno != ENOENT)
+                    released = 0;
+                if (temporary >= 0) close(temporary);
+                g_free(output);
+            }
+            result = released < 0 ? -1 : released ? 0 : 1;
+        }
+        if (task >= 0) close(task);
+        g_free(raw); g_key_file_unref(record);
+    }
+    closedir(directory); close(gc);
+    return result;
+}
+
 int latcd_retirement_hold(const char *root, const char *source, const char *name,
                            const char *id, const char *reason, bool release,
                            char *error, size_t error_size)
@@ -732,7 +916,7 @@ int latcd_retirement_tombstone(const char *root, const char *source,
         g_hash_table_unref(references);
         if (!safe) goto out;
     }
-    if (object_hold_status(directory, name, &before) ||
+    if (object_hold_status(directory, name, &before) || object_task_status(directory, name, &before) ||
         fstat(object_fd, &after) || !object_stat_equal(&before, &after) ||
         fstatat(directory, name, &path, AT_SYMLINK_NOFOLLOW) ||
         !object_stat_equal(&before, &path)) goto out;
@@ -1168,6 +1352,7 @@ static int recover_tombstone(const char *root_path, int root, int store,
     }
     if (remove_object && !strcmp(observation, "MATCHED")) {
         int held = object_hold_status(root, name, &after);
+        if (!held) held = object_task_status(root, name, &after);
         if (held) observation = held < 0 ? "UNKNOWN" : "BUSY";
     }
     if (remove_object && (!strcmp(observation, "MATCHED") || !strcmp(observation, "MISSING"))) {
