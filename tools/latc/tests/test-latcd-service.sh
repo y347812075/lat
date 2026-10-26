@@ -17,6 +17,18 @@ export LATC_FAKE_REAL=$latc
 rm -rf "$work"
 mkdir -m 700 -p "$work"
 
+cleanup_service()
+{
+    for pid in "${server_pid:-}" "${owner_pid:-}" "${normal_pid:-}" "${kill_pid:-}"; do
+        [ -n "$pid" ] || continue
+        kill -TERM "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    done
+}
+trap cleanup_service EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 start_service()
 {
     name=$1
@@ -70,6 +82,7 @@ stop_service()
 {
     kill -TERM "$server_pid"
     wait "$server_pid"
+    server_pid=
 }
 
 submit_source()
@@ -128,6 +141,7 @@ test -z "$(find "$owner_cache" -maxdepth 1 -type f \
 
 kill -TERM "$owner_pid"
 wait "$owner_pid"
+owner_pid=
 normal_phase=$work/cache-owner-normal-recovery
 mkdir -m 700 "$normal_phase"
 normal_socket=$normal_phase/latcd.sock
@@ -144,6 +158,7 @@ done
 [ -S "$normal_socket" ]
 kill -KILL "$normal_pid"
 wait "$normal_pid" 2>/dev/null || true
+normal_pid=
 
 kill_phase=$work/cache-owner-kill-recovery
 mkdir -m 700 "$kill_phase"
@@ -185,6 +200,7 @@ find "$owner_cache" -maxdepth 1 -type f \
 cmp "$kill_phase/cache.before" "$kill_phase/cache.after"
 kill -TERM "$kill_pid"
 wait "$kill_pid"
+kill_pid=
 
 start_service concurrent "$latc"
 wait_stats 's["requests"] == 0 and s["compiled"] == 0 and s["failed"] == 0 and s["active_jobs"] == 0 and s["queue_depth"] == 0'
@@ -368,6 +384,9 @@ assert (cache / current["tbset"]).is_file(), current
 assert len(list(cache.glob(f"{source_sha}-*.so"))) == 1
 assert len(list(cache.glob(f"{source_sha}-*.native"))) == 1
 assert len(list(cache.glob(f"{source_sha}-*.tbset"))) == 1
+(cache.parent / "initial-generation.json").write_text(json.dumps({
+    current[role]: hashlib.sha256((cache / current[role]).read_bytes()).hexdigest()
+    for role in ("module", "native", "tbset")}))
 stats = json.loads((cache.parent / "stats.json").read_text())
 assert stats["requests"] == 2, stats
 assert stats["queued"] == 1 and stats["deduplicated"] == 1, stats
@@ -467,9 +486,12 @@ assert sequence >= 2, sequence
 assert records == [(entry_rva, 3), (entry_rva + 5, 3)], records
 assert current["version"] == 2, current
 assert (cache / current["native"]).is_file(), current
-assert len(list(cache.glob(f"{source_sha}-*.so"))) == 1
-assert len(list(cache.glob(f"{source_sha}-*.native"))) == 1
-assert len(list(cache.glob(f"{source_sha}-*.tbset"))) == 1
+assert len(list(cache.glob(f"{source_sha}-*.so"))) == 2
+assert len(list(cache.glob(f"{source_sha}-*.native"))) == 2
+assert len(list(cache.glob(f"{source_sha}-*.tbset"))) == 2
+old = json.loads((cache.parent / "initial-generation.json").read_text())
+assert all(hashlib.sha256((cache / name).read_bytes()).hexdigest() == digest
+           for name, digest in old.items()), old
 PY
 set +e
 LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$cache" \
@@ -514,6 +536,9 @@ manifest = json.loads((cache / f"{source_sha}.current").read_text())
 output.write_text(json.dumps({name: manifest[name]
                               for name in ("module", "native")},
                              sort_keys=True))
+(cache.parent / "initial-files.json").write_text(json.dumps({
+    manifest[role]: hashlib.sha256((cache / manifest[role]).read_bytes()).hexdigest()
+    for role in ("module", "native", "tbset")}))
 PY
 python3 - "$cache" "$guest" "$phase/covered.tbset" "$script_dir" <<'PY'
 import hashlib
@@ -570,7 +595,10 @@ _, _, records = read_key_set(cache / manifest["tbset"])
 assert len(records) == 2, records
 assert len(list(cache.glob(f"{source_sha}-*.so"))) == 1
 assert len(list(cache.glob(f"{source_sha}-*.native"))) == 1
-assert len(list(cache.glob(f"{source_sha}-*.tbset"))) == 1
+assert len(list(cache.glob(f"{source_sha}-*.tbset"))) == 2
+old = json.loads((cache.parent / "initial-files.json").read_text())
+assert all(hashlib.sha256((cache / name).read_bytes()).hexdigest() == digest
+           for name, digest in old.items()), old
 PY
 stop_service
 
@@ -737,9 +765,12 @@ source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
 manifest = json.loads((cache / f"{source_sha}.current").read_text())
 _, _, records = read_key_set(cache / manifest["tbset"])
 assert {flags for _, flags in records} == {3}, records
-assert len(list(cache.glob(f"{source_sha}-*.so"))) == 1
-assert len(list(cache.glob(f"{source_sha}-*.native"))) == 1
-assert len(list(cache.glob(f"{source_sha}-*.tbset"))) == 1
+assert len(list(cache.glob(f"{source_sha}-*.so"))) == 2
+assert len(list(cache.glob(f"{source_sha}-*.native"))) == 2
+assert len(list(cache.glob(f"{source_sha}-*.tbset"))) == 2
+old = json.loads((cache.parent / "published.json").read_text())
+assert all(hashlib.sha256((cache / name).read_bytes()).hexdigest() == digest
+           for name, digest in old.items() if not name.endswith(".current")), old
 PY
 stop_service
 unset LATCD_TEST_FAIL_BEFORE_MANIFEST
