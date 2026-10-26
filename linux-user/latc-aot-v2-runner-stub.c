@@ -2,6 +2,7 @@
 
 #include "qemu.h"
 #include "latc-aot-v2-runner.h"
+#include <sys/file.h>
 
 void latc_aot_v2_fork_start(void)
 {
@@ -110,6 +111,21 @@ int latc_aot_v2_relocate_source_fd(int fd)
 int latc_aot_v2_fd_dup_replace(int oldfd, int newfd, int flags, bool use_dup3)
 {
     return use_dup3 ? dup3(oldfd, newfd, flags) : dup2(oldfd, newfd);
+}
+
+int latc_aot_v2_fd_snapshot_guest(int fd)
+{
+    return fcntl(fd, F_DUPFD_CLOEXEC, 3);
+}
+
+void latc_aot_v2_fd_snapshot_close(int fd)
+{
+    close(fd);
+}
+
+int latc_aot_v2_fd_try_flock(int fd, int operation)
+{
+    return flock(fd, operation | LOCK_NB);
 }
 
 void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)

@@ -18539,10 +18539,19 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return do_ppoll(arg1, arg2, arg3, arg4, arg5, true, true);
 #endif
     case TARGET_NR_flock:
+    {
         if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
+        int immediate = latc_aot_v2_fd_try_flock(arg1, arg2);
+        if (!immediate || errno != EWOULDBLOCK || (arg2 & LOCK_NB))
+            return get_errno(immediate);
+        int snapshot = latc_aot_v2_fd_snapshot_guest(arg1);
+        if (snapshot < 0) return get_errno(-1);
         /* NOTE: the flock constant seems to be the same for every
            Linux platform */
-        return get_errno(safe_flock(arg1, arg2));
+        ret = get_errno(safe_flock(snapshot, arg2));
+        latc_aot_v2_fd_snapshot_close(snapshot);
+        return ret;
+    }
     case TARGET_NR_readv:
         {
             if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;

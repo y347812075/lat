@@ -74,6 +74,8 @@ LAT_AOT_RUNTIME_2.0 {
         lat_aot_v2_cache_source_lock;
         lat_aot_v2_internal_fd_is_protected;
         lat_aot_v2_internal_fd_dup_replace;
+        lat_aot_v2_internal_fd_snapshot_guest;
+        lat_aot_v2_internal_fd_try_flock;
         lat_aot_v2_context_apply_guest_slots;
         lat_aot_v2_context_apply_guest_table;
         lat_aot_v2_module_open;

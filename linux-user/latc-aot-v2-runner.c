@@ -351,6 +351,21 @@ int latc_aot_v2_fd_dup_replace(int oldfd, int newfd, int flags, bool use_dup3)
     return lat_aot_v2_internal_fd_dup_replace(oldfd, newfd, flags, use_dup3);
 }
 
+int latc_aot_v2_fd_snapshot_guest(int fd)
+{
+    return lat_aot_v2_internal_fd_snapshot_guest(fd);
+}
+
+void latc_aot_v2_fd_snapshot_close(int fd)
+{
+    lat_aot_v2_cache_close_fd(fd, true, NULL, 0);
+}
+
+int latc_aot_v2_fd_try_flock(int fd, int operation)
+{
+    return lat_aot_v2_internal_fd_try_flock(fd, operation);
+}
+
 typedef struct LatAotV2KeyRetry {
     CPUState *cpu;
     target_ulong pc;

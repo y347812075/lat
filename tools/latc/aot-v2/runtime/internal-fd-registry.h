@@ -22,4 +22,12 @@ bool lat_aot_v2_internal_fd_is_protected(int fd);
  * relocates source identity references first; no callback runs under this lock. */
 int lat_aot_v2_internal_fd_dup_replace(int oldfd, int newfd, int flags, bool use_dup3);
 
+/* Pin an admitted guest open description under the allocation/registration lock.
+ * Returned CLOEXEC fd is internal; release with cache_close_fd(..., true, ...).
+ * Blocking guest operations run on this copy outside the registry lock. */
+int lat_aot_v2_internal_fd_snapshot_guest(int fd);
+
+/* Never blocks under the registry lock; caller handles EWOULDBLOCK separately. */
+int lat_aot_v2_internal_fd_try_flock(int fd, int operation);
+
 #endif

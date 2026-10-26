@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 static pthread_mutex_t registry_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -131,6 +132,38 @@ int lat_aot_v2_internal_fd_dup_replace(int oldfd, int newfd, int flags, bool use
     } else {
         result = use_dup3 ? dup3(oldfd, newfd, flags) : dup2(oldfd, newfd);
     }
+    int saved = errno;
+    lat_aot_v2_internal_fd_unlock();
+    errno = saved;
+    return result;
+}
+
+int lat_aot_v2_internal_fd_snapshot_guest(int fd)
+{
+    lat_aot_v2_internal_fd_lock();
+    int snapshot = -1;
+    if (fd_is_protected_locked(fd)) errno = EACCES;
+    else {
+        snapshot = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+        if (snapshot >= 0 && lat_aot_v2_internal_fd_register_locked(snapshot)) {
+            int saved = errno;
+            close(snapshot);
+            snapshot = -1;
+            errno = saved;
+        }
+    }
+    int saved = errno;
+    lat_aot_v2_internal_fd_unlock();
+    errno = saved;
+    return snapshot;
+}
+
+int lat_aot_v2_internal_fd_try_flock(int fd, int operation)
+{
+    lat_aot_v2_internal_fd_lock();
+    int result;
+    if (fd_is_protected_locked(fd)) { errno = EACCES; result = -1; }
+    else result = flock(fd, operation | LOCK_NB);
     int saved = errno;
     lat_aot_v2_internal_fd_unlock();
     errno = saved;
