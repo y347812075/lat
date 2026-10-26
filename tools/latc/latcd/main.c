@@ -3813,6 +3813,107 @@ static int service_queue_request(LatcdService *service, int source_fd,
     return 0;
 }
 
+static int journal_queue_receipts(const LatcdConfig *config,
+                                  LatcdService *service,
+                                  const uint8_t build[32],
+                                  const uint8_t codegen[32],
+                                  LatcdResponseV2 *response)
+{
+    char error[sizeof(response->message)] = {0};
+    unsigned count = 0;
+    uint64_t received = 0;
+    uint64_t accepted = 0;
+    uint64_t published = 0;
+    unsigned queued = 0;
+    unsigned failures = 0;
+    uint64_t request_id = response->request_id;
+
+    response_init(response, request_id);
+    if (latcd_journal_collect(config->cache_dir, build, codegen,
+            config->max_cache_bytes, &count, &received, error, sizeof(error))) {
+        response->status = LATCD_STATUS_BAD_REQUEST;
+        g_strlcpy(response->message, error, sizeof(response->message));
+        return -1;
+    }
+
+    char *root_path = g_build_filename(config->cache_dir, ".journals", NULL);
+    GError *scan_error = NULL;
+    GDir *root_dir = g_dir_open(root_path, 0, &scan_error);
+    if (!root_dir && (!scan_error || scan_error->code != G_FILE_ERROR_NOENT)) {
+        response->status = LATCD_STATUS_IO_ERROR;
+        g_strlcpy(response->message,
+                  scan_error ? scan_error->message : "cannot open journal store",
+                  sizeof(response->message));
+        g_clear_error(&scan_error);
+        g_free(root_path);
+        return -1;
+    }
+    int root = open(root_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (root_dir && root < 0) {
+        response->status = LATCD_STATUS_IO_ERROR;
+        g_strlcpy(response->message, "cannot open journal receipt root",
+                  sizeof(response->message));
+        g_dir_close(root_dir);
+        g_free(root_path);
+        return -1;
+    }
+    const char *name;
+    while (root_dir && (name = g_dir_read_name(root_dir))) {
+        if (name[0] == '.') continue;
+        int directory = openat(root, name,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int source = directory >= 0 ? openat(directory, "source",
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
+        int receipt = directory >= 0 ? openat(directory, "received.tbset",
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
+        if (source >= 0 && receipt >= 0) {
+            static _Atomic uint64_t request_sequence;
+            LatcdRequestV2 request = {
+                .magic = LATCD_REQUEST_MAGIC,
+                .version = LATCD_PROTOCOL_VERSION,
+                .size = sizeof(request),
+                .operation = LATCD_OP_SUBMIT_KEYS,
+                .priority = LATCD_PRIORITY_STARTUP,
+                .request_id = atomic_fetch_add(&request_sequence, 1) + 1,
+            };
+            LatcdResponseV2 item;
+            int result = service_queue_request(service, source, receipt,
+                                               &request, &item);
+            accepted = MAX(accepted, item.accepted_sequence);
+            published = MAX(published, item.published_sequence);
+            if (result) {
+                failures++;
+                snprintf(error, sizeof(error), "%s", item.message);
+            } else {
+                queued++;
+            }
+        }
+        if (source >= 0) close(source);
+        if (receipt >= 0) close(receipt);
+        if (directory >= 0) close(directory);
+        if (failures) break;
+    }
+    if (root_dir) g_dir_close(root_dir);
+    if (root >= 0) close(root);
+    g_clear_error(&scan_error);
+    g_free(root_path);
+
+    response->accepted_sequence = accepted;
+    response->published_sequence = published;
+    if (failures) {
+        response->status = LATCD_STATUS_IO_ERROR;
+        snprintf(response->message, sizeof(response->message),
+                 "receipts=%u keys=%llu queued=%u failures=%u: %s", count,
+                 (unsigned long long)received, queued, failures,
+                 error[0] ? error : "receipt admission failed");
+        return -1;
+    }
+    snprintf(response->message, sizeof(response->message),
+             "receipts=%u keys=%llu queued=%u", count,
+             (unsigned long long)received, queued);
+    return 0;
+}
+
 static int source_flush_state_locked(LatcdService *service,
                                      const char *source_key,
                                      LatcdSourceState *state,
@@ -4255,14 +4356,8 @@ static int run_service(const LatcdConfig *config)
     }
     if (recovered_journals)
     {
-        uint64_t received;
-        if (latcd_journal_collect(config->cache_dir, journal_build, journal_codegen,
-                config->max_cache_bytes, &recovered_journals, &received, error, sizeof(error))) {
-            fprintf(stderr, "latcd: journal receipt recovery failed: %s\n", error);
-            return 1;
-        }
-        fprintf(stderr, "latcd: recovered %u journals, quarantined keys=%llu; no compile admission\n",
-                recovered_journals, (unsigned long long)received);
+        fprintf(stderr, "latcd: recovered %u journal streams; receipt admission pending\n",
+                recovered_journals);
     }
     int server = make_server(config->socket_path, error, sizeof(error));
     if (server < 0) {
@@ -4333,6 +4428,22 @@ static int run_service(const LatcdConfig *config)
     pthread_mutex_lock(&service.lock);
     write_stats_locked(&service);
     pthread_mutex_unlock(&service.lock);
+    if (recovered_journals) {
+        LatcdResponseV2 recovered = {0};
+        response_init(&recovered, 1);
+        if (journal_queue_receipts(config, &service, journal_build,
+                                   journal_codegen, &recovered)) {
+            fprintf(stderr, "latcd: journal receipt admission failed: %s\n",
+                    recovered.message);
+            stop_requested = 1;
+        } else {
+            fprintf(stderr,
+                    "latcd: journal receipt admission accepted=%" PRIu64
+                    " published=%" PRIu64 " %s\n",
+                    recovered.accepted_sequence, recovered.published_sequence,
+                    recovered.message);
+        }
+    }
     struct sigaction action = { .sa_handler = signal_stop };
     sigemptyset(&action.sa_mask);
     sigaction(SIGINT, &action, NULL);
@@ -4396,6 +4507,9 @@ static int run_service(const LatcdConfig *config)
                 register_journal(config, source, tbset, &request, &response, &directory);
             } else if (request.operation == LATCD_OP_APPEND_JOURNAL) {
                 append_journal(config, source, tbset, &request, &response);
+            } else if (request.operation == LATCD_OP_COLLECT_JOURNALS) {
+                journal_queue_receipts(config, &service, journal_build,
+                                       journal_codegen, &response);
             } else if (request.operation != LATCD_OP_SUBMIT_KEYS) {
                 response.status = LATCD_STATUS_BAD_REQUEST;
                 g_strlcpy(response.message,
@@ -4481,16 +4595,8 @@ static int run_service(const LatcdConfig *config)
             append_journal(config, source, tbset, &request, &response);
         } else if (request.operation == LATCD_OP_COLLECT_JOURNALS) {
             response_init(&response, request.request_id);
-            uint64_t received;
-            unsigned count;
-            if (latcd_journal_collect(config->cache_dir, journal_build, journal_codegen,
-                    config->max_cache_bytes, &count, &received, error, sizeof(error))) {
-                response.status = LATCD_STATUS_BAD_REQUEST;
-                g_strlcpy(response.message, error, sizeof(response.message));
-            } else {
-                snprintf(response.message, sizeof(response.message),
-                         "quarantined streams=%u keys=%llu", count, (unsigned long long)received);
-            }
+            journal_queue_receipts(config, &service, journal_build,
+                                   journal_codegen, &response);
         } else if (request.operation == LATCD_OP_PRECOMPILE_SOURCE) {
             LatcdPrecompileRequest *work = g_new0(
                 LatcdPrecompileRequest, 1);

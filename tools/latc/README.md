@@ -205,6 +205,9 @@ return `EACCES`; the protected journal inode/nlink and receipt remain unchanged.
 SCM_RIGHTS accepts an ordinary file descriptor but closes an injected journal
 descriptor and returns `EACCES` before guest copyout. This covers guest syscall
 admission, not an arbitrary same-UID host process that bypasses the emulator.
+The restart mode kills both producer and daemon, starts a fresh daemon on the
+same cache, verifies automatic receipt admission, and checks that the published
+module TB set contains the recovered fixture keys.
 Corruption is reported as failure, never accepted as the expected test result.
 
 `test-aot-v2-journal-fork` runs the existing dynamic fork fixture with the

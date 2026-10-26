@@ -26,7 +26,8 @@ from tb_key_set import read_key_set
 
 
 MODES = ('control', 'truncate', 'setfl', 'overwrite', 'dup', 'collision',
-         'path-control', 'path', 'hardlink', 'symlink', 'scm-control', 'scm')
+         'path-control', 'path', 'hardlink', 'symlink', 'scm-control', 'scm',
+         'restart')
 
 
 def require(condition, message):
@@ -118,7 +119,8 @@ def collect(endpoint, work):
     magic, version, size, status, reserved, identity = struct.unpack_from('<IHH i I Q', response)
     require((magic, version, size, reserved, identity) ==
             (0x4c415452, 2, 264, 0, request_id), 'wrong collector response identity')
-    return status
+    accepted, published = struct.unpack_from('<QQ', response, 16)
+    return {'status': status, 'accepted': accepted, 'published': published}
 
 
 def receipt_keys(path, guest):
@@ -157,6 +159,8 @@ def run_case(prefix, guests, root, mode):
         guest = guests / 'guest-hardlink'
     elif mode in ('scm-control', 'scm'):
         guest = guests / 'guest-scm'
+    elif mode == 'restart':
+        guest = guests / 'guest-overwrite'
     else:
         guest = guests / ('guest-path' if mode in
                           ('path-control', 'path', 'symlink')
@@ -175,7 +179,7 @@ def run_case(prefix, guests, root, mode):
                    str(guest), '_start|delivery_target', str(work / 'expected.tbset')]
         evidence['commands'].append(command)
         subprocess.run(command, check=True)
-        _, _, expected = read_key_set(work / 'expected.tbset')
+        source_digest, _, expected = read_key_set(work / 'expected.tbset')
         require(len(expected) == 2, 'expected distinct entry and delivery target keys')
         evidence['expected_keys'] = sorted(expected)
         with (work / 'daemon.log').open('wb') as log, (work / 'runner.log').open('wb') as err:
@@ -320,9 +324,46 @@ def run_case(prefix, guests, root, mode):
             (work / 'journal-after.gz').write_bytes(gzip.compress(after, mtime=0))
             if len(after) != len(before) or after[:224] != before[:224]:
                 failures.append('guest altered journal size/header/committed entry slot')
-            status = collect(endpoint, work)
-            evidence['collector_status'] = status
-            if status != 0:
+            if mode == 'restart':
+                daemon.kill()
+                evidence['crashed_daemon_rc'] = daemon.wait(timeout=10)
+                Path(endpoint).unlink(missing_ok=True)
+                restart_command = [
+                    str(prefix / 'bin/latcd'), '--serve', '--socket', endpoint,
+                    '--cache-dir', str(cache), '--latc', str(prefix / 'bin/latc'),
+                    '--runner', str(prefix / 'bin/latx-x86_64'), '--runtime-dir',
+                    str(prefix / 'lib'), '--workers', '1', '--idle-seconds', '0',
+                ]
+                evidence['commands'].append(restart_command)
+                restart_log = (work / 'daemon-restart.log').open('wb')
+                daemon = subprocess.Popen(restart_command, env=env,
+                                          stdout=restart_log,
+                                          stderr=restart_log)
+                deadline = time.monotonic() + 10
+                while not Path(endpoint).exists():
+                    require(daemon.poll() is None and time.monotonic() < deadline,
+                            'restarted daemon startup failed')
+                    time.sleep(.01)
+                deadline = time.monotonic() + 120
+                modules = []
+                while not modules:
+                    modules = list(cache.glob(source_digest.hex() + '-*.so'))
+                    require(daemon.poll() is None and time.monotonic() < deadline,
+                            'restarted daemon did not publish a module')
+                    time.sleep(.1)
+                actual = work / 'restart-module.tbset'
+                command = [str(prefix / 'bin/latc'), 'emit-module-tbset',
+                           str(modules[0]), '-o', str(actual)]
+                evidence['commands'].append(command)
+                subprocess.run(command, check=True)
+                _, _, module_keys = read_key_set(actual)
+                missing = set(expected) - set(module_keys)
+                require(not missing,
+                        f'restarted module missed receipt keys: {sorted(missing)}')
+                evidence['restart_module'] = str(modules[0])
+            collector = collect(endpoint, work)
+            evidence['collector'] = collector
+            if collector['status'] != 0:
                 failures.append('collector rejected damaged journal')
             receipt = journal.parent / 'received.tbset'
             evidence['receipt_exists'] = receipt.exists()
@@ -339,6 +380,18 @@ def run_case(prefix, guests, root, mode):
                     failures.append(f'collector missing executed fixture keys: {sorted(missing)}')
             else:
                 failures.append('collector did not publish a receipt')
+            if mode == 'overwrite':
+                command = [str(prefix / 'bin/latcd'), '--flush-all',
+                           '--socket', endpoint]
+                evidence['commands'].append(command)
+                flush = subprocess.run(command, check=False, capture_output=True,
+                                       text=True, timeout=120)
+                (work / 'flush-all.stdout').write_text(flush.stdout)
+                (work / 'flush-all.stderr').write_text(flush.stderr)
+                require(flush.returncode == 0,
+                        f'journal receipt publication failed: {flush.stderr}')
+                require(list(cache.glob('*.so')),
+                        'journal receipt flush published no module')
     except (AssertionError, OSError, subprocess.SubprocessError) as error:
         failures.append(str(error))
     finally:
@@ -471,9 +524,9 @@ def run_exec_case(prefix, guests, root):
             producer_rc = runner.wait(timeout=30)
             evidence['producer_rc'] = producer_rc
             require(producer_rc == 42, f'exec guest returned {producer_rc}, expected 42')
-        status = collect(endpoint, work)
-        evidence['collector_status'] = status
-        require(status == 0, 'collector rejected exec journal')
+        collector = collect(endpoint, work)
+        evidence['collector'] = collector
+        require(collector['status'] == 0, 'collector rejected exec journal')
         receipts = {}
         received = set()
         for journal_path in journals_after:

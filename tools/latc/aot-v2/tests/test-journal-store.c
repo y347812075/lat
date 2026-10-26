@@ -76,6 +76,23 @@ static void check_receipt(int stream, const LatKeyJournalIdentity *identity, siz
     lat_tb_key_set_destroy(&set);
 }
 
+static void remove_tree(const char *path)
+{
+    GDir *directory = g_dir_open(path, 0, NULL);
+
+    if (directory) {
+        const char *name;
+        while ((name = g_dir_read_name(directory))) {
+            char *child = g_build_filename(path, name, NULL);
+            if (g_file_test(child, G_FILE_TEST_IS_DIR)) remove_tree(child);
+            else g_assert_cmpint(unlink(child), ==, 0);
+            g_free(child);
+        }
+        g_dir_close(directory);
+    }
+    g_assert_cmpint(rmdir(path), ==, 0);
+}
+
 static void check_collection(const LatcdConfig *config, int stream,
                               const LatKeyJournalIdentity *identity)
 {
@@ -90,13 +107,15 @@ static void check_collection(const LatcdConfig *config, int stream,
     g_assert_cmpuint(slot, ==, 2);
     LatcdResponseV2 response = operation(config, -1, -1, 0, LATCD_OP_COLLECT_JOURNALS);
     g_assert_cmpint(response.status, ==, LATCD_STATUS_OK);
-    g_assert_cmpuint(response.accepted_sequence, ==, 0);
-    g_assert_cmpuint(response.published_sequence, ==, 0);
+    g_assert_cmpuint(response.accepted_sequence, >, 0);
+    g_assert_cmpuint(response.published_sequence, <=, response.accepted_sequence);
+    uint64_t first_accepted = response.accepted_sequence;
     check_receipt(stream, identity, 2);
     struct stat before, after;
     g_assert_cmpint(fstatat(stream, "received.tbset", &before, AT_SYMLINK_NOFOLLOW), ==, 0);
     response = operation(config, -1, -1, 0, LATCD_OP_COLLECT_JOURNALS);
     g_assert_cmpint(response.status, ==, LATCD_STATUS_OK);
+    g_assert_cmpuint(response.accepted_sequence, >=, first_accepted);
     g_assert_cmpint(fstatat(stream, "received.tbset", &after, AT_SYMLINK_NOFOLLOW), ==, 0);
     g_assert_cmpuint(before.st_ino, ==, after.st_ino);
     /* Reject non-executable loads, holes, exclusive ends and absolute VAs. */
@@ -673,12 +692,12 @@ int main(void)
     g_assert_cmpint(rmdir(root), ==, 0);
     g_free(root); g_free(stream);
     char *temporary = g_build_filename(cache, ".tmp", NULL);
-    g_assert_cmpint(rmdir(temporary), ==, 0);
+    remove_tree(temporary);
     g_free(temporary);
-    g_assert_cmpint(rmdir(cache), ==, 0);
+    remove_tree(cache);
     g_assert_cmpint(rmdir(directory), ==, 0);
     close(configuration); g_bytes_unref(bytes);
     g_free(socket_path); g_free(source_path); g_free(cache); g_free(directory);
-    puts("journal registration/quarantined receipt recovery: PASS (no compile admission)");
+    puts("journal registration/receipt admission recovery: PASS");
     return 0;
 }

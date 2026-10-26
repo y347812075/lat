@@ -29,7 +29,7 @@ enum LatcdOperation {
      * Success registers a recoverable stream, not accepted/published keys.
      */
     LATCD_OP_REGISTER_JOURNAL = 8,
-    /* Quarantined receipt only; does not admit compilation or advance watermarks. */
+    /* Collect receipts and admit them through the normal compile queue. */
     LATCD_OP_COLLECT_JOURNALS = 9,
     /* Like REGISTER_JOURNAL, but success also returns one stream directory fd. */
     LATCD_OP_REGISTER_JOURNAL_CAPABILITY = 10,
