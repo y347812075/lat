@@ -241,6 +241,29 @@ class PlannerTest(unittest.TestCase):
         self.put(str(release.relative_to(self.root)), released.replace('state=RELEASED', 'state=DONE').encode())
         self.run_plan(success=False)
 
+    def test_compiler_inputs_release(self):
+        task = self.task()
+        st = task.stat()
+        record = (f'[handoff]\nversion=1\ntask_id={task.stem}\nstate=INPUTS_RELEASED\n'
+                  f'task_device={st.st_dev}\ntask_inode={st.st_ino}\n')
+        release = self.put(f'.gc/compiler-releases/{task.name}', record.encode())
+        with task.open('rb') as pin:
+            fcntl.flock(pin, fcntl.LOCK_SH)
+            plan = self.run_plan()
+            self.assertFalse(next(iter(plan['tasks'].values())).get('compiler_inputs_released', False))
+        plan = self.run_plan()
+        self.assertTrue(next(iter(plan['tasks'].values()))['compiler_inputs_released'])
+        row = next(row for row in plan['entries'] if row['path'] == '.tmp/input-ABC')
+        self.assertFalse(row['task_references'])
+        self.put('.tmp/native-ABC', b'output still held')
+        plan = self.run_plan()
+        row = next(row for row in plan['entries'] if row['path'] == '.tmp/native-ABC')
+        self.assertTrue(row['task_references'])
+        for bad in (record.replace('INPUTS_RELEASED', 'DONE'),
+                    record.replace(f'task_inode={st.st_ino}', 'task_inode=0')):
+            self.put(str(release.relative_to(self.root)), bad.encode())
+            self.run_plan(success=False)
+
     def generation(self, digit, *, tbset=None):
         stem = SOURCE + "-" + digit * 64
         manifest = dict(self.manifest, module=stem + ".so", native=stem + ".native",

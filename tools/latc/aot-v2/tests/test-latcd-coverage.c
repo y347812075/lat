@@ -238,6 +238,25 @@ static void test_publication_cleanup(void)
     digest_hex(digest, cleanup_hex);
     LatcdConfig config = {.cache_dir = directory,
         .max_cache_bytes = UINT64_C(1073741824)};
+    char *task_id = g_uuid_string_random();
+    char *task_dir = g_build_filename(directory, ".gc", "tasks", NULL);
+    g_assert_cmpint(g_mkdir_with_parents(task_dir, 0700), ==, 0);
+    char *task_name = g_strdup_printf("%s.ini", task_id);
+    char *task_path = g_build_filename(task_dir, task_name, NULL);
+    g_assert_true(g_file_set_contents(task_path, "task", 4, NULL));
+    g_assert_cmpint(g_chmod(task_path, 0400), ==, 0);
+    int task_fd = open(task_path, O_RDONLY | O_CLOEXEC);
+    g_assert_cmpint(task_fd, >=, 0);
+    struct stat task_identity;
+    g_assert_cmpint(fstat(task_fd, &task_identity), ==, 0);
+    g_assert_cmpint(flock(task_fd, LOCK_SH), ==, 0);
+    g_assert_cmpint(record_compiler_release(&config, task_id, &task_identity), ==, -1);
+    close(task_fd);
+    g_assert_cmpint(record_compiler_release(&config, task_id, &task_identity), ==, 0);
+    g_free(task_path);
+    g_free(task_name);
+    g_free(task_dir);
+    g_free(task_id);
     char *names[6];
     const char *suffixes[] = {"so", "native", "tbset", "so", "native", "tbset"};
     for (unsigned i = 0; i < G_N_ELEMENTS(names); i++) {

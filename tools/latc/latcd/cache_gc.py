@@ -103,6 +103,7 @@ class Inventory:
         self.copy_receipts = {}
         self.copy_handoffs = {}
         self.copy_releases = {}
+        self.compiler_releases = {}
         self.frozen = set()
         self.freeze_all = False
         self.count = 0
@@ -151,6 +152,8 @@ class Inventory:
                         self.read_copy_handoff(fd, name, st)
                     if prefix == ".gc/copy-releases":
                         self.read_copy_handoff(fd, name, st, releasing=True)
+                    if prefix == ".gc/compiler-releases":
+                        self.read_copy_handoff(fd, name, st, releasing=True, compiler=True)
                     if stat.S_ISDIR(st.st_mode):
                         child = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
                                         os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=fd)
@@ -165,8 +168,9 @@ class Inventory:
         if identity(os.fstat(fd)) != identity(before):
             self.error(prefix or ".", "concurrent_change", "directory changed during scan")
 
-    def read_copy_handoff(self, directory, name, before, releasing=False):
-        relative = (".gc/copy-releases/" if releasing else ".gc/copy-handoffs/") + name
+    def read_copy_handoff(self, directory, name, before, releasing=False, compiler=False):
+        relative = (".gc/compiler-releases/" if compiler else
+                    ".gc/copy-releases/" if releasing else ".gc/copy-handoffs/") + name
         try:
             if (not name.endswith(".ini") or str(uuid.UUID(name[:-4])) != name[:-4] or
                     not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
@@ -191,13 +195,14 @@ class Inventory:
                 numbers |= {"receipt_device", "receipt_inode"}
             if (set(value) != numbers | {"version", "task_id", "state"} or
                     value["version"] != "1" or value["task_id"] != name[:-4] or
-                    value["state"] != ("RELEASED" if releasing else "SNAPSHOT_OWNED")):
+                    value["state"] != ("INPUTS_RELEASED" if compiler else
+                                       "RELEASED" if releasing else "SNAPSHOT_OWNED")):
                 raise ValueError("invalid copy handoff fields")
             for key in numbers:
                 if not re.fullmatch(r"[0-9]+", value[key]) or int(value[key]) >= 2**64:
                     raise ValueError("invalid copy handoff integer")
                 value[key] = int(value[key])
-            target = self.copy_releases if releasing else self.copy_handoffs
+            target = self.compiler_releases if compiler else self.copy_releases if releasing else self.copy_handoffs
             target[relative] = dict(value, binding_observed=False,
                                                 input_reference_released=False)
         except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
@@ -642,6 +647,23 @@ class Inventory:
         return output
 
     def report(self):
+        compiler_inputs = {"source", "tbset", "base_native", "base_module"}
+        for relative, release in self.compiler_releases.items():
+            task_path = ".gc/tasks/" + release["task_id"] + ".ini"
+            task, row = self.tasks.get(task_path), self.entries.get(task_path)
+            if (not task or task["version"] != "1" or not row or
+                    (row["device"], row["inode"]) != (release["task_device"], release["task_inode"])):
+                self.freeze_all = True
+                self.error(relative, "compiler_release_binding_changed", task_path)
+                continue
+            release["binding_observed"] = True
+            if task["lease_observation"] != "NO_HOLDER_OBSERVED":
+                continue
+            task["compiler_inputs_released"] = True
+            release["input_reference_released"] = True
+            for target, refs in self.task_refs.items():
+                self.task_refs[target] = [ref for ref in refs if not
+                    (ref["task"] == task_path and ref["role"] in compiler_inputs)]
         for relative, release in self.copy_releases.items():
             task_path = ".gc/tasks/" + release["task_id"] + ".ini"
             task, row = self.tasks.get(task_path), self.entries.get(task_path)
@@ -719,6 +741,8 @@ class Inventory:
                 elif role == "output" or role.startswith("output_"):
                     continue  # Intent only: never claim an output inode is reserved.
                 elif role == "input" and task.get("input_reference_released"):
+                    continue
+                elif role in compiler_inputs and task.get("compiler_inputs_released"):
                     continue
                 else:
                     row = self.entries.get(path)
@@ -826,6 +850,7 @@ class Inventory:
                 "copy_receipt_count": len(self.copy_receipts), "copy_receipts": self.copy_receipts,
                 "copy_handoff_count": len(self.copy_handoffs), "copy_handoffs": self.copy_handoffs,
                 "copy_release_count": len(self.copy_releases), "copy_releases": self.copy_releases,
+                "compiler_release_count": len(self.compiler_releases), "compiler_releases": self.compiler_releases,
                 "transactions": self.transactions,
                 "retirement_plan": {"grace_us": self.grace_us,
                                     "clock": ({"boot_id": self.clock[0], "boottime_us": self.clock[1]}

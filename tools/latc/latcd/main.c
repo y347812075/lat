@@ -1346,6 +1346,40 @@ out:
     return lease;
 }
 
+static int record_compiler_release(const LatcdConfig *config, const char *id,
+                                    const struct stat *expected)
+{
+    int root = -1, gc = -1, tasks = -1, releases = -1, task = -1, lease = -1;
+    GKeyFile *record = g_key_file_new();
+    char *name = g_strdup_printf("%s.ini", id);
+    struct stat observed;
+    root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (root < 0 || (gc = open_task_directory(root, ".gc")) < 0 ||
+        (tasks = open_task_directory(gc, "tasks")) < 0 ||
+        (releases = open_task_directory(gc, "compiler-releases")) < 0 ||
+        (task = openat(tasks, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)) < 0 ||
+        fstat(task, &observed) || observed.st_dev != expected->st_dev ||
+        observed.st_ino != expected->st_ino || observed.st_nlink != 1 ||
+        !S_ISREG(observed.st_mode) || observed.st_uid != geteuid() ||
+        (observed.st_mode & 0222) || flock(task, LOCK_EX | LOCK_NB)) goto out;
+    g_key_file_set_string(record, "handoff", "version", "1");
+    g_key_file_set_string(record, "handoff", "task_id", id);
+    g_key_file_set_string(record, "handoff", "state", "INPUTS_RELEASED");
+    g_key_file_set_uint64(record, "handoff", "task_device", observed.st_dev);
+    g_key_file_set_uint64(record, "handoff", "task_inode", observed.st_ino);
+    lease = persist_task_record(releases, id, record);
+out:
+    if (lease >= 0) close(lease);
+    if (task >= 0) close(task);
+    if (releases >= 0) close(releases);
+    if (tasks >= 0) close(tasks);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    g_free(name);
+    g_key_file_free(record);
+    return lease < 0 ? -1 : 0;
+}
+
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *source, const char *tbset,
                         bool static_tbset,
@@ -1446,8 +1480,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     int pin_result = pin_compiler_inputs(inputs, input_pins, error, error_size);
     const char *task_paths[6] = {source, tbset, base_native, base_module,
                                 output_native, output};
+    char *task_id = NULL;
     int task_lease = pin_result ? -1 : record_task(config, false, task_paths,
-        input_pins, digest, environment, NULL, error, error_size);
+        input_pins, digest, environment, &task_id, error, error_size);
     if (task_lease < 0) pin_result = -1;
     pid_t child = pin_result ? -1 : fork();
     if (child == 0) {
@@ -1487,6 +1522,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     }
     if (child < 0) {
         if (task_lease >= 0) close(task_lease);
+        g_free(task_id);
         close_compiler_inputs(input_pins);
         release_compile_space(worker_index);
         g_free(library_path);
@@ -1526,7 +1562,13 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         kill(-child, SIGKILL);
     }
     compiler_process_groups[worker_index] = 0;
+    struct stat task_identity;
+    bool task_known = !fstat(task_lease, &task_identity);
     close(task_lease);
+    /* An independent EX probe cannot unlock a descendant's inherited SH OFD. */
+    if (task_known && record_compiler_release(config, task_id, &task_identity))
+        fprintf(stderr, "latcd: compiler inputs still held or release not durable; retaining task root\n");
+    g_free(task_id);
     close_compiler_inputs(input_pins);
     release_compile_space(worker_index);
     g_free(library_path);

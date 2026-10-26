@@ -73,6 +73,10 @@ def run(prefix, guest, work):
             copies = [task for task in observed['tasks'].values() if task.get('kind') == 'COPY']
             assert len(copies) == 2
             assert observed['copy_release_count'] == 2
+            compilers = [task for task in observed['tasks'].values() if task['version'] == '1']
+            assert len(compilers) >= 2
+            assert all(task['compiler_inputs_released'] for task in compilers)
+            assert observed['compiler_release_count'] == len(compilers)
             assert all(task['copy_released'] for task in copies)
             assert all(not (cache / '.tmp' / task['objects']['output']['name']).exists() for task in copies)
             copy_names = {'.gc/tasks/' + task['id'] + '.ini' for task in copies}

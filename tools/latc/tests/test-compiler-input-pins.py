@@ -121,6 +121,7 @@ def run(prefix, guest, work):
                                    if role in ('source', 'tbset', 'base_native', 'base_module')) == {
                                        Path(path).name for path in inputs}
                         assert not task['completion_verified']
+                        assert not task.get('compiler_inputs_released', False)
                         assert task['objects']['output_native']['name']
                         assert task['objects']['output_module']['name']
                         copies = [value for value in plan['tasks'].values()
