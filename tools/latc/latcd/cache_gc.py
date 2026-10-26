@@ -100,6 +100,7 @@ class Inventory:
         self.tombstones = {}
         self.tasks = {}
         self.task_refs = {}
+        self.copy_receipts = {}
         self.frozen = set()
         self.freeze_all = False
         self.count = 0
@@ -142,6 +143,8 @@ class Inventory:
                         self.read_tombstone(fd, name, st)
                     if prefix == ".gc/tasks":
                         self.read_task(fd, name, st)
+                    if prefix == ".gc/copy-receipts":
+                        self.read_copy_receipt(fd, name, st)
                     if stat.S_ISDIR(st.st_mode):
                         child = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
                                         os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=fd)
@@ -155,6 +158,52 @@ class Inventory:
                     self.error(relative, "unreadable_or_changed", str(exc))
         if identity(os.fstat(fd)) != identity(before):
             self.error(prefix or ".", "concurrent_change", "directory changed during scan")
+
+    def read_copy_receipt(self, directory, name, before):
+        relative = ".gc/copy-receipts/" + name
+        try:
+            if (not name.endswith(".ini") or str(uuid.UUID(name[:-4])) != name[:-4] or
+                    not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
+                    before.st_nlink != 1 or before.st_mode & 0o222 or
+                    not 0 < before.st_size <= 65536):
+                raise ValueError("unsafe copy receipt")
+            fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW |
+                         os.O_NONBLOCK, dir_fd=directory)
+            try:
+                raw = os.read(fd, 65537)
+                if identity(os.fstat(fd)) != identity(before) or len(raw) != before.st_size:
+                    raise ValueError("copy receipt changed during read")
+            finally:
+                os.close(fd)
+            parser = configparser.ConfigParser(interpolation=None, strict=True)
+            parser.read_string(raw.decode("ascii"))
+            if parser.defaults() or parser.sections() != ["receipt", "output"]:
+                raise ValueError("invalid copy receipt sections")
+            value, obj = dict(parser["receipt"]), dict(parser["output"])
+            if (set(value) != {"version", "task_id", "task_device", "task_inode", "state"} or
+                    value["version"] != "1" or value["task_id"] != name[:-4] or
+                    value["state"] != "COPIED" or set(obj) != {"name", "device", "inode",
+                    "size", "mode", "uid", "mtime_sec", "mtime_nsec", "sha256"} or
+                    not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", obj["name"]) or
+                    not re.fullmatch(SHA, obj["sha256"])):
+                raise ValueError("invalid copy receipt fields")
+            for fields, keys in ((value, {"task_device", "task_inode"}),
+                                 (obj, set(obj) - {"name", "sha256"})):
+                for key in keys:
+                    if not re.fullmatch(r"-?[0-9]+" if key == "mtime_sec" else r"[0-9]+", fields[key]):
+                        raise ValueError("invalid copy receipt integer")
+                    fields[key] = int(fields[key])
+                    low, high = (-2**63, 2**63) if key == "mtime_sec" else (0, 2**64)
+                    if not low <= fields[key] < high:
+                        raise ValueError("copy receipt integer out of range")
+            if (obj["uid"] != os.geteuid() or not stat.S_ISREG(obj["mode"]) or
+                    obj["mode"] & 0o222 or not obj["size"] or obj["mtime_nsec"] >= 10**9):
+                raise ValueError("unsafe copy output binding")
+            self.copy_receipts[relative] = dict(value, output=obj, binding_observed=False,
+                                                content_validated=False)
+        except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
+            self.freeze_all = True
+            self.error(relative, "invalid_copy_receipt", str(exc))
 
     def read_task(self, directory, name, before):
         relative = ".gc/tasks/" + name
@@ -548,6 +597,30 @@ class Inventory:
         return output
 
     def report(self):
+        for relative, receipt in self.copy_receipts.items():
+            task_path = ".gc/tasks/" + receipt["task_id"] + ".ini"
+            task, row = self.tasks.get(task_path), self.entries.get(task_path)
+            obj = receipt["output"]
+            if (not task or task.get("kind") != "COPY" or not row or
+                    (row["device"], row["inode"]) != (receipt["task_device"], receipt["task_inode"]) or
+                    task["objects"]["output"]["name"] != obj["name"]):
+                self.freeze_all = True
+                self.error(relative, "copy_receipt_task_changed", task_path)
+                continue
+            output = self.entries.get(".tmp/" + obj["name"])
+            receipt["output_observation"] = "MISSING" if output is None else "CHANGED"
+            if output is not None:
+                observed = output["_identity"]
+                matched = (observed[0], observed[1], observed[2], observed[3], observed[4],
+                           observed[5], observed[6]) == (obj["device"], obj["inode"], obj["mode"],
+                    obj["uid"], 1, obj["size"], obj["mtime_sec"] * 10**9 + obj["mtime_nsec"])
+                if matched:
+                    receipt["binding_observed"] = True
+                    receipt["output_observation"] = "MATCHED"
+                else:
+                    self.freeze_all = True
+                    self.error(relative, "copy_receipt_output_changed", obj["name"])
+            task["copy_receipt"] = relative
         for relative, task in self.tasks.items():
             for role, obj in task["objects"].items():
                 directories = {"cache": "", "temporary": ".tmp", "collected": ".tbsets"}
@@ -662,6 +735,7 @@ class Inventory:
                 "liveness_verified": False, "manifest_count": len(self.manifests),
                 "transaction_count": len(self.transactions),
                 "task_count": len(self.tasks), "tasks": self.tasks,
+                "copy_receipt_count": len(self.copy_receipts), "copy_receipts": self.copy_receipts,
                 "transactions": self.transactions,
                 "retirement_plan": {"grace_us": self.grace_us,
                                     "clock": ({"boot_id": self.clock[0], "boottime_us": self.clock[1]}

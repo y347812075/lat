@@ -177,6 +177,39 @@ class PlannerTest(unittest.TestCase):
             self.put(str(record.relative_to(self.root)), bad.encode())
             self.run_plan(success=False)
 
+    def test_copy_receipt_binding_and_bad_input(self):
+        task = self.task()
+        raw = task.read_text().replace('version=1', 'version=2\nkind=COPY').replace(
+            f'environment_sha256={OTHER}\n', '').replace('[source]', '[input]').replace(
+            '[output_native]', '[output]').split('[output_module]')[0]
+        self.put(str(task.relative_to(self.root)), raw.encode())
+        output = self.put('.tmp/native-ABC', b'complete output')
+        st, root = output.stat(), task.stat()
+        record = (f'[receipt]\nversion=1\ntask_id={task.stem}\ntask_device={root.st_dev}\n'
+                  f'task_inode={root.st_ino}\nstate=COPIED\n[output]\nname={output.name}\n'
+                  f'device={st.st_dev}\ninode={st.st_ino}\nsize={st.st_size}\nmode={st.st_mode}\n'
+                  f'uid={st.st_uid}\nmtime_sec={st.st_mtime_ns // 10**9}\n'
+                  f'mtime_nsec={st.st_mtime_ns % 10**9}\n'
+                  f'sha256={hashlib.sha256(output.read_bytes()).hexdigest()}\n')
+        receipt = self.put(f'.gc/copy-receipts/{task.name}', record.encode())
+        plan = self.run_plan()
+        value = next(iter(plan['copy_receipts'].values()))
+        self.assertTrue(value['binding_observed'])
+        self.assertFalse(value['content_validated'])
+        for bad in (record.replace('state=COPIED', 'state=DONE'),
+                    record.replace('name=native-ABC', 'name=../escape'),
+                    record.replace(f'task_inode={root.st_ino}', 'task_inode=0'),
+                    record.replace('sha256=', 'sha256=invalid')):
+            self.put(str(receipt.relative_to(self.root)), bad.encode())
+            self.run_plan(success=False)
+        self.put(str(receipt.relative_to(self.root)), record.encode())
+        self.put('.tmp/native-ABC', b'changed size')
+        self.run_plan(success=False)
+        output.unlink()
+        value = next(iter(self.run_plan()['copy_receipts'].values()))
+        self.assertEqual(value['output_observation'], 'MISSING')
+        self.assertFalse(value['binding_observed'])
+
     def generation(self, digit, *, tbset=None):
         stem = SOURCE + "-" + digit * 64
         manifest = dict(self.manifest, module=stem + ".so", native=stem + ".native",

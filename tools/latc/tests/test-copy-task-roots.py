@@ -2,6 +2,7 @@
 """Observe durable copy roots before output creation and after copied fsync."""
 
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,7 @@ def run(prefix, guest, work):
                     str(guest), str(tbset)], env=env, check=True)
     subprocess.run([str(prefix / 'bin/latc'), 'emit-static-tbset', str(guest),
                     '-o', str(full)], env=env, check=True)
-    for stage in ('recorded', 'copied'):
+    for stage in ('recorded', 'synced', 'copied'):
         directory = work / stage
         directory.mkdir(mode=0o700)
         cache, socket = directory / 'cache', directory / 's'
@@ -80,7 +81,13 @@ def run(prefix, guest, work):
                 assert source['directory'] == 'cache'
                 output = cache / '.tmp' / task['objects']['output']['name']
                 paths = [cache / record, cache / source['name']]
-                assert output.exists() == (stage == 'copied')
+                assert output.exists() == (stage != 'recorded')
+                assert observed['copy_receipt_count'] == (1 if stage == 'copied' else 0)
+                if stage == 'copied':
+                    receipt = next(iter(observed['copy_receipts'].values()))
+                    assert receipt['binding_observed']
+                    assert not receipt['content_validated']
+                    assert receipt['output']['sha256'] == hashlib.sha256(output.read_bytes()).hexdigest()
                 if output.exists():
                     assert output.read_bytes() == paths[1].read_bytes()
                     assert output.stat().st_mode & 0o222 == 0
@@ -108,7 +115,7 @@ def run(prefix, guest, work):
                     stdout=log, stderr=log, timeout=30)
                 assert restarted.returncode == 0
                 assert (cache / record).exists()
-                assert output.exists() == (stage == 'copied')
+                assert output.exists() == (stage != 'recorded')
                 assert current.read_bytes() == original
             finally:
                 if daemon is not None and daemon.poll() is None:

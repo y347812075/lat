@@ -1198,18 +1198,57 @@ static void task_object_identity(GKeyFile *record, const char *group,
     g_key_file_set_uint64(record, group, "mtime_nsec", st->st_mtim.tv_nsec);
 }
 
+static int persist_task_record(int directory, const char *id, GKeyFile *record)
+{
+    char *staging = g_strdup_printf(".write-%s", id);
+    char *name = g_strdup_printf("%s.ini", id);
+    int lease = openat(directory, staging, O_RDWR | O_CREAT | O_EXCL |
+                        O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (lease < 0 || flock(lease, LOCK_SH | LOCK_NB)) goto failed;
+    gsize length;
+    char *data = g_key_file_to_data(record, &length, NULL);
+    size_t done = 0;
+    while (done < length) {
+        ssize_t count = write(lease, data + done, length - done);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+        done += count;
+    }
+    g_free(data);
+    if (done != length || fchmod(lease, 0400) || fsync(lease) ||
+        linkat(directory, staging, directory, name, 0) ||
+        unlinkat(directory, staging, 0) || fsync(directory)) goto failed;
+    int readonly = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat writer, reader;
+    if (readonly < 0 || fstat(lease, &writer) || fstat(readonly, &reader) ||
+        writer.st_dev != reader.st_dev || writer.st_ino != reader.st_ino ||
+        reader.st_nlink != 1 || flock(readonly, LOCK_SH | LOCK_NB)) {
+        if (readonly >= 0) close(readonly);
+        goto failed;
+    }
+    close(lease);
+    lease = readonly;
+    goto out;
+failed:
+    if (lease >= 0) close(lease);
+    lease = -1;
+    unlinkat(directory, staging, 0);
+out:
+    g_free(staging);
+    g_free(name);
+    return lease;
+}
+
 /* The immutable record is also the lease inode. No completion or deletion claim. */
 static int record_task(const LatcdConfig *config, bool copying,
                                 const char *const paths[6], const int pins[4],
                                 const uint8_t digest[32],
                                 const char *const environment[],
-                                char *error, size_t error_size)
+                                char **task_id, char *error, size_t error_size)
 {
     int root = -1, gc = -1, tasks = -1, temporary = -1, collected = -1, lease = -1;
     GKeyFile *record = g_key_file_new();
     char *id = g_uuid_string_random();
-    char *staging = g_strdup_printf(".write-%s", id);
-    char *name = g_strdup_printf("%s.ini", id);
     char *tmp = g_build_filename(config->cache_dir, ".tmp", NULL);
     char *tbsets = g_build_filename(config->cache_dir, ".tbsets", NULL);
     char source_hex[65];
@@ -1286,37 +1325,13 @@ static int record_task(const LatcdConfig *config, bool copying,
         g_free(basename);
         if (!valid) goto failed;
     }
-    lease = openat(tasks, staging, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC |
-                   O_NOFOLLOW, 0600);
-    if (lease < 0 || flock(lease, LOCK_SH | LOCK_NB)) goto failed;
-    gsize length;
-    char *data = g_key_file_to_data(record, &length, NULL);
-    size_t done = 0;
-    while (done < length) {
-        ssize_t count = write(lease, data + done, length - done);
-        if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) break;
-        done += count;
-    }
-    g_free(data);
-    if (done != length || fchmod(lease, 0400) || fsync(lease) ||
-        linkat(tasks, staging, tasks, name, 0) ||
-        unlinkat(tasks, staging, 0) || fsync(tasks)) goto failed;
-    int readonly = openat(tasks, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    struct stat writer, reader;
-    if (readonly < 0 || fstat(lease, &writer) || fstat(readonly, &reader) ||
-        writer.st_dev != reader.st_dev || writer.st_ino != reader.st_ino ||
-        reader.st_nlink != 1 || flock(readonly, LOCK_SH | LOCK_NB)) {
-        if (readonly >= 0) close(readonly);
-        goto failed;
-    }
-    close(lease);
-    lease = readonly;
+    lease = persist_task_record(tasks, id, record);
+    if (lease < 0) goto failed;
+    if (task_id) *task_id = g_strdup(id);
     goto out;
 failed:
     if (lease >= 0) close(lease);
     lease = -1;
-    if (tasks >= 0) unlinkat(tasks, staging, 0);
     fail(error, error_size, "cannot persist %s task root", copying ? "copy" : "compiler");
 out:
     if (collected >= 0) close(collected);
@@ -1326,8 +1341,6 @@ out:
     if (root >= 0) close(root);
     g_free(tmp);
     g_free(tbsets);
-    g_free(name);
-    g_free(staging);
     g_free(id);
     g_key_file_free(record);
     return lease;
@@ -1434,7 +1447,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     const char *task_paths[6] = {source, tbset, base_native, base_module,
                                 output_native, output};
     int task_lease = pin_result ? -1 : record_task(config, false, task_paths,
-        input_pins, digest, environment, error, error_size);
+        input_pins, digest, environment, NULL, error, error_size);
     if (task_lease < 0) pin_result = -1;
     pid_t child = pin_result ? -1 : fork();
     if (child == 0) {
@@ -1690,6 +1703,45 @@ static void copy_test_barrier(const char *stage)
     do { result = read((int)input, &byte, 1); } while (result < 0 && errno == EINTR);
 }
 
+static char *cached_fd_digest(int fd);
+
+static int record_copy_receipt(const LatcdConfig *config, const char *id,
+                                int task_pin, const char *output, int output_pin,
+                                char *error, size_t error_size)
+{
+    int root = -1, gc = -1, receipts = -1, lease = -1;
+    GKeyFile *record = g_key_file_new();
+    struct stat task, before, after, path;
+    char *sha = NULL;
+    char *name = g_path_get_basename(output);
+    if (fstat(task_pin, &task) || fstat(output_pin, &before) ||
+        !(sha = cached_fd_digest(output_pin)) || fstat(output_pin, &after) ||
+        !metadata_equal(&before, &after) || before.st_mode != after.st_mode ||
+        lstat(output, &path) || path.st_dev != before.st_dev ||
+        path.st_ino != before.st_ino || path.st_nlink != 1) goto out;
+    root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (root < 0 || (gc = open_task_directory(root, ".gc")) < 0 ||
+        (receipts = open_task_directory(gc, "copy-receipts")) < 0) goto out;
+    g_key_file_set_string(record, "receipt", "version", "1");
+    g_key_file_set_string(record, "receipt", "task_id", id);
+    g_key_file_set_uint64(record, "receipt", "task_device", task.st_dev);
+    g_key_file_set_uint64(record, "receipt", "task_inode", task.st_ino);
+    g_key_file_set_string(record, "receipt", "state", "COPIED");
+    task_object_identity(record, "output", &before);
+    g_key_file_set_string(record, "output", "name", name);
+    g_key_file_set_string(record, "output", "sha256", sha);
+    lease = persist_task_record(receipts, id, record);
+out:
+    if (lease >= 0) close(lease);
+    if (receipts >= 0) close(receipts);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    g_free(name);
+    g_free(sha);
+    g_key_file_free(record);
+    return lease < 0 ? fail(error, error_size, "cannot persist copy output receipt") : 0;
+}
+
 static int snapshot_task_copy(const LatcdConfig *config, const char *source,
                               int input, const uint8_t digest[32],
                               const char *temporary, char **snapshot,
@@ -1701,12 +1753,16 @@ static int snapshot_task_copy(const LatcdConfig *config, const char *source,
     char *output = g_build_filename(temporary, name, NULL);
     const char *paths[6] = {source, NULL, NULL, NULL, output, NULL};
     int inputs[4] = {input, -1, -1, -1};
+    char *task_id = NULL;
     *task_pin = record_task(config, true, paths, inputs, digest, NULL,
-                            error, error_size);
+                            &task_id, error, error_size);
     if (*task_pin >= 0) copy_test_barrier("recorded");
     int result = *task_pin < 0 ? -1 : snapshot_cached_fd(input, temporary,
         snapshot, snapshot_pin, output, error, error_size);
     if (!result) result = sync_directory(temporary, error, error_size);
+    if (!result) copy_test_barrier("synced");
+    if (!result) result = record_copy_receipt(config, task_id, *task_pin,
+        output, *snapshot_pin, error, error_size);
     if (!result) copy_test_barrier("copied");
     if (result) {
         if (*snapshot_pin >= 0) close(*snapshot_pin);
@@ -1717,6 +1773,7 @@ static int snapshot_task_copy(const LatcdConfig *config, const char *source,
         *task_pin = -1;
     }
     g_free(output);
+    g_free(task_id);
     g_free(name);
     g_free(id);
     return result;
