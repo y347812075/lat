@@ -844,6 +844,7 @@ static void test_task_record_persistence(void)
     for (unsigned crash = 0; crash < 2; crash++) {
         for (enum RecordBoundary boundary = RECORD_WRITE;
              boundary <= RECORD_DIRECTORY_SYNC; boundary++) {
+            if (boundary == RECORD_UNLINK) continue; /* No named staging file. */
             char *id = g_uuid_string_random();
             char *name = g_strdup_printf("%s.ini", id);
             char *staging = g_strdup_printf(".write-%s", id);
@@ -870,15 +871,14 @@ static void test_task_record_persistence(void)
             record_crash = false;
             /* SIGKILL tests process death, not power-loss durability. A final
              * name can survive a failed/unacknowledged post-link operation. */
-            bool published = boundary >= (crash ? RECORD_LINK : RECORD_UNLINK);
-            bool staged = crash && boundary <= RECORD_LINK;
+            bool published = boundary >= (crash ? RECORD_LINK : RECORD_DIRECTORY_SYNC);
             struct stat final_status, staging_status;
             g_assert_cmpint(fstatat(root, name, &final_status, 0), ==,
                             published ? 0 : -1);
             if (!published) g_assert_cmpint(errno, ==, ENOENT);
             g_assert_cmpint(fstatat(root, staging, &staging_status, 0), ==,
-                            staged ? 0 : -1);
-            if (!staged) g_assert_cmpint(errno, ==, ENOENT);
+                            -1);
+            g_assert_cmpint(errno, ==, ENOENT);
             if (published) {
                 char *path = g_build_filename(directory, name, NULL);
                 char *actual = NULL;
@@ -886,10 +886,7 @@ static void test_task_record_persistence(void)
                 g_assert_true(g_file_get_contents(path, &actual, &size, NULL));
                 g_assert_cmpmem(actual, size, expected, length);
                 g_assert_cmpuint(final_status.st_mode & 0777, ==, 0400);
-                g_assert_cmpuint(final_status.st_nlink, ==, staged ? 2 : 1);
-                if (staged) {
-                    g_assert_cmpuint(final_status.st_ino, ==, staging_status.st_ino);
-                }
+                g_assert_cmpuint(final_status.st_nlink, ==, 1);
                 int probe = open(path, O_RDONLY | O_CLOEXEC);
                 g_assert_cmpint(probe, >=, 0);
                 g_assert_cmpint(flock(probe, LOCK_EX | LOCK_NB), ==, 0);
@@ -897,7 +894,6 @@ static void test_task_record_persistence(void)
                 g_free(actual);
                 g_free(path);
             }
-            if (staged) g_assert_cmpint(unlinkat(root, staging, 0), ==, 0);
             if (published) g_assert_cmpint(unlinkat(root, name, 0), ==, 0);
             g_free(staging);
             g_free(name);

@@ -1263,24 +1263,36 @@ static void task_object_identity(GKeyFile *record, const char *group,
 
 static int persist_task_record(int directory, const char *id, GKeyFile *record)
 {
-    char *staging = g_strdup_printf(".write-%s", id);
     char *name = g_strdup_printf("%s.ini", id);
-    int lease = openat(directory, staging, O_RDWR | O_CREAT | O_EXCL |
-                        O_CLOEXEC | O_NOFOLLOW, 0600);
+    int lease = openat(directory, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
     if (lease < 0 || flock(lease, LOCK_SH | LOCK_NB)) goto failed;
+    const char *point = getenv("LATCD_TEST_TASK_RECORD_CRASH");
+    const char *kind = getenv("LATCD_TEST_TASK_RECORD_KIND");
+    bool copying = g_key_file_has_key(record, "task", "kind", NULL);
+    bool inject = point && kind && g_key_file_has_group(record, "task") &&
+        !strcmp(kind, copying ? "COPY" : "COMPILER");
+    if (inject && !strcmp(point, "created")) raise(SIGKILL);
     gsize length;
     char *data = g_key_file_to_data(record, &length, NULL);
     size_t done = 0;
     while (done < length) {
-        ssize_t count = write(lease, data + done, length - done);
+        size_t wanted = inject && !strcmp(point, "partial") ? MIN(length - done, 128) : length - done;
+        ssize_t count = write(lease, data + done, wanted);
         if (count < 0 && errno == EINTR) continue;
         if (count <= 0) break;
         done += count;
+        if (inject && !strcmp(point, "partial")) raise(SIGKILL);
     }
     g_free(data);
-    if (done != length || fchmod(lease, 0400) || fsync(lease) ||
-        linkat(directory, staging, directory, name, 0) ||
-        unlinkat(directory, staging, 0) || fsync(directory)) goto failed;
+    if (done != length || fchmod(lease, 0400) || fsync(lease)) goto failed;
+    if (inject && !strcmp(point, "synced")) raise(SIGKILL);
+    /* No named partial metadata survives a pre-link crash. Unsupported
+     * anonymous files fail closed; never fall back to orphan staging names. */
+    char descriptor[64];
+    snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", lease);
+    if (linkat(AT_FDCWD, descriptor, directory, name, AT_SYMLINK_FOLLOW) ||
+        fsync(directory)) goto failed;
+    if (inject && !strcmp(point, "linked")) raise(SIGKILL);
     int readonly = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat writer, reader;
     if (readonly < 0 || fstat(lease, &writer) || fstat(readonly, &reader) ||
@@ -1295,9 +1307,7 @@ static int persist_task_record(int directory, const char *id, GKeyFile *record)
 failed:
     if (lease >= 0) close(lease);
     lease = -1;
-    unlinkat(directory, staging, 0);
 out:
-    g_free(staging);
     g_free(name);
     return lease;
 }
