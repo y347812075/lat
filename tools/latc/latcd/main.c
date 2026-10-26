@@ -1347,28 +1347,48 @@ out:
 }
 
 static int record_compiler_release(const LatcdConfig *config, const char *id,
-                                    const struct stat *expected)
+                                    const struct stat *expected, bool outputs)
 {
-    int root = -1, gc = -1, tasks = -1, releases = -1, task = -1, lease = -1;
+    int root = -1, gc = -1, tasks = -1, releases = -1, task = -1, temporary = -1, lease = -1;
     GKeyFile *record = g_key_file_new();
     char *name = g_strdup_printf("%s.ini", id);
     struct stat observed;
     root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (root < 0 || (gc = open_task_directory(root, ".gc")) < 0 ||
         (tasks = open_task_directory(gc, "tasks")) < 0 ||
-        (releases = open_task_directory(gc, "compiler-releases")) < 0 ||
+        (releases = open_task_directory(gc, outputs ? "compiler-output-releases" : "compiler-releases")) < 0 ||
         (task = openat(tasks, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)) < 0 ||
         fstat(task, &observed) || observed.st_dev != expected->st_dev ||
         observed.st_ino != expected->st_ino || observed.st_nlink != 1 ||
         !S_ISREG(observed.st_mode) || observed.st_uid != geteuid() ||
         (observed.st_mode & 0222) || flock(task, LOCK_EX | LOCK_NB)) goto out;
+    if (outputs) {
+        char data[65537];
+        GKeyFile *bound = g_key_file_new();
+        bool missing = observed.st_size > 0 && observed.st_size <= 65536 &&
+            pread(task, data, observed.st_size, 0) == observed.st_size &&
+            g_key_file_load_from_data(bound, data, observed.st_size, G_KEY_FILE_NONE, NULL);
+        temporary = openat(root, ".tmp", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        missing &= temporary >= 0;
+        const char *roles[] = {"output_native", "output_module"};
+        for (unsigned i = 0; missing && i < 2; i++) {
+            char *output = g_key_file_get_string(bound, roles[i], "name", NULL);
+            struct stat st;
+            missing = output && *output && output[0] != '.' && !strchr(output, '/') &&
+                fstatat(temporary, output, &st, AT_SYMLINK_NOFOLLOW) && errno == ENOENT;
+            g_free(output);
+        }
+        g_key_file_free(bound);
+        if (!missing || fsync(temporary)) goto out;
+    }
     g_key_file_set_string(record, "handoff", "version", "1");
     g_key_file_set_string(record, "handoff", "task_id", id);
-    g_key_file_set_string(record, "handoff", "state", "INPUTS_RELEASED");
+    g_key_file_set_string(record, "handoff", "state", outputs ? "OUTPUTS_RELEASED" : "INPUTS_RELEASED");
     g_key_file_set_uint64(record, "handoff", "task_device", observed.st_dev);
     g_key_file_set_uint64(record, "handoff", "task_inode", observed.st_ino);
     lease = persist_task_record(releases, id, record);
 out:
+    if (temporary >= 0) close(temporary);
     if (lease >= 0) close(lease);
     if (task >= 0) close(task);
     if (releases >= 0) close(releases);
@@ -1380,12 +1400,17 @@ out:
     return lease < 0 ? -1 : 0;
 }
 
+typedef struct LatcdCompilerTask {
+    char id[37];
+    struct stat identity;
+} LatcdCompilerTask;
+
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *source, const char *tbset,
                         bool static_tbset,
                         const char *base_native, const char *base_module,
                         const char *output_native,
-                        const char *output, const uint8_t digest[32],
+                        const char *output, const uint8_t digest[32], GPtrArray *compiler_tasks,
                         char *error, size_t error_size)
 {
     if (validate_toolchain(config, error, error_size)) {
@@ -1484,6 +1509,16 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     int task_lease = pin_result ? -1 : record_task(config, false, task_paths,
         input_pins, digest, environment, &task_id, error, error_size);
     if (task_lease < 0) pin_result = -1;
+    if (task_lease >= 0) {
+        LatcdCompilerTask *task = g_new0(LatcdCompilerTask, 1);
+        g_strlcpy(task->id, task_id, sizeof(task->id));
+        if (fstat(task_lease, &task->identity)) {
+            g_free(task);
+            pin_result = -1;
+        } else {
+            g_ptr_array_add(compiler_tasks, task);
+        }
+    }
     pid_t child = pin_result ? -1 : fork();
     if (child == 0) {
         /* Only this compiler inherits these OFDs; unrelated execs keep CLOEXEC. */
@@ -1566,7 +1601,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     bool task_known = !fstat(task_lease, &task_identity);
     close(task_lease);
     /* An independent EX probe cannot unlock a descendant's inherited SH OFD. */
-    if (task_known && record_compiler_release(config, task_id, &task_identity))
+    if (task_known && record_compiler_release(config, task_id, &task_identity, false))
         fprintf(stderr, "latcd: compiler inputs still held or release not durable; retaining task root\n");
     g_free(task_id);
     close_compiler_inputs(input_pins);
@@ -2613,6 +2648,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     char *base_native = NULL;
     char *base_module = NULL;
     int baseline_pins[4] = {-1, -1, -1, -1};
+    GPtrArray *compiler_tasks = g_ptr_array_new_with_free_func(g_free);
     char *retained_tbset = NULL;
     char *module_name = NULL;
     char *native_name = NULL;
@@ -2775,7 +2811,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     int compiler_result = run_compiler(config, worker_index, snapshot,
                                        compile_tbset, static_tbset,
                                        base_native, base_module, native,
-                                       module, digest, error, sizeof(error));
+                                       module, digest, compiler_tasks, error, sizeof(error));
     if (compiler_result) {
         if (!base_native) {
             status = LATCD_STATUS_COMPILE_FAILED;
@@ -2802,7 +2838,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         compiler_result = run_compiler(config, worker_index, snapshot,
                                        full_compile_tbset, static_tbset,
                                        NULL, NULL, native, module, digest,
-                                       error, sizeof(error));
+                                       compiler_tasks, error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
             goto out;
@@ -2839,7 +2875,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         compiler_result = run_compiler(config, worker_index, snapshot,
                                        full_compile_tbset, static_tbset,
                                        NULL, NULL, native, module, digest,
-                                       error, sizeof(error));
+                                       compiler_tasks, error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
             goto out;
@@ -3010,6 +3046,12 @@ out:
               sizeof(response->message));
     if (module && *module) unlink(module);
     if (native && *native) unlink(native);
+    for (guint i = 0; i < compiler_tasks->len; i++) {
+        LatcdCompilerTask *task = g_ptr_array_index(compiler_tasks, i);
+        if (record_compiler_release(config, task->id, &task->identity, true))
+            fprintf(stderr, "latcd: compiler output release not durable; retaining task root\n");
+    }
+    g_ptr_array_free(compiler_tasks, TRUE);
     if (tbset_copy && *tbset_copy) unlink(tbset_copy);
     if (module_staged && unlink(final_module) && errno != ENOENT) capacity_retained = true;
     if (native_staged && unlink(final_native) && errno != ENOENT) capacity_retained = true;

@@ -243,16 +243,24 @@ static void test_publication_cleanup(void)
     g_assert_cmpint(g_mkdir_with_parents(task_dir, 0700), ==, 0);
     char *task_name = g_strdup_printf("%s.ini", task_id);
     char *task_path = g_build_filename(task_dir, task_name, NULL);
-    g_assert_true(g_file_set_contents(task_path, "task", 4, NULL));
+    g_assert_true(g_file_set_contents(task_path,
+        "[output_native]\nname=native-output\n[output_module]\nname=module-output\n", -1, NULL));
     g_assert_cmpint(g_chmod(task_path, 0400), ==, 0);
     int task_fd = open(task_path, O_RDONLY | O_CLOEXEC);
     g_assert_cmpint(task_fd, >=, 0);
     struct stat task_identity;
     g_assert_cmpint(fstat(task_fd, &task_identity), ==, 0);
     g_assert_cmpint(flock(task_fd, LOCK_SH), ==, 0);
-    g_assert_cmpint(record_compiler_release(&config, task_id, &task_identity), ==, -1);
+    g_assert_cmpint(record_compiler_release(&config, task_id, &task_identity, false), ==, -1);
+    g_assert_cmpint(record_compiler_release(&config, task_id, &task_identity, true), ==, -1);
     close(task_fd);
-    g_assert_cmpint(record_compiler_release(&config, task_id, &task_identity), ==, 0);
+    g_assert_cmpint(record_compiler_release(&config, task_id, &task_identity, false), ==, 0);
+    char *live_output = g_build_filename(temporary, "native-output", NULL);
+    g_assert_true(g_file_set_contents(live_output, "live", 4, NULL));
+    g_assert_cmpint(record_compiler_release(&config, task_id, &task_identity, true), ==, -1);
+    g_assert_cmpint(g_unlink(live_output), ==, 0);
+    g_assert_cmpint(record_compiler_release(&config, task_id, &task_identity, true), ==, 0);
+    g_free(live_output);
     g_free(task_path);
     g_free(task_name);
     g_free(task_dir);

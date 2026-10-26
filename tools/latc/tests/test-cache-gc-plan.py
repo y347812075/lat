@@ -259,6 +259,21 @@ class PlannerTest(unittest.TestCase):
         plan = self.run_plan()
         row = next(row for row in plan['entries'] if row['path'] == '.tmp/native-ABC')
         self.assertTrue(row['task_references'])
+        output_release = self.put(f'.gc/compiler-output-releases/{task.name}',
+                                 record.replace('INPUTS_RELEASED', 'OUTPUTS_RELEASED').encode())
+        plan = self.run_plan()
+        self.assertFalse(next(iter(plan['tasks'].values())).get('compiler_outputs_released', False))
+        (self.root / '.tmp/native-ABC').unlink()
+        plan = self.run_plan()
+        self.assertTrue(next(iter(plan['tasks'].values()))['compiler_outputs_released'])
+        with task.open('rb') as pin:
+            fcntl.flock(pin, fcntl.LOCK_SH)
+            self.assertFalse(next(iter(self.run_plan()['tasks'].values())).get('compiler_outputs_released', False))
+        self.put(str(output_release.relative_to(self.root)),
+                 record.replace('INPUTS_RELEASED', 'OUTPUTS_RELEASED').replace(
+                     f'task_inode={st.st_ino}', 'task_inode=0').encode())
+        self.run_plan(success=False)
+        output_release.unlink()
         for bad in (record.replace('INPUTS_RELEASED', 'DONE'),
                     record.replace(f'task_inode={st.st_ino}', 'task_inode=0')):
             self.put(str(release.relative_to(self.root)), bad.encode())
