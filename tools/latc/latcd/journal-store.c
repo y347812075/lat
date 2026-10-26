@@ -156,6 +156,23 @@ static uint64_t stream_storage(uint64_t capacity)
     return 192 + capacity * 32 + 2 * (64 + capacity * sizeof(LatTbKey));
 }
 
+int latcd_journal_budget(int snapshot_fd, int config_fd, uint64_t capacity, uint64_t *bytes)
+{
+    struct stat source, config;
+    *bytes = 0;
+    int seals = fcntl(config_fd, F_GET_SEALS);
+    if (!capacity || capacity > LAT_KEY_JOURNAL_MAX_SLOTS || seals < 0 ||
+        (seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK)) !=
+        (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK) ||
+        fstat(snapshot_fd, &source) || !S_ISREG(source.st_mode) || source.st_size < 0 ||
+        fstat(config_fd, &config) || config.st_size <= 0 || config.st_size > LATCD_JOURNAL_CONFIG_LIMIT)
+        return -1;
+    uint64_t overhead = sizeof(Registration) + config.st_size + stream_storage(capacity);
+    if ((uint64_t)source.st_size > UINT64_MAX - overhead) return -1;
+    *bytes = source.st_size + overhead;
+    return 0;
+}
+
 static bool executable_keys(int fd, const LatTbKeySet *keys)
 {
     struct stat st;
@@ -341,20 +358,28 @@ static int scan(int root, const uint8_t build[32], const uint8_t codegen[32],
     return result;
 }
 
-int latcd_journal_recover(const char *cache, const uint8_t build[32],
-    const uint8_t codegen[32], uint64_t max_bytes, unsigned *count,
+int latcd_journal_inventory(const char *cache, const uint8_t build[32],
+    const uint8_t codegen[32], uint64_t max_bytes, unsigned *count, uint64_t *bytes,
     char *error, size_t error_size)
 {
     *count = 0;
+    *bytes = 0;
     int root = root_open(cache, false);
     if (root < 0) {
         if (errno == ENOENT) return 0;
         return fail(error, error_size, "cannot open journal store");
     }
-    uint64_t bytes;
-    int result = scan(root, build, codegen, max_bytes, count, &bytes, NULL, error, error_size);
+    int result = scan(root, build, codegen, max_bytes, count, bytes, NULL, error, error_size);
     close(root);
     return result;
+}
+
+int latcd_journal_recover(const char *cache, const uint8_t build[32],
+    const uint8_t codegen[32], uint64_t max_bytes, unsigned *count,
+    char *error, size_t error_size)
+{
+    uint64_t bytes;
+    return latcd_journal_inventory(cache, build, codegen, max_bytes, count, &bytes, error, error_size);
 }
 
 int latcd_journal_collect(const char *cache, const uint8_t build[32],

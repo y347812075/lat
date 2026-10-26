@@ -70,6 +70,13 @@ int main(void)
     assert(!unlink(legacy_change)); g_free(legacy_change);
     assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
     assert(capacity.committed == 15 && !capacity.reserved);
+    assert(!latcd_cache_capacity_reserve(&capacity, 4, 20, NULL, 0));
+    assert(!latcd_cache_capacity_journal(&capacity, 4, 4, true));
+    assert(capacity.journal_reserved == 4 && !capacity.reserved);
+    assert(latcd_cache_capacity_reserve_transient(&capacity, 2, 20, NULL, 0));
+    assert(!latcd_cache_capacity_reserve_transient(&capacity, 1, 20, NULL, 0));
+    latcd_cache_capacity_finish_transient(&capacity, 1, false);
+    assert(!latcd_cache_capacity_journal(&capacity, 0, 0, true));
     assert(!latcd_cache_capacity_reserve_transient(&capacity, 4, 20, error, sizeof(error)));
     assert(capacity.transient_reserved == 4);
     assert(latcd_cache_capacity_reserve(&capacity, 2, 20, error, sizeof(error)));
@@ -138,6 +145,12 @@ int main(void)
     assert(!pthread_barrier_destroy(&start) && !pthread_barrier_destroy(&finish));
     latcd_cache_capacity_finish(&empty, 1, true);
     assert(!empty.ready);
+    empty.ready = true;
+    assert(!latcd_cache_capacity_reserve(&empty, 5, 100, NULL, 0));
+    assert(latcd_cache_capacity_journal(&empty, 0, 5, false));
+    assert(!empty.ready && empty.reserved == 5);
+    assert(!latcd_cache_capacity_journal(&empty, 4, 5, true));
+    assert(!empty.ready && !empty.reserved && empty.journal_reserved == 4);
     latcd_cache_capacity_close(&capacity);
     assert(!pthread_mutex_destroy(&empty.lock) && !pthread_mutex_destroy(&capacity.lock));
     assert(!unlink(module) && !unlink(native) && !unlink(old) && !unlink(alias));

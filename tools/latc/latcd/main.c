@@ -3839,6 +3839,7 @@ static void write_stats_locked(LatcdService *service)
     uint64_t publication_bytes = generation_capacity.reserved;
     uint64_t transient_bytes = generation_capacity.transient_reserved;
     uint64_t recovered_bytes = generation_capacity.recovered_reserved;
+    uint64_t journal_bytes = generation_capacity.journal_reserved;
     unsigned unknown_budgets = generation_capacity.unknown_tasks ?
         g_hash_table_size(generation_capacity.unknown_tasks) : 0;
     bool capacity_ready = generation_capacity.ready;
@@ -3860,6 +3861,7 @@ static void write_stats_locked(LatcdService *service)
         ",\"cache_owner_pid\":%ld,\"generation_logical_bytes\":%" PRIu64
         ",\"publication_reserved_bytes\":%" PRIu64 ",\"compiler_peak_reserved_bytes\":%" PRIu64
         ",\"recovered_compiler_reserved_bytes\":%" PRIu64
+        ",\"journal_reserved_bytes\":%" PRIu64
         ",\"unknown_compiler_budget_tasks\":%u"
         ",\"compiler_budget_recovery_state\":%d"
         ",\"retirement_candidates\":%u,\"retirement_due_candidates\":%u"
@@ -3875,7 +3877,7 @@ static void write_stats_locked(LatcdService *service)
         g_hash_table_size(service->active),
         g_hash_table_size(service->running_sources), service->config->workers,
         service->config->max_cache_bytes, (long)getpid(), generation_bytes,
-        publication_bytes, transient_bytes, recovered_bytes, unknown_budgets, budget_recovery,
+        publication_bytes, transient_bytes, recovered_bytes, journal_bytes, unknown_budgets, budget_recovery,
         retirement.candidates, retirement.due, retirement.next_deadline_us, retirement.oldest_due_wait_us,
         retirement.complete ? "true" : "false",
         timer_wakeups, publication_wakeups,
@@ -5201,6 +5203,16 @@ static void register_journal(const LatcdConfig *config, int source, int config_f
     } else {
         char stream[33];
         int result;
+        uint64_t reservation = 0;
+        int snapshot_fd = open(snapshot, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        result = snapshot_fd < 0 ? -1 : latcd_journal_budget(snapshot_fd, config_fd, request->sequence, &reservation);
+        if (snapshot_fd >= 0) close(snapshot_fd);
+        if (!result) result = latcd_cache_capacity_reserve(&generation_capacity,
+            reservation, config->max_cache_bytes, error, sizeof(error));
+        if (result) {
+            response->status = LATCD_STATUS_BAD_REQUEST;
+            goto cleanup;
+        }
         if (request->operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY) {
             result = latcd_journal_register_capability(config->cache_dir, snapshot,
                 response->source_sha256, build, codegen, config_fd, request->sequence,
@@ -5210,12 +5222,23 @@ static void register_journal(const LatcdConfig *config, int source, int config_f
                 build, codegen, config_fd, request->sequence, config->max_cache_bytes,
                 stream, error, sizeof(error));
         }
+        unsigned count;
+        uint64_t total;
+        char inventory_error[256] = {0};
+        bool valid = !latcd_journal_inventory(config->cache_dir, build, codegen,
+            config->max_cache_bytes, &count, &total, inventory_error, sizeof(inventory_error));
+        if (latcd_cache_capacity_journal(&generation_capacity, total, reservation, valid)) {
+            fprintf(stderr, "latcd: journal capacity reconciliation failed: %s\n", inventory_error);
+            if (*directory_fd >= 0) { close(*directory_fd); *directory_fd = -1; }
+            result = fail(error, sizeof(error), "capacity: journal inventory unsafe; reservation retained");
+        }
         if (result) {
             response->status = LATCD_STATUS_BAD_REQUEST;
         } else {
             g_strlcpy(response->message, stream, sizeof(response->message));
         }
     }
+cleanup:
     if (snapshot) unlink(snapshot);
     g_free(snapshot);
     g_free(temporary);
@@ -5273,10 +5296,12 @@ static int run_service(const LatcdConfig *config)
     g_free(temporary_dir);
     uint8_t journal_build[32], journal_codegen[32];
     unsigned recovered_journals;
+    uint64_t recovered_journal_bytes;
     expected_codegen_id(journal_codegen);
-    if (journal_build_id(journal_build) || latcd_journal_recover(config->cache_dir,
+    if (journal_build_id(journal_build) || latcd_journal_inventory(config->cache_dir,
             journal_build, journal_codegen, config->max_cache_bytes,
-            &recovered_journals, error, sizeof(error))) {
+            &recovered_journals, &recovered_journal_bytes, error, sizeof(error)) ||
+        latcd_cache_capacity_journal(&generation_capacity, recovered_journal_bytes, 0, true)) {
         fprintf(stderr, "latcd: journal recovery validation failed: %s\n", error);
         return 1;
     }

@@ -18,7 +18,13 @@ static pid_t start_service(const LatcdConfig *config)
 {
     pid_t child = fork();
     g_assert_cmpint(child, >=, 0);
-    if (!child) _exit(run_service(config));
+    if (!child) {
+        char error[256];
+        g_assert_cmpint(ensure_private_directory(config->cache_dir, error, sizeof(error)), ==, 0);
+        g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, config->cache_dir,
+                                                error, sizeof(error)), ==, 0);
+        _exit(run_service(config));
+    }
     for (unsigned i = 0; i < 500 && access(config->socket_path, F_OK); i++)
         g_usleep(10000);
     g_assert_cmpint(access(config->socket_path, F_OK), ==, 0);
@@ -91,6 +97,42 @@ static void remove_tree(const char *path)
         g_dir_close(directory);
     }
     g_assert_cmpint(rmdir(path), ==, 0);
+}
+
+static void check_shared_capacity(const LatcdConfig *original, int source, int configuration)
+{
+    uint64_t budget;
+    g_assert_cmpint(latcd_journal_budget(source, configuration, 2, &budget), ==, 0);
+    char *cache = g_strconcat(original->cache_dir, "-shared", NULL);
+    char *socket = g_strconcat(original->socket_path, "-shared", NULL);
+    char *name = g_strnfill(64, 'a');
+    char *native = g_strdup_printf("%s/%s.native", cache, name);
+    g_assert_cmpint(mkdir(cache, 0700), ==, 0);
+    g_assert_true(g_file_set_contents(native, "generation", 10, NULL));
+    g_assert_cmpint(chmod(native, 0400), ==, 0);
+    LatcdConfig config = *original;
+    config.cache_dir = cache;
+    config.socket_path = socket;
+    config.max_cache_bytes = budget + 9;
+    pid_t child = start_service(&config);
+    LatcdResponseV2 response = request(&config, source, configuration, 2);
+    g_assert_cmpint(response.status, !=, LATCD_STATUS_OK);
+    g_assert_nonnull(strstr(response.message, "capacity:"));
+    g_assert_cmpint(kill(child, SIGTERM), ==, 0);
+    wait_ok(child);
+    g_assert_cmpint(unlink(native), ==, 0);
+    child = start_service(&config);
+    g_assert_cmpint(request(&config, source, configuration, 2).status, ==, LATCD_STATUS_OK);
+    g_assert_cmpint(kill(child, SIGTERM), ==, 0);
+    wait_ok(child);
+    child = start_service(&config);
+    response = request(&config, source, configuration, 2);
+    g_assert_cmpint(response.status, !=, LATCD_STATUS_OK);
+    g_assert_nonnull(strstr(response.message, "capacity:"));
+    g_assert_cmpint(kill(child, SIGTERM), ==, 0);
+    wait_ok(child);
+    remove_tree(cache);
+    g_free(native); g_free(name); g_free(socket); g_free(cache);
 }
 
 static void check_collection(const LatcdConfig *config, int stream,
@@ -571,6 +613,7 @@ int main(void)
     g_assert_cmpint(request(&config, source, configuration, 2).status, !=, LATCD_STATUS_OK);
     g_assert_cmpint(fcntl(configuration, F_ADD_SEALS,
         F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL), ==, 0);
+    check_shared_capacity(&config, source, configuration);
     g_assert_cmpint(request(&config, source, configuration, 0).status, !=, LATCD_STATUS_OK);
     LatcdResponseV2 registered = request(&config, source, configuration, 4);
     g_assert_cmpint(registered.status, ==, LATCD_STATUS_OK);

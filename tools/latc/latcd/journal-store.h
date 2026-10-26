@@ -6,6 +6,13 @@
 #define LATCD_JOURNAL_MAX_STREAMS 128u
 #define LATCD_JOURNAL_CONFIG_LIMIT 4096u
 
+/* Conservative stream quota includes source, config, journal and atomic receipt
+ * replacement. Inventory validates persisted streams, not just file sizes. */
+int latcd_journal_budget(int snapshot_fd, int config_fd, uint64_t capacity, uint64_t *bytes);
+int latcd_journal_inventory(const char *cache, const uint8_t build[32],
+    const uint8_t codegen[32], uint64_t max_bytes, unsigned *count, uint64_t *bytes,
+    char *error, size_t error_size);
+
 /* snapshot is a daemon-owned verified copy, never the producer's original.
  * Functions perform I/O; callers must not hold translation/service/cache locks.
  * Registration/recovery do not accept keys or authorize config compatibility.

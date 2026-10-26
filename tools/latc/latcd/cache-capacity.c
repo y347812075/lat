@@ -146,7 +146,8 @@ static int reserve_bytes(LatcdCacheCapacity *capacity, uint64_t bytes,
         capacity->reserved <= limit - capacity->committed &&
         capacity->transient_reserved <= limit - capacity->committed - capacity->reserved &&
         capacity->recovered_reserved <= limit - capacity->committed - capacity->reserved - capacity->transient_reserved &&
-        bytes <= limit - capacity->committed - capacity->reserved - capacity->transient_reserved - capacity->recovered_reserved;
+        capacity->journal_reserved <= limit - capacity->committed - capacity->reserved - capacity->transient_reserved - capacity->recovered_reserved &&
+        bytes <= limit - capacity->committed - capacity->reserved - capacity->transient_reserved - capacity->recovered_reserved - capacity->journal_reserved;
     if (fits) {
         if (transient) capacity->transient_reserved += bytes;
         else capacity->reserved += bytes;
@@ -204,6 +205,7 @@ void latcd_cache_capacity_close(LatcdCacheCapacity *capacity)
     if (capacity->recovered_tasks) g_hash_table_unref(capacity->recovered_tasks);
     capacity->recovered_tasks = NULL;
     capacity->recovered_reserved = 0;
+    capacity->journal_reserved = 0;
     if (capacity->unknown_tasks) g_hash_table_unref(capacity->unknown_tasks);
     capacity->unknown_tasks = NULL;
     capacity->ready = false;
@@ -248,6 +250,20 @@ void latcd_cache_capacity_release_task(LatcdCacheCapacity *capacity, const char 
     }
     if (capacity->unknown_tasks) g_hash_table_remove(capacity->unknown_tasks, id);
     pthread_mutex_unlock(&capacity->lock);
+}
+
+int latcd_cache_capacity_journal(LatcdCacheCapacity *capacity, uint64_t total,
+                                 uint64_t reservation, bool valid)
+{
+    pthread_mutex_lock(&capacity->lock);
+    int result = !valid || reservation > capacity->reserved;
+    if (result) capacity->ready = false;
+    else {
+        capacity->reserved -= reservation;
+        capacity->journal_reserved = total;
+    }
+    pthread_mutex_unlock(&capacity->lock);
+    return result ? -1 : 0;
 }
 
 static void finish_bytes(LatcdCacheCapacity *capacity, uint64_t bytes,

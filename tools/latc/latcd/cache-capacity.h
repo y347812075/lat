@@ -12,6 +12,7 @@ typedef struct LatcdCacheCapacity {
     uint64_t reserved;
     uint64_t transient_reserved;
     uint64_t recovered_reserved;
+    uint64_t journal_reserved;
     void *recovered_tasks;
     void *unknown_tasks;
     bool ready;
@@ -40,6 +41,10 @@ void latcd_cache_capacity_finish_transient(LatcdCacheCapacity *capacity, uint64_
 int latcd_cache_capacity_restore_task(LatcdCacheCapacity *capacity, const char *id, uint64_t bytes);
 void latcd_cache_capacity_unknown_task(LatcdCacheCapacity *capacity, const char *id);
 void latcd_cache_capacity_release_task(LatcdCacheCapacity *capacity, const char *id);
+/* Serialized journal owner reconciles full durable quota while releasing only
+ * its own in-flight reservation. Failed inventory keeps reservation, closes admission. */
+int latcd_cache_capacity_journal(LatcdCacheCapacity *capacity, uint64_t total,
+                                uint64_t reservation, bool valid);
 /* Bracket owned root namespace writes; unexpected changes invalidate admission.
  * Names stay registered through cleanup, including while cache_lock is dropped. */
 int latcd_cache_capacity_expect(LatcdCacheCapacity *capacity, const char *const *names,
