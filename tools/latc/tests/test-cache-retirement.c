@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -88,7 +89,7 @@ static void test_crash(int phase, bool initial)
     assert(child >= 0);
     if (!child) {
         char error[256], *transaction = NULL;
-        assert(!latcd_retirement_prepare(root, source, next, strlen(next),
+        assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
                                          &transaction, error, sizeof(error)));
         if (phase >= 1) put(current, next);
         if (phase >= 2) assert(!latcd_retirement_finish(root, transaction,
@@ -122,7 +123,7 @@ static void test_unknown_and_corrupt(void)
     char *root = root_new(), *transaction = NULL, error[256];
     char *current = current_path(root);
     put(current, old);
-    assert(!latcd_retirement_prepare(root, source, next, strlen(next),
+    assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
                                      &transaction, error, sizeof(error)));
     put(current, "unrecognized current\n");
     unsigned recovered;
@@ -145,7 +146,7 @@ static void test_reboot(void)
 {
     char *root = root_new(), *transaction = NULL, error[256];
     char *current = current_path(root);
-    assert(!latcd_retirement_prepare(root, source, next, strlen(next),
+    assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
                                      &transaction, error, sizeof(error)));
     put(current, next);
     assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
@@ -173,6 +174,101 @@ static void test_reboot(void)
     g_free(root);
 }
 
+static void test_object_identity(int mutation)
+{
+    char *root = root_new(), *current = current_path(root);
+    char *name = g_strconcat(source, ".native", NULL);
+    char *path = g_build_filename(root, name, NULL);
+    put(path, "immutable native\n");
+    const char *names[] = {name};
+    char *objects = latcd_retirement_capture_objects(root, source, names, 1);
+    assert(objects);
+    char error[256], *transaction = NULL;
+    assert(!latcd_retirement_prepare(root, source, next, strlen(next), objects,
+                                     &transaction, error, sizeof(error)));
+    put(current, next);
+    assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+    assert_state(root, "RETIRED");
+    if (mutation == 1) {
+        put(path, "immutable native\n"); /* Same bytes, different inode. */
+    } else if (mutation == 2) {
+        assert(!chmod(path, 0600));
+        int fd = open(path, O_WRONLY);
+        assert(fd >= 0 && pwrite(fd, "X", 1, 0) == 1 && !fsync(fd));
+        close(fd);
+        assert(!chmod(path, 0400)); /* Same inode and length, changed hash. */
+    } else if (mutation == 3) {
+        assert(!unlink(path));
+    } else if (mutation == 4) {
+        char *alias = g_build_filename(root, "alias", NULL);
+        assert(!link(path, alias));
+        g_free(alias);
+    } else if (mutation == 5) {
+        assert(!unlink(path));
+        assert(!symlink(current, path));
+    }
+    unsigned recovered;
+    assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)));
+    assert_state(root, mutation ? "UNKNOWN" : "RETIRED");
+    assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)));
+    assert_state(root, mutation ? "UNKNOWN" : "RETIRED");
+    if (!mutation) {
+        int fd = open(path, O_RDONLY);
+        assert(fd >= 0 && !flock(fd, LOCK_EX | LOCK_NB));
+        assert(!latcd_retirement_capture_objects(root, source, names, 1));
+        close(fd);
+        const char *bad[] = {"../escape.native"};
+        assert(!latcd_retirement_capture_objects(root, source, bad, 1));
+    }
+    g_free(transaction);
+    g_free(objects);
+    g_free(name);
+    g_free(path);
+    g_free(current);
+    remove_root(root);
+    g_free(root);
+}
+
+static void test_legacy_and_schema(void)
+{
+    char *root = root_new(), *current = current_path(root);
+    char *transaction = NULL, error[256];
+    assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
+                                     &transaction, error, sizeof(error)));
+    char *path = single_record(root);
+    GKeyFile *record = g_key_file_new();
+    assert(g_key_file_load_from_file(record, path, 0, NULL));
+    g_key_file_set_integer(record, "transaction", "version", 1);
+    assert(g_key_file_remove_key(record, "transaction", "objects", NULL));
+    char *data = g_key_file_to_data(record, NULL, NULL);
+    put(path, data);
+    g_free(data);
+    put(current, next);
+    unsigned recovered;
+    assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)));
+    assert_state(root, "RETIRED");
+    const char *bad[] = { "%%%", "W29iamVjdHNdCmNvdW50PTcK",
+        "W29iamVjdHNdCmNvdW50PTEK" };
+    for (size_t i = 0; i < G_N_ELEMENTS(bad); i++) {
+        g_key_file_set_integer(record, "transaction", "version", 2);
+        g_key_file_set_string(record, "transaction", "objects", bad[i]);
+        data = g_key_file_to_data(record, NULL, NULL);
+        put(path, data);
+        g_free(data);
+        assert(latcd_retirement_recover(root, &recovered, error, sizeof(error)));
+        char *contents = NULL;
+        assert(g_file_get_contents(current, &contents, NULL, NULL));
+        assert(!strcmp(contents, next));
+        g_free(contents);
+    }
+    g_key_file_unref(record);
+    g_free(transaction);
+    g_free(path);
+    g_free(current);
+    remove_root(root);
+    g_free(root);
+}
+
 int main(void)
 {
     for (int phase = 0; phase < 3; phase++) {
@@ -181,6 +277,8 @@ int main(void)
     }
     test_unknown_and_corrupt();
     test_reboot();
+    for (int mutation = 0; mutation < 6; mutation++) test_object_identity(mutation);
+    test_legacy_and_schema();
     puts("test-cache-retirement: PASS");
     return 0;
 }

@@ -109,6 +109,32 @@ class PlannerTest(unittest.TestCase):
         plan = self.run_plan(False)
         self.assertTrue(any(e["reason"] == "invalid_transaction" for e in plan["errors"]))
 
+    def test_object_evidence_schema(self):
+        name = STEM + ".native"
+        st = (self.root / name).stat()
+        evidence = ("[objects]\ncount=1\n[object0]\nname=" + name +
+                    f"\ndevice={st.st_dev}\ninode={st.st_ino}\nsize={st.st_size}" +
+                    f"\nallocated={st.st_blocks * 512}\nsha256=" + "e" * 64 + "\n")
+        path = ".gc/transactions/12345678-1234-4234-8234-123456789abc.ini"
+        record = ("[transaction]\nversion=2\nsource=" + SOURCE +
+                  "\nstate=RETIRED\nprevious=\nnext=" +
+                  base64.b64encode(json.dumps(self.manifest).encode()).decode() +
+                  "\nobjects=" + base64.b64encode(evidence.encode()).decode() +
+                  "\nobjects_status=RECORDED\n")
+        self.put(path, record.encode())
+        plan = self.run_plan()
+        self.assertEqual(plan["transactions"][path]["object_identities"][0]["inode"], st.st_ino)
+        # Recorded evidence is deliberately not a claim of current content validity.
+        self.assertFalse(plan["content_validated"])
+        for bad in (evidence.replace("count=1", "count=7"),
+                    evidence.replace(name, "../escape.native"),
+                    evidence.replace("inode=", "unexpected="),
+                    evidence.replace("size=" + str(st.st_size), "size=-1")):
+            changed = record.replace(base64.b64encode(evidence.encode()).decode(),
+                                     base64.b64encode(bad.encode()).decode())
+            self.put(path, changed.encode())
+            self.run_plan(False)
+
     def test_missing_target(self):
         (self.root / (STEM + ".native")).unlink()
         plan = self.run_plan(False)

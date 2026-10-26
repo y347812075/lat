@@ -85,6 +85,25 @@ def run(prefix, guest, work):
             return value["transaction"]
 
         before = record()
+        assert before["version"] == "2"
+        objects = configparser.ConfigParser(interpolation=None, strict=True)
+        objects.read_string(base64.b64decode(before["objects"], validate=True).decode())
+        expected_names = set()
+        for encoded in (before["previous"], before["next"]):
+            snapshot = base64.b64decode(encoded, validate=True)
+            if snapshot:
+                expected_names.update(value for key, value in json.loads(snapshot).items()
+                                      if key in {"module", "native", "tbset"} and value)
+        recorded_names = set()
+        for i in range(objects.getint("objects", "count")):
+            obj = objects[f"object{i}"]
+            path = cache / obj["name"]
+            st = path.stat()
+            assert (st.st_dev, st.st_ino, st.st_size, st.st_blocks * 512) == tuple(
+                int(obj[key]) for key in ("device", "inode", "size", "allocated"))
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == obj["sha256"]
+            recorded_names.add(obj["name"])
+        assert recorded_names == expected_names
         assert base64.b64decode(before["previous"], validate=True) == (old_manifest or b"")
         assert before["state"] == ("RETIRED" if phase == "retired" else "PREPARED")
         manifest = cache / (source + ".current")
@@ -94,6 +113,7 @@ def run(prefix, guest, work):
                                        env=env, stdout=log, stderr=log, timeout=30)
         assert recovered.returncode == 0
         after = record()
+        assert after["objects_status"] == "RECORDED"
         assert after["state"] == ("ABORTED" if phase == "prepared" else "RETIRED")
         if phase == "prepared":
             assert current_before == old_manifest

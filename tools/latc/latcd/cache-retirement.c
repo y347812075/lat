@@ -13,11 +13,93 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <time.h>
 #include <unistd.h>
 
 #define MANIFEST_LIMIT 4096
-#define RECORD_LIMIT 32768
+#define RECORD_LIMIT 65536
+
+static bool object_name_valid(const char *source, const char *name)
+{
+    if (!name || strncmp(source, name, 64)) return false;
+    const char *suffix = name + 64;
+    if (*suffix == '-') {
+        suffix++;
+        if (strlen(suffix) < 64 || strspn(suffix, "0123456789abcdef") != 64) return false;
+        suffix += 64;
+    }
+    return !strcmp(suffix, ".so") || !strcmp(suffix, ".native") ||
+           !strcmp(suffix, ".tbset");
+}
+
+static bool object_stat_equal(const struct stat *a, const struct stat *b)
+{
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+        a->st_mode == b->st_mode && a->st_uid == b->st_uid &&
+        a->st_nlink == b->st_nlink && a->st_size == b->st_size &&
+        a->st_blocks == b->st_blocks &&
+        a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
+        a->st_ctim.tv_sec == b->st_ctim.tv_sec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+}
+
+static char *capture_objects(int directory, const char *source,
+                             const char *const *names, size_t count)
+{
+    if (!source || strlen(source) != 64 ||
+        strspn(source, "0123456789abcdef") != 64 || !names || !count || count > 6) return NULL;
+    GKeyFile *objects = g_key_file_new();
+    bool valid = true;
+    g_key_file_set_integer(objects, "objects", "count", count);
+    for (size_t i = 0; valid && i < count; i++) {
+        if (!object_name_valid(source, names[i])) { valid = false; break; }
+        int fd = openat(directory, names[i], O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        struct stat before, after, path;
+        valid = fd >= 0 && !flock(fd, LOCK_SH | LOCK_NB) && !fstat(fd, &before) &&
+            S_ISREG(before.st_mode) && before.st_uid == geteuid() &&
+            before.st_nlink == 1 && !(before.st_mode & 0222) && before.st_size > 0;
+        GChecksum *hash = g_checksum_new(G_CHECKSUM_SHA256);
+        unsigned char buffer[65536];
+        uint64_t total = 0;
+        while (valid) {
+            ssize_t bytes = read(fd, buffer, sizeof(buffer));
+            if (bytes < 0 && errno == EINTR) continue;
+            if (bytes < 0) { valid = false; break; }
+            if (!bytes) break;
+            total += bytes;
+            if (total > (uint64_t)before.st_size) { valid = false; break; }
+            g_checksum_update(hash, buffer, bytes);
+        }
+        valid = valid && total == (uint64_t)before.st_size && !fstat(fd, &after) &&
+            !fstatat(directory, names[i], &path, AT_SYMLINK_NOFOLLOW) &&
+            object_stat_equal(&before, &after) && object_stat_equal(&before, &path);
+        if (valid) {
+            char group[32];
+            snprintf(group, sizeof(group), "object%zu", i);
+            g_key_file_set_string(objects, group, "name", names[i]);
+            g_key_file_set_uint64(objects, group, "device", before.st_dev);
+            g_key_file_set_uint64(objects, group, "inode", before.st_ino);
+            g_key_file_set_uint64(objects, group, "size", before.st_size);
+            g_key_file_set_uint64(objects, group, "allocated", (uint64_t)before.st_blocks * 512);
+            g_key_file_set_string(objects, group, "sha256", g_checksum_get_string(hash));
+        }
+        g_checksum_free(hash);
+        if (fd >= 0) close(fd);
+    }
+    char *data = valid ? g_key_file_to_data(objects, NULL, NULL) : NULL;
+    g_key_file_unref(objects);
+    return data;
+}
+
+char *latcd_retirement_capture_objects(const char *root, const char *source,
+                                      const char *const *names, size_t count)
+{
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory < 0) return NULL;
+    char *data = capture_objects(directory, source, names, count);
+    close(directory);
+    return data;
+}
 
 static int fail(char *error, size_t size, const char *format, ...)
 {
@@ -153,7 +235,7 @@ static void set_clock(GKeyFile *record, const char *prefix)
 }
 
 int latcd_retirement_prepare(const char *root, const char *source,
-                            const char *next, size_t next_size,
+                            const char *next, size_t next_size, const char *objects,
                             char **transaction, char *error, size_t error_size)
 {
     *transaction = NULL;
@@ -170,7 +252,11 @@ int latcd_retirement_prepare(const char *root, const char *source,
     GKeyFile *record = g_key_file_new();
     char *old64 = g_base64_encode((guchar *)previous, previous_size);
     char *new64 = g_base64_encode((const guchar *)next, next_size);
-    g_key_file_set_integer(record, "transaction", "version", 1);
+    g_key_file_set_integer(record, "transaction", "version", 2);
+    char *object64 = g_base64_encode((const guchar *)(objects ? objects : ""),
+                                    objects ? strlen(objects) : 0);
+    g_key_file_set_string(record, "transaction", "objects", object64);
+    g_free(object64);
     g_key_file_set_string(record, "transaction", "source", source);
     g_key_file_set_string(record, "transaction", "state", "PREPARED");
     g_key_file_set_string(record, "transaction", "previous", old64);
@@ -212,7 +298,8 @@ static bool record_shape_valid(GKeyFile *record)
     char **keys = g_key_file_get_keys(record, "transaction", &count, NULL);
     GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
     const char *allowed[] = { "version", "source", "state", "previous", "next",
-        "prepared_boot", "prepared_boottime_us", "retired_boot", "retired_boottime_us" };
+        "prepared_boot", "prepared_boottime_us", "retired_boot", "retired_boottime_us",
+        "objects", "objects_status" };
     for (gsize i = 0; valid && i < count; i++) {
         bool known = false;
         for (size_t j = 0; j < G_N_ELEMENTS(allowed); j++)
@@ -234,7 +321,103 @@ static guchar *decode_snapshot(const char *value, gsize *size)
     return decoded;
 }
 
-static int recover_record(int root, int store, const char *name)
+static bool exact_keys(GKeyFile *record, const char *group,
+                        const char *const *required, size_t required_count)
+{
+    gsize count;
+    char **keys = g_key_file_get_keys(record, group, &count, NULL);
+    bool valid = keys && count == required_count;
+    for (size_t i = 0; valid && i < required_count; i++) {
+        unsigned matches = 0;
+        for (gsize j = 0; j < count; j++) matches += !strcmp(keys[j], required[i]);
+        valid = matches == 1;
+    }
+    g_strfreev(keys);
+    return valid;
+}
+
+/* No pathname here is trusted until its source-bound basename is checked.
+ * Content hashing is reserved for startup, outside daemon metadata locks. */
+static int verify_objects(int root, const char *source, const char *encoded,
+                           bool content)
+{
+    if (!encoded) return -1;
+    if (!*encoded) return 2;
+    gsize size;
+    guchar *raw = g_base64_decode(encoded, &size);
+    char *canonical = g_base64_encode(raw, size);
+    bool valid = size && size < 16384 && !strcmp(canonical, encoded) && !memchr(raw, 0, size);
+    GKeyFile *objects = g_key_file_new();
+    valid = valid && g_key_file_load_from_data(objects, (char *)raw, size, 0, NULL);
+    g_free(canonical);
+    g_free(raw);
+    int result = -1;
+    if (!valid) goto out;
+    const char *header[] = {"count"};
+    const char *fields[] = {"name", "device", "inode", "size", "allocated", "sha256"};
+    int count = g_key_file_get_integer(objects, "objects", "count", NULL);
+    gsize group_count;
+    char **groups = g_key_file_get_groups(objects, &group_count);
+    valid = count > 0 && count <= 6 && group_count == (gsize)count + 1 &&
+        exact_keys(objects, "objects", header, G_N_ELEMENTS(header));
+    g_strfreev(groups);
+    if (!valid) goto out;
+    result = 0;
+    for (int i = 0; i < count; i++) {
+        char group[32];
+        snprintf(group, sizeof(group), "object%d", i);
+        if (!exact_keys(objects, group, fields, G_N_ELEMENTS(fields))) { result = -1; break; }
+        char *name = g_key_file_get_string(objects, group, "name", NULL);
+        char *hash = g_key_file_get_string(objects, group, "sha256", NULL);
+        valid = object_name_valid(source, name) && hash && strlen(hash) == 64 &&
+            strspn(hash, "0123456789abcdef") == 64;
+        uint64_t values[4] = {0};
+        for (size_t j = 0; valid && j < G_N_ELEMENTS(values); j++) {
+            char *value = g_key_file_get_string(objects, group, fields[j + 1], NULL);
+            char *end = NULL;
+            errno = 0;
+            values[j] = value ? g_ascii_strtoull(value, &end, 10) : 0;
+            valid = value && *value && strspn(value, "0123456789") == strlen(value) &&
+                end && !*end && !errno;
+            g_free(value);
+        }
+        if (!valid) result = -1;
+        else {
+            struct stat st;
+            if (fstatat(root, name, &st, AT_SYMLINK_NOFOLLOW) ||
+                !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+                st.st_nlink != 1 || (st.st_mode & 0222) ||
+                (uint64_t)st.st_dev != values[0] || (uint64_t)st.st_ino != values[1] ||
+                (uint64_t)st.st_size != values[2] || (uint64_t)st.st_blocks * 512 != values[3]) {
+                result = 1;
+            } else if (content) {
+                /* Reuse the same fd/lease/hash checks as publication capture. */
+                const char *names[] = {name};
+                char *actual = capture_objects(root, source, names, 1);
+                GKeyFile *observed = g_key_file_new();
+                char *actual_hash = NULL;
+                if (actual && g_key_file_load_from_data(observed, actual, -1, 0, NULL))
+                    actual_hash = g_key_file_get_string(observed, "object0", "sha256", NULL);
+                if (g_strcmp0(hash, actual_hash)) result = 1;
+                for (size_t j = 0; actual_hash && j < G_N_ELEMENTS(values); j++) {
+                    if (g_key_file_get_uint64(observed, "object0", fields[j + 1], NULL) != values[j])
+                        result = 1;
+                }
+                g_free(actual_hash);
+                g_free(actual);
+                g_key_file_unref(observed);
+            }
+        }
+        g_free(hash);
+        g_free(name);
+        if (result) break;
+    }
+out:
+    g_key_file_unref(objects);
+    return result;
+}
+
+static int recover_record(int root, int store, const char *name, bool content)
 {
     char *raw = NULL;
     size_t size;
@@ -248,7 +431,8 @@ static int recover_record(int root, int store, const char *name)
     char *state = g_key_file_get_string(record, "transaction", "state", NULL);
     char *old64 = g_key_file_get_string(record, "transaction", "previous", NULL);
     char *new64 = g_key_file_get_string(record, "transaction", "next", NULL);
-    if (g_key_file_get_integer(record, "transaction", "version", NULL) != 1 ||
+    int version = g_key_file_get_integer(record, "transaction", "version", NULL);
+    if ((version != 1 && version != 2) ||
         !source_valid(source) || !state || !old64 || !new64) goto fields_out;
     gsize old_size, new_size;
     guchar *old = decode_snapshot(old64, &old_size);
@@ -257,6 +441,19 @@ static int recover_record(int root, int store, const char *name)
         g_free(old);
         g_free(next);
         goto fields_out;
+    }
+    if (version == 2) {
+        char *encoded = g_key_file_get_string(record, "transaction", "objects", NULL);
+        int object_result = verify_objects(root, source, encoded, content);
+        g_free(encoded);
+        if (object_result < 0) goto snapshots_out;
+        g_key_file_set_string(record, "transaction", "objects_status",
+            object_result == 2 ? "UNPROVEN" : object_result ? "MISMATCH" : "RECORDED");
+        if (object_result == 1) {
+            g_key_file_set_string(record, "transaction", "state", "UNKNOWN");
+            result = write_record(store, name, record);
+            goto snapshots_out;
+        }
     }
     if (strcmp(state, "PREPARED")) {
         result = (!strcmp(state, "RETIRED") || !strcmp(state, "ABORTED") ||
@@ -315,7 +512,7 @@ int latcd_retirement_finish(const char *root, const char *transaction,
     int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     int store = root_fd < 0 ? -1 : open_store(root_fd, false);
     int result = store < 0 || fsync(root_fd) ? -1 :
-                 recover_record(root_fd, store, transaction);
+                 recover_record(root_fd, store, transaction, false);
     if (store >= 0) close(store);
     if (root_fd >= 0) close(root_fd);
     return result ? fail(error, error_size, "cannot complete retirement transaction") : 0;
@@ -343,7 +540,7 @@ int latcd_retirement_recover(const char *root, unsigned *recovered,
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         /* Interrupted record writes are evidence, not deletion candidates. */
         if (g_str_has_prefix(entry->d_name, ".write-")) continue;
-        if (*recovered >= 100000 || recover_record(root_fd, store, entry->d_name)) {
+        if (*recovered >= 100000 || recover_record(root_fd, store, entry->d_name, true)) {
             result = -1;
             break;
         }

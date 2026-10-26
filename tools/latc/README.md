@@ -898,6 +898,12 @@ initially absent current) is ABORTED, and any other result is UNKNOWN. Recovery
 does not recompile, move, or remove generation files. RETIRED timestamps use
 boot ID and CLOCK_BOOTTIME; a changed boot ID restarts the observation window.
 These records are evidence and conservative planner roots, not deletion permits.
+Version 2 additionally records the old/new immutable objects' basename, device,
+inode, length, allocated bytes and SHA256. Collection holds shared file leases
+outside the daemon metadata lock. Startup rechecks those identities and hashes;
+missing/replaced/modified/aliased objects become UNKNOWN, never delete candidates.
+Unavailable object evidence is UNPROVEN, including legacy version 1 records;
+it does not block compatible publication but cannot authorize reclamation.
 Controlled-domain admission, object-identity tombstones, partial-delete recovery,
 automatic expiry scheduling, and capacity reclamation remain disabled/pending.
 

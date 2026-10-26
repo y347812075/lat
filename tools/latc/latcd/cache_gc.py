@@ -138,12 +138,12 @@ class Inventory:
             if (not name.endswith(".ini") or str(uuid.UUID(name[:-4])) != name[:-4] or
                     not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
                     before.st_nlink != 1 or before.st_mode & 0o222 or
-                    not 0 < before.st_size <= 32768):
+                    not 0 < before.st_size <= 65536):
                 raise ValueError("unsafe retirement transaction")
             fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW |
                          os.O_NONBLOCK, dir_fd=directory)
             try:
-                raw = os.read(fd, 32769)
+                raw = os.read(fd, 65537)
                 if identity(os.fstat(fd)) != identity(before) or len(raw) != before.st_size:
                     raise ValueError("transaction changed during read")
             finally:
@@ -154,11 +154,12 @@ class Inventory:
                 raise ValueError("invalid transaction sections")
             value = dict(parser["transaction"])
             required = {"version", "source", "state", "previous", "next"}
-            optional = {"prepared_boot", "prepared_boottime_us", "retired_boot", "retired_boottime_us"}
+            optional = {"prepared_boot", "prepared_boottime_us", "retired_boot", "retired_boottime_us",
+                        "objects", "objects_status"}
             if not required <= value.keys() or value.keys() - required - optional:
                 raise ValueError("unsupported transaction fields")
             source, state = value["source"], value["state"]
-            if (value["version"] != "1" or not re.fullmatch(SHA, source) or
+            if (value["version"] not in {"1", "2"} or not re.fullmatch(SHA, source) or
                     state not in {"PREPARED", "RETIRED", "ABORTED", "UNKNOWN"}):
                 raise ValueError("invalid transaction identity/state")
             snapshots = {}
@@ -169,6 +170,37 @@ class Inventory:
                 if not 0 < len(raw_manifest) < MAX_MANIFEST:
                     raise ValueError("invalid transaction snapshot size")
                 snapshots[role] = parse_manifest(raw_manifest, source)
+            object_rows = []
+            if value["version"] == "2":
+                encoded = value.get("objects")
+                if encoded is None:
+                    raise ValueError("missing object evidence")
+                evidence = base64.b64decode(encoded, validate=True)
+                if len(evidence) >= 16384:
+                    raise ValueError("object evidence too large")
+                if evidence:
+                    objects = configparser.ConfigParser(interpolation=None, strict=True)
+                    objects.read_string(evidence.decode("ascii"))
+                    count = objects.getint("objects", "count")
+                    if (not 0 < count <= 6 or objects.defaults() or
+                            set(objects["objects"]) != {"count"} or
+                            set(objects.sections()) != {"objects", *(f"object{i}" for i in range(count))}):
+                        raise ValueError("invalid object table")
+                    for i in range(count):
+                        row = dict(objects[f"object{i}"])
+                        if set(row) != {"name", "device", "inode", "size", "allocated", "sha256"}:
+                            raise ValueError("invalid object fields")
+                        match = GENERATED.fullmatch(row["name"])
+                        if not match or match[1] != source or not re.fullmatch(SHA, row["sha256"]):
+                            raise ValueError("invalid object identity")
+                        for key in ("device", "inode", "size", "allocated"):
+                            if not re.fullmatch(r"[0-9]+", row[key]) or int(row[key]) >= 2**64:
+                                raise ValueError("invalid object number")
+                            row[key] = int(row[key])
+                        object_rows.append(row)
+                if value.get("objects_status", "UNPROVEN") not in {"UNPROVEN", "MISMATCH", "RECORDED"}:
+                    raise ValueError("invalid object evidence status")
+            value["object_identities"] = object_rows
             for role, manifest in snapshots.items():
                 for field in ("module", "native", "tbset"):
                     if manifest[field]:
@@ -178,7 +210,7 @@ class Inventory:
             self.transactions[relative] = value
             if state == "UNKNOWN":
                 self.frozen.add(source)
-        except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
+        except (OSError, ValueError, KeyError, UnicodeError, configparser.Error) as exc:
             self.freeze_all = True
             self.error(relative, "invalid_transaction", str(exc))
 
@@ -309,6 +341,7 @@ class Inventory:
                 "snapshot_atomic": False, "content_validated": False,
                 "liveness_verified": False, "manifest_count": len(self.manifests),
                 "transaction_count": len(self.transactions),
+                "transactions": self.transactions,
                 "totals": {"path_count": len(output), "unique_objects": len(unique),
                            "logical_bytes": sum(r["logical_bytes"] for r in unique),
                            "allocated_bytes": sum(r["allocated_bytes"] for r in unique)},

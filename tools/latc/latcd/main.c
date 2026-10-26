@@ -1627,6 +1627,16 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     /* Open descriptors hold shared leases while expensive hashes run.
      * Path and generation checks below guard the source-latched commit. */
     pthread_mutex_unlock(&cache_lock);
+    const char *object_names[6] = {module_name, native_name};
+    size_t object_count = 2;
+    if (*tbset_name) object_names[object_count++] = tbset_name;
+    if (selected_valid) {
+        object_names[object_count++] = selected.module;
+        object_names[object_count++] = selected.native;
+        if (*selected.tbset) object_names[object_count++] = selected.tbset;
+    }
+    char *objects = latcd_retirement_capture_objects(config->cache_dir, hex,
+                                                     object_names, object_count);
     char *module_sha256 = pinned ? cached_fd_digest(module_fd) : NULL;
     char *native_sha256 = pinned ? cached_fd_digest(native_fd) : NULL;
     pthread_mutex_lock(&cache_lock);
@@ -1656,6 +1666,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     g_free(native_path);
     g_free(tbset_path);
     if (!unchanged || !module_sha256 || !native_sha256) {
+        g_free(objects);
         g_free(module_sha256);
         g_free(native_sha256);
         return fail(error, error_size,
@@ -1664,6 +1675,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     source_lock_fd = lat_aot_v2_cache_source_lock(
         config->cache_dir, hex, LOCK_EX, false, error, error_size);
     if (source_lock_fd < 0) {
+        g_free(objects);
         g_free(module_sha256);
         g_free(native_sha256);
         return -1;
@@ -1679,6 +1691,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
          (previous.native_sha256 && strcmp(previous.native_sha256, native_sha256)))) {
         current_manifest_clear(&previous);
         close(source_lock_fd);
+        g_free(objects);
         g_free(module_sha256);
         g_free(native_sha256);
         return fail(error, error_size, "current module/native pair content changed");
@@ -1689,6 +1702,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     int fd = g_mkstemp_full(temporary, O_RDWR | O_CLOEXEC, 0600);
     if (fd < 0) {
         close(source_lock_fd);
+        g_free(objects);
         g_free(module_sha256);
         g_free(native_sha256);
         g_free(temporary_dir);
@@ -1726,10 +1740,11 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     }
     char *final = g_strdup_printf("%s/%s.current", config->cache_dir, hex);
     if (!result && latcd_retirement_prepare(config->cache_dir, hex,
-            contents->str, contents->len, &transaction, error, error_size)) {
+            contents->str, contents->len, objects, &transaction, error, error_size)) {
         result = -1;
     }
     g_string_free(contents, TRUE);
+    g_free(objects);
     const char *crash = getenv("LATCD_TEST_RETIREMENT_CRASH");
     if (!result && crash && !strcmp(crash, "prepared")) raise(SIGKILL);
     if (!result) {
