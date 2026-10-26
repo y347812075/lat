@@ -112,10 +112,10 @@ $(BUILD)/%.o: %.c
 
 $(BUILD)/latcd/latcd $(BUILD)/tests/test-journal-store \
 $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
-		$(BUILD)/latcd/cache-retirement.o
+		$(BUILD)/latcd/cache-retirement.o $(BUILD)/latcd/parson/parson.o
 
 $(BUILD)/tests/test-cache-retirement: tests/test-cache-retirement.c \
-		$(BUILD)/latcd/cache-retirement.o
+		$(BUILD)/latcd/cache-retirement.o $(BUILD)/latcd/parson/parson.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

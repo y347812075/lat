@@ -183,10 +183,20 @@ static void test_object_identity(int mutation)
     const char *names[] = {name};
     char *objects = latcd_retirement_capture_objects(root, source, names, 1);
     assert(objects);
+    char *manifest = g_strdup_printf("{\"version\":2,\"source_sha256\":\"%s\","
+        "\"codegen_id\":\"%s\",\"module\":\"%s.so\",\"native\":\"%s.native\","
+        "\"tbset\":\"\",\"published_sequence\":1}", source, source, source, source);
+    char *module_name = g_strconcat(source, ".so", NULL);
+    char *module_path = g_build_filename(root, module_name, NULL);
+    put(module_path, "immutable module\n");
+    const char *complete_names[] = {name, module_name};
+    g_free(objects);
+    objects = latcd_retirement_capture_objects(root, source, complete_names, 2);
+    assert(objects);
     char error[256], *transaction = NULL;
-    assert(!latcd_retirement_prepare(root, source, next, strlen(next), objects,
+    assert(!latcd_retirement_prepare(root, source, manifest, strlen(manifest), objects,
                                      &transaction, error, sizeof(error)));
-    put(current, next);
+    put(current, manifest);
     assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
     assert_state(root, "RETIRED");
     if (mutation == 1) {
@@ -206,6 +216,21 @@ static void test_object_identity(int mutation)
     } else if (mutation == 5) {
         assert(!unlink(path));
         assert(!symlink(current, path));
+    } else if (mutation == 6) {
+        char *record_path = single_record(root);
+        GKeyFile *record = g_key_file_new();
+        assert(g_key_file_load_from_file(record, record_path, 0, NULL));
+        char *incomplete = latcd_retirement_capture_objects(root, source, names, 1);
+        assert(incomplete);
+        char *encoded = g_base64_encode((guchar *)incomplete, strlen(incomplete));
+        g_key_file_set_string(record, "transaction", "objects", encoded);
+        char *data = g_key_file_to_data(record, NULL, NULL);
+        put(record_path, data);
+        g_free(data);
+        g_free(encoded);
+        g_free(incomplete);
+        g_key_file_unref(record);
+        g_free(record_path);
     }
     unsigned recovered;
     assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)));
@@ -222,6 +247,9 @@ static void test_object_identity(int mutation)
     }
     g_free(transaction);
     g_free(objects);
+    g_free(manifest);
+    g_free(module_name);
+    g_free(module_path);
     g_free(name);
     g_free(path);
     g_free(current);
@@ -269,6 +297,93 @@ static void test_legacy_and_schema(void)
     g_free(root);
 }
 
+static void assert_binding(const char *manifest, const char *objects, bool success)
+{
+    int result = latcd_retirement_validate_binding(source, NULL, 0,
+        manifest, strlen(manifest), objects, strlen(objects));
+    assert((result == 0) == success);
+}
+
+static void test_manifest_binding(void)
+{
+    char *root = root_new();
+    char *module = g_strconcat(source, ".so", NULL);
+    char *native = g_strconcat(source, ".native", NULL);
+    char *path = g_build_filename(root, module, NULL);
+    put(path, "module\n");
+    g_free(path);
+    path = g_build_filename(root, native, NULL);
+    put(path, "native\n");
+    const char *names[] = {module, native};
+    char *objects = latcd_retirement_capture_objects(root, source, names, 2);
+    assert(objects);
+    char *manifest = g_strdup_printf("{\"version\":2,\"source_sha256\":\"%s\","
+        "\"codegen_id\":\"%s\",\"module\":\"%s\",\"native\":\"%s\","
+        "\"tbset\":\"\",\"published_sequence\":18446744073709551615}",
+        source, source, module, native);
+    assert_binding(manifest, objects, true);
+    char *trailing = g_strconcat(manifest, " {}", NULL);
+    assert_binding(trailing, objects, false);
+    g_free(trailing);
+    char *duplicate = g_strconcat("{\"version\":2,", manifest + 1, NULL);
+    assert_binding(duplicate, objects, false);
+    g_free(duplicate);
+    const char *bad_sequence[] = {"18446744073709551616", "-1", "true", "1.0", "1e2", "01"};
+    for (size_t i = 0; i < G_N_ELEMENTS(bad_sequence); i++) {
+        const char *position = strstr(manifest, "18446744073709551615");
+        char *prefix = g_strndup(manifest, position - manifest);
+        char *bad = g_strconcat(prefix, bad_sequence[i], "}", NULL);
+        assert_binding(bad, objects, false);
+        g_free(prefix);
+        g_free(bad);
+    }
+    GKeyFile *table = g_key_file_new();
+    assert(g_key_file_load_from_data(table, objects, -1, 0, NULL));
+    g_key_file_set_integer(table, "objects", "count", 1);
+    assert(g_key_file_remove_group(table, "object1", NULL));
+    char *missing = g_key_file_to_data(table, NULL, NULL);
+    assert_binding(manifest, missing, false);
+    g_free(missing);
+    assert(g_key_file_load_from_data(table, objects, -1, 0, NULL));
+    g_key_file_set_string(table, "object1", "name", module);
+    char *conflict = g_key_file_to_data(table, NULL, NULL);
+    assert_binding(manifest, conflict, false);
+    g_free(conflict);
+    assert(g_key_file_load_from_data(table, objects, -1, 0, NULL));
+    char *hash = g_key_file_get_string(table, "object0", "sha256", NULL);
+    char *with_hash = g_strdup_printf("{\"module_sha256\":\"%s\",%s", hash, manifest + 1);
+    assert_binding(with_hash, objects, true);
+    hash[0] = hash[0] == '0' ? '1' : '0';
+    char *wrong_hash = g_strdup_printf("{\"module_sha256\":\"%s\",%s", hash, manifest + 1);
+    assert_binding(wrong_hash, objects, false);
+    char *unknown = g_strdup_printf("{\"unexpected\":true,%s", manifest + 1);
+    assert_binding(unknown, objects, false);
+    /* A complete table may contain equal rows for a shared old/new object. */
+    const char *shared_names[] = {module, native, module, native};
+    char *shared = latcd_retirement_capture_objects(root, source, shared_names, 4);
+    assert_binding(manifest, shared, true);
+    assert(!latcd_retirement_validate_binding(source, manifest, strlen(manifest),
+        manifest, strlen(manifest), shared, strlen(shared)));
+    assert(g_key_file_load_from_data(table, shared, -1, 0, NULL));
+    g_key_file_set_uint64(table, "object2", "inode", 1);
+    conflict = g_key_file_to_data(table, NULL, NULL);
+    assert_binding(manifest, conflict, false);
+    g_free(conflict);
+    g_free(shared);
+    g_free(unknown);
+    g_free(hash);
+    g_free(with_hash);
+    g_free(wrong_hash);
+    g_key_file_unref(table);
+    g_free(manifest);
+    g_free(objects);
+    g_free(module);
+    g_free(native);
+    g_free(path);
+    remove_root(root);
+    g_free(root);
+}
+
 int main(void)
 {
     for (int phase = 0; phase < 3; phase++) {
@@ -277,8 +392,9 @@ int main(void)
     }
     test_unknown_and_corrupt();
     test_reboot();
-    for (int mutation = 0; mutation < 6; mutation++) test_object_identity(mutation);
+    for (int mutation = 0; mutation < 7; mutation++) test_object_identity(mutation);
     test_legacy_and_schema();
+    test_manifest_binding();
     puts("test-cache-retirement: PASS");
     return 0;
 }

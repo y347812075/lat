@@ -155,7 +155,7 @@ class Inventory:
             value = dict(parser["transaction"])
             required = {"version", "source", "state", "previous", "next"}
             optional = {"prepared_boot", "prepared_boottime_us", "retired_boot", "retired_boottime_us",
-                        "objects", "objects_status"}
+                        "objects", "objects_status", "binding_status"}
             if not required <= value.keys() or value.keys() - required - optional:
                 raise ValueError("unsupported transaction fields")
             source, state = value["source"], value["state"]
@@ -201,6 +201,32 @@ class Inventory:
                 if value.get("objects_status", "UNPROVEN") not in {"UNPROVEN", "MISMATCH", "RECORDED"}:
                     raise ValueError("invalid object evidence status")
             value["object_identities"] = object_rows
+            expected = {}
+            for manifest in snapshots.values():
+                for role in ("module", "native", "tbset"):
+                    name = manifest[role]
+                    if not name:
+                        continue
+                    digest = manifest.get(role + "_sha256", "")
+                    prior = expected.get(name, "")
+                    if prior and digest and prior != digest:
+                        raise ValueError("conflicting snapshot digests")
+                    expected[name] = prior or digest
+            observed = {}
+            for row in object_rows:
+                name = row["name"]
+                if (name not in expected or
+                        (expected[name] and expected[name] != row["sha256"]) or
+                        (name in observed and observed[name] != row)):
+                    raise ValueError("object evidence differs from manifest references")
+                observed[name] = row
+            if object_rows and observed.keys() != expected.keys():
+                raise ValueError("object evidence does not cover manifest references")
+            value["binding_verified"] = bool(object_rows)
+            if value.get("binding_status", "UNPROVEN") not in {"COMPLETE", "UNPROVEN"}:
+                raise ValueError("invalid binding status")
+            if value.get("binding_status") == "COMPLETE" and not object_rows:
+                raise ValueError("complete binding has no object evidence")
             for role, manifest in snapshots.items():
                 for field in ("module", "native", "tbset"):
                     if manifest[field]:

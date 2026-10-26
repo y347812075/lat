@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "cache-retirement.h"
+#include "parson/parson.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -299,7 +300,7 @@ static bool record_shape_valid(GKeyFile *record)
     GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
     const char *allowed[] = { "version", "source", "state", "previous", "next",
         "prepared_boot", "prepared_boottime_us", "retired_boot", "retired_boottime_us",
-        "objects", "objects_status" };
+        "objects", "objects_status", "binding_status" };
     for (gsize i = 0; valid && i < count; i++) {
         bool known = false;
         for (size_t j = 0; j < G_N_ELEMENTS(allowed); j++)
@@ -334,6 +335,129 @@ static bool exact_keys(GKeyFile *record, const char *group,
     }
     g_strfreev(keys);
     return valid;
+}
+
+static bool digest_valid(const char *value)
+{
+    return value && strlen(value) == 64 && strspn(value, "0123456789abcdef") == 64;
+}
+
+static bool manifest_references(const char *source, const char *raw, size_t size,
+                                GHashTable *expected)
+{
+    if (!raw || !size || size >= MANIFEST_LIMIT || memchr(raw, 0, size)) return false;
+    char *text = g_strndup(raw, size);
+    JSON_Value *value = json_parse_string(text);
+    JSON_Object *manifest = json_value_get_object(value);
+    const char *required[] = {"version", "module", "native", "tbset",
+        "source_sha256", "codegen_id", "published_sequence"};
+    const char *optional[] = {"module_sha256", "native_sha256"};
+    bool valid = manifest != NULL;
+    for (size_t i = 0; valid && i < json_object_get_count(manifest); i++) {
+        const char *key = json_object_get_name(manifest, i);
+        bool known = false;
+        for (size_t j = 0; j < G_N_ELEMENTS(required); j++) known |= !strcmp(key, required[j]);
+        for (size_t j = 0; j < G_N_ELEMENTS(optional); j++) known |= !strcmp(key, optional[j]);
+        valid = known;
+    }
+    for (size_t i = 0; valid && i < G_N_ELEMENTS(required); i++)
+        valid = json_object_has_value(manifest, required[i]);
+    const char *version = lat_json_number_token(json_object_get_value(manifest, "version"));
+    const char *sequence = lat_json_number_token(json_object_get_value(manifest, "published_sequence"));
+    const char *identity = json_object_get_string(manifest, "source_sha256");
+    const char *codegen = json_object_get_string(manifest, "codegen_id");
+    char *end = NULL;
+    errno = 0;
+    if (sequence) (void)g_ascii_strtoull(sequence, &end, 10);
+    valid = valid && version && !strcmp(version, "2") && sequence && *sequence &&
+        strspn(sequence, "0123456789") == strlen(sequence) && end && !*end && !errno &&
+        identity && !strcmp(identity, source) && digest_valid(codegen);
+    valid = valid && identity && codegen &&
+        json_object_get_string_len(manifest, "source_sha256") == strlen(identity) &&
+        json_object_get_string_len(manifest, "codegen_id") == strlen(codegen);
+    for (size_t i = 0; valid && i < G_N_ELEMENTS(optional); i++) {
+        if (json_object_has_value(manifest, optional[i])) {
+            const char *hash = json_object_get_string(manifest, optional[i]);
+            valid = digest_valid(hash) && json_object_get_string_len(manifest, optional[i]) == strlen(hash);
+        }
+    }
+    const char *roles[] = {"module", "native", "tbset"};
+    const char *suffixes[] = {".so", ".native", ".tbset"};
+    for (size_t i = 0; valid && i < G_N_ELEMENTS(roles); i++) {
+        const char *name = json_object_get_string(manifest, roles[i]);
+        valid = name && json_object_get_string_len(manifest, roles[i]) == strlen(name);
+        if (!valid || (i == 2 && !*name)) continue;
+        valid = object_name_valid(source, name) && g_str_has_suffix(name, suffixes[i]);
+        if (!valid) break;
+        const char *hash = i < 2 ? json_object_get_string(manifest, optional[i]) : NULL;
+        const char *prior = g_hash_table_lookup(expected, name);
+        if (prior && *prior && hash && strcmp(prior, hash)) { valid = false; break; }
+        if (!prior || !*prior)
+            g_hash_table_replace(expected, g_strdup(name), g_strdup(hash ? hash : ""));
+    }
+    json_value_free(value);
+    g_free(text);
+    return valid;
+}
+
+int latcd_retirement_validate_binding(const char *source,
+                                      const char *previous, size_t previous_size,
+                                      const char *next, size_t next_size,
+                                      const char *raw, size_t size)
+{
+    if (!source_valid(source) || !raw || !size || size >= 16384 || memchr(raw, 0, size)) return -1;
+    GHashTable *expected = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    GHashTable *observed = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    bool valid = (!previous_size || manifest_references(source, previous, previous_size, expected)) &&
+        manifest_references(source, next, next_size, expected);
+    GKeyFile *objects = g_key_file_new();
+    valid = valid && g_key_file_load_from_data(objects, raw, size, 0, NULL);
+    int count = g_key_file_get_integer(objects, "objects", "count", NULL);
+    const char *header[] = {"count"};
+    const char *object_fields[] = {"name", "device", "inode", "size", "allocated", "sha256"};
+    gsize group_count;
+    char **groups = g_key_file_get_groups(objects, &group_count);
+    valid = valid && count > 0 && count <= 6 && group_count == (gsize)count + 1 &&
+        exact_keys(objects, "objects", header, G_N_ELEMENTS(header));
+    g_strfreev(groups);
+    for (int i = 0; valid && i < count; i++) {
+        char group[32];
+        snprintf(group, sizeof(group), "object%d", i);
+        if (!exact_keys(objects, group, object_fields, G_N_ELEMENTS(object_fields))) { valid = false; break; }
+        char *name = g_key_file_get_string(objects, group, "name", NULL);
+        char *hash = g_key_file_get_string(objects, group, "sha256", NULL);
+        const char *required_hash = name ? g_hash_table_lookup(expected, name) : NULL;
+        valid = required_hash && digest_valid(hash) && (!*required_hash || !strcmp(required_hash, hash));
+        if (valid) {
+            /* Repeated names occur when consecutive manifests share an object.
+             * All identity fields must agree, not merely the filename/hash. */
+            const char *fields[] = {"device", "inode", "size", "allocated", "sha256"};
+            GString *signature = g_string_new(NULL);
+            for (size_t j = 0; valid && j < G_N_ELEMENTS(fields); j++) {
+                char *field = g_key_file_get_string(objects, group, fields[j], NULL);
+                valid = field && !strchr(field, '\n');
+                if (valid && j < 4) {
+                    char *end;
+                    errno = 0;
+                    (void)g_ascii_strtoull(field, &end, 10);
+                    valid = *field && strspn(field, "0123456789") == strlen(field) && !*end && !errno;
+                }
+                if (valid) g_string_append_printf(signature, "%s\n", field);
+                g_free(field);
+            }
+            const char *prior = g_hash_table_lookup(observed, name);
+            valid = valid && (!prior || !strcmp(prior, signature->str));
+            if (valid) g_hash_table_replace(observed, g_strdup(name), g_strdup(signature->str));
+            g_string_free(signature, TRUE);
+        }
+        g_free(name);
+        g_free(hash);
+    }
+    valid = valid && g_hash_table_size(expected) == g_hash_table_size(observed);
+    g_hash_table_unref(expected);
+    g_hash_table_unref(observed);
+    g_key_file_unref(objects);
+    return valid ? 0 : -1;
 }
 
 /* No pathname here is trusted until its source-bound basename is checked.
@@ -445,11 +569,18 @@ static int recover_record(int root, int store, const char *name, bool content)
     if (version == 2) {
         char *encoded = g_key_file_get_string(record, "transaction", "objects", NULL);
         int object_result = verify_objects(root, source, encoded, content);
+        gsize object_size = 0;
+        guchar *object_data = encoded ? g_base64_decode(encoded, &object_size) : NULL;
+        bool bound = object_size && !latcd_retirement_validate_binding(source,
+            (char *)old, old_size, (char *)next, new_size, (char *)object_data, object_size);
+        g_free(object_data);
         g_free(encoded);
         if (object_result < 0) goto snapshots_out;
+        g_key_file_set_string(record, "transaction", "binding_status",
+                              bound ? "COMPLETE" : "UNPROVEN");
         g_key_file_set_string(record, "transaction", "objects_status",
             object_result == 2 ? "UNPROVEN" : object_result ? "MISMATCH" : "RECORDED");
-        if (object_result == 1) {
+        if (object_result == 1 || (object_size && !bound)) {
             g_key_file_set_string(record, "transaction", "state", "UNKNOWN");
             result = write_record(store, name, record);
             goto snapshots_out;

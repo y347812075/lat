@@ -8,6 +8,12 @@
 char *latcd_retirement_capture_objects(const char *root, const char *source,
                                       const char *const *names, size_t count);
 
+/* Strict snapshot schema and complete old/new object-set/hash binding. */
+int latcd_retirement_validate_binding(const char *source,
+                                      const char *previous, size_t previous_size,
+                                      const char *next, size_t next_size,
+                                      const char *objects, size_t objects_size);
+
 /* The caller owns the cache management lease and the source commit latch.
  * Neither transaction completion nor recovery authorizes file removal. */
 int latcd_retirement_prepare(const char *root, const char *source,

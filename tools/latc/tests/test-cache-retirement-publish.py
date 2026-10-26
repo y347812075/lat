@@ -114,6 +114,7 @@ def run(prefix, guest, work):
         assert recovered.returncode == 0
         after = record()
         assert after["objects_status"] == "RECORDED"
+        assert after["binding_status"] == "COMPLETE"
         assert after["state"] == ("ABORTED" if phase == "prepared" else "RETIRED")
         if phase == "prepared":
             assert current_before == old_manifest

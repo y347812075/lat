@@ -904,6 +904,12 @@ outside the daemon metadata lock. Startup rechecks those identities and hashes;
 missing/replaced/modified/aliased objects become UNKNOWN, never delete candidates.
 Unavailable object evidence is UNPROVEN, including legacy version 1 records;
 it does not block compatible publication but cannot authorize reclamation.
+Retirement verification parses both manifest snapshots with a bounded JSON
+parser, rejects duplicate/unknown fields and non-integer or overflowing sequence
+numbers, and requires the object table to cover exactly their combined file
+references. Shared names must have identical identities; available manifest
+digests must match the object digests. A nonempty but incomplete or conflicting
+binding becomes UNKNOWN. The planner independently validates the same binding.
 Controlled-domain admission, object-identity tombstones, partial-delete recovery,
 automatic expiry scheduling, and capacity reclamation remain disabled/pending.
 

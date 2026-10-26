@@ -112,9 +112,13 @@ class PlannerTest(unittest.TestCase):
     def test_object_evidence_schema(self):
         name = STEM + ".native"
         st = (self.root / name).stat()
-        evidence = ("[objects]\ncount=1\n[object0]\nname=" + name +
-                    f"\ndevice={st.st_dev}\ninode={st.st_ino}\nsize={st.st_size}" +
-                    f"\nallocated={st.st_blocks * 512}\nsha256=" + "e" * 64 + "\n")
+        evidence = "[objects]\ncount=3\n"
+        for i, role in enumerate(("native", "module", "tbset")):
+            obj = self.root / self.manifest[role]
+            status = obj.stat()
+            evidence += (f"[object{i}]\nname={obj.name}\ndevice={status.st_dev}" +
+                         f"\ninode={status.st_ino}\nsize={status.st_size}" +
+                         f"\nallocated={status.st_blocks * 512}\nsha256=" + "e" * 64 + "\n")
         path = ".gc/transactions/12345678-1234-4234-8234-123456789abc.ini"
         record = ("[transaction]\nversion=2\nsource=" + SOURCE +
                   "\nstate=RETIRED\nprevious=\nnext=" +
@@ -124,12 +128,15 @@ class PlannerTest(unittest.TestCase):
         self.put(path, record.encode())
         plan = self.run_plan()
         self.assertEqual(plan["transactions"][path]["object_identities"][0]["inode"], st.st_ino)
+        self.assertTrue(plan["transactions"][path]["binding_verified"])
         # Recorded evidence is deliberately not a claim of current content validity.
         self.assertFalse(plan["content_validated"])
-        for bad in (evidence.replace("count=1", "count=7"),
+        for bad in (evidence.replace("count=3", "count=7"),
                     evidence.replace(name, "../escape.native"),
                     evidence.replace("inode=", "unexpected="),
-                    evidence.replace("size=" + str(st.st_size), "size=-1")):
+                    evidence.replace("size=" + str(st.st_size), "size=-1"),
+                    evidence.replace(self.manifest["module"], name),
+                    evidence.replace(self.manifest["module"], SOURCE + ".so")):
             changed = record.replace(base64.b64encode(evidence.encode()).decode(),
                                      base64.b64encode(bad.encode()).decode())
             self.put(path, changed.encode())
