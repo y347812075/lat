@@ -30,6 +30,7 @@ typedef enum LatNativeTuMigrationKind {
 typedef struct LatNativeTuMigrationPlan {
     LatNativeTuMigrationKind kind;
     uint64_t changed_fields;
+    uint8_t old_native_sha256[32];
     uint8_t old_config_sha256[32];
     uint8_t target_config_sha256[32];
     LatTbKeySet affected_keys;
@@ -76,6 +77,32 @@ int lat_native_tu_migration_bind_delta(const void *old_data, size_t old_size,
     LatNativeTuMigrationBinding *binding, char *error, size_t error_size);
 void lat_native_tu_migration_binding_destroy(
     LatNativeTuMigrationBinding *binding);
+
+/* Separated, quarantined inputs for a future v12 composer. The retained image
+ * is the audited complement of the affected closure; the replacement image is
+ * the complete target-native delta. These parts are never executable as-is. */
+typedef struct LatNativeTuMigrationCandidate {
+    uint8_t old_native_sha256[32];
+    uint8_t delta_native_sha256[32];
+    uint8_t old_config_sha256[32];
+    uint8_t target_config_sha256[32];
+    void *retained_native;
+    size_t retained_native_size;
+    void *replacement_native;
+    size_t replacement_native_size;
+    LatTbKeySet retained_keys;
+    LatTbKeySet replacement_keys;
+} LatNativeTuMigrationCandidate;
+
+int lat_native_tu_migration_prepare_candidate(
+    const void *old_data, size_t old_size,
+    const void *delta_data, size_t delta_size,
+    const LatNativeTuMigrationPlan *plan,
+    const LatNativeTuMigrationBinding *binding,
+    LatNativeTuMigrationCandidate *candidate,
+    char *error, size_t error_size);
+void lat_native_tu_migration_candidate_destroy(
+    LatNativeTuMigrationCandidate *candidate);
 
 /* Compact the complement of the closed removal plan. Experimental replay images
  * only: the unchanged CONFIG_UNVERIFIED flag prohibits execution/publication.

@@ -112,6 +112,54 @@ static void test_config_plan(const unsigned char *original, size_t size)
     delta_header->lat_build_id[0] ^= 1;
     lat_native_tu_migration_plan_destroy(&migration);
 
+    LatNativeTuMigrationPlan partial_plan = {0};
+    assert(!lat_native_tu_migration_plan(
+        data, size + h->translation_config_size, bytes, length,
+        NULL, NULL, &partial_plan, error, sizeof(error)));
+    assert(partial_plan.kind == LAT_NATIVE_TU_MIGRATION_PARTIAL);
+    void *partial_delta = NULL;
+    size_t partial_delta_size = 0;
+    int extract_result = lat_native_tu_extract(
+        data, size + h->translation_config_size,
+        &partial_plan.retained_keys, &partial_delta, &partial_delta_size,
+        error, sizeof(error));
+    if (extract_result) fprintf(stderr, "extract failed: %s\n", error);
+    assert(!extract_result);
+    assert(partial_delta_size >= h->translation_config_size);
+    LatNativeImageHeaderV2 *partial_header = partial_delta;
+    assert(partial_header->translation_config_size == length);
+    memcpy((uint8_t *)partial_delta + partial_delta_size - length, bytes, length);
+    partial_header->translation_config_size = length;
+    memcpy(partial_header->translation_config_sha256,
+           partial_plan.target_config_sha256, 32);
+    assert(!lat_native_tu_migration_bind_delta(
+        data, size + h->translation_config_size,
+        partial_delta, partial_delta_size, &partial_plan, &binding,
+        error, sizeof(error)));
+    assert(binding.status == LAT_NATIVE_TU_MIGRATION_BIND_READY);
+    LatNativeTuMigrationCandidate candidate = {0};
+    assert(!lat_native_tu_migration_prepare_candidate(
+        data, size + h->translation_config_size,
+        partial_delta, partial_delta_size, &partial_plan, &binding,
+        &candidate, error, sizeof(error)));
+    assert(candidate.retained_native && candidate.retained_native_size);
+    assert(candidate.replacement_native && candidate.replacement_native_size);
+    assert(candidate.retained_keys.count == 1 &&
+           candidate.retained_keys.keys[0].guest_rva == 0x50);
+    assert(candidate.replacement_keys.count == 5 &&
+           !lat_tb_key_set_contains(&candidate.replacement_keys, 0x50, 3));
+    lat_native_tu_migration_candidate_destroy(&candidate);
+    unsigned char mutated_old[8192];
+    memcpy(mutated_old, data, size + h->translation_config_size);
+    mutated_old[h->code_offset] ^= 1;
+    assert(lat_native_tu_migration_bind_delta(
+        mutated_old, size + h->translation_config_size,
+        partial_delta, partial_delta_size, &partial_plan, &binding,
+        error, sizeof(error)));
+    lat_native_tu_migration_binding_destroy(&binding);
+    g_free(partial_delta);
+    lat_native_tu_migration_plan_destroy(&partial_plan);
+
     runtime.source_sha256[0] ^= 1;
     assert(lat_native_tu_migration_plan(data, size + h->translation_config_size,
         bytes, length, &runtime, &static_candidates, &migration,
@@ -158,7 +206,7 @@ static void test_config_plan(const unsigned char *original, size_t size)
     memcpy(full_delta_header->translation_config_sha256,
            migration.target_config_sha256, 32);
     assert(!lat_native_tu_migration_bind_delta(
-        data, size + h->translation_config_size,
+        all_data, size + h->translation_config_size,
         full_delta, size + length, &migration, &binding,
         error, sizeof(error)));
     assert(binding.status == LAT_NATIVE_TU_MIGRATION_BIND_REJECT);
@@ -173,11 +221,20 @@ static void test_config_plan(const unsigned char *original, size_t size)
         NULL, NULL, &migration, error, sizeof(error)));
     assert(migration.kind == LAT_NATIVE_TU_MIGRATION_FULL);
     assert(!lat_native_tu_migration_bind_delta(
-        data, size + h->translation_config_size,
+        all_data, size + h->translation_config_size,
         full_delta, size + length, &migration, &binding,
         error, sizeof(error)));
     assert(binding.status == LAT_NATIVE_TU_MIGRATION_BIND_READY);
     assert(!binding.collision_keys.count && !binding.missing_required_keys.count);
+    assert(!lat_native_tu_migration_prepare_candidate(
+        all_data, size + h->translation_config_size,
+        full_delta, size + length, &migration, &binding,
+        &candidate, error, sizeof(error)));
+    assert(!candidate.retained_native && !candidate.retained_native_size);
+    assert(candidate.replacement_native && candidate.replacement_native_size);
+    assert(!candidate.retained_keys.count &&
+           candidate.replacement_keys.count == 6);
+    lat_native_tu_migration_candidate_destroy(&candidate);
     lat_native_tu_migration_binding_destroy(&binding);
     lat_native_tu_migration_plan_destroy(&migration);
     if (LAT_AOT_V2_TBSET_RECORD_LIMIT >= 6) {
@@ -282,6 +339,16 @@ int main(void)
             .code_offset = owners[i] * 32 + (i == 1 || i == 3 ? 8 : 0),
             .code_size = 8, .flags = 3, .tu_index = owners[i]};
     }
+    for (unsigned int i = 0; i < h->code_size / 4; i++) {
+        uint32_t nop = 0x03400000u;
+        memcpy(data + h->code_offset + i * 4, &nop, sizeof(nop));
+    }
+    uint32_t branch = 0x50000000u;
+    for (unsigned int i = 0; i < h->tb_count; i++) {
+        memcpy(data + h->code_offset + tbs[i].code_offset + 4, &branch, 4);
+    }
+    memcpy(data + h->code_offset + 64, &branch, sizeof(branch));
+    memcpy(data + h->code_offset + 96, &branch, sizeof(branch));
     rel[0] = (LatNativeRelocationV1){.code_offset = 64,
         .kind = LAT_NATIVE_RELOC_TB_TARGET, .slots = 1,
         .physical_target_plus_one = 6};

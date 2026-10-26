@@ -250,6 +250,16 @@ static int normalized_key_set(const LatTbKeySet *input,
                                 error, error_size);
 }
 
+static void hash_bytes_sha256(const void *data, size_t size,
+                              uint8_t digest[32])
+{
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    g_checksum_update(checksum, data, size);
+    gsize digest_size = 32;
+    g_checksum_get_digest(checksum, digest, &digest_size);
+    g_checksum_free(checksum);
+}
+
 void lat_native_tu_migration_plan_destroy(LatNativeTuMigrationPlan *plan)
 {
     if (!plan) return;
@@ -270,6 +280,7 @@ int lat_native_tu_migration_plan(const void *data, size_t size,
         return fail(error, error_size, "missing migration plan input");
     }
     lat_native_tu_migration_plan_destroy(plan);
+    hash_bytes_sha256(data, size, plan->old_native_sha256);
 
     int result = -1;
     uint64_t changed = 0;
@@ -360,11 +371,14 @@ int lat_native_tu_migration_bind_delta(const void *old_data, size_t old_size,
     }
     const LatNativeImageHeaderV2 *old_header = old_data;
     const LatNativeImageHeaderV2 *delta_header = delta_data;
+    uint8_t old_native_sha256[32];
+    hash_bytes_sha256(old_data, old_size, old_native_sha256);
     if (!(delta_header->flags & LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED) ||
         memcmp(old_header->guest_sha256, delta_header->guest_sha256, 32) ||
         memcmp(old_header->lat_build_id, delta_header->lat_build_id,
                sizeof(old_header->lat_build_id)) ||
         old_header->preferred_guest_base != delta_header->preferred_guest_base ||
+        memcmp(old_native_sha256, plan->old_native_sha256, 32) ||
         memcmp(old_header->translation_config_sha256,
                plan->old_config_sha256, 32) ||
         memcmp(delta_header->translation_config_sha256,
@@ -413,6 +427,170 @@ int lat_native_tu_migration_bind_delta(const void *old_data, size_t old_size,
 
 failed:
     lat_native_tu_migration_binding_destroy(binding);
+    return -1;
+}
+
+static bool key_sets_equal(const LatTbKeySet *left, const LatTbKeySet *right)
+{
+    return left && right && left->count == right->count &&
+        !memcmp(left->source_sha256, right->source_sha256, 32) &&
+        (!left->count ||
+         !memcmp(left->keys, right->keys, left->count * sizeof(LatTbKey)));
+}
+
+void lat_native_tu_migration_candidate_destroy(
+    LatNativeTuMigrationCandidate *candidate)
+{
+    if (!candidate) return;
+    g_free(candidate->retained_native);
+    g_free(candidate->replacement_native);
+    lat_tb_key_set_destroy(&candidate->retained_keys);
+    lat_tb_key_set_destroy(&candidate->replacement_keys);
+    memset(candidate, 0, sizeof(*candidate));
+}
+
+int lat_native_tu_migration_prepare_candidate(
+    const void *old_data, size_t old_size,
+    const void *delta_data, size_t delta_size,
+    const LatNativeTuMigrationPlan *plan,
+    const LatNativeTuMigrationBinding *binding,
+    LatNativeTuMigrationCandidate *candidate,
+    char *error, size_t error_size)
+{
+    if (!old_data || !delta_data || !plan || !binding || !candidate) {
+        return fail(error, error_size, "missing migration candidate input");
+    }
+    lat_native_tu_migration_candidate_destroy(candidate);
+    if (binding->status != LAT_NATIVE_TU_MIGRATION_BIND_READY ||
+        !binding->covers_required_keys || plan->kind ==
+            LAT_NATIVE_TU_MIGRATION_NOOP) {
+        return fail(error, error_size,
+                    "migration candidate requires a READY binding");
+    }
+    if (lat_native_image_validate(old_data, old_size, error, error_size) ||
+        lat_native_image_validate(delta_data, delta_size, error, error_size)) {
+        goto failed;
+    }
+    const LatNativeImageHeaderV2 *old_header = old_data;
+    const LatNativeImageHeaderV2 *delta_header = delta_data;
+    uint8_t old_native_sha256[32];
+    hash_bytes_sha256(old_data, old_size, old_native_sha256);
+    if (!(delta_header->flags & LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED) ||
+        memcmp(old_header->guest_sha256, delta_header->guest_sha256, 32) ||
+        memcmp(old_header->lat_build_id, delta_header->lat_build_id,
+               sizeof(old_header->lat_build_id)) ||
+        old_header->preferred_guest_base != delta_header->preferred_guest_base ||
+        memcmp(old_native_sha256, plan->old_native_sha256, 32) ||
+        memcmp(old_header->translation_config_sha256,
+               plan->old_config_sha256, 32) ||
+        memcmp(delta_header->translation_config_sha256,
+               plan->target_config_sha256, 32)) {
+        fail(error, error_size,
+             "migration candidate input identity mismatch");
+        goto failed;
+    }
+    const LatTbKeySet *plan_sets[] = {
+        &plan->affected_keys, &plan->retained_keys,
+        &plan->compile_required_keys, &plan->deferred_static_keys,
+    };
+    for (size_t i = 0; i < G_N_ELEMENTS(plan_sets); i++) {
+        if (memcmp(plan_sets[i]->source_sha256,
+                   old_header->guest_sha256, 32)) {
+            fail(error, error_size, "migration plan source identity mismatch");
+            goto failed;
+        }
+    }
+
+    hash_bytes_sha256(old_data, old_size, candidate->old_native_sha256);
+    hash_bytes_sha256(delta_data, delta_size, candidate->delta_native_sha256);
+    memcpy(candidate->old_config_sha256, plan->old_config_sha256, 32);
+    memcpy(candidate->target_config_sha256, plan->target_config_sha256, 32);
+    candidate->replacement_native = g_memdup2(delta_data, delta_size);
+    candidate->replacement_native_size = delta_size;
+    const LatNativeTbV1 *delta_tbs = (const void *)((const uint8_t *)delta_data +
+                                                     delta_header->tb_table_offset);
+    if (native_key_set(delta_header, delta_tbs, &candidate->replacement_keys,
+                       error, error_size)) {
+        goto failed;
+    }
+    if (!key_sets_equal(&candidate->replacement_keys, &binding->delta_keys)) {
+        fail(error, error_size,
+             "binding does not describe the supplied target delta");
+        goto failed;
+    }
+
+    if (plan->retained_keys.count) {
+        if (lat_native_tu_extract(old_data, old_size, &plan->affected_keys,
+                &candidate->retained_native, &candidate->retained_native_size,
+                error, error_size) ||
+            lat_native_image_validate(candidate->retained_native,
+                candidate->retained_native_size, error, error_size)) {
+            goto failed;
+        }
+        const LatNativeImageHeaderV2 *retained_header =
+            candidate->retained_native;
+        const LatNativeTbV1 *retained_tbs = (const void *)(
+            (const uint8_t *)candidate->retained_native +
+            retained_header->tb_table_offset);
+        if (native_key_set(retained_header, retained_tbs,
+                &candidate->retained_keys, error, error_size)) {
+            goto failed;
+        }
+        if (!key_sets_equal(&candidate->retained_keys, &plan->retained_keys)) {
+            fail(error, error_size,
+                 "retained extraction does not match the migration plan");
+            goto failed;
+        }
+    } else if (plan->affected_keys.count) {
+        const LatNativeImageHeaderV2 *old_header_for_keys = old_data;
+        const LatNativeTbV1 *old_tbs = (const void *)((const uint8_t *)old_data +
+                                                       old_header_for_keys->tb_table_offset);
+        LatTbKeySet old_keys = {0};
+        if (native_key_set(old_header_for_keys, old_tbs, &old_keys,
+                           error, error_size)) {
+            lat_tb_key_set_destroy(&old_keys);
+            goto failed;
+        }
+        if (!key_sets_equal(&old_keys, &plan->affected_keys)) {
+            lat_tb_key_set_destroy(&old_keys);
+            fail(error, error_size,
+                 "full replacement plan does not remove all old keys");
+            goto failed;
+        }
+        lat_tb_key_set_destroy(&old_keys);
+    }
+    if (!candidate->retained_keys.count) {
+        memcpy(candidate->retained_keys.source_sha256,
+               old_header->guest_sha256, 32);
+    }
+    LatTbKeySet delta_without_retained = {0};
+    LatTbKeySet collision = {0}, missing_required = {0};
+    if (lat_tb_key_set_difference(&candidate->replacement_keys,
+            &candidate->retained_keys, &delta_without_retained,
+            error, error_size) ||
+        lat_tb_key_set_difference(&candidate->replacement_keys,
+            &delta_without_retained, &collision, error, error_size) ||
+        lat_tb_key_set_difference(&plan->compile_required_keys,
+            &candidate->replacement_keys, &missing_required,
+            error, error_size)) {
+        lat_tb_key_set_destroy(&delta_without_retained);
+        lat_tb_key_set_destroy(&collision);
+        lat_tb_key_set_destroy(&missing_required);
+        goto failed;
+    }
+    bool valid = !collision.count && !missing_required.count;
+    lat_tb_key_set_destroy(&delta_without_retained);
+    lat_tb_key_set_destroy(&collision);
+    lat_tb_key_set_destroy(&missing_required);
+    if (!valid) {
+        fail(error, error_size,
+             "candidate parts have retained collisions or required-key gaps");
+        goto failed;
+    }
+    return 0;
+
+failed:
+    lat_native_tu_migration_candidate_destroy(candidate);
     return -1;
 }
 
