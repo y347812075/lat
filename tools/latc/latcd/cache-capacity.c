@@ -104,7 +104,7 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
                               char *error, size_t error_size)
 {
     pthread_mutex_lock(&capacity->lock);
-    bool busy = capacity->reserved || capacity->transient_reserved ||
+    bool busy = capacity->reserved || capacity->transient_reserved || capacity->recovered_reserved ||
         (capacity->expected_names && g_hash_table_size(capacity->expected_names));
     pthread_mutex_unlock(&capacity->lock);
     if (busy) return -1;
@@ -142,7 +142,8 @@ static int reserve_bytes(LatcdCacheCapacity *capacity, uint64_t bytes,
     bool fits = capacity->ready && capacity->committed <= limit &&
         capacity->reserved <= limit - capacity->committed &&
         capacity->transient_reserved <= limit - capacity->committed - capacity->reserved &&
-        bytes <= limit - capacity->committed - capacity->reserved - capacity->transient_reserved;
+        capacity->recovered_reserved <= limit - capacity->committed - capacity->reserved - capacity->transient_reserved &&
+        bytes <= limit - capacity->committed - capacity->reserved - capacity->transient_reserved - capacity->recovered_reserved;
     if (fits) {
         if (transient) capacity->transient_reserved += bytes;
         else capacity->reserved += bytes;
@@ -197,7 +198,39 @@ void latcd_cache_capacity_close(LatcdCacheCapacity *capacity)
     capacity->watch_fd = -1;
     if (capacity->expected_names) g_hash_table_unref(capacity->expected_names);
     capacity->expected_names = NULL;
+    if (capacity->recovered_tasks) g_hash_table_unref(capacity->recovered_tasks);
+    capacity->recovered_tasks = NULL;
+    capacity->recovered_reserved = 0;
     capacity->ready = false;
+}
+
+int latcd_cache_capacity_restore_task(LatcdCacheCapacity *capacity, const char *id, uint64_t bytes)
+{
+    pthread_mutex_lock(&capacity->lock);
+    if (!capacity->recovered_tasks) capacity->recovered_tasks = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, g_free);
+    uint64_t *existing = g_hash_table_lookup(capacity->recovered_tasks, id);
+    int result = !bytes || (existing ? *existing != bytes : bytes > UINT64_MAX - capacity->recovered_reserved);
+    if (!result && !existing) {
+        uint64_t *value = g_new(uint64_t, 1);
+        *value = bytes;
+        g_hash_table_insert(capacity->recovered_tasks, g_strdup(id), value);
+        capacity->recovered_reserved += bytes;
+    }
+    if (result) capacity->ready = false;
+    pthread_mutex_unlock(&capacity->lock);
+    return result ? -1 : 0;
+}
+
+void latcd_cache_capacity_release_task(LatcdCacheCapacity *capacity, const char *id)
+{
+    pthread_mutex_lock(&capacity->lock);
+    uint64_t *bytes = capacity->recovered_tasks ? g_hash_table_lookup(capacity->recovered_tasks, id) : NULL;
+    if (bytes) {
+        capacity->recovered_reserved -= *bytes;
+        g_hash_table_remove(capacity->recovered_tasks, id);
+    }
+    pthread_mutex_unlock(&capacity->lock);
 }
 
 static void finish_bytes(LatcdCacheCapacity *capacity, uint64_t bytes,

@@ -660,6 +660,19 @@ static void test_compiler_input_recovery(void)
         &id, error, sizeof(error));
     g_assert_cmpint(task, >=, 0);
     g_assert_true(g_file_set_contents(native, "unfinished", -1, NULL));
+    struct stat budget_task;
+    g_assert_cmpint(fstat(task, &budget_task), ==, 0);
+    record_boundary = RECORD_FILE_SYNC;
+    record_hits = 0;
+    g_assert_cmpint(record_compiler_budget(&config, id, &budget_task, 12345), ==, -1);
+    g_assert_cmpuint(record_hits, ==, 1);
+    g_assert_cmpint(restore_compiler_budgets(&config, error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(generation_capacity.recovered_reserved, ==, 0);
+    g_assert_cmpint(record_compiler_budget(&config, id, &budget_task, 12345), ==, 0);
+    g_assert_cmpint(restore_compiler_budgets(&config, error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(generation_capacity.recovered_reserved, ==, 12345);
+    g_assert_cmpint(restore_compiler_budgets(&config, error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(generation_capacity.recovered_reserved, ==, 12345);
     char *name = g_strdup_printf("%s.ini", id);
     char *release = g_build_filename(directory, ".gc", "compiler-releases", name, NULL);
     g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
@@ -684,6 +697,7 @@ static void test_compiler_input_recovery(void)
     char *output_release = g_build_filename(directory, ".gc", "compiler-output-releases", name, NULL);
     g_assert_false(g_file_test(output_release, G_FILE_TEST_EXISTS));
     char *original = NULL;
+    g_assert_cmpuint(generation_capacity.recovered_reserved, ==, 12345);
     gsize original_size;
     g_assert_true(g_file_get_contents(release, &original, &original_size, NULL));
     g_assert_cmpint(g_chmod(release, 0600), ==, 0);
@@ -715,10 +729,17 @@ static void test_compiler_input_recovery(void)
     g_assert_false(g_file_test(output_release, G_FILE_TEST_EXISTS));
     g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
     g_assert_cmpint(stat(output_release, &before), ==, 0);
+    g_assert_cmpuint(generation_capacity.recovered_reserved, ==, 0);
     g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
     g_assert_cmpint(stat(output_release, &after), ==, 0);
     g_assert_true(metadata_equal(&before, &after));
     char *task_directory = g_build_filename(directory, ".gc", "tasks", NULL);
+    char *budget_path = g_build_filename(directory, ".gc", "compiler-budgets", name, NULL);
+    g_assert_cmpint(g_chmod(budget_path, 0600), ==, 0);
+    g_assert_true(g_file_set_contents(budget_path, "bad budget", -1, NULL));
+    g_assert_cmpint(g_chmod(budget_path, 0400), ==, 0);
+    g_assert_cmpint(restore_compiler_budgets(&config, error, sizeof(error)), ==, -1);
+    g_free(budget_path);
     for (unsigned i = 0; i < 70; i++) {
         char *unknown = g_strdup_printf("%s/unknown-%u", task_directory, i);
         g_assert_true(g_file_set_contents(unknown, "retain", -1, NULL));

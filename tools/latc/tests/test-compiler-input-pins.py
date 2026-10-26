@@ -48,10 +48,12 @@ def run(prefix, guest, work):
         directory = work / ('incremental' if incremental else 'initial')
         directory.mkdir(mode=0o700)
         cache, service_socket = directory / 'cache', directory / 's'
+        stats = directory / 'stats.json'
         def args(compiler):
             return [str(latcd), '--serve', '--socket', str(service_socket),
                     '--cache-dir', str(cache), '--latc', str(compiler), '--runner',
-                    str(prefix / 'bin/latx-x86_64'), '--runtime-dir', str(prefix / 'lib')]
+                    str(prefix / 'bin/latx-x86_64'), '--runtime-dir', str(prefix / 'lib'),
+                    '--stats', str(stats)]
         def start(compiler, log):
             daemon = subprocess.Popen(args(compiler), env=env, stdout=log, stderr=log)
             deadline = time.monotonic() + 30
@@ -150,6 +152,14 @@ def run(prefix, guest, work):
                 # daemon's death while the compiler retains the task SH OFD.
                 service_socket.unlink(missing_ok=True)
                 daemon = start(prefix / 'bin/latc', log)
+                deadline = time.monotonic() + 10
+                while True:
+                    value = json.loads(stats.read_bytes())
+                    if value['cache_owner_pid'] == daemon.pid:
+                        assert value['recovered_compiler_reserved_bytes'] >= 64 * 1024 * 1024, value
+                        break
+                    assert time.monotonic() < deadline
+                    time.sleep(.01)
                 assert_pinned()
                 task_plan('HELD_OBSERVED')
                 channel.sendall(b'f')

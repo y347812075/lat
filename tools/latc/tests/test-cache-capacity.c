@@ -79,6 +79,17 @@ int main(void)
     latcd_cache_capacity_finish(&capacity, 1, false);
     latcd_cache_capacity_finish_transient(&capacity, 4, false);
     assert(capacity.committed == 15 && !capacity.transient_reserved && !capacity.reserved);
+    assert(!latcd_cache_capacity_restore_task(&capacity, "task-a", 4));
+    assert(!latcd_cache_capacity_restore_task(&capacity, "task-a", 4));
+    assert(capacity.recovered_reserved == 4);
+    assert(latcd_cache_capacity_reserve(&capacity, 2, 20, NULL, 0));
+    assert(!latcd_cache_capacity_reserve_transient(&capacity, 1, 20, NULL, 0));
+    latcd_cache_capacity_finish_transient(&capacity, 1, false);
+    latcd_cache_capacity_release_task(&capacity, "unknown");
+    assert(capacity.recovered_reserved == 4);
+    latcd_cache_capacity_release_task(&capacity, "task-a");
+    latcd_cache_capacity_release_task(&capacity, "task-a");
+    assert(!capacity.recovered_reserved);
     assert(!latcd_cache_capacity_reserve(&capacity, 5, 20, error, sizeof(error)));
     assert(latcd_cache_capacity_reserve(&capacity, 1, 20, error, sizeof(error)));
     latcd_cache_capacity_finish(&capacity, 5, false);

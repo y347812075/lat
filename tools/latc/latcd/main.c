@@ -1348,6 +1348,102 @@ out:
     return lease;
 }
 
+static int record_compiler_budget(const LatcdConfig *config, const char *id,
+                                   const struct stat *task, uint64_t bytes)
+{
+    int root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = root < 0 ? -1 : open_task_directory(root, ".gc");
+    int budgets = gc < 0 ? -1 : open_task_directory(gc, "compiler-budgets");
+    int lease = -1;
+    struct stat cache;
+    GKeyFile *record = g_key_file_new();
+    if (budgets >= 0 && !fstat(root, &cache)) {
+        g_key_file_set_string(record, "budget", "version", "1");
+        g_key_file_set_string(record, "budget", "task_id", id);
+        g_key_file_set_uint64(record, "budget", "task_device", task->st_dev);
+        g_key_file_set_uint64(record, "budget", "task_inode", task->st_ino);
+        g_key_file_set_uint64(record, "budget", "cache_device", cache.st_dev);
+        g_key_file_set_uint64(record, "budget", "cache_inode", cache.st_ino);
+        g_key_file_set_uint64(record, "budget", "bytes", bytes);
+        lease = persist_task_record(budgets, id, record);
+    }
+    if (lease >= 0) close(lease);
+    if (budgets >= 0) close(budgets);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    g_key_file_free(record);
+    return lease < 0 ? -1 : 0;
+}
+
+static int restore_compiler_budgets(const LatcdConfig *config, char *error, size_t error_size)
+{
+    int root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = root < 0 ? -1 : open_task_directory(root, ".gc");
+    int tasks = gc < 0 ? -1 : open_task_directory(gc, "tasks");
+    int budgets = gc < 0 ? -1 : open_task_directory(gc, "compiler-budgets");
+    DIR *directory = budgets < 0 ? NULL : fdopendir(budgets);
+    int result = -1;
+    unsigned visited = 0;
+    if (!directory && budgets >= 0) close(budgets);
+    struct stat cache;
+    if (!directory || tasks < 0 || fstat(root, &cache)) goto out;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) { result = errno ? -1 : 0; break; }
+        const char *name = entry->d_name;
+        if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
+        if (++visited > 100000 || stop_requested || strlen(name) != 40 ||
+            strcmp(name + 36, ".ini")) break;
+        char id[37];
+        memcpy(id, name, 36);
+        id[36] = 0;
+        if (!g_uuid_string_is_valid(id)) break;
+        int fd = openat(budgets, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        struct stat before, after, task;
+        char data[4096];
+        GKeyFile *record = g_key_file_new();
+        bool valid = fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) &&
+            before.st_uid == geteuid() && before.st_nlink == 1 && !(before.st_mode & 0222) &&
+            before.st_size > 0 && (uint64_t)before.st_size <= sizeof(data) &&
+            pread(fd, data, before.st_size, 0) == before.st_size &&
+            !fstat(fd, &after) && metadata_equal(&before, &after) &&
+            !fstatat(tasks, name, &task, AT_SYMLINK_NOFOLLOW) && S_ISREG(task.st_mode) &&
+            task.st_uid == geteuid() && task.st_nlink == 1 && !(task.st_mode & 0222) &&
+            g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
+        char *version = g_key_file_get_string(record, "budget", "version", NULL);
+        gsize groups = 0, keys = 0;
+        char **names = g_key_file_get_groups(record, &groups);
+        g_strfreev(names);
+        names = g_key_file_get_keys(record, "budget", &keys, NULL);
+        g_strfreev(names);
+        valid &= groups == 1 && keys == 7;
+        char *task_id = g_key_file_get_string(record, "budget", "task_id", NULL);
+        valid &= version && !strcmp(version, "1") && task_id && !strcmp(task_id, id);
+        g_free(version);
+        g_free(task_id);
+        const char *fields[] = {"task_device", "task_inode", "cache_device", "cache_inode", "bytes"};
+        uint64_t expected[] = {valid ? task.st_dev : 0, valid ? task.st_ino : 0,
+                               cache.st_dev, cache.st_ino, 0};
+        for (unsigned i = 0; valid && i < G_N_ELEMENTS(fields); i++) {
+            GError *parse_error = NULL;
+            guint64 value = g_key_file_get_uint64(record, "budget", fields[i], &parse_error);
+            valid = !parse_error && (i == 4 ? value > 0 : value == expected[i]);
+            if (i == 4 && valid) valid = !latcd_cache_capacity_restore_task(&generation_capacity, id, value);
+            g_clear_error(&parse_error);
+        }
+        if (fd >= 0) close(fd);
+        g_key_file_free(record);
+        if (!valid) break;
+    }
+out:
+    if (directory) closedir(directory);
+    if (tasks >= 0) close(tasks);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    return result ? fail(error, error_size, "capacity: compiler budget recovery incomplete or unsafe") : 0;
+}
+
 static int record_compiler_release(const LatcdConfig *config, const char *id,
                                     const struct stat *expected, bool outputs)
 {
@@ -1446,8 +1542,8 @@ static bool compiler_task_is_local(const char *id)
     return active;
 }
 
-static bool compiler_input_release_matches(int releases, const char *name,
-                                           const char *id, const struct stat *task)
+static bool compiler_release_matches(int releases, const char *name,
+                                      const char *id, const struct stat *task, bool outputs)
 {
     int fd = openat(releases, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     struct stat before, after;
@@ -1466,7 +1562,7 @@ static bool compiler_input_release_matches(int releases, const char *name,
     g_strfreev(names);
     valid &= groups == 1 && keys == 5;
     const char *fields[] = {"version", "task_id", "state"};
-    const char *values[] = {"1", id, "INPUTS_RELEASED"};
+    const char *values[] = {"1", id, outputs ? "OUTPUTS_RELEASED" : "INPUTS_RELEASED"};
     for (unsigned i = 0; valid && i < G_N_ELEMENTS(fields); i++) {
         char *value = g_key_file_get_string(record, "handoff", fields[i], NULL);
         valid = value && !strcmp(value, values[i]);
@@ -1566,6 +1662,7 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
             g_clear_error(&parse_error);
         }
         bool temporary_matches = false;
+        bool outputs_missing = false;
         if (valid) {
             GError *parse_error = NULL;
             guint64 device = g_key_file_get_uint64(record, "temporary", "device", &parse_error);
@@ -1578,6 +1675,15 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
                 !fstat(tmp, &identity) && identity.st_uid == geteuid() &&
                 !(identity.st_mode & 0077) && device == (guint64)identity.st_dev &&
                 inode == (guint64)identity.st_ino;
+            outputs_missing = temporary_matches;
+            const char *roles[] = {"output_native", "output_module"};
+            for (unsigned i = 0; outputs_missing && i < G_N_ELEMENTS(roles); i++) {
+                char *output = g_key_file_get_string(record, roles[i], "name", NULL);
+                struct stat st;
+                outputs_missing = output && *output && output[0] != '.' && !strchr(output, '/') &&
+                    fstatat(tmp, output, &st, AT_SYMLINK_NOFOLLOW) && errno == ENOENT;
+                g_free(output);
+            }
             if (tmp >= 0) close(tmp);
             g_clear_error(&parse_error);
         }
@@ -1600,17 +1706,23 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
          * treat the earlier observation as permanent authority. */
         bool inputs_released = valid && (input_exists ||
             !record_compiler_release(config, id, &before, false)) &&
-            compiler_input_release_matches(releases, name, id, &before);
+            compiler_release_matches(releases, name, id, &before, false);
         if (!input_exists && inputs_released) recovered++;
         if (!inputs_released) { retained++; continue; }
         int outputs = open_task_directory(gc, "compiler-output-releases");
         bool output_exists = outputs >= 0 &&
             !fstatat(outputs, name, &existing, AT_SYMLINK_NOFOLLOW);
         bool output_absent = outputs >= 0 && !output_exists && errno == ENOENT;
+        bool output_released = output_exists && compiler_release_matches(outputs, name, id, &before, true);
         if (outputs >= 0) close(outputs);
         if (output_absent && temporary_matches &&
-            !record_compiler_release(config, id, &before, true)) recovered++;
+            !record_compiler_release(config, id, &before, true)) {
+            recovered++;
+            output_released = true;
+        }
         else if (!output_exists) retained++;
+        if (output_released && outputs_missing)
+            latcd_cache_capacity_release_task(&generation_capacity, id);
     }
 out:
     if (directory && (result != 1 || stop_requested)) {
@@ -1793,6 +1905,10 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         } else {
             compiler_task_local(task_id, true);
             g_ptr_array_add(compiler_tasks, task);
+            if (record_compiler_budget(config, task_id, &task->identity, cache_peak)) {
+                pin_result = -1;
+                fail(error, error_size, "capacity: cannot persist compiler budget");
+            }
         }
     }
     pid_t child = pin_result ? -1 : fork();
@@ -3542,6 +3658,7 @@ static void write_stats_locked(LatcdService *service)
     uint64_t generation_bytes = generation_capacity.committed;
     uint64_t publication_bytes = generation_capacity.reserved;
     uint64_t transient_bytes = generation_capacity.transient_reserved;
+    uint64_t recovered_bytes = generation_capacity.recovered_reserved;
     bool capacity_ready = generation_capacity.ready;
     pthread_mutex_unlock(&generation_capacity.lock);
     int length = snprintf(contents, sizeof(contents),
@@ -3554,6 +3671,7 @@ static void write_stats_locked(LatcdService *service)
         ",\"max_cache_bytes\":%" PRIu64
         ",\"cache_owner_pid\":%ld,\"generation_logical_bytes\":%" PRIu64
         ",\"publication_reserved_bytes\":%" PRIu64 ",\"compiler_peak_reserved_bytes\":%" PRIu64
+        ",\"recovered_compiler_reserved_bytes\":%" PRIu64
         ",\"generation_capacity_ready\":%s}\n",
         service->requests, service->queued, service->deduplicated,
         service->cache_hits, service->compiled, service->failed,
@@ -3562,7 +3680,7 @@ static void write_stats_locked(LatcdService *service)
         g_hash_table_size(service->active),
         g_hash_table_size(service->running_sources), service->config->workers,
         service->config->max_cache_bytes, (long)getpid(), generation_bytes,
-        publication_bytes, transient_bytes, capacity_ready ? "true" : "false");
+        publication_bytes, transient_bytes, recovered_bytes, capacity_ready ? "true" : "false");
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
         ssize_t written = write(fd, contents, length);
@@ -5688,6 +5806,18 @@ int main(int argc, char **argv)
     }
     if (latcd_cache_capacity_scan(&generation_capacity, config.cache_dir, error, sizeof(error))) {
         fprintf(stderr, "latcd: %s\n", error);
+        close(cache_owner);
+        return 1;
+    }
+    if (restore_compiler_budgets(&config, error, sizeof(error))) {
+        fprintf(stderr, "latcd: %s\n", error);
+        latcd_cache_capacity_close(&generation_capacity);
+        close(cache_owner);
+        return 1;
+    }
+    if (!serve && recover_compiler_inputs(&config, error, sizeof(error))) {
+        fprintf(stderr, "latcd: %s\n", error);
+        latcd_cache_capacity_close(&generation_capacity);
         close(cache_owner);
         return 1;
     }
