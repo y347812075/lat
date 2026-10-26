@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Compiler input leases survive daemon death and descendant handoff."""
+
+import fcntl
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+
+WRAPPER = '''#!/usr/bin/python3
+import json, os, pathlib, socket, sys
+config = json.loads(pathlib.Path(__file__).with_suffix('.json').read_text())
+if sys.argv[1] == 'build-id':
+    os.execv(config['latc'], [config['latc'], 'build-id'])
+inputs = [sys.argv[2], sys.argv[sys.argv.index('--tbset') + 1]]
+inputs += [os.environ[name] for name in ('LATC_NATIVE_BASE', 'LATC_NATIVE_BASE_MODULE')
+           if name in os.environ]
+channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+channel.connect(config['socket'])
+channel.sendall((json.dumps(dict(pid=os.getpid(), inputs=inputs)) + '\\n').encode())
+assert channel.recv(1) == b'f'
+child = os.fork()
+if child:
+    os._exit(0)
+channel.sendall((json.dumps(dict(child=os.getpid())) + '\\n').encode())
+assert channel.recv(1) == b'x'
+os._exit(0)
+'''
+
+
+def run(prefix, guest, work):
+    work.mkdir(mode=0o700, parents=True, exist_ok=False)
+    env = dict(os.environ, TMPDIR=str(Path.home() / 'tmp'),
+               LD_LIBRARY_PATH=str(prefix / 'lib'))
+    latcd = prefix / 'bin/latcd'
+    tbset = work / 'input.tbset'
+    full = work / 'full.tbset'
+    subprocess.run([sys.executable, str(Path(__file__).with_name('make-tbset.py')),
+                    str(guest), str(tbset)], env=env, check=True)
+    subprocess.run([str(prefix / 'bin/latc'), 'emit-static-tbset', str(guest),
+                    '-o', str(full)], env=env, check=True)
+    for incremental in (False, True):
+        directory = work / ('incremental' if incremental else 'initial')
+        directory.mkdir(mode=0o700)
+        cache, service_socket = directory / 'cache', directory / 's'
+        def args(compiler):
+            return [str(latcd), '--serve', '--socket', str(service_socket),
+                    '--cache-dir', str(cache), '--latc', str(compiler), '--runner',
+                    str(prefix / 'bin/latx-x86_64'), '--runtime-dir', str(prefix / 'lib')]
+        def start(compiler, log):
+            daemon = subprocess.Popen(args(compiler), env=env, stdout=log, stderr=log)
+            deadline = time.monotonic() + 30
+            while not service_socket.is_socket():
+                assert daemon.poll() is None and time.monotonic() < deadline
+                time.sleep(.01)
+            return daemon
+        def submit(keys, log):
+            subprocess.run([str(latcd), '--submit', '--socket', str(service_socket),
+                            '--tbset', str(keys), str(guest)], env=env,
+                           stdout=log, stderr=log, check=True, timeout=30)
+        if incremental:
+            with (directory / 'baseline.log').open('wb') as log:
+                daemon = start(prefix / 'bin/latc', log)
+                try:
+                    submit(tbset, log)
+                    subprocess.run([str(latcd), '--flush-source', '--socket', str(service_socket),
+                                    str(guest)], env=env, stdout=log, stderr=log,
+                                   check=True, timeout=120)
+                finally:
+                    daemon.terminate()
+                    daemon.wait(timeout=30)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(directory / 'barrier'))
+        listener.listen(1)
+        listener.settimeout(30)
+        wrapper = directory / 'compiler.py'
+        wrapper.write_text(WRAPPER)
+        wrapper.chmod(0o700)
+        wrapper.with_suffix('.json').write_text(json.dumps(
+            dict(latc=str(prefix / 'bin/latc'), socket=str(directory / 'barrier'))))
+        daemon = channel = stream = None
+        compiler_pid = None
+        probes = []
+        with (directory / 'daemon.log').open('wb') as log:
+            try:
+                daemon = start(wrapper, log)
+                submit(full if incremental else tbset, log)
+                channel, _ = listener.accept()
+                channel.settimeout(10)
+                stream = channel.makefile('rb')
+                report = json.loads(stream.readline())
+                compiler_pid = report['pid']
+                inputs = report['inputs']
+                assert len(inputs) == (4 if incremental else 2), inputs
+                (directory / 'inputs.json').write_text(json.dumps(report, indent=2))
+                def assert_pinned():
+                    for probe in probes:
+                        try:
+                            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            raise AssertionError('compiler input lease was released')
+                        except BlockingIOError:
+                            pass
+                for path in inputs:
+                    probes.append(os.open(path, os.O_RDONLY))
+                assert_pinned()
+                daemon.kill()
+                assert daemon.wait(timeout=10) == -signal.SIGKILL
+                assert_pinned()
+                channel.sendall(b'f')
+                child = json.loads(stream.readline())['child']
+                (directory / 'descendant.json').write_text(json.dumps(dict(child=child)))
+                assert_pinned()
+                channel.sendall(b'x')
+                assert stream.read() == b''
+                # EOF precedes final kernel fd release by a small interval.
+                deadline = time.monotonic() + 10
+                for probe in probes:
+                    while True:
+                        try:
+                            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            assert time.monotonic() < deadline
+                            time.sleep(.01)
+            finally:
+                if compiler_pid is not None:
+                    try:
+                        os.killpg(compiler_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if daemon is not None and daemon.poll() is None:
+                    daemon.kill()
+                    daemon.wait(timeout=10)
+                if stream is not None:
+                    stream.close()
+                if channel is not None:
+                    channel.close()
+                listener.close()
+                for probe in probes:
+                    os.close(probe)
+    print('test-compiler-input-pins: PASS')
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 4:
+        raise SystemExit('usage: test-compiler-input-pins.py PREFIX X86_GUEST NEW_WORKDIR')
+    run(*(Path(value).resolve() for value in sys.argv[1:]))

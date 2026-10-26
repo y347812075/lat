@@ -1144,6 +1144,32 @@ static int prepare_static_tbset(const LatcdConfig *config,
     return result;
 }
 
+static void close_compiler_inputs(int pins[4])
+{
+    for (unsigned i = 0; i < 4; i++) {
+        if (pins[i] >= 0) close(pins[i]);
+        pins[i] = -1;
+    }
+}
+
+static int pin_compiler_inputs(const char *const paths[4], int pins[4],
+                                char *error, size_t error_size)
+{
+    for (unsigned i = 0; i < 4; i++) {
+        if (!paths[i]) continue;
+        pins[i] = open(paths[i], O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        struct stat status;
+        if (pins[i] < 0 || fstat(pins[i], &status) || !S_ISREG(status.st_mode) ||
+            status.st_uid != geteuid() ||
+            (status.st_mode & (S_IWGRP | S_IWOTH)) ||
+            flock(pins[i], LOCK_SH | LOCK_NB)) {
+            close_compiler_inputs(pins);
+            return fail(error, error_size, "cannot pin compiler input: %s", paths[i]);
+        }
+    }
+    return 0;
+}
+
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *source, const char *tbset,
                         bool static_tbset,
@@ -1239,8 +1265,15 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     environment[environment_count++] = selection_environment;
     environment[environment_count++] = "LATC_SKIP_FINAL_INSPECT=1";
     environment[environment_count] = NULL;
-    pid_t child = fork();
+    const char *inputs[4] = {source, tbset, base_native, base_module};
+    int input_pins[4] = {-1, -1, -1, -1};
+    int pin_result = pin_compiler_inputs(inputs, input_pins, error, error_size);
+    pid_t child = pin_result ? -1 : fork();
     if (child == 0) {
+        /* Only this compiler inherits these OFDs; unrelated execs keep CLOEXEC. */
+        for (unsigned i = 0; i < 4; i++) {
+            if (input_pins[i] >= 0 && fcntl(input_pins[i], F_SETFD, 0)) _exit(126);
+        }
         if (setpgid(0, 0)) {
             _exit(126);
         }
@@ -1271,6 +1304,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         _exit(127);
     }
     if (child < 0) {
+        close_compiler_inputs(input_pins);
         release_compile_space(worker_index);
         g_free(library_path);
         g_free(temporary_path);
@@ -1282,6 +1316,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         g_free(trusted_digest);
         g_free(closure_environment);
         g_free(selection_environment);
+        if (pin_result) return -1;
         return fail(error, error_size, "cannot start compiler: %s",
                     strerror(errno));
     }
@@ -1308,6 +1343,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         kill(-child, SIGKILL);
     }
     compiler_process_groups[worker_index] = 0;
+    close_compiler_inputs(input_pins);
     release_compile_space(worker_index);
     g_free(library_path);
     g_free(temporary_path);
