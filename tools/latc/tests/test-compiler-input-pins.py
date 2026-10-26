@@ -128,9 +128,17 @@ def run(prefix, guest, work):
                         assert not task.get('compiler_outputs_released', False)
                         assert task['objects']['output_native']['name']
                         assert task['objects']['output_module']['name']
+                        budget_path = cache / '.gc/compiler-budgets' / Path(path).name
+                        missing = not budget_path.exists()
+                        assert task['compiler_budget_status'] == ('MISSING' if missing else 'BOUND'), task
+                        assert plan['compiler_budget_summary']['unknown_compiler_task_count'] == int(missing), plan
+                        if not missing:
+                            assert task['compiler_peak_budget_bytes'] >= 64 * 1024 * 1024, task
+                        assert not plan['compiler_budget_summary']['daemon_reservation_verified']
                         copies = [value for value in plan['tasks'].values()
                                   if value.get('kind') == 'COPY']
                         assert len(copies) == (2 if incremental else 0)
+                        assert all(value['compiler_budget_status'] == 'NOT_APPLICABLE' for value in copies)
                         if publisher_active:
                             assert all(value['lease_observation'] == 'HELD_OBSERVED'
                                        for value in copies)

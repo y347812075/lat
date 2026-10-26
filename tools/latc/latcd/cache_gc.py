@@ -105,6 +105,7 @@ class Inventory:
         self.copy_releases = {}
         self.compiler_releases = {}
         self.compiler_output_releases = {}
+        self.compiler_budgets = {}
         self.frozen = set()
         self.freeze_all = False
         self.count = 0
@@ -147,6 +148,8 @@ class Inventory:
                         self.read_tombstone(fd, name, st)
                     if prefix == ".gc/tasks":
                         self.read_task(fd, name, st)
+                    if prefix == ".gc/compiler-budgets":
+                        self.read_compiler_budget(fd, name, st)
                     if prefix == ".gc/copy-receipts":
                         self.read_copy_receipt(fd, name, st)
                     if prefix == ".gc/copy-handoffs":
@@ -170,6 +173,84 @@ class Inventory:
                     self.error(relative, "unreadable_or_changed", str(exc))
         if identity(os.fstat(fd)) != identity(before):
             self.error(prefix or ".", "concurrent_change", "directory changed during scan")
+
+    def read_compiler_budget(self, directory, name, before):
+        relative = ".gc/compiler-budgets/" + name
+        self.compiler_budgets[relative] = {"valid": False, "binding_observed": False}
+        try:
+            if (not name.endswith(".ini") or str(uuid.UUID(name[:-4])) != name[:-4] or
+                    not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
+                    before.st_nlink != 1 or before.st_mode & 0o222 or
+                    not 0 < before.st_size <= 4096):
+                raise ValueError("unsafe compiler budget")
+            fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW |
+                         os.O_NONBLOCK, dir_fd=directory)
+            try:
+                raw = os.read(fd, 4097)
+                if identity(os.fstat(fd)) != identity(before) or len(raw) != before.st_size:
+                    raise ValueError("compiler budget changed during read")
+            finally:
+                os.close(fd)
+            parser = configparser.ConfigParser(interpolation=None, strict=True)
+            parser.read_string(raw.decode("ascii"))
+            if parser.defaults() or parser.sections() != ["budget"]:
+                raise ValueError("invalid compiler budget sections")
+            value = dict(parser["budget"])
+            numbers = {"task_device", "task_inode", "cache_device", "cache_inode", "bytes"}
+            if (set(value) != numbers | {"version", "task_id"} or
+                    value["version"] != "1" or value["task_id"] != name[:-4]):
+                raise ValueError("invalid compiler budget fields")
+            for key in numbers:
+                if not re.fullmatch(r"[0-9]+", value[key]) or int(value[key]) >= 2**64:
+                    raise ValueError("invalid compiler budget integer")
+                value[key] = int(value[key])
+            if not value["bytes"]:
+                raise ValueError("compiler budget must be positive")
+            self.compiler_budgets[relative] = dict(value, valid=True, binding_observed=False)
+        except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
+            self.freeze_all = True
+            self.error(relative, "invalid_compiler_budget", str(exc))
+
+    def compiler_budget_report(self):
+        bound_bytes = outstanding_bytes = unknown_tasks = 0
+        for relative, budget in self.compiler_budgets.items():
+            if not budget["valid"]:
+                continue
+            task_path = ".gc/tasks/" + budget["task_id"] + ".ini"
+            task, row = self.tasks.get(task_path), self.entries.get(task_path)
+            cache = self.directories.get("")
+            if (not task or task["version"] != "1" or not row or not cache or
+                    (row["device"], row["inode"]) != (budget["task_device"], budget["task_inode"]) or
+                    cache[:2] != (budget["cache_device"], budget["cache_inode"])):
+                self.freeze_all = True
+                self.error(relative, "compiler_budget_binding_changed", task_path)
+                continue
+            budget["binding_observed"] = True
+            bound_bytes += budget["bytes"]
+            if not task.get("compiler_outputs_released"):
+                outstanding_bytes += budget["bytes"]
+        for relative, task in self.tasks.items():
+            if task["version"] != "1":
+                task["compiler_budget_status"] = "NOT_APPLICABLE"
+                continue
+            path = ".gc/compiler-budgets/" + relative.rsplit("/", 1)[1]
+            budget = self.compiler_budgets.get(path)
+            if budget is None:
+                task["compiler_budget_status"] = "MISSING"
+            elif not budget["binding_observed"]:
+                task["compiler_budget_status"] = "INVALID"
+            else:
+                task["compiler_budget_status"] = "BOUND"
+                task["compiler_peak_budget_bytes"] = budget["bytes"]
+            if task["compiler_budget_status"] != "BOUND":
+                unknown_tasks += 1
+        return {"bound_peak_bytes": bound_bytes,
+                "without_output_release_observed_bytes": outstanding_bytes,
+                "unknown_compiler_task_count": unknown_tasks,
+                "invalid_or_unbound_record_count": sum(not b["binding_observed"]
+                                                        for b in self.compiler_budgets.values()),
+                "daemon_reservation_verified": False,
+                "physical_usage": False}
 
     def read_copy_handoff(self, directory, name, before, releasing=False, compiler=False, outputs=False):
         relative = (".gc/compiler-output-releases/" if outputs else ".gc/compiler-releases/" if compiler else
@@ -779,6 +860,7 @@ class Inventory:
                 if not matched:
                     self.freeze_all = True
                     self.error(relative, "task_binding_changed", path or ".")
+        compiler_budget_summary = self.compiler_budget_report()
         for relative in self.entries:
             if (relative.startswith(".gc/tombstones/") and
                     not relative.removeprefix(".gc/tombstones/").startswith(".write-")):
@@ -875,6 +957,9 @@ class Inventory:
                 "compiler_release_count": len(self.compiler_releases), "compiler_releases": self.compiler_releases,
                 "compiler_output_release_count": len(self.compiler_output_releases),
                 "compiler_output_releases": self.compiler_output_releases,
+                "compiler_budget_count": len(self.compiler_budgets),
+                "compiler_budgets": self.compiler_budgets,
+                "compiler_budget_summary": compiler_budget_summary,
                 "transactions": self.transactions,
                 "retirement_plan": {"grace_us": self.grace_us,
                                     "clock": ({"boot_id": self.clock[0], "boottime_us": self.clock[1]}

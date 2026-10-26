@@ -98,6 +98,108 @@ class PlannerTest(unittest.TestCase):
         record += '[output_native]\nname=native-ABC\n[output_module]\nname=module-ABC\n'
         return self.put(f'.gc/tasks/{record_id}.ini', record.encode())
 
+    def budget(self, task, amount=123456):
+        st, cache = task.stat(), self.root.stat()
+        record = (f'[budget]\nversion=1\ntask_id={task.stem}\n'
+                  f'task_device={st.st_dev}\ntask_inode={st.st_ino}\n'
+                  f'cache_device={cache.st_dev}\ncache_inode={cache.st_ino}\nbytes={amount}\n')
+        return self.put(f'.gc/compiler-budgets/{task.name}', record.encode())
+
+    def test_compiler_budget_bound_and_missing(self):
+        task = self.task()
+        plan = self.run_plan()
+        self.assertEqual(plan['tasks'][str(task.relative_to(self.root))]['compiler_budget_status'], 'MISSING')
+        self.assertEqual(plan['compiler_budget_summary']['unknown_compiler_task_count'], 1)
+        self.assertEqual(plan['compiler_budget_summary']['bound_peak_bytes'], 0)
+        self.budget(task)
+        with task.open('rb') as pin:
+            fcntl.flock(pin, fcntl.LOCK_SH)
+            plan = self.run_plan()
+        summary = plan['compiler_budget_summary']
+        self.assertEqual(summary['bound_peak_bytes'], 123456)
+        self.assertEqual(summary['without_output_release_observed_bytes'], 123456)
+        self.assertEqual(summary['unknown_compiler_task_count'], 0)
+        self.assertFalse(summary['daemon_reservation_verified'])
+        self.assertFalse(summary['physical_usage'])
+        self.assertEqual(next(iter(plan['tasks'].values()))['compiler_budget_status'], 'BOUND')
+        self.assertTrue(next(iter(plan['compiler_budgets'].values()))['binding_observed'])
+
+    def test_compiler_budget_invalid_schema_and_integer(self):
+        task = self.task()
+        budget = self.budget(task)
+        original = budget.read_bytes()
+        for bad in (original.replace(b'version=1', b'version=2'),
+                    original + b'unknown=1\n', original + b'bytes=5\n',
+                    original + b'[extra]\nx=1\n', b'[DEFAULT]\nx=1\n' + original,
+                    original.replace(b'bytes=123456', b'bytes=0'),
+                    original.replace(b'bytes=123456', b'bytes=-1'),
+                    original.replace(b'bytes=123456', b'bytes=18446744073709551616'),
+                    original.replace(b'bytes=123456', b'bytes=1.5')):
+            with self.subTest(bad=bad):
+                self.put(str(budget.relative_to(self.root)), bad)
+                plan = self.run_plan(success=False)
+                self.assertTrue(any(e['reason'] == 'invalid_compiler_budget' for e in plan['errors']))
+                self.assertEqual(plan['compiler_budget_summary']['unknown_compiler_task_count'], 1)
+                self.assertEqual(next(iter(plan['tasks'].values()))['compiler_budget_status'], 'INVALID')
+
+    def test_compiler_budget_unsafe_file(self):
+        task = self.task()
+        budget = self.budget(task)
+        original = budget.read_bytes()
+        budget.chmod(0o600)
+        self.run_plan(success=False)
+        budget.chmod(0o400)
+        alias = self.root / 'budget-hardlink'
+        os.link(budget, alias)
+        self.run_plan(success=False)
+        alias.unlink()
+        budget.unlink()
+        budget.symlink_to(task)
+        self.run_plan(success=False)
+        budget.unlink()
+        self.put(str(budget.relative_to(self.root)), original)
+        self.put('.gc/compiler-budgets/.write-interrupted', b'partial')
+        self.run_plan(success=False)
+
+    def test_compiler_budget_wrong_binding_and_orphan(self):
+        task = self.task()
+        budget = self.budget(task)
+        original = budget.read_bytes()
+        for field, number in (('task_inode', task.stat().st_ino),
+                              ('cache_inode', self.root.stat().st_ino),
+                              ('task_device', task.stat().st_dev),
+                              ('cache_device', self.root.stat().st_dev)):
+            self.put(str(budget.relative_to(self.root)), original.replace(
+                f'{field}={number}'.encode(), f'{field}={number + 1}'.encode()))
+            plan = self.run_plan(success=False)
+            self.assertEqual(plan['compiler_budget_summary']['bound_peak_bytes'], 0)
+            self.assertEqual(plan['compiler_budget_summary']['invalid_or_unbound_record_count'], 1)
+            self.assertTrue(any(e['reason'] == 'compiler_budget_binding_changed' for e in plan['errors']))
+        self.put(str(budget.relative_to(self.root)), original)
+        task.unlink()
+        plan = self.run_plan(success=False)
+        self.assertEqual(plan['compiler_budget_summary']['invalid_or_unbound_record_count'], 1)
+
+    def test_compiler_budget_output_release_observation(self):
+        task = self.task()
+        self.budget(task)
+        st = task.stat()
+        record = (f'[handoff]\nversion=1\ntask_id={task.stem}\nstate=INPUTS_RELEASED\n'
+                  f'task_device={st.st_dev}\ntask_inode={st.st_ino}\n')
+        self.put(f'.gc/compiler-releases/{task.name}', record.encode())
+        self.put(f'.gc/compiler-output-releases/{task.name}',
+                 record.replace('INPUTS_RELEASED', 'OUTPUTS_RELEASED').encode())
+        plan = self.run_plan()
+        self.assertEqual(plan['compiler_budget_summary']['bound_peak_bytes'], 123456)
+        self.assertEqual(plan['compiler_budget_summary']['without_output_release_observed_bytes'], 0)
+        with task.open('rb') as pin:
+            fcntl.flock(pin, fcntl.LOCK_SH)
+            plan = self.run_plan()
+            self.assertEqual(plan['compiler_budget_summary']['without_output_release_observed_bytes'], 123456)
+        self.put('.tmp/native-ABC', b'output retained')
+        plan = self.run_plan()
+        self.assertEqual(plan['compiler_budget_summary']['without_output_release_observed_bytes'], 123456)
+
     def test_task_lease_and_references(self):
         record = self.task()
         with record.open('rb') as pin:
@@ -176,6 +278,8 @@ class PlannerTest(unittest.TestCase):
         plan = self.run_plan()
         task = next(iter(plan['tasks'].values()))
         self.assertEqual(task['kind'], 'COPY')
+        self.assertEqual(task['compiler_budget_status'], 'NOT_APPLICABLE')
+        self.assertEqual(plan['compiler_budget_summary']['unknown_compiler_task_count'], 0)
         self.assertFalse(task['completion_verified'])
         self.assertEqual(task['lease_observation'], 'NO_HOLDER_OBSERVED')
         self.put('.tmp/native-ABC', b'partial output')
