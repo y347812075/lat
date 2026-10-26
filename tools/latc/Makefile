@@ -425,6 +425,7 @@ $(BUILD)/tests/test-native-migration-v12 \
 	$(BUILD)/tests/test-journal-store
 	$(BUILD)/tests/test-latcd-coverage
 	$(BUILD)/tests/test-latcd-channel
+	python3 tests/test-cache-gc-plan.py $(BUILD)/latcd/latcd
 	$(BUILD)/tests/test-tbset-selection $(BUILD)/tests/cfg-fixture
 	$(BUILD)/tests/test-tb-closure
 	python3 tests/test-tbplan.py $(BUILD)/latc $(BUILD)/tests/cfg-fixture

@@ -863,6 +863,22 @@ only after that commit does `latcd` remove the superseded generation. A failed
 compile, merge, link, or pre-manifest publication leaves the prior manifest and
 all files it names unchanged. This manifest has no older-format parser.
 
+Inspect a cache domain without opening the daemon, taking its owner lock, or
+authorizing cleanup:
+
+```sh
+build/latcd/latcd gc --plan \
+  --cache-dir "${XDG_CACHE_HOME:-$HOME/.cache}/lat-aot-v2/<build-id>/live"
+```
+
+The planner strictly parses every exact `<source-sha256>.current` manifest and
+reports current, retired, temporary, state, and unknown objects with logical
+and allocated-byte totals. Hardlinked names are counted once by the top-level
+total. Every row keeps `delete_authorized=false`; an incomplete or concurrently
+changing inventory exits nonzero while still emitting the report. Directory
+modes, hardlink aliases, lifecycle pins, and mount references still have to be
+admitted by the later reclamation batches.
+
 On LoongArch, validate a copied LAT runner and real x86 guest with:
 
 ```sh

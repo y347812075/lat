@@ -646,6 +646,10 @@ if 'CONFIG_LATX' in config_host
     'tools/latc/aot-v2/compiler/module.map',
     install_dir: latc_helper_dir / 'aot-v2/compiler',
   )
+  install_data(
+    'tools/latc/latcd/cache_gc.py',
+    install_dir: latc_helper_dir / 'scripts',
+  )
 
   latcd_inc = include_directories(
     'tools/latc/aot-v2/include',
@@ -669,6 +673,10 @@ if 'CONFIG_LATX' in config_host
     include_directories: latcd_inc,
     dependencies: [glib, libdl, dependency('threads')],
     link_args: qemu_static_link_args,
+    c_args: [
+      '-DLATCD_GC_SCRIPT="' + latc_helper_dir / 'scripts/cache_gc.py' + '"',
+      '-DLATCD_GC_SOURCE_SCRIPT="' + meson.current_source_dir() / 'tools/latc/latcd/cache_gc.py' + '"',
+    ],
     install: true,
   )
 endif

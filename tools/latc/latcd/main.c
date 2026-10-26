@@ -4909,12 +4909,78 @@ static void usage(const char *name)
             "  %s --flush-all --socket PATH\n"
             "  %s --precompile --socket PATH --x86-rootfs DIR"
             " [--latc PATH] [--jobs N] GUEST_ELF\n"
+            "  %s gc --plan --cache-dir DIR\n"
             "  %s --build-id\n",
-            name, name, name, name, name, name, name);
+            name, name, name, name, name, name, name, name);
+}
+
+static int run_gc_plan(int argc, char **argv)
+{
+    bool plan = false;
+    const char *cache = NULL;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--plan") && !plan) plan = true;
+        else if (!strcmp(argv[i], "--cache-dir") && !cache && i + 1 < argc)
+            cache = argv[++i];
+        else { usage(argv[0]); return 2; }
+    }
+    if (!plan || !cache || !*cache) { usage(argv[0]); return 2; }
+    GError *gerror = NULL;
+    char *executable = g_file_read_link("/proc/self/exe", &gerror);
+    if (!executable) {
+        fprintf(stderr, "latcd: cannot locate GC planner: %s\n",
+                gerror ? gerror->message : "unknown error");
+        g_clear_error(&gerror);
+        return 1;
+    }
+    char *directory = g_path_get_dirname(executable);
+    char *script = NULL;
+    char *candidate = NULL;
+#ifdef LATCD_GC_RELATIVE_SCRIPT
+    candidate = g_build_filename(directory, LATCD_GC_RELATIVE_SCRIPT, NULL);
+    if (g_file_test(candidate, G_FILE_TEST_IS_REGULAR)) script = candidate;
+    else g_free(candidate);
+#endif
+#ifdef LATCD_GC_SCRIPT
+    if (!script) {
+        candidate = g_strdup(LATCD_GC_SCRIPT);
+        if (g_file_test(candidate, G_FILE_TEST_IS_REGULAR)) script = candidate;
+        else g_free(candidate);
+    }
+#endif
+#ifdef LATCD_GC_SOURCE_SCRIPT
+    if (!script) {
+        candidate = g_strdup(LATCD_GC_SOURCE_SCRIPT);
+        if (g_file_test(candidate, G_FILE_TEST_IS_REGULAR)) script = candidate;
+        else g_free(candidate);
+    }
+#endif
+#if !defined(LATCD_GC_RELATIVE_SCRIPT) && !defined(LATCD_GC_SCRIPT)
+    if (!script) {
+        candidate = g_build_filename(directory, "..", "..", "latcd", "cache_gc.py", NULL);
+        if (g_file_test(candidate, G_FILE_TEST_IS_REGULAR)) script = candidate;
+        else g_free(candidate);
+    }
+#endif
+    g_free(executable);
+    g_free(directory);
+    if (!script) {
+        fprintf(stderr, "latcd: cannot locate installed GC planner\n");
+        return 1;
+    }
+    /* A separate stdlib-only planner never opens the daemon's writable state. */
+    execlp("python3", "python3", "-I", "-B", script,
+           "--plan", "--cache-dir", cache, (char *)NULL);
+    fprintf(stderr, "latcd: cannot execute read-only GC planner: %s\n", strerror(errno));
+    g_free(script);
+    return 1;
 }
 
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && !strcmp(argv[1], "gc")) {
+        return run_gc_plan(argc, argv);
+    }
     if (argc == 2 && !strcmp(argv[1], "--build-id")) {
         puts(LATC_BUILD_ID);
         return 0;

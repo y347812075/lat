@@ -171,6 +171,20 @@ daemon_pid=
 test "$(find "$cache" -maxdepth 1 -name '*.so' | wc -l)" -gt 0
 test "$(find "$cache" -maxdepth 1 -name '*.current' | wc -l)" -gt 0
 
+"$latcd" gc --plan --cache-dir "$cache" >"$work/install-cache-plan.json"
+python3 - "$work/install-cache-plan.json" <<'PY'
+import json
+import sys
+
+plan = json.load(open(sys.argv[1]))
+assert plan["complete"] is True
+assert plan["mode"] == "read_only_plan"
+assert plan["delete_authorized"] is False
+assert plan["manifest_count"] > 0
+assert plan["entries"]
+assert all(entry["delete_authorized"] is False for entry in plan["entries"])
+PY
+
 codegen=$(printf '%s' "$identity" | sha256sum | cut -d ' ' -f 1)
 for module in "$cache"/*.so; do
     "$latc" inspect-module --json "$module"
