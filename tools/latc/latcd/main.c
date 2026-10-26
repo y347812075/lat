@@ -1302,6 +1302,23 @@ out:
     return lease;
 }
 
+static void task_root_test_barrier(bool copying, char stage)
+{
+    const char *kind = getenv("LATCD_TEST_TASK_ROOT_KIND");
+    const char *notify = getenv("LATCD_TEST_TASK_ROOT_NOTIFY_FD");
+    const char *resume = getenv("LATCD_TEST_TASK_ROOT_RESUME_FD");
+    if (!kind || strcmp(kind, copying ? "COPY" : "COMPILER") || !notify || !resume) return;
+    char *end;
+    long output = strtol(notify, &end, 10);
+    if (!*notify || *end || output < 0 || output > INT_MAX) return;
+    long input = strtol(resume, &end, 10);
+    if (!*resume || *end || input < 0 || input > INT_MAX) return;
+    ssize_t count;
+    do { count = write((int)output, &stage, 1); } while (count < 0 && errno == EINTR);
+    if (count != 1) return;
+    do { count = read((int)input, &stage, 1); } while (count < 0 && errno == EINTR);
+}
+
 /* The immutable record is also the lease inode. No completion or deletion claim. */
 static int record_task(const LatcdConfig *config, bool copying,
                                 const char *const paths[6], const int pins[4],
@@ -1316,6 +1333,13 @@ static int record_task(const LatcdConfig *config, bool copying,
     char *tbsets = g_build_filename(config->cache_dir, ".tbsets", NULL);
     char source_hex[65];
     digest_hex(digest, source_hex);
+    task_root_test_barrier(copying, 'b');
+    /* Inputs are already pinned, and COPY may hold C: never wait or invert the
+     * executor's roots-to-object order. Keep SH through durable registration. */
+    int roots = latcd_retirement_roots_lock(config->cache_dir, LOCK_SH | LOCK_NB,
+                                            error, error_size);
+    if (roots < 0) goto out;
+    task_root_test_barrier(copying, 'l');
     root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (root < 0 || (gc = open_task_directory(root, ".gc")) < 0 ||
         (tasks = open_task_directory(gc, "tasks")) < 0 ||
@@ -1390,6 +1414,7 @@ static int record_task(const LatcdConfig *config, bool copying,
     }
     lease = persist_task_record(tasks, id, record);
     if (lease < 0) goto failed;
+    task_root_test_barrier(copying, 'p');
     if (task_id) *task_id = g_strdup(id);
     goto out;
 failed:
@@ -1397,6 +1422,7 @@ failed:
     lease = -1;
     fail(error, error_size, "cannot persist %s task root", copying ? "copy" : "compiler");
 out:
+    if (roots >= 0) close(roots);
     if (collected >= 0) close(collected);
     if (temporary >= 0) close(temporary);
     if (tasks >= 0) close(tasks);
