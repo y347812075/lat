@@ -12,6 +12,11 @@
 int lat_aot_v2_cache_lock_fd(int fd, int operation,
                              char *error, size_t error_size);
 
+/* Check after taking the object lease. Any tombstone entry (even malformed)
+ * blocks a new reader. This is not a domain admission or deletion permit. */
+int lat_aot_v2_cache_object_available(const char *path,
+                                      char *error, size_t error_size);
+
 /* Use a stable per-source latch around manifest read and artifact-fd capture. */
 int lat_aot_v2_cache_source_lock(const char *cache_dir,
                                  const char *source_hex, int operation,

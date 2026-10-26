@@ -10,6 +10,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -35,6 +36,9 @@ static bool lock_operation_valid(int operation)
            !(operation & ~(LOCK_SH | LOCK_EX | LOCK_NB));
 }
 
+static int verify_private_directory(int fd, const char *label,
+                                    char *error, size_t error_size);
+
 int lat_aot_v2_cache_lock_fd(int fd, int operation,
                              char *error, size_t error_size)
 {
@@ -51,6 +55,62 @@ int lat_aot_v2_cache_lock_fd(int fd, int operation,
                     strerror(errno));
     }
     return 0;
+}
+
+int lat_aot_v2_cache_object_available(const char *path,
+                                      char *error, size_t error_size)
+{
+    if (!path || !*path) {
+        errno = EINVAL;
+        return fail(error, error_size, "invalid cache object path");
+    }
+    const char *slash = strrchr(path, '/');
+    const char *name = slash ? slash + 1 : path;
+    if (!*name || !strcmp(name, ".") || !strcmp(name, "..")) {
+        errno = EINVAL;
+        return fail(error, error_size, "invalid cache object basename");
+    }
+    size_t length = slash ? (size_t)(slash - path) : 1;
+    char *parent = malloc((length ? length : 1) + 1);
+    if (!parent) return fail(error, error_size, "cannot allocate cache object path");
+    if (!slash) memcpy(parent, ".", 2);
+    else if (!length) { parent[0] = '/'; parent[1] = 0; }
+    else { memcpy(parent, path, length); parent[length] = 0; }
+    int root = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    free(parent);
+    if (root < 0) return fail(error, error_size, "cannot open cache object parent");
+    int gc = openat(root, ".gc", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int saved = errno;
+    close(root);
+    if (gc < 0) {
+        errno = saved;
+        return saved == ENOENT ? 0 : fail(error, error_size, "unsafe cache lifecycle directory");
+    }
+    if (verify_private_directory(gc, "cache lifecycle", error, error_size)) {
+        close(gc);
+        return -1;
+    }
+    int tombstones = openat(gc, "tombstones", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    saved = errno;
+    close(gc);
+    if (tombstones < 0) {
+        errno = saved;
+        return saved == ENOENT ? 0 : fail(error, error_size, "unsafe cache tombstone directory");
+    }
+    if (verify_private_directory(tombstones, "cache tombstones", error, error_size)) {
+        close(tombstones);
+        return -1;
+    }
+    struct stat status;
+    int result = fstatat(tombstones, name, &status, AT_SYMLINK_NOFOLLOW);
+    saved = errno;
+    close(tombstones);
+    if (!result) {
+        errno = ESTALE;
+        return fail(error, error_size, "cache object is tombstoned: %s", name);
+    }
+    errno = saved;
+    return saved == ENOENT ? 0 : fail(error, error_size, "cannot inspect cache object tombstone");
 }
 
 static bool source_hex_valid(const char *source_hex)

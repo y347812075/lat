@@ -281,6 +281,33 @@ static int cleanup(const char *root)
     return rmdir(root);
 }
 
+static int test_tombstones(const char *root)
+{
+    char path[4096], directory[4096], marker[4096], error[256];
+    snprintf(path, sizeof(path), "%s/artifact", root);
+    snprintf(directory, sizeof(directory), "%s/.gc/tombstones", root);
+    snprintf(marker, sizeof(marker), "%s/.gc/tombstones/artifact", root);
+    if (lat_aot_v2_cache_object_available(path, error, sizeof(error))) return -1;
+    if (mkdir(directory, 0700)) return -1;
+    if (lat_aot_v2_cache_object_available(path, error, sizeof(error))) return -1;
+    /* Garbage metadata, directories and dangling symlinks all fail closed. */
+    int fd = open(marker, O_WRONLY | O_CREAT | O_EXCL, 0400);
+    if (fd < 0 || write(fd, "invalid", 7) != 7) return -1;
+    close(fd);
+    if (!lat_aot_v2_cache_object_available(path, error, sizeof(error)) || errno != ESTALE)
+        return -1;
+    if (unlink(marker) || mkdir(marker, 0700)) return -1;
+    if (!lat_aot_v2_cache_object_available(path, error, sizeof(error))) return -1;
+    if (rmdir(marker) || symlink("missing", marker)) return -1;
+    if (!lat_aot_v2_cache_object_available(path, error, sizeof(error))) return -1;
+    if (unlink(marker) || rmdir(directory) || symlink("missing", directory)) return -1;
+    if (!lat_aot_v2_cache_object_available(path, error, sizeof(error))) return -1;
+    if (unlink(directory)) return -1;
+    if (lat_aot_v2_cache_object_available(path, error, sizeof(error))) return -1;
+    if (!lat_aot_v2_cache_object_available(NULL, error, sizeof(error))) return -1;
+    return 0;
+}
+
 int main(void)
 {
     const char *tmpdir = getenv("TMPDIR");
@@ -305,7 +332,7 @@ int main(void)
     int result = test_unsafe_layout(root) || test_source_latch(root) ||
         test_guest_fd_registry(root) || test_atfork_registry() ||
         test_fork_inheritance(root) || test_exec_closes_latch(root) ||
-        test_artifact_latch(root);
+        test_artifact_latch(root) || test_tombstones(root);
     if (cleanup(root)) {
         fprintf(stderr, "cannot clean lifecycle test directory %s: %s\n",
                 root, strerror(errno));

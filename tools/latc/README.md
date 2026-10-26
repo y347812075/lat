@@ -910,6 +910,14 @@ numbers, and requires the object table to cover exactly their combined file
 references. Shared names must have identical identities; available manifest
 digests must match the object digests. A nonempty but incomplete or conflicting
 binding becomes UNKNOWN. The planner independently validates the same binding.
+
+Object deletion intent uses `.gc/tombstones/<object-basename>`. New module loads
+check for any entry after acquiring the inode lease; malformed intent also blocks
+new users. Worker snapshot opens and publisher commit checks reject tombstoned
+objects. The intent writer records immutable identity but is not exposed as a GC
+command: controlled-domain admission, complete reference checks and deletion
+recovery are still required before any unlink can be enabled. The planner freezes
+unrecovered intent. These protections do not authorize cleaning historical caches.
 Controlled-domain admission, object-identity tombstones, partial-delete recovery,
 automatic expiry scheduling, and capacity reclamation remain disabled/pending.
 

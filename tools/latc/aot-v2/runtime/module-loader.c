@@ -195,6 +195,7 @@ int lat_aot_v2_module_open(const char *path,
     }
     if (lat_aot_v2_cache_lock_fd(fd, LOCK_SH | LOCK_NB,
                                  error, error_size) ||
+        lat_aot_v2_cache_object_available(path, error, error_size) ||
         lat_aot_v2_internal_fd_register_locked(fd)) {
         int saved = errno;
         close(fd);

@@ -6,6 +6,7 @@
 #include <glib.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -468,6 +469,97 @@ static void test_manifest_binding(void)
     g_free(root);
 }
 
+static void test_tombstone(void)
+{
+    char *root = root_new(), *name = g_strdup_printf("%s.native", source);
+    char *path = g_build_filename(root, name, NULL), error[256];
+    put(path, "retired native fixture\n");
+    const char *names[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+    assert(evidence);
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int reader = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    assert(fd >= 0 && reader >= 0 && !flock(reader, LOCK_SH));
+    assert(latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+    close(reader);
+    char *current = current_path(root);
+    char *manifest = g_strdup_printf("{\"version\":2,\"module\":\"%s.so\","
+        "\"native\":\"%s\",\"tbset\":\"\",\"source_sha256\":\"%s\","
+        "\"codegen_id\":\"%s\",\"published_sequence\":1}", source, name, source, source);
+    put(current, manifest);
+    assert(latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+    put(current, "invalid current");
+    assert(latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+    assert(!unlink(current));
+    GKeyFile *mismatch = g_key_file_new();
+    assert(g_key_file_load_from_data(mismatch, evidence, -1, 0, NULL));
+    g_key_file_set_uint64(mismatch, "object0", "inode", 0);
+    char *wrong = g_key_file_to_data(mismatch, NULL, NULL);
+    assert(latcd_retirement_tombstone(root, source, name, fd, wrong, error, sizeof(error)));
+    g_free(wrong);
+    g_key_file_unref(mismatch);
+    assert(!latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+    assert(!access(path, F_OK));
+    char *marker = g_build_filename(root, ".gc", "tombstones", name, NULL);
+    GKeyFile *record = g_key_file_new();
+    assert(g_key_file_load_from_file(record, marker, 0, NULL));
+    struct stat st;
+    assert(!fstat(fd, &st));
+    assert(g_key_file_get_uint64(record, "tombstone", "inode", NULL) == (uint64_t)st.st_ino);
+    char *before = NULL, *after = NULL;
+    assert(g_file_get_contents(marker, &before, NULL, NULL));
+    assert(latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+    assert(g_file_get_contents(marker, &after, NULL, NULL) && !strcmp(before, after));
+    close(fd);
+    g_key_file_unref(record);
+    g_free(before); g_free(after); g_free(marker); g_free(current); g_free(manifest);
+    g_free(evidence); g_free(path); g_free(name);
+    remove_root(root); g_free(root);
+}
+
+static void test_tombstone_crash(const char *point, bool crash)
+{
+    char *root = root_new(), *name = g_strdup_printf("%s.native", source);
+    char *path = g_build_filename(root, name, NULL), error[256];
+    put(path, "immutable retired object\n");
+    const char *names[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+    assert(evidence);
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        assert(fd >= 0);
+        char *setting = g_strdup_printf("%s:%s", crash ? "crash" : "error", point);
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", setting, 1));
+        int result = latcd_retirement_tombstone(root, source, name, fd, evidence,
+                                                error, sizeof(error));
+        assert(!crash && result < 0);
+        close(fd);
+        _exit(0);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child);
+    if (crash) assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    else assert(WIFEXITED(status) && !WEXITSTATUS(status));
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    assert(fd >= 0 && !flock(fd, LOCK_EX | LOCK_NB));
+    close(fd);
+    char *marker = g_build_filename(root, ".gc", "tombstones", name, NULL);
+    bool renamed = !strcmp(point, "renamed") || !strcmp(point, "directory-synced");
+    assert((!access(marker, F_OK)) == renamed);
+    if (renamed) {
+        GKeyFile *record = g_key_file_new();
+        assert(g_key_file_load_from_file(record, marker, 0, NULL));
+        char *state = g_key_file_get_string(record, "tombstone", "state", NULL);
+        assert(!g_strcmp0(state, "DELETING"));
+        g_free(state);
+        g_key_file_unref(record);
+    }
+    g_free(marker); g_free(evidence); g_free(path); g_free(name);
+    remove_root(root); g_free(root);
+}
+
 int main(void)
 {
     for (int phase = 0; phase < 3; phase++) {
@@ -479,6 +571,7 @@ int main(void)
     for (int mutation = 0; mutation < 7; mutation++) test_object_identity(mutation);
     test_legacy_and_schema();
     test_manifest_binding();
+    test_tombstone();
     const char *points[] = {"created", "partial-write", "written", "chmod",
         "file-synced", "closed", "renamed", "directory-synced"};
     for (size_t i = 0; i < G_N_ELEMENTS(points); i++)
@@ -486,6 +579,9 @@ int main(void)
             for (int finishing = 0; finishing < 2; finishing++)
                 for (int initial = 0; initial < 2; initial++)
                     test_record_write_fault(points[i], crash, finishing, initial);
+    for (size_t i = 0; i < G_N_ELEMENTS(points); i++)
+        for (int crash = 0; crash < 2; crash++)
+            test_tombstone_crash(points[i], crash);
     puts("test-cache-retirement: PASS");
     return 0;
 }

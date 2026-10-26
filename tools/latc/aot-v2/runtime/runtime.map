@@ -70,6 +70,7 @@ LAT_AOT_RUNTIME_2.0 {
         lat_aot_runtime_xsetbv;
         lat_aot_runtime_kzt_get_alternate;
         lat_aot_v2_cache_close_fd;
+        lat_aot_v2_cache_object_available;
         lat_aot_v2_cache_source_lock;
         lat_aot_v2_internal_fd_is_protected;
         lat_aot_v2_context_apply_guest_slots;

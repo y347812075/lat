@@ -1239,7 +1239,8 @@ static int open_cached_file(const char *source, uint64_t max_size,
                     strerror(errno));
     }
     if (lat_aot_v2_cache_lock_fd(input, LOCK_SH | LOCK_NB,
-                                 error, error_size)) {
+                                 error, error_size) ||
+        lat_aot_v2_cache_object_available(source, error, error_size)) {
         close(input);
         return -1;
     }
@@ -1448,7 +1449,8 @@ static int sync_directory(const char *path, char *error, size_t error_size)
 static int owned_module_inspect(const char *path, LatAotModuleInfoV2 *info)
 {
     struct stat status;
-    return !lstat(path, &status) && S_ISREG(status.st_mode) &&
+    return !lat_aot_v2_cache_object_available(path, NULL, 0) &&
+           !lstat(path, &status) && S_ISREG(status.st_mode) &&
            status.st_uid == geteuid() && status.st_nlink == 1 &&
            !(status.st_mode & 0222) &&
            !lat_aot_v2_module_inspect_file(path, info, NULL, 0);
@@ -1679,6 +1681,20 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         g_free(module_sha256);
         g_free(native_sha256);
         return -1;
+    }
+    const char *candidates[] = {module_name, native_name, tbset_name};
+    for (size_t i = 0; i < G_N_ELEMENTS(candidates); i++) {
+        if (!*candidates[i]) continue;
+        char *path = g_build_filename(config->cache_dir, candidates[i], NULL);
+        int unavailable = lat_aot_v2_cache_object_available(path, error, error_size);
+        g_free(path);
+        if (unavailable) {
+            close(source_lock_fd);
+            g_free(objects);
+            g_free(module_sha256);
+            g_free(native_sha256);
+            return -1;
+        }
     }
     LatcdCurrentManifest previous = {0};
     bool same_pair = !current_manifest_read(config, hex, &previous) &&

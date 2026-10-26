@@ -295,6 +295,16 @@ class Inventory:
 
     def report(self):
         for relative in self.entries:
+            if relative.startswith(".gc/tombstones/"):
+                name = relative.removeprefix(".gc/tombstones/")
+                match = GENERATED.fullmatch(name)
+                if match:
+                    self.frozen.add(match[1])
+                else:
+                    self.freeze_all = True
+                self.error(relative, "unrecovered_tombstone",
+                           "persistent deletion intent requires controlled recovery")
+        for relative in self.entries:
             if "/" not in relative and relative.endswith(".current") and not CURRENT.fullmatch(relative):
                 self.freeze_all = True
                 self.error(relative, "unknown_manifest_name", "cannot establish source scope")

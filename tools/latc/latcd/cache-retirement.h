@@ -14,6 +14,15 @@ int latcd_retirement_validate_binding(const char *source,
                                       const char *next, size_t next_size,
                                       const char *objects, size_t objects_size);
 
+/* Caller holds source EX and has rechecked every reference/admission root.
+ * evidence is a single-object capture taken outside the source latch while the
+ * caller retains the object's SH lease. Caller guarantees immutable contents.
+ * Takes EX|NB on object_fd; caller closes it on success AND failure. Writes intent only;
+ * this API does not admit a domain or authorize/perform unlink. */
+int latcd_retirement_tombstone(const char *root, const char *source,
+                               const char *name, int object_fd, const char *evidence,
+                               char *error, size_t error_size);
+
 /* The caller owns the cache management lease and the source commit latch.
  * Neither transaction completion nor recovery authorizes file removal. */
 int latcd_retirement_prepare(const char *root, const char *source,

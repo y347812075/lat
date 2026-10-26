@@ -500,6 +500,91 @@ int latcd_retirement_validate_binding(const char *source,
     return valid ? 0 : -1;
 }
 
+int latcd_retirement_tombstone(const char *root, const char *source,
+                               const char *name, int object_fd, const char *evidence,
+                               char *error, size_t error_size)
+{
+    if (!source_valid(source) || !object_name_valid(source, name) || object_fd < 0 ||
+        !evidence || strlen(evidence) >= 16384)
+        return fail(error, error_size, "invalid tombstone object");
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", true);
+    int store = gc < 0 ? -1 : open_directory(gc, "tombstones", true);
+    int result = -1;
+    GKeyFile *record = g_key_file_new();
+    GKeyFile *captured = g_key_file_new();
+    char *captured_name = NULL, *hash = NULL;
+    struct stat before, after, path;
+    char *current = g_strdup_printf("%s.current", source), *manifest = NULL;
+    size_t size = 0;
+    if (store < 0 || flock(object_fd, LOCK_EX | LOCK_NB) ||
+        fstat(object_fd, &before) || !S_ISREG(before.st_mode) ||
+        before.st_uid != geteuid() || before.st_nlink != 1 ||
+        (before.st_mode & 0222) || before.st_size <= 0 ||
+        fstatat(directory, name, &path, AT_SYMLINK_NOFOLLOW) ||
+        !object_stat_equal(&before, &path)) goto out;
+    const char *header[] = {"count"};
+    const char *fields[] = {"name", "device", "inode", "size", "allocated", "sha256"};
+    gsize groups;
+    char **group_names;
+    if (!g_key_file_load_from_data(captured, evidence, -1, 0, NULL)) goto out;
+    group_names = g_key_file_get_groups(captured, &groups);
+    g_strfreev(group_names);
+    if (groups != 2 || g_key_file_get_integer(captured, "objects", "count", NULL) != 1 ||
+        !exact_keys(captured, "objects", header, G_N_ELEMENTS(header)) ||
+        !exact_keys(captured, "object0", fields, G_N_ELEMENTS(fields))) goto out;
+    captured_name = g_key_file_get_string(captured, "object0", "name", NULL);
+    hash = g_key_file_get_string(captured, "object0", "sha256", NULL);
+    if (g_strcmp0(captured_name, name) || !digest_valid(hash)) goto out;
+    uint64_t expected[] = {before.st_dev, before.st_ino, before.st_size,
+                          (uint64_t)before.st_blocks * 512};
+    for (size_t i = 0; i < G_N_ELEMENTS(expected); i++) {
+        char *value = g_key_file_get_string(captured, "object0", fields[i + 1], NULL);
+        errno = 0;
+        char *end = NULL;
+        uint64_t number = value ? g_ascii_strtoull(value, &end, 10) : 0;
+        bool valid = value && *value && strspn(value, "0123456789") == strlen(value) &&
+            !errno && end && !*end && number == expected[i];
+        g_free(value);
+        if (!valid) goto out;
+    }
+    int status = read_file(directory, current, MANIFEST_LIMIT, &manifest, &size);
+    if (status < 0) goto out;
+    if (!status) {
+        GHashTable *references = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+        bool safe = manifest_references(source, manifest, size, references) &&
+            !g_hash_table_contains(references, name);
+        g_hash_table_unref(references);
+        if (!safe) goto out;
+    }
+    if (fstat(object_fd, &after) || !object_stat_equal(&before, &after) ||
+        fstatat(directory, name, &path, AT_SYMLINK_NOFOLLOW) ||
+        !object_stat_equal(&before, &path)) goto out;
+    /* Never replace earlier intent: its identity is crash-recovery evidence. */
+    if (!fstatat(store, name, &path, AT_SYMLINK_NOFOLLOW) || errno != ENOENT) goto out;
+    g_key_file_set_integer(record, "tombstone", "version", 1);
+    g_key_file_set_string(record, "tombstone", "source", source);
+    g_key_file_set_string(record, "tombstone", "name", name);
+    g_key_file_set_string(record, "tombstone", "state", "DELETING");
+    g_key_file_set_uint64(record, "tombstone", "device", before.st_dev);
+    g_key_file_set_uint64(record, "tombstone", "inode", before.st_ino);
+    g_key_file_set_uint64(record, "tombstone", "size", before.st_size);
+    g_key_file_set_uint64(record, "tombstone", "allocated", (uint64_t)before.st_blocks * 512);
+    g_key_file_set_string(record, "tombstone", "sha256", hash);
+    result = write_record(store, name, record);
+out:
+    g_free(manifest);
+    g_free(current);
+    g_key_file_unref(record);
+    g_key_file_unref(captured);
+    g_free(captured_name);
+    g_free(hash);
+    if (store >= 0) close(store);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    return result ? fail(error, error_size, "cannot persist object deletion intent") : 0;
+}
+
 /* No pathname here is trusted until its source-bound basename is checked.
  * Content hashing is reserved for startup, outside daemon metadata locks. */
 static int verify_objects(int root, const char *source, const char *encoded,

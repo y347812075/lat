@@ -147,6 +147,13 @@ class PlannerTest(unittest.TestCase):
         plan = self.run_plan(False)
         self.assertTrue(any(e["reason"] == "missing_or_invalid_current_target" for e in plan["errors"]))
 
+    def test_tombstone_freezes_source(self):
+        self.put(".gc/tombstones/" + STEM + ".native", b"invalid intent")
+        plan = self.run_plan(False)
+        self.assertTrue(any(e["reason"] == "unrecovered_tombstone" for e in plan["errors"]))
+        rows = {row["path"]: row for row in plan["entries"]}
+        self.assertIn("invalid_source_manifest", rows[STEM + ".so"]["reasons"])
+
     def test_bad_manifests(self):
         variants = [b"{", b"[]", b"{\"version\":2,\"version\":2}"]
         for key, value in [("module", "../escape.so"), ("version", True),

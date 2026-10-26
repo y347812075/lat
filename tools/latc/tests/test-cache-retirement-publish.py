@@ -136,6 +136,20 @@ def run(prefix, guest, work):
                     env=run_env, stdout=log, stderr=log, timeout=30)
             assert result.returncode == 42
             assert "module=registered" in (directory / "runner.log").read_text()
+            # A persisted intent must block new loads even after the GC's EX
+            # lease is gone. Corrupt intent is equally conservative.
+            tombstones = cache / ".gc/tombstones"
+            tombstones.mkdir(mode=0o700)
+            marker = tombstones / json.loads((cache / (source + ".current")).read_bytes())["module"]
+            marker.write_bytes(b"deliberately invalid tombstone\n")
+            marker.chmod(0o400)
+            with (directory / "tombstone-runner.log").open("wb") as log:
+                blocked = subprocess.run([str(prefix / "bin/latx-x86_64"), str(guest)],
+                    env=run_env, stdout=log, stderr=log, timeout=30)
+            assert blocked.returncode != 42
+            assert "tombstoned" in (directory / "tombstone-runner.log").read_text()
+            marker.unlink()
+            tombstones.rmdir()
         if old_manifest:
             for role in ("module", "native", "tbset"):
                 assert (cache / json.loads(old_manifest)[role]).is_file()
