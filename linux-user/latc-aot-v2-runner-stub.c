@@ -128,6 +128,11 @@ int latc_aot_v2_fd_try_flock(int fd, int operation)
     return flock(fd, operation | LOCK_NB);
 }
 
+int latc_aot_v2_fd_fcntl(int fd, int command, int argument)
+{
+    return fcntl(fd, command, argument);
+}
+
 void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
 {
     (void)guest_pc;

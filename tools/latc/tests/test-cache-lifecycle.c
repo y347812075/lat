@@ -154,6 +154,7 @@ typedef struct DupAttempt {
     int ready;
     bool dup3;
     bool snapshot;
+    int command;
     int result;
     int error;
 } DupAttempt;
@@ -162,13 +163,18 @@ static void *attempt_dup(void *opaque)
 {
     DupAttempt *attempt = opaque;
     if (signal_byte(attempt->ready)) return (void *)1;
-    attempt->result = attempt->snapshot ? lat_aot_v2_internal_fd_snapshot_guest(attempt->source) :
-        lat_aot_v2_internal_fd_dup_replace(attempt->source, attempt->target, O_CLOEXEC, attempt->dup3);
+    if (attempt->command >= 0)
+        attempt->result = lat_aot_v2_internal_fd_fcntl(attempt->source, attempt->command, 0);
+    else if (attempt->snapshot)
+        attempt->result = lat_aot_v2_internal_fd_snapshot_guest(attempt->source);
+    else
+        attempt->result = lat_aot_v2_internal_fd_dup_replace(
+            attempt->source, attempt->target, O_CLOEXEC, attempt->dup3);
     attempt->error = errno;
     return NULL;
 }
 
-static int test_dup_registration(bool dup3, bool protect_source, bool snapshot)
+static int test_dup_registration(bool dup3, bool protect_source, bool snapshot, int command)
 {
     int source = open("/dev/null", O_RDONLY | O_CLOEXEC);
     int target = open("/dev/zero", O_RDONLY | O_CLOEXEC);
@@ -177,7 +183,8 @@ static int test_dup_registration(bool dup3, bool protect_source, bool snapshot)
     struct stat before, after;
     if (fstat(target, &before)) return -1;
     DupAttempt attempt = { .source = source, .target = target,
-                           .ready = ready[1], .dup3 = dup3, .snapshot = snapshot };
+                           .ready = ready[1], .dup3 = dup3, .snapshot = snapshot,
+                           .command = command };
     pthread_t worker;
     /* Simulate an internal allocator completing registration while a guest
      * replacement has started but cannot yet enter the shared lock. */
@@ -241,6 +248,28 @@ static int test_guest_snapshot(const char *root)
     if (lat_aot_v2_internal_fd_snapshot_guest(-1) != -1 || errno != EBADF) return -1;
     close(fd); close(contender);
     return unlink(path);
+}
+
+static int test_guest_fcntl(void)
+{
+    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (fd < 0 || lat_aot_v2_internal_fd_fcntl(fd, F_GETFD, 0) != FD_CLOEXEC ||
+        lat_aot_v2_internal_fd_fcntl(fd, F_SETFD, 0) ||
+        lat_aot_v2_internal_fd_fcntl(fd, F_GETFD, 0)) return -1;
+    const int commands[] = {F_DUPFD, F_DUPFD_CLOEXEC};
+    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+        int copy = lat_aot_v2_internal_fd_fcntl(fd, commands[i], 32);
+        if (copy < 32 || lat_aot_v2_internal_fd_is_protected(copy) ||
+            !!(fcntl(copy, F_GETFD) & FD_CLOEXEC) != (commands[i] == F_DUPFD_CLOEXEC))
+            return -1;
+        close(copy);
+        if (lat_aot_v2_internal_fd_fcntl(fd, commands[i], -1) != -1 || errno != EINVAL)
+            return -1;
+    }
+    if (lat_aot_v2_internal_fd_fcntl(-1, F_GETFD, 0) != -1 || errno != EBADF ||
+        lat_aot_v2_internal_fd_fcntl(fd, F_SETFL, 0) != -1 || errno != EINVAL) return -1;
+    close(fd);
+    return 0;
 }
 
 static void *hold_registry_lock(void *opaque)
@@ -426,15 +455,19 @@ int main(void)
     chmod(root, 0700);
     for (int dup3 = 0; dup3 < 2; dup3++)
         for (int source = 0; source < 2; source++)
-            if (test_dup_registration(dup3, source, false)) {
+            if (test_dup_registration(dup3, source, false, -1)) {
                 fprintf(stderr, "atomic dup registration failed dup3=%d source=%d\n", dup3, source);
                 return 1;
             }
-    if (test_dup_registration(false, true, true)) return 1;
+    if (test_dup_registration(false, true, true, -1)) return 1;
+    const int commands[] = {F_GETFD, F_SETFD, F_DUPFD, F_DUPFD_CLOEXEC};
+    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
+        if (test_dup_registration(false, true, false, commands[i])) return 1;
     int result = test_unsafe_layout(root) || test_source_latch(root) ||
         test_guest_fd_registry(root) || test_atfork_registry() ||
         test_fork_inheritance(root) || test_exec_closes_latch(root) ||
-        test_artifact_latch(root) || test_tombstones(root) || test_guest_snapshot(root);
+        test_artifact_latch(root) || test_tombstones(root) || test_guest_snapshot(root) ||
+        test_guest_fcntl();
     if (cleanup(root)) {
         fprintf(stderr, "cannot clean lifecycle test directory %s: %s\n",
                 root, strerror(errno));

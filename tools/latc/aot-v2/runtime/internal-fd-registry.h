@@ -30,4 +30,7 @@ int lat_aot_v2_internal_fd_snapshot_guest(int fd);
 /* Never blocks under the registry lock; caller handles EWOULDBLOCK separately. */
 int lat_aot_v2_internal_fd_try_flock(int fd, int operation);
 
+/* Only nonblocking descriptor flags/dup commands; record locks are excluded. */
+int lat_aot_v2_internal_fd_fcntl(int fd, int command, int argument);
+
 #endif

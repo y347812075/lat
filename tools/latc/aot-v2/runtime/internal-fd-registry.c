@@ -169,3 +169,20 @@ int lat_aot_v2_internal_fd_try_flock(int fd, int operation)
     errno = saved;
     return result;
 }
+
+int lat_aot_v2_internal_fd_fcntl(int fd, int command, int argument)
+{
+    if (command != F_GETFD && command != F_SETFD && command != F_DUPFD &&
+        command != F_DUPFD_CLOEXEC) {
+        errno = EINVAL;
+        return -1;
+    }
+    lat_aot_v2_internal_fd_lock();
+    int result;
+    if (fd_is_protected_locked(fd)) { errno = EACCES; result = -1; }
+    else result = fcntl(fd, command, argument);
+    int saved = errno;
+    lat_aot_v2_internal_fd_unlock();
+    errno = saved;
+    return result;
+}

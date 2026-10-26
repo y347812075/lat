@@ -366,6 +366,11 @@ int latc_aot_v2_fd_try_flock(int fd, int operation)
     return lat_aot_v2_internal_fd_try_flock(fd, operation);
 }
 
+int latc_aot_v2_fd_fcntl(int fd, int command, int argument)
+{
+    return lat_aot_v2_internal_fd_fcntl(fd, command, argument);
+}
+
 typedef struct LatAotV2KeyRetry {
     CPUState *cpu;
     target_ulong pc;

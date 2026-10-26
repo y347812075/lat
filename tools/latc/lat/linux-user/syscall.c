@@ -10517,6 +10517,18 @@ static abi_long do_fcntl(CPUArchState *env, int fd, int cmd, abi_ulong arg)
 #endif
 
     switch(cmd) {
+    case TARGET_F_GETFD:
+    case TARGET_F_SETFD:
+    case TARGET_F_DUPFD:
+#ifdef F_DUPFD_CLOEXEC
+    case TARGET_F_DUPFD_CLOEXEC:
+#endif
+        ret = get_errno(latc_aot_v2_fd_fcntl(fd, host_cmd, arg));
+        if (ret >= 0 && (cmd == TARGET_F_DUPFD || cmd == TARGET_F_DUPFD_CLOEXEC)) {
+            fd_trans_dup(fd, ret);
+        }
+        break;
+
     case TARGET_F_GETLK:
         ret = copy_from_user_flock(&fl64, arg);
         if (ret) {
@@ -16452,7 +16464,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
     case TARGET_NR_dup:
         ret = latc_aot_v2_fd_is_protected(arg1) ? -TARGET_EACCES :
-              get_errno(dup(arg1));
+              get_errno(latc_aot_v2_fd_fcntl(arg1, F_DUPFD, 0));
         if (ret >= 0) {
             fd_trans_dup(arg1, ret);
         }
