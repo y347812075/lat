@@ -164,6 +164,7 @@ typedef struct LatcdService {
     GHashTable *negative;
     GHashTable *source_states;
     GHashTable *static_barriers;
+    GHashTable *journal_receipts;
     pthread_t *workers;
     int stopping;
     uint64_t next_sequence;
@@ -3813,10 +3814,40 @@ static int service_queue_request(LatcdService *service, int source_fd,
     return 0;
 }
 
+static bool receipt_digest(int fd, char digest[65])
+{
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    struct stat st;
+    uint8_t buffer[65536];
+    off_t offset = 0;
+    bool ok = !fstat(fd, &st) && S_ISREG(st.st_mode);
+
+    while (ok && offset < st.st_size) {
+        ssize_t count = pread(fd, buffer,
+            MIN(sizeof(buffer), (size_t)(st.st_size - offset)), offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            ok = false;
+            break;
+        }
+        g_checksum_update(checksum, buffer, count);
+        offset += count;
+    }
+    if (ok) {
+        gsize size = 32;
+        uint8_t raw[32];
+        g_checksum_get_digest(checksum, raw, &size);
+        digest_hex(raw, digest);
+    }
+    g_checksum_free(checksum);
+    return ok;
+}
+
 static int journal_queue_receipts(const LatcdConfig *config,
                                   LatcdService *service,
                                   const uint8_t build[32],
                                   const uint8_t codegen[32],
+                                  bool skip_unchanged,
                                   LatcdResponseV2 *response)
 {
     char error[sizeof(response->message)] = {0};
@@ -3825,6 +3856,7 @@ static int journal_queue_receipts(const LatcdConfig *config,
     uint64_t accepted = 0;
     uint64_t published = 0;
     unsigned queued = 0;
+    unsigned skipped = 0;
     unsigned failures = 0;
     uint64_t request_id = response->request_id;
 
@@ -3867,6 +3899,19 @@ static int journal_queue_receipts(const LatcdConfig *config,
         int receipt = directory >= 0 ? openat(directory, "received.tbset",
             O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
         if (source >= 0 && receipt >= 0) {
+            char digest[65] = {0};
+            if (!receipt_digest(receipt, digest)) {
+                failures++;
+                snprintf(error, sizeof(error), "cannot hash journal receipt");
+            }
+            pthread_mutex_lock(&service->lock);
+            const char *previous = g_hash_table_lookup(
+                service->journal_receipts, name);
+            bool unchanged = previous && !strcmp(previous, digest);
+            pthread_mutex_unlock(&service->lock);
+            if (skip_unchanged && unchanged) {
+                skipped++;
+            } else if (!failures) {
             static _Atomic uint64_t request_sequence;
             LatcdRequestV2 request = {
                 .magic = LATCD_REQUEST_MAGIC,
@@ -3885,7 +3930,12 @@ static int journal_queue_receipts(const LatcdConfig *config,
                 failures++;
                 snprintf(error, sizeof(error), "%s", item.message);
             } else {
+                pthread_mutex_lock(&service->lock);
+                g_hash_table_insert(service->journal_receipts,
+                                    g_strdup(name), g_strdup(digest));
+                pthread_mutex_unlock(&service->lock);
                 queued++;
+            }
             }
         }
         if (source >= 0) close(source);
@@ -3909,8 +3959,8 @@ static int journal_queue_receipts(const LatcdConfig *config,
         return -1;
     }
     snprintf(response->message, sizeof(response->message),
-             "receipts=%u keys=%llu queued=%u", count,
-             (unsigned long long)received, queued);
+             "receipts=%u keys=%llu queued=%u skipped=%u", count,
+             (unsigned long long)received, queued, skipped);
     return 0;
 }
 
@@ -4378,6 +4428,8 @@ static int run_service(const LatcdConfig *config)
                                                g_free, g_free),
         .static_barriers = g_hash_table_new_full(g_str_hash, g_str_equal,
                                                 g_free, g_free),
+        .journal_receipts = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                   g_free, g_free),
         .workers = g_new0(pthread_t, config->workers),
         .stopping = 0,
         .next_sequence = 0,
@@ -4423,6 +4475,7 @@ static int run_service(const LatcdConfig *config)
         g_hash_table_destroy(service.negative);
         g_hash_table_destroy(service.source_states);
         g_hash_table_destroy(service.static_barriers);
+        g_hash_table_destroy(service.journal_receipts);
         return 1;
     }
     pthread_mutex_lock(&service.lock);
@@ -4432,7 +4485,7 @@ static int run_service(const LatcdConfig *config)
         LatcdResponseV2 recovered = {0};
         response_init(&recovered, 1);
         if (journal_queue_receipts(config, &service, journal_build,
-                                   journal_codegen, &recovered)) {
+                                   journal_codegen, true, &recovered)) {
             fprintf(stderr, "latcd: journal receipt admission failed: %s\n",
                     recovered.message);
             stop_requested = 1;
@@ -4459,6 +4512,8 @@ static int run_service(const LatcdConfig *config)
         stop_requested = 1;
     }
     int64_t last_activity = g_get_monotonic_time();
+    int64_t last_journal_admission = last_activity;
+    bool journal_admission_error = false;
     struct pollfd channels[LATCD_MAX_CHANNELS + 1] = {
         { .fd = server, .events = POLLIN },
     };
@@ -4471,6 +4526,24 @@ static int run_service(const LatcdConfig *config)
             continue;
         }
         if (available <= 0) {
+            int64_t now = g_get_monotonic_time();
+            if (!stop_requested &&
+                now - last_journal_admission >= G_USEC_PER_SEC) {
+                LatcdResponseV2 admitted = {0};
+                response_init(&admitted, 1);
+                bool failed = journal_queue_receipts(
+                    config, &service, journal_build, journal_codegen, true,
+                    &admitted);
+                if (failed && !journal_admission_error) {
+                    fprintf(stderr,
+                            "latcd: periodic journal admission failed: %s\n",
+                            admitted.message);
+                } else if (!failed && journal_admission_error) {
+                    fprintf(stderr, "latcd: periodic journal admission recovered\n");
+                }
+                journal_admission_error = failed;
+                last_journal_admission = now;
+            }
             pthread_mutex_lock(&service.lock);
             bool busy = channel_count > 1 || pending_flushes->len || service.queue->len ||
                 g_hash_table_size(service.running_sources);
@@ -4509,7 +4582,7 @@ static int run_service(const LatcdConfig *config)
                 append_journal(config, source, tbset, &request, &response);
             } else if (request.operation == LATCD_OP_COLLECT_JOURNALS) {
                 journal_queue_receipts(config, &service, journal_build,
-                                       journal_codegen, &response);
+                                       journal_codegen, false, &response);
             } else if (request.operation != LATCD_OP_SUBMIT_KEYS) {
                 response.status = LATCD_STATUS_BAD_REQUEST;
                 g_strlcpy(response.message,
@@ -4596,7 +4669,7 @@ static int run_service(const LatcdConfig *config)
         } else if (request.operation == LATCD_OP_COLLECT_JOURNALS) {
             response_init(&response, request.request_id);
             journal_queue_receipts(config, &service, journal_build,
-                                   journal_codegen, &response);
+                                   journal_codegen, false, &response);
         } else if (request.operation == LATCD_OP_PRECOMPILE_SOURCE) {
             LatcdPrecompileRequest *work = g_new0(
                 LatcdPrecompileRequest, 1);
@@ -4701,6 +4774,7 @@ static int run_service(const LatcdConfig *config)
     g_hash_table_destroy(service.negative);
     g_hash_table_destroy(service.source_states);
     g_hash_table_destroy(service.static_barriers);
+    g_hash_table_destroy(service.journal_receipts);
     g_free(worker_args);
     g_free(service.workers);
     pthread_cond_destroy(&service.ready);

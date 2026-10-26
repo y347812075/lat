@@ -27,7 +27,7 @@ from tb_key_set import read_key_set
 
 MODES = ('control', 'truncate', 'setfl', 'overwrite', 'dup', 'collision',
          'path-control', 'path', 'hardlink', 'symlink', 'scm-control', 'scm',
-         'restart')
+         'background', 'restart')
 
 
 def require(condition, message):
@@ -137,6 +137,27 @@ def receipt_keys(path, guest):
     return keys
 
 
+def wait_for_module(prefix, cache, source_digest, expected, work, evidence,
+                    daemon, name):
+    deadline = time.monotonic() + 120
+    modules = []
+    while not modules:
+        modules = list(cache.glob(source_digest.hex() + '-*.so'))
+        require(daemon.poll() is None and time.monotonic() < deadline,
+                f'{name} did not publish a module')
+        time.sleep(.1)
+    actual = work / f'{name}-module.tbset'
+    command = [str(prefix / 'bin/latc'), 'emit-module-tbset',
+               str(modules[0]), '-o', str(actual)]
+    evidence['commands'].append(command)
+    subprocess.run(command, check=True)
+    _, _, module_keys = read_key_set(actual)
+    missing = set(expected) - set(module_keys)
+    require(not missing,
+            f'{name} module missed receipt keys: {sorted(missing)}')
+    return str(modules[0])
+
+
 def guest_environment(prefix, work, root, endpoint):
     env = {key: os.environ[key] for key in ('PATH', 'LANG', 'LC_ALL', 'TZ')
            if key in os.environ}
@@ -159,7 +180,7 @@ def run_case(prefix, guests, root, mode):
         guest = guests / 'guest-hardlink'
     elif mode in ('scm-control', 'scm'):
         guest = guests / 'guest-scm'
-    elif mode == 'restart':
+    elif mode in ('background', 'restart'):
         guest = guests / 'guest-overwrite'
     else:
         guest = guests / ('guest-path' if mode in
@@ -188,6 +209,8 @@ def run_case(prefix, guests, root, mode):
                        '--runner', str(prefix / 'bin/latx-x86_64'), '--runtime-dir',
                        str(prefix / 'lib'), '--workers', '1', '--idle-seconds', '0',
                        '--flush-only']
+            if mode == 'background':
+                command.remove('--flush-only')
             evidence['commands'].append(command)
             daemon = subprocess.Popen(command, env=env, stdout=log, stderr=log)
             deadline = time.monotonic() + 10
@@ -314,6 +337,10 @@ def run_case(prefix, guests, root, mode):
                 require(exact(runner.stdout, 1) == b'T', 'target did not execute after operation')
             except (AssertionError, BrokenPipeError) as error:
                 failures.append(str(error))
+            if mode == 'background':
+                evidence['background_module'] = wait_for_module(
+                    prefix, cache, source_digest, expected, work, evidence,
+                    daemon, 'background')
             if runner.poll() is None:
                 runner.kill()
             producer_rc = runner.wait(timeout=10)
@@ -344,23 +371,9 @@ def run_case(prefix, guests, root, mode):
                     require(daemon.poll() is None and time.monotonic() < deadline,
                             'restarted daemon startup failed')
                     time.sleep(.01)
-                deadline = time.monotonic() + 120
-                modules = []
-                while not modules:
-                    modules = list(cache.glob(source_digest.hex() + '-*.so'))
-                    require(daemon.poll() is None and time.monotonic() < deadline,
-                            'restarted daemon did not publish a module')
-                    time.sleep(.1)
-                actual = work / 'restart-module.tbset'
-                command = [str(prefix / 'bin/latc'), 'emit-module-tbset',
-                           str(modules[0]), '-o', str(actual)]
-                evidence['commands'].append(command)
-                subprocess.run(command, check=True)
-                _, _, module_keys = read_key_set(actual)
-                missing = set(expected) - set(module_keys)
-                require(not missing,
-                        f'restarted module missed receipt keys: {sorted(missing)}')
-                evidence['restart_module'] = str(modules[0])
+                evidence['restart_module'] = wait_for_module(
+                    prefix, cache, source_digest, expected, work, evidence,
+                    daemon, 'restart')
             collector = collect(endpoint, work)
             evidence['collector'] = collector
             if collector['status'] != 0:
