@@ -202,6 +202,139 @@ int lat_native_tu_config_plan(const void *data, size_t size,
     return plan_tus(data, size, &seeds, *changed, result, error, error_size);
 }
 
+static int native_key_set(const LatNativeImageHeaderV2 *header,
+                          const LatNativeTbV1 *tbs, LatTbKeySet *set,
+                          char *error, size_t error_size)
+{
+    if (header->tb_count > LAT_AOT_V2_TBSET_RECORD_LIMIT) {
+        return fail(error, error_size, "native key set exceeds record limit");
+    }
+    memset(set, 0, sizeof(*set));
+    memcpy(set->source_sha256, header->guest_sha256, 32);
+    set->keys = header->tb_count ?
+        malloc(header->tb_count * sizeof(LatTbKey)) : NULL;
+    if (header->tb_count && !set->keys) {
+        return fail(error, error_size, "out of memory building native key set");
+    }
+    for (uint64_t i = 0; i < header->tb_count; i++) {
+        set->keys[set->count++] = (LatTbKey) {
+            .guest_rva = tbs[i].guest_pc - header->preferred_guest_base,
+            .flags = tbs[i].flags,
+        };
+    }
+    if (lat_tb_key_set_sort_unique(set, error, error_size)) {
+        lat_tb_key_set_destroy(set);
+        return -1;
+    }
+    return 0;
+}
+
+static int normalized_key_set(const LatTbKeySet *input,
+                              const uint8_t source_sha256[32],
+                              LatTbKeySet *result,
+                              char *error, size_t error_size)
+{
+    LatTbKeySet empty = {0};
+    if (input && (input->count > LAT_AOT_V2_TBSET_RECORD_LIMIT ||
+                  (input->count && !input->keys))) {
+        return fail(error, error_size, "invalid migration plan key set");
+    }
+    for (size_t i = 0; input && i < input->count; i++) {
+        if (input->keys[i].flags != 3 || input->keys[i].reserved) {
+            return fail(error, error_size,
+                        "migration plan requires RVA-compatible parallel keys");
+        }
+    }
+    memcpy(empty.source_sha256, source_sha256, 32);
+    return lat_tb_key_set_union(input ? input : &empty, &empty, result,
+                                error, error_size);
+}
+
+void lat_native_tu_migration_plan_destroy(LatNativeTuMigrationPlan *plan)
+{
+    if (!plan) return;
+    lat_tb_key_set_destroy(&plan->affected_keys);
+    lat_tb_key_set_destroy(&plan->retained_keys);
+    lat_tb_key_set_destroy(&plan->compile_required_keys);
+    lat_tb_key_set_destroy(&plan->deferred_static_keys);
+    memset(plan, 0, sizeof(*plan));
+}
+
+int lat_native_tu_migration_plan(const void *data, size_t size,
+    const void *target, size_t target_size,
+    const LatTbKeySet *runtime_required,
+    const LatTbKeySet *static_candidates,
+    LatNativeTuMigrationPlan *plan, char *error, size_t error_size)
+{
+    if (!plan || !data) {
+        return fail(error, error_size, "missing migration plan input");
+    }
+    lat_native_tu_migration_plan_destroy(plan);
+
+    int result = -1;
+    uint64_t changed = 0;
+    LatTbKeySet native = {0}, required = {0}, static_keys = {0};
+    LatTbKeySet missing_required = {0}, retained_or_required = {0};
+    if (lat_native_tu_config_plan(data, size, target, target_size,
+            &plan->affected_keys, &changed, error, error_size)) {
+        goto out;
+    }
+    const LatNativeImageHeaderV2 *header = data;
+    const LatNativeTbV1 *tbs = (const void *)((const uint8_t *)data +
+                                               header->tb_table_offset);
+    LatTranslationConfig old_config, target_config;
+    const uint8_t *old_bytes = (const uint8_t *)data + size -
+                               header->translation_config_size;
+    if (lat_translation_config_decode(old_bytes,
+            header->translation_config_size, NULL, &old_config,
+            error, error_size) ||
+        lat_translation_config_decode(target, target_size,
+            old_config.build_id, &target_config, error, error_size) ||
+        lat_translation_config_digest(&old_config, plan->old_config_sha256,
+            error, error_size) ||
+        lat_translation_config_digest(&target_config,
+            plan->target_config_sha256, error, error_size) ||
+        native_key_set(header, tbs, &native, error, error_size) ||
+        lat_tb_key_set_difference(&native, &plan->affected_keys,
+            &plan->retained_keys, error, error_size) ||
+        normalized_key_set(runtime_required, header->guest_sha256, &required,
+            error, error_size) ||
+        normalized_key_set(static_candidates, header->guest_sha256,
+            &static_keys, error, error_size) ||
+        lat_tb_key_set_difference(&required, &plan->retained_keys,
+            &missing_required, error, error_size) ||
+        lat_tb_key_set_union(&plan->affected_keys, &missing_required,
+            &plan->compile_required_keys, error, error_size) ||
+        lat_tb_key_set_union(&plan->retained_keys,
+            &plan->compile_required_keys, &retained_or_required,
+            error, error_size) ||
+        lat_tb_key_set_difference(&static_keys, &retained_or_required,
+            &plan->deferred_static_keys, error, error_size)) {
+        goto out;
+    }
+    plan->changed_fields = changed;
+    plan->configuration_contract_complete =
+        old_config.compatibility_complete && target_config.compatibility_complete;
+    plan->reuse_authorized = false;
+    plan->movement_certified = false;
+    if (!plan->affected_keys.count && !plan->compile_required_keys.count) {
+        plan->kind = LAT_NATIVE_TU_MIGRATION_NOOP;
+    } else if (plan->affected_keys.count == native.count) {
+        plan->kind = LAT_NATIVE_TU_MIGRATION_FULL;
+    } else {
+        plan->kind = LAT_NATIVE_TU_MIGRATION_PARTIAL;
+    }
+    result = 0;
+out:
+    lat_tb_key_set_destroy(&native);
+    lat_tb_key_set_destroy(&required);
+    lat_tb_key_set_destroy(&static_keys);
+    lat_tb_key_set_destroy(&missing_required);
+    lat_tb_key_set_destroy(&retained_or_required);
+    if (result) lat_native_tu_migration_plan_destroy(plan);
+    return result;
+}
+
 typedef struct ExtractRange {
     uint64_t old_offset, size, new_offset;
 } ExtractRange;

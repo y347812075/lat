@@ -1,6 +1,7 @@
 #ifndef LATC_NATIVE_TU_PLAN_H
 #define LATC_NATIVE_TU_PLAN_H
 
+#include <stdbool.h>
 #include "lat-tb-key-set.h"
 
 /* Metadata closure only, not a configuration compatibility decision. Includes
@@ -14,6 +15,41 @@ int lat_native_tu_plan(const void *data, size_t size, const LatTbKeySet *seeds,
 int lat_native_tu_config_plan(const void *data, size_t size,
     const void *target, size_t target_size, LatTbKeySet *result,
     uint64_t *changed, char *error, size_t error_size);
+
+typedef enum LatNativeTuMigrationKind {
+    LAT_NATIVE_TU_MIGRATION_NOOP = 0,
+    LAT_NATIVE_TU_MIGRATION_PARTIAL = 1,
+    LAT_NATIVE_TU_MIGRATION_FULL = 2,
+} LatNativeTuMigrationKind;
+
+/* Planning-only view of a possible v11 configuration migration. It separates
+ * old native coverage into affected/retained TUs and classifies mandatory
+ * runtime keys ahead of optional static candidates. It grants neither reuse
+ * nor movement authority and must not feed normal merge or publication. */
+/* Initialize the plan to zero before its first build. */
+typedef struct LatNativeTuMigrationPlan {
+    LatNativeTuMigrationKind kind;
+    uint64_t changed_fields;
+    uint8_t old_config_sha256[32];
+    uint8_t target_config_sha256[32];
+    LatTbKeySet affected_keys;
+    LatTbKeySet retained_keys;
+    LatTbKeySet compile_required_keys;
+    LatTbKeySet deferred_static_keys;
+    bool configuration_contract_complete;
+    bool reuse_authorized;
+    bool movement_certified;
+} LatNativeTuMigrationPlan;
+
+/* runtime_required contains new mandatory keys not already promised by the old
+ * native; old native keys are included automatically. static_candidates may be
+ * NULL and are deferred when already retained or mandatory. */
+int lat_native_tu_migration_plan(const void *data, size_t size,
+    const void *target, size_t target_size,
+    const LatTbKeySet *runtime_required,
+    const LatTbKeySet *static_candidates,
+    LatNativeTuMigrationPlan *plan, char *error, size_t error_size);
+void lat_native_tu_migration_plan_destroy(LatNativeTuMigrationPlan *plan);
 
 /* Compact the complement of the closed removal plan. Experimental replay images
  * only: the unchanged CONFIG_UNVERIFIED flag prohibits execution/publication.

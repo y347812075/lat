@@ -55,6 +55,77 @@ static void test_config_plan(const unsigned char *original, size_t size)
     const unsigned expected[] = {0x10, 0x20, 0x28, 0x30, 0x40};
     for (unsigned i = 0; i < 5; i++) assert(plan.keys[i].guest_rva == expected[i]);
     lat_tb_key_set_destroy(&plan);
+
+    LatTbKey runtime_key = {.guest_rva = 0x60, .flags = 3};
+    LatTbKey static_keys[] = {
+        {.guest_rva = 0x50, .flags = 3},
+        {.guest_rva = 0x60, .flags = 3},
+        {.guest_rva = 0x70, .flags = 3},
+    };
+    LatTbKeySet runtime = {.count = 1, .keys = &runtime_key};
+    LatTbKeySet static_candidates = {.count = 3, .keys = static_keys};
+    memcpy(runtime.source_sha256, h->guest_sha256, 32);
+    memcpy(static_candidates.source_sha256, h->guest_sha256, 32);
+    LatNativeTuMigrationPlan migration = {0};
+    assert(!lat_native_tu_migration_plan(data, size + h->translation_config_size,
+        bytes, length, &runtime, &static_candidates, &migration,
+        error, sizeof(error)));
+    assert(migration.kind == LAT_NATIVE_TU_MIGRATION_PARTIAL);
+    assert(migration.changed_fields == (UINT64_C(1) << LAT_CONFIG_CVT_OPT));
+    assert(migration.affected_keys.count == 5);
+    assert(migration.retained_keys.count == 1 &&
+           migration.retained_keys.keys[0].guest_rva == 0x50);
+    assert(migration.compile_required_keys.count == 6);
+    const unsigned required_expected[] =
+        {0x10, 0x20, 0x28, 0x30, 0x40, 0x60};
+    for (unsigned i = 0; i < 6; i++) {
+        assert(migration.compile_required_keys.keys[i].guest_rva ==
+               required_expected[i]);
+    }
+    assert(migration.deferred_static_keys.count == 1 &&
+           migration.deferred_static_keys.keys[0].guest_rva == 0x70);
+    assert(!migration.configuration_contract_complete);
+    assert(!migration.reuse_authorized && !migration.movement_certified);
+    lat_native_tu_migration_plan_destroy(&migration);
+
+    runtime.source_sha256[0] ^= 1;
+    assert(lat_native_tu_migration_plan(data, size + h->translation_config_size,
+        bytes, length, &runtime, &static_candidates, &migration,
+        error, sizeof(error)));
+    runtime.source_sha256[0] ^= 1;
+
+    GBytes *same = NULL;
+    assert(!lat_translation_config_encode(&old, &same, error, sizeof(error)));
+    gsize same_length;
+    const void *same_bytes = g_bytes_get_data(same, &same_length);
+    assert(!lat_native_tu_migration_plan(
+        data, size + h->translation_config_size, same_bytes, same_length,
+        NULL, NULL, &migration, error, sizeof(error)));
+    assert(migration.kind == LAT_NATIVE_TU_MIGRATION_NOOP);
+    assert(!migration.changed_fields);
+    assert(migration.affected_keys.count == 0 &&
+           migration.retained_keys.count == 6);
+    lat_native_tu_migration_plan_destroy(&migration);
+    g_bytes_unref(same);
+
+    static_candidates.source_sha256[0] ^= 1;
+    assert(lat_native_tu_migration_plan(data, size + h->translation_config_size,
+        bytes, length, &runtime, &static_candidates, &migration,
+        error, sizeof(error)));
+    static_candidates.source_sha256[0] ^= 1;
+
+    unsigned char all_data[8192];
+    memcpy(all_data, data, size + h->translation_config_size);
+    LatNativeTuV1 *all_tus = (void *)(all_data + h->tu_table_offset);
+    for (unsigned i = 0; i < h->tu_count; i++) {
+        all_tus[i].config_dependencies |= UINT64_C(1) << LAT_CONFIG_CVT_OPT;
+    }
+    assert(!lat_native_tu_migration_plan(
+        all_data, size + h->translation_config_size, bytes, length,
+        NULL, NULL, &migration, error, sizeof(error)));
+    assert(migration.kind == LAT_NATIVE_TU_MIGRATION_FULL);
+    assert(migration.affected_keys.count == 6 && !migration.retained_keys.count);
+    lat_native_tu_migration_plan_destroy(&migration);
     if (LAT_AOT_V2_TBSET_RECORD_LIMIT >= 6) {
         tus[4].config_dependency_version = 0;
         tus[4].config_dependencies = 0;
