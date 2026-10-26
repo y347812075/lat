@@ -315,6 +315,24 @@ static void check_directory_capability(const LatcdConfig *config, int source,
         for (unsigned i = 0; i < 16; i++)
             bound.epoch[i] = (g_ascii_xdigit_value(epoch[2 * i]) << 4) |
                              g_ascii_xdigit_value(epoch[2 * i + 1]);
+        uint64_t journal_id = 0;
+        for (unsigned i = 0; i < 8; i++)
+            journal_id |= (uint64_t)bound.epoch[i] << (8 * i);
+        g_assert_cmpint(latcd_client_append_journal(config->socket_path,
+            source, snapshot, identity->source_sha256,
+            journal_id ^ UINT64_C(1), 31, error, sizeof(error)), ==, -1);
+        g_assert_cmpint(latcd_client_append_journal(config->socket_path,
+            snapshot, snapshot, identity->source_sha256,
+            journal_id, 31, error, sizeof(error)), ==, -1);
+        g_assert_cmpint(latcd_client_append_journal(config->socket_path,
+            source, source, identity->source_sha256,
+            journal_id, 31, error, sizeof(error)), ==, -1);
+        result = mode ? latcd_client_channel_append_journal(channel, source,
+            snapshot, identity->source_sha256, journal_id, 32, error, sizeof(error)) :
+            latcd_client_append_journal(config->socket_path, source, snapshot,
+            identity->source_sha256, journal_id, 32, error, sizeof(error));
+        if (result) g_error("journal append mode=%u failed: %s", mode, error);
+        g_assert_cmpint(result, ==, 0);
         LatKeyJournal writer;
         g_assert_cmpint(lat_key_journal_open_at(stream, "keys", &bound, true,
             &writer, error, sizeof(error)), ==, 0);
@@ -352,7 +370,7 @@ static void check_directory_capability(const LatcdConfig *config, int source,
         g_assert_cmpint(rename(hidden, root), ==, 0);
         g_assert_cmpint(operation(config, -1, -1, 0, LATCD_OP_COLLECT_JOURNALS).status,
                        ==, LATCD_STATUS_OK);
-        check_receipt(stream, &bound, 2);
+        check_receipt(stream, &bound, 3);
         lat_key_journal_close(&writer);
         g_assert_cmpint(unlinkat(stream, "received.tbset", 0), ==, 0);
         close(stream);

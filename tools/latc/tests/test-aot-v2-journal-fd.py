@@ -3,8 +3,8 @@
 
 Build x86-journal-fd.S with -DATTACK=0..5 and x86-journal-exec.S into GUEST_DIR.
 Run with PREFIX GUEST_DIR NEW_WORKDIR (under ~/tmp). The opt-in regression
-requires the installed writer fd to remain private in the main guest table,
-across fork and exec, and never treats corruption as a pass.
+requires latcd to own every journal file, leaves no journal descriptor in any
+runner task across fork and exec, and never treats corruption as a pass.
 """
 
 import argparse
@@ -73,6 +73,13 @@ def descriptors_for_inode(table, stat):
         if snap and (snap['device'], snap['inode']) == (stat.st_dev, stat.st_ino):
             descriptors.append(int(path.name))
     return descriptors
+
+
+def unused_main_fd(table, start=128, limit=4096):
+    for fd in range(start, limit):
+        if not (table / str(fd)).exists():
+            return fd
+    raise AssertionError('no unused main-table fd available for attack disclosure')
 
 
 def inherited_runner_environment(pid):
@@ -147,7 +154,7 @@ def run_case(prefix, guests, root, mode):
     guest = guests / ('guest-' + mode)
     env = guest_environment(prefix, work, root, endpoint)
     evidence = {'mode': mode, 'environment': env, 'commands': [],
-                'scope': 'controlled host-fd disclosure; no natural discovery or sandbox claim',
+                'scope': 'real guest with controlled numeric fd; broker owns journal file',
                 'guest_sha256': digest(guest),
                 'installed_sha256': {name: digest(prefix / name) for name in
                     ('bin/latx-x86_64', 'bin/latc', 'bin/latcd',
@@ -197,19 +204,18 @@ def run_case(prefix, guests, root, mode):
                     'journal descriptor remained in the guest-visible main fd table')
             require(not main_directory_descriptors,
                     'journal directory remained in the guest-visible main fd table')
-            require(len(private) == 1,
-                    f'expected one private journal descriptor, got {private}')
-            owner_tid, fd = private[0]
-            require(not (main_table / str(fd)).exists(),
-                    'private journal fd number collides with a main-table descriptor')
+            require(not private,
+                    f'runner task held a journal descriptor: {private}')
+            fd = unused_main_fd(main_table)
             before = journal.read_bytes()
             require(len(before) >= 224, 'short initial journal')
             target = struct.unpack_from('<QQQQ', before, 192)
             require(target[0] == 3 and target[2:] == (3, 0), 'entry slot not committed')
-            evidence.update(journal_fd=fd, owner_tid=owner_tid,
+            evidence.update(attack_fd=fd,
                             main_journal_descriptors=main_descriptors,
                             main_journal_directory_descriptors=main_directory_descriptors,
-                            fd_before=fd_snapshot(Path(f'/proc/{runner.pid}/task/{owner_tid}/fd'), fd),
+                            private_journal_descriptors=private,
+                            fd_before=fd_snapshot(main_table, fd),
                             entry_record=target)
             (work / 'journal-before.gz').write_bytes(gzip.compress(before, mtime=0))
             runner.stdin.write(struct.pack('<i', fd))
@@ -217,8 +223,7 @@ def run_case(prefix, guests, root, mode):
             try:
                 result = struct.unpack('<q', exact(runner.stdout, 8))[0]
                 evidence['guest_result'] = result
-                evidence['fd_after'] = fd_snapshot(
-                    Path(f'/proc/{runner.pid}/task/{owner_tid}/fd'), fd)
+                evidence['fd_after'] = fd_snapshot(main_table, fd)
                 evidence['main_fd_after'] = fd_snapshot(main_table, fd)
                 if mode == 'dup' and result >= 0:
                     evidence['dup_fd'] = fd_snapshot(main_table, result)
@@ -358,11 +363,10 @@ def run_exec_case(prefix, guests, root):
             require(not before['main_file'], 'main table exposed journal file before exec')
             require(not before['main_directory'],
                     'main table exposed journal directory before exec')
-            require(len(before['private']) == 1,
-                    f'expected one private fd before exec, got {before["private"]}')
-            pre_tid, pre_fd = before['private'][0]
-            evidence.update(before_exec=before, pre_owner_tid=pre_tid,
-                            pre_journal_fd=pre_fd,
+            require(not before['private'],
+                    f'runner held a journal fd before exec: {before["private"]}')
+            pre_journal_name = journal.parent.name
+            evidence.update(before_exec=before, pre_journal=pre_journal_name,
                             pre_process_exe=process_executable_identity(runner.pid),
                             pre_process_environment=inherited_runner_environment(runner.pid))
             runner.stdin.write(b'x')
@@ -386,12 +390,12 @@ def run_exec_case(prefix, guests, root):
             private = [(name, task_fd)
                        for name, state in after_by_journal.items()
                        for task_fd in state['private']]
-            require(len(private) == 1,
-                    f'expected one private fd after exec, got {private}')
-            post_journal_name, (post_tid, post_fd) = private[0]
-            require(post_tid != pre_tid, 'exec retained the prior owner thread')
-            evidence.update(post_owner_tid=post_tid, post_journal_fd=post_fd,
-                            post_journal=post_journal_name)
+            require(not private,
+                    f'runner held a journal fd after exec: {private}')
+            post_journals = set(after_by_journal) - {pre_journal_name}
+            require(post_journals,
+                    'exec did not register a new journal epoch')
+            evidence['post_journals'] = sorted(post_journals)
             runner.stdin.write(b'z')
             runner.stdin.flush()
             producer_rc = runner.wait(timeout=30)

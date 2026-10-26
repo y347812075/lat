@@ -36,6 +36,9 @@ static int latcd_client_operation_timeout(uint32_t operation)
         operation == LATCD_OP_SUBMIT_STATIC_KEYS) {
         name = "LATX_AOT_V2_SUBMIT_TIMEOUT_MS";
         fallback = 5000;
+    } else if (operation == LATCD_OP_APPEND_JOURNAL) {
+        name = "LATX_AOT_V2_JOURNAL_TIMEOUT_MS";
+        fallback = 5000;
     } else if (operation == LATCD_OP_HELLO) {
         name = "LATX_AOT_V2_HELLO_TIMEOUT_MS";
         fallback = 3000;
@@ -341,6 +344,69 @@ int latcd_client_channel_register_journal_capability(int channel, int source, in
     }
     return register_journal(NULL, channel, source, config, digest, capacity, request_id,
                              epoch, directory_fd, error, error_size);
+}
+
+static int append_journal(const char *path, int channel, int source, int config,
+                          const uint8_t digest[32], uint64_t journal_id,
+                          uint64_t key_rva, char *error, size_t error_size)
+{
+    if (!digest || source < 0 || config < 0 || (!path && channel < 0)) {
+        errno = EINVAL;
+        return fail(error, error_size, "invalid journal append arguments");
+    }
+    int socket_fd, replies[2] = {-1, -1};
+    if (path) {
+        socket_fd = connect_daemon(path, error, error_size);
+        if (socket_fd < 0) return -1;
+    } else {
+        if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                       0, replies)) {
+            return fail(error, error_size, "cannot create journal reply: %s",
+                        strerror(errno));
+        }
+        socket_fd = replies[0];
+    }
+    LatcdRequestV2 request = {
+        .magic = LATCD_REQUEST_MAGIC, .version = LATCD_PROTOCOL_VERSION,
+        .size = sizeof(request), .operation = LATCD_OP_APPEND_JOURNAL,
+        .request_id = journal_id, .sequence = key_rva,
+    };
+    int result = path ? latcd_send_request(socket_fd, source, config, &request,
+                                            error, error_size) :
+        latcd_send_channel_request(channel, source, config, replies[1], &request,
+                                   error, error_size);
+    if (replies[1] >= 0) close(replies[1]);
+    LatcdResponseV2 response;
+    if (!result) {
+        result = receive_response(socket_fd, request.operation, journal_id,
+                                  NULL, NULL, &response, NULL, error, error_size);
+    }
+    if (!result && (memcmp(response.source_sha256, digest, 32) ||
+                    response.accepted_sequence || response.published_sequence)) {
+        errno = EPROTO;
+        result = fail(error, error_size,
+                      "invalid journal append identity or watermarks");
+    }
+    int saved = errno;
+    close(socket_fd);
+    errno = saved;
+    return result;
+}
+
+int latcd_client_append_journal(const char *path, int source, int config,
+    const uint8_t digest[32], uint64_t journal_id, uint64_t key_rva,
+    char *error, size_t error_size)
+{
+    return append_journal(path, -1, source, config, digest, journal_id, key_rva,
+                          error, error_size);
+}
+
+int latcd_client_channel_append_journal(int channel, int source, int config,
+    const uint8_t digest[32], uint64_t journal_id, uint64_t key_rva,
+    char *error, size_t error_size)
+{
+    return append_journal(NULL, channel, source, config, digest, journal_id,
+                          key_rva, error, error_size);
 }
 
 int latcd_client_hello(const char *socket_path, const char *build_id,

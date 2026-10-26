@@ -31,5 +31,12 @@ int latcd_journal_recover(const char *cache, const uint8_t build[32],
 int latcd_journal_collect(const char *cache, const uint8_t build[32],
     const uint8_t codegen[32], uint64_t max_bytes, unsigned *count,
     uint64_t *received_keys, char *error, size_t error_size);
+/* Append one executable key to the unique live epoch selected by journal_id.
+ * source_fd and sealed config_fd must match the persisted registration.
+ */
+int latcd_journal_append(const char *cache, uint64_t journal_id,
+    int source_fd, int config_fd, const uint8_t build[32],
+    const uint8_t codegen[32], const LatTbKey *key, uint8_t source_sha[32],
+    uint64_t *slot, char *error, size_t error_size);
 
 #endif

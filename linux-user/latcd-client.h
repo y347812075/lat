@@ -44,6 +44,12 @@ int latcd_client_channel_register_journal_capability(int channel_fd,
     int source_fd, int config_fd, const uint8_t source_sha256[32],
     uint64_t capacity, uint64_t request_id, char epoch[33], int *directory_fd,
     char *error, size_t error_size);
+int latcd_client_append_journal(const char *socket_path, int source_fd,
+    int config_fd, const uint8_t source_sha256[32], uint64_t journal_id,
+    uint64_t key_rva, char *error, size_t error_size);
+int latcd_client_channel_append_journal(int channel_fd, int source_fd,
+    int config_fd, const uint8_t source_sha256[32], uint64_t journal_id,
+    uint64_t key_rva, char *error, size_t error_size);
 
 int latcd_client_submit_keys_fd(const char *socket_path, int source_fd,
                                 int keys_fd, uint32_t priority,

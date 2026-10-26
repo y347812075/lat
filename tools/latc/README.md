@@ -188,24 +188,23 @@ make -C tools/latc test-aot-v2-journal-fd \
   WORK="$HOME/tmp/journal-fd-new-run"
 ```
 
-The test discloses the real internal journal fd to each guest through stdin;
-this is not a natural-discovery or hostile same-UID process claim. Attack
-operations must return `EBADF`, the guest must continue, and collection after
-SIGKILL must preserve both executed fixture keys. The collision case reuses the
-private numeric fd for a normal guest stdout alias. The exec case verifies that
-the old owner is gone, the new owner has a new TID and epoch journal, and the
-union of both receipts covers all executed phases. The Make target enters a
-private user/mount namespace and binds the installed runner over the binfmt
-interpreter so guest exec cannot silently select a system runner. Each case
-records product hashes, commands, fd state, before/after journals, raw collector
-replies and available receipts.
+latcd owns the journal file and the runner keeps no journal file or directory
+descriptor in any task, including fork children and post-exec runners. The test
+discloses an unused numeric fd and real guests must receive `EBADF` while still
+continuing to execute. The collision case reuses that number for a normal guest
+stdout alias. The exec case verifies a new epoch journal and that the union of
+both receipts covers all executed phases. The Make target enters a private
+user/mount namespace and binds the installed runner over the binfmt interpreter
+so guest exec cannot silently select a system runner. Each case records product
+hashes, commands, fd state, before/after journals, raw collector replies and
+available receipts. This does not yet protect a disclosed cache pathname.
 Corruption is reported as failure, never accepted as the expected test result.
 
 `test-aot-v2-journal-fork` runs the existing dynamic fork fixture with the
 journal enabled only for the final runner. It builds the hot module first,
 starts a private flush-only service, and verifies that both parent and child
-continue with AOT after the private writer owner has been discarded in the
-fork child. It requires `INSTALL_PREFIX`, `X86_ROOTFS`, `X86_GUEST`,
+continue with AOT through the daemon-owned writer broker. It requires
+`INSTALL_PREFIX`, `X86_ROOTFS`, `X86_GUEST`,
 `FIXTURE_DIR`, and `WORK`.
 
 `make -C tools/latc test-posix-lock-lifetime WORK="$HOME/tmp"` runs a native

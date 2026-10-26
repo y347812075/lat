@@ -4197,6 +4197,32 @@ static void register_journal(const LatcdConfig *config, int source, int config_f
                   sizeof(response->message));
 }
 
+static void append_journal(const LatcdConfig *config, int source, int config_fd,
+                           const LatcdRequestV2 *request,
+                           LatcdResponseV2 *response)
+{
+    response_init(response, request->request_id);
+    uint8_t build[32], codegen[32], source_sha[32];
+    char error[sizeof(response->message)] = {0};
+    LatTbKey key = { .guest_rva = request->sequence, .flags = 3 };
+    uint64_t slot = 0;
+
+    expected_codegen_id(codegen);
+    if (journal_build_id(build) ||
+        latcd_journal_append(config->cache_dir, request->request_id,
+            source, config_fd, build, codegen, &key, source_sha, &slot,
+            error, sizeof(error))) {
+        response->status = LATCD_STATUS_BAD_REQUEST;
+        g_strlcpy(response->message,
+                  error[0] ? error : "journal key append failed",
+                  sizeof(response->message));
+    } else {
+        memcpy(response->source_sha256, source_sha, 32);
+        g_strlcpy(response->message, "journal key committed",
+                  sizeof(response->message));
+    }
+}
+
 static int request_is_ready(int fd)
 {
     struct pollfd request = { .fd = fd, .events = POLLIN };
@@ -4368,9 +4394,12 @@ static int run_service(const LatcdConfig *config)
             if (request.operation == LATCD_OP_REGISTER_JOURNAL ||
                 request.operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY) {
                 register_journal(config, source, tbset, &request, &response, &directory);
+            } else if (request.operation == LATCD_OP_APPEND_JOURNAL) {
+                append_journal(config, source, tbset, &request, &response);
             } else if (request.operation != LATCD_OP_SUBMIT_KEYS) {
                 response.status = LATCD_STATUS_BAD_REQUEST;
-                g_strlcpy(response.message, "channel only accepts runtime keys or journal registration",
+                g_strlcpy(response.message,
+                          "channel only accepts runtime keys or journal operations",
                           sizeof(response.message));
             } else {
                 service_queue_request(&service, source, tbset,
@@ -4448,6 +4477,8 @@ static int run_service(const LatcdConfig *config)
         } else if (request.operation == LATCD_OP_REGISTER_JOURNAL ||
                    request.operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY) {
             register_journal(config, source, tbset, &request, &response, &directory);
+        } else if (request.operation == LATCD_OP_APPEND_JOURNAL) {
+            append_journal(config, source, tbset, &request, &response);
         } else if (request.operation == LATCD_OP_COLLECT_JOURNALS) {
             response_init(&response, request.request_id);
             uint64_t received;

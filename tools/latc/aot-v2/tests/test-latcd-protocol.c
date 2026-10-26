@@ -165,7 +165,7 @@ static int test_channel(int sender, int receiver, int source)
 {
     char error[256];
     for (unsigned operation = LATCD_OP_SUBMIT_KEYS;
-         operation <= LATCD_OP_REGISTER_JOURNAL_CAPABILITY; operation++) {
+         operation <= LATCD_OP_APPEND_JOURNAL; operation++) {
         LatcdRequestV2 sent = {
             .magic = LATCD_REQUEST_MAGIC,
             .version = LATCD_PROTOCOL_VERSION,
@@ -200,7 +200,8 @@ static int test_channel(int sender, int receiver, int source)
             int expected = operation == LATCD_OP_SUBMIT_KEYS ||
                            operation == LATCD_OP_SUBMIT_STATIC_KEYS ||
                            operation == LATCD_OP_REGISTER_JOURNAL ||
-                           operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY ? 2 :
+                           operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY ||
+                           operation == LATCD_OP_APPEND_JOURNAL ? 2 :
                            operation == LATCD_OP_FLUSH_SOURCE ||
                            operation == LATCD_OP_PRECOMPILE_SOURCE ? 1 : 0;
             if ((received_source >= 0) != (expected >= 1) ||

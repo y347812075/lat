@@ -33,6 +33,10 @@ enum LatcdOperation {
     LATCD_OP_COLLECT_JOURNALS = 9,
     /* Like REGISTER_JOURNAL, but success also returns one stream directory fd. */
     LATCD_OP_REGISTER_JOURNAL_CAPABILITY = 10,
+    /* source_fd + sealed config fd; request_id selects the 64-bit epoch prefix
+     * and sequence is the executable RVA. Daemon commits flags CODE64|PARALLEL.
+     */
+    LATCD_OP_APPEND_JOURNAL = 11,
 };
 
 enum LatcdStatus {

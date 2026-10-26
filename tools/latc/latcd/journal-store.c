@@ -371,6 +371,130 @@ int latcd_journal_collect(const char *cache, const uint8_t build[32],
     return result;
 }
 
+static int hex_digit(char value)
+{
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    return -1;
+}
+
+static bool journal_id_matches_name(uint64_t journal_id, const char *name)
+{
+    uint64_t value = 0;
+
+    if (!stream_name(name)) return false;
+    for (unsigned i = 0; i < 8; i++) {
+        int high = hex_digit(name[2 * i]);
+        int low = hex_digit(name[2 * i + 1]);
+        if (high < 0 || low < 0) return false;
+        value |= (uint64_t)((high << 4) | low) << (8 * i);
+    }
+    return value == journal_id;
+}
+
+int latcd_journal_append(const char *cache, uint64_t journal_id,
+    int source_fd, int config_fd, const uint8_t build[32],
+    const uint8_t codegen[32], const LatTbKey *key, uint8_t source_sha[32],
+    uint64_t *slot, char *error, size_t error_size)
+{
+    if (!cache || source_fd < 0 || config_fd < 0 || !build || !codegen ||
+        !key || !source_sha || key->flags != 3 || key->reserved) {
+        return fail(error, error_size, "invalid journal append arguments");
+    }
+    if (slot) *slot = 0;
+    int root = root_open(cache, false);
+    if (root < 0) return fail(error, error_size, "cannot open journal store");
+    int copy = openat(root, ".", O_DIRECTORY | O_RDONLY | O_CLOEXEC);
+    DIR *directory_list = copy >= 0 ? fdopendir(copy) : NULL;
+    if (!directory_list) {
+        if (copy >= 0) close(copy);
+        close(root);
+        return fail(error, error_size, "cannot scan journal store");
+    }
+    bool found = false;
+    int result = -1;
+    char stream[33] = {0};
+    Registration selected = {0};
+    struct dirent *entry;
+    while ((entry = readdir(directory_list))) {
+        if (!journal_id_matches_name(journal_id, entry->d_name)) continue;
+        if (found) {
+            fail(error, error_size, "ambiguous journal epoch");
+            goto out;
+        }
+        int directory = directory_at(root, entry->d_name, false);
+        struct stat st;
+        int registration = directory >= 0 ?
+            readonly_file(directory, "registration", sizeof(Registration), true,
+                          &st) : -1;
+        bool valid = registration >= 0 && st.st_size == sizeof(selected) &&
+            read_exact(registration, &selected, sizeof(selected));
+        if (registration >= 0) close(registration);
+        if (directory >= 0) close(directory);
+        valid = valid && !memcmp(selected.magic, "LATJREG1", 8) &&
+            !memcmp(selected.identity.epoch, &journal_id, sizeof(journal_id)) &&
+            !memcmp(selected.identity.build_sha256, build, 32) &&
+            !memcmp(selected.identity.codegen_sha256, codegen, 32);
+        if (!valid) {
+            fail(error, error_size, "invalid journal registration for epoch");
+            goto out;
+        }
+        memcpy(stream, entry->d_name, 33);
+        found = true;
+    }
+    if (!found) {
+        fail(error, error_size, "journal epoch not found");
+        goto out;
+    }
+    uint8_t digest[32];
+    if (!hash_fd(source_fd, digest) ||
+        memcmp(digest, selected.identity.source_sha256, 32)) {
+        fail(error, error_size, "journal source identity mismatch");
+        goto out;
+    }
+    memcpy(source_sha, digest, 32);
+    uint8_t config[LATCD_JOURNAL_CONFIG_LIMIT];
+    struct stat config_stat;
+    int seals = fcntl(config_fd, F_GET_SEALS);
+    if (seals < 0 ||
+        (seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK)) !=
+        (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK) ||
+        fstat(config_fd, &config_stat) || config_stat.st_size <= 0 ||
+        (uint64_t)config_stat.st_size > sizeof(config) ||
+        !read_exact(config_fd, config, config_stat.st_size)) {
+        fail(error, error_size, "journal configuration is invalid or unsealed");
+        goto out;
+    }
+    LatTranslationConfig decoded;
+    if (lat_translation_config_decode(config, config_stat.st_size, build,
+                                      &decoded, error, error_size) ||
+        lat_translation_config_digest(&decoded, digest, error, error_size)) {
+        goto out;
+    }
+    if (memcmp(digest, selected.identity.config_sha256, 32)) {
+        fail(error, error_size, "journal configuration identity mismatch");
+        goto out;
+    }
+    int directory = directory_at(root, stream, false);
+    LatKeyJournal journal;
+    if (directory < 0) {
+        fail(error, error_size, "cannot open journal epoch directory");
+        goto out;
+    }
+    if (lat_key_journal_open_at(directory, "keys", &selected.identity, true,
+                                &journal, error, error_size)) {
+        close(directory);
+        goto out;
+    }
+    result = lat_key_journal_append(&journal, key, slot, error, error_size);
+    lat_key_journal_close(&journal);
+    close(directory);
+out:
+    closedir(directory_list);
+    close(root);
+    return result;
+}
+
 static int register_stream(const char *cache, const char *snapshot,
     const uint8_t source_sha[32], const uint8_t build[32], const uint8_t codegen[32],
     int config_fd, uint64_t capacity, uint64_t max_bytes,
