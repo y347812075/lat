@@ -1105,6 +1105,21 @@ static void test_explicit_holds(void)
     remove_root(root); g_free(root);
 }
 
+static void test_due_without_retirement(void)
+{
+    char *root = root_new(), error[256];
+    char *name = g_strconcat(source, ".native", NULL), *path = g_build_filename(root, name, NULL);
+    put(path, "no retirement evidence\n");
+    const char *capture[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, capture, 1);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(fd >= 0 && evidence && !latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+    close(fd);
+    assert(latcd_tombstone_delete_due(root, name, 0, error, sizeof(error)));
+    assert(!access(path, F_OK));
+    g_free(evidence); g_free(path); g_free(name); remove_root(root); g_free(root);
+}
+
 static void test_transaction_root_admission(unsigned mutation, bool executor)
 {
     char *root = root_new(), error[256], *transaction = NULL;
@@ -1151,14 +1166,34 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         g_key_file_remove_key(record, "transaction", "objects", NULL);
     }
     if (mutation == 9) g_key_file_set_string(record, "transaction", "unexpected", "value");
+    if (mutation == 10) g_key_file_set_string(record, "transaction", "retired_boot", "12345678-1234-4234-8234-123456789abc");
+    if (mutation == 11) g_key_file_set_uint64(record, "transaction", "retired_boottime_us", UINT64_MAX);
+    if (mutation == 12) g_key_file_remove_key(record, "transaction", "retired_boot", NULL);
+    if (mutation == 13) g_key_file_set_string(record, "transaction", "retired_boottime_us", "-1");
+    if (mutation == 14) g_key_file_set_string(record, "transaction", "retired_boottime_us", "18446744073709551616");
     char *raw = g_key_file_to_data(record, NULL, NULL);
     put(record_path, raw);
     fd = open(paths[0], O_RDONLY | O_CLOEXEC);
     assert(fd >= 0);
-    int result = executor ? latcd_tombstone_delete(root, names[0], error, sizeof(error)) :
+    if (!mutation && executor) {
+        assert(latcd_tombstone_delete_due(root, names[0], UINT64_MAX, error, sizeof(error)));
+        assert(!access(paths[0], F_OK));
+        /* An arithmetic overflow is unknown, not an elapsed deadline. */
+        char *marker = g_build_filename(root, ".gc", "tombstones", names[0], NULL);
+        assert(!unlink(marker));
+        assert(!latcd_retirement_tombstone(root, source, names[0], fd, single, error, sizeof(error)));
+        g_free(marker);
+        close(fd);
+        fd = open(paths[0], O_RDONLY | O_CLOEXEC);
+        assert(fd >= 0);
+        assert(latcd_tombstone_delete_due(root, names[0], 3600 * UINT64_C(1000000), error, sizeof(error)));
+        assert(!access(paths[0], F_OK));
+    }
+    int result = executor ? latcd_tombstone_delete_due(root, names[0], 0, error, sizeof(error)) :
         latcd_retirement_tombstone(root, source, names[0], fd, single, error, sizeof(error));
     close(fd);
-    assert((result == 0) == (mutation == 0));
+    bool accepted = !mutation || (!executor && mutation >= 10);
+    assert((result == 0) == accepted);
     if (!mutation && !executor) assert(!latcd_tombstone_delete(root, names[0], error, sizeof(error)));
     assert((access(paths[0], F_OK) == 0) == (mutation != 0));
     g_free(raw); g_key_file_unref(record); g_free(record_path); g_free(evidence);
@@ -1295,7 +1330,8 @@ static void test_hold_crash(bool release, const char *point)
 int main(void)
 {
     test_explicit_holds();
-    for (unsigned mutation = 0; mutation < 10; mutation++) {
+    test_due_without_retirement();
+    for (unsigned mutation = 0; mutation < 15; mutation++) {
         test_transaction_root_admission(mutation, false);
         test_transaction_root_admission(mutation, true);
     }

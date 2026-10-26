@@ -793,15 +793,30 @@ static int object_task_status(int root, const char *name, const struct stat *obj
     return result;
 }
 
-static int object_transaction_status(int root, const char *name, const struct stat *object)
+static int object_transaction_status(int root, const char *name, const struct stat *object,
+                                      const uint64_t *grace_us)
 {
     int store = open_store(root, false);
-    if (store < 0) return errno == ENOENT ? 0 : -1;
+    if (store < 0) return errno == ENOENT && !grace_us ? 0 : -1;
     DIR *directory = fdopendir(store);
     if (!directory) { close(store); return -1; }
     int result = 0;
     unsigned visited = 0;
     int64_t started = g_get_monotonic_time();
+    char *boot = NULL;
+    struct timespec now;
+    uint64_t now_us = 0, latest_deadline = 0;
+    bool retirement_observed = false;
+    if (grace_us) {
+        if (clock_gettime(CLOCK_BOOTTIME, &now) || now.tv_sec < 0 ||
+            (uint64_t)now.tv_sec > UINT64_MAX / 1000000 ||
+            !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL)) result = -1;
+        if (!result) {
+            g_strchomp(boot);
+            if (!hold_id_valid(boot)) result = -1;
+            now_us = (uint64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+        }
+    }
     while (!result) {
         errno = 0;
         struct dirent *entry = readdir(directory);
@@ -868,11 +883,32 @@ static int object_transaction_status(int root, const char *name, const struct st
             }
             g_key_file_unref(evidence);
         }
+        if (valid && referenced && retired && grace_us) {
+            GHashTable *old_refs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+            GHashTable *next_refs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+            valid = bound && record_string_is(record, "transaction", "binding_status", "COMPLETE") &&
+                record_string_is(record, "transaction", "objects_status", "RECORDED") &&
+                (!previous_size || manifest_references(source, (char *)previous, previous_size, old_refs)) &&
+                manifest_references(source, (char *)next, next_size, next_refs);
+            if (valid && g_hash_table_contains(old_refs, name) && !g_hash_table_contains(next_refs, name)) {
+                uint64_t stamp;
+                valid = record_string_is(record, "transaction", "retired_boot", boot) &&
+                    record_uint64(record, "transaction", "retired_boottime_us", &stamp) &&
+                    stamp <= now_us && *grace_us <= UINT64_MAX - stamp;
+                if (valid) {
+                    retirement_observed = true;
+                    latest_deadline = MAX(latest_deadline, stamp + *grace_us);
+                }
+            }
+            g_hash_table_unref(old_refs); g_hash_table_unref(next_refs);
+        }
         result = !valid ? -1 : referenced && !retired ? 1 : 0;
         g_hash_table_unref(refs); g_free(canonical); g_free(objects); g_free(next); g_free(previous);
         g_free(state); g_free(objects64); g_free(next64); g_free(previous64); g_free(source);
         g_key_file_unref(record); g_free(raw);
     }
+    if (!result && grace_us && (!retirement_observed || latest_deadline > now_us)) result = 1;
+    g_free(boot);
     closedir(directory);
     return result;
 }
@@ -1001,7 +1037,7 @@ int latcd_retirement_tombstone(const char *root, const char *source,
         if (!safe) goto out;
     }
     if (object_hold_status(directory, name, &before) || object_task_status(directory, name, &before) ||
-        object_transaction_status(directory, name, &before) ||
+        object_transaction_status(directory, name, &before, NULL) ||
         fstat(object_fd, &after) || !object_stat_equal(&before, &after) ||
         fstatat(directory, name, &path, AT_SYMLINK_NOFOLLOW) ||
         !object_stat_equal(&before, &path)) goto out;
@@ -1356,7 +1392,8 @@ static bool tombstone_shape(GKeyFile *record, const char *name,
 }
 
 static int recover_tombstone(const char *root_path, int root, int store,
-                              const char *name, bool remove_object, LatcdRecoveryCursor *cursor)
+                              const char *name, bool remove_object, LatcdRecoveryCursor *cursor,
+                              const uint64_t *grace_us)
 {
     char *raw = NULL, *source = NULL, *hash = NULL;
     size_t size;
@@ -1438,7 +1475,7 @@ static int recover_tombstone(const char *root_path, int root, int store,
     if (remove_object && !strcmp(observation, "MATCHED")) {
         int held = object_hold_status(root, name, &after);
         if (!held) held = object_task_status(root, name, &after);
-        if (!held) held = object_transaction_status(root, name, &after);
+        if (!held) held = object_transaction_status(root, name, &after, grace_us);
         if (held) observation = held < 0 ? "UNKNOWN" : "BUSY";
     }
     if (remove_object && (!strcmp(observation, "MATCHED") || !strcmp(observation, "MISSING"))) {
@@ -1486,8 +1523,8 @@ int latcd_tombstone_recover(const char *root, unsigned *recovered,
     return result;
 }
 
-int latcd_tombstone_delete(const char *root, const char *name,
-                            char *error, size_t error_size)
+static int tombstone_delete(const char *root, const char *name, const uint64_t *grace_us,
+                             char *error, size_t error_size)
 {
     if (!name || strlen(name) < 64 || strchr(name, '/'))
         return fail(error, error_size, "invalid deletion object name");
@@ -1498,11 +1535,22 @@ int latcd_tombstone_delete(const char *root, const char *name,
     int directory = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
     int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
-    int result = store < 0 ? -1 : recover_tombstone(root, directory, store, name, true, NULL);
+    int result = store < 0 ? -1 : recover_tombstone(root, directory, store, name, true, NULL, grace_us);
     if (store >= 0) close(store);
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
     return result ? fail(error, error_size, "object deletion deferred or rejected") : 0;
+}
+
+int latcd_tombstone_delete(const char *root, const char *name, char *error, size_t error_size)
+{
+    return tombstone_delete(root, name, NULL, error, error_size);
+}
+
+int latcd_tombstone_delete_due(const char *root, const char *name, uint64_t grace_us,
+                               char *error, size_t error_size)
+{
+    return tombstone_delete(root, name, &grace_us, error, error_size);
 }
 
 static void recovery_object_free(gpointer pointer)
@@ -1664,7 +1712,7 @@ int latcd_recovery_step(LatcdRecoveryCursor *cursor, unsigned entries,
         if (fstatat(dirfd(cursor->directory), cursor->pending, &record, AT_SYMLINK_NOFOLLOW) ||
             !object_stat_equal(&record, &cursor->pending_identity)) goto invalid;
         int result = cursor->tombstones ? recover_tombstone(cursor->root_path, cursor->root,
-            dirfd(cursor->directory), cursor->pending, false, cursor) :
+            dirfd(cursor->directory), cursor->pending, false, cursor, NULL) :
             recover_record(cursor->root, dirfd(cursor->directory), cursor->pending, true, cursor);
         if (result < 0) goto invalid;
         if (result > 0) break;

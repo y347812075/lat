@@ -75,4 +75,10 @@ int latcd_tombstone_recover(const char *root, unsigned *recovered,
 int latcd_tombstone_delete(const char *root, const char *name,
                             char *error, size_t error_size);
 
+/* Preferred executor entry: in addition to the same external domain/owner
+ * contract, recheck fully bound retirement and BOOTTIME grace under source EX.
+ * No retirement, reboot mismatch, future stamp or overflow rejects removal. */
+int latcd_tombstone_delete_due(const char *root, const char *name, uint64_t grace_us,
+                               char *error, size_t error_size);
+
 #endif
