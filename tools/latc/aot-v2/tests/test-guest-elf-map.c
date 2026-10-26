@@ -43,6 +43,93 @@ static int executable_mapping(int fd, uint64_t bias, uint64_t *start,
     return -1;
 }
 
+static int test_exact_exec_ranges(void)
+{
+    char path[PATH_MAX];
+    const char *temporary = getenv("TMPDIR");
+    if (temporary) {
+        snprintf(path, sizeof(path), "%s/latc-exact-exec-XXXXXX", temporary);
+    } else {
+        snprintf(path, sizeof(path), "%s/tmp/latc-exact-exec-XXXXXX", getenv("HOME"));
+    }
+    int fd = mkstemp(path);
+    if (fd < 0) return -1;
+    unlink(path);
+    Elf64_Ehdr elf = {
+        .e_ident = { ELFMAG0, ELFMAG1, ELFMAG2, ELFMAG3,
+                     ELFCLASS64, ELFDATA2LSB, EV_CURRENT },
+        .e_type = ET_EXEC, .e_machine = EM_X86_64, .e_version = EV_CURRENT,
+        .e_ehsize = sizeof(Elf64_Ehdr), .e_phoff = sizeof(Elf64_Ehdr),
+        .e_phentsize = sizeof(Elf64_Phdr), .e_phnum = 3,
+    };
+    Elf64_Phdr phdrs[] = {
+        { .p_type = PT_LOAD, .p_flags = PF_R, .p_offset = 0,
+          .p_vaddr = 0x400000, .p_filesz = 0x1000, .p_memsz = 0x1000 },
+        { .p_type = PT_LOAD, .p_flags = PF_R | PF_X, .p_offset = 0x1123,
+          .p_vaddr = 0x401123, .p_filesz = 0x42, .p_memsz = 0x58 },
+        { .p_type = PT_LOAD, .p_flags = PF_R | PF_X, .p_offset = 0x2234,
+          .p_vaddr = 0x402234, .p_filesz = 0x31, .p_memsz = 0x31 },
+    };
+    int result = -1;
+    if (ftruncate(fd, 0x3000) || pwrite(fd, &elf, sizeof(elf), 0) != sizeof(elf) ||
+        pwrite(fd, phdrs, sizeof(phdrs), elf.e_phoff) != sizeof(phdrs)) goto out;
+    static const uint64_t biases[] = { 0, UINT64_C(0x555500000000) };
+    for (unsigned b = 0; b < sizeof(biases) / sizeof(biases[0]); b++) {
+        LatGuestElfInfoV2 info;
+        char error[256];
+        uint64_t bias = biases[b];
+        if (lat_guest_elf_inspect_mapping_v2(fd, bias + 0x401000, 0x1000,
+                0x1000, 0x1000, &info, error, sizeof(error)) ||
+            info.exec_range_count != 2 || info.preferred_base != 0x400000 ||
+            info.exec_ranges[0].begin != bias + 0x401000 ||
+            info.exec_ranges[0].end != bias + 0x402000 ||
+            info.exec_ranges[1].begin != bias + 0x402000 ||
+            info.exec_ranges[1].end != bias + 0x403000 ||
+            info.exact_exec_ranges[0].begin != bias + 0x401123 ||
+            info.exact_exec_ranges[0].end != bias + 0x40117b ||
+            info.exact_exec_ranges[1].begin != bias + 0x402234 ||
+            info.exact_exec_ranges[1].end != bias + 0x402265) goto out;
+        static const struct { uint64_t pc; int admitted; } cases[] = {
+            { 0x400000, 0 }, { 0x401000, 0 }, { 0x401122, 0 },
+            { 0x401123, 1 }, { 0x401164, 1 }, { 0x40117a, 1 },
+            { 0x40117b, 0 }, { 0x401fff, 0 }, { 0x402000, 0 },
+            { 0x402233, 0 }, { 0x402234, 1 }, { 0x402264, 1 },
+            { 0x402265, 0 }, { 0x402fff, 0 },
+        };
+        for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+            uint64_t pc = bias + cases[c].pc;
+            int admitted = 0;
+            for (unsigned i = 0; i < info.exec_range_count; i++) {
+                admitted |= pc >= info.exact_exec_ranges[i].begin &&
+                            pc < info.exact_exec_ranges[i].end;
+            }
+            if (admitted != cases[c].admitted) goto out;
+        }
+        LatGuestElfTrackerV2 *tracker = lat_guest_elf_tracker_new_v2();
+        const LatGuestElfInfoV2 *tracked;
+        int added;
+        if (!tracker) goto out;
+        int failed = lat_guest_elf_tracker_note_v2(tracker, fd, bias + 0x401000,
+                0x1000, 0x1000, 0x1000, &tracked, &added, error, sizeof(error)) ||
+            !added || lat_guest_elf_tracker_remove_range_v2(
+                tracker, bias + 0x401fff, 1) != 1;
+        lat_guest_elf_tracker_free_v2(tracker);
+        if (failed) goto out;
+    }
+    LatGuestElfInfoV2 info;
+    char error[256];
+    if (!lat_guest_elf_inspect_mapping_v2(fd, UINT64_MAX - 0x1000, 0x1000,
+            0x1000, 0x1000, &info, error, sizeof(error))) goto out;
+    phdrs[2].p_vaddr = UINT64_MAX - 0x40;
+    if (pwrite(fd, phdrs, sizeof(phdrs), elf.e_phoff) != sizeof(phdrs) ||
+        !lat_guest_elf_inspect_mapping_v2(fd, 0x401000, 0x1000,
+            0x1000, 0x1000, &info, error, sizeof(error))) goto out;
+    result = 0;
+out:
+    close(fd);
+    return result;
+}
+
 static int inspect_once(int fd, uint8_t digest[32])
 {
     LatGuestElfTrackerV2 *tracker = lat_guest_elf_tracker_new_v2();
@@ -263,6 +350,10 @@ int main(int argc, char **argv)
     if (argc != 4) {
         fprintf(stderr, "usage: %s MAIN INTERPRETER DSO\n", argv[0]);
         return 2;
+    }
+    if (test_exact_exec_ranges()) {
+        fprintf(stderr, "exact executable ELF range validation failed\n");
+        return 1;
     }
     if (test_identity_cache(argv[1])) {
         fprintf(stderr, "AOT v2 identity cache validation failed\n");

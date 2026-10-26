@@ -1,0 +1,35 @@
+#ifndef LATCD_JOURNAL_STORE_H
+#define LATCD_JOURNAL_STORE_H
+
+#include "lat-key-journal.h"
+
+#define LATCD_JOURNAL_MAX_STREAMS 128u
+#define LATCD_JOURNAL_CONFIG_LIMIT 4096u
+
+/* snapshot is a daemon-owned verified copy, never the producer's original.
+ * Functions perform I/O; callers must not hold translation/service/cache locks.
+ * Registration/recovery do not accept keys or authorize config compatibility.
+ */
+int latcd_journal_register(const char *cache, const char *snapshot,
+    const uint8_t source_sha[32], const uint8_t build[32], const uint8_t codegen[32],
+    int config_fd, uint64_t capacity, uint64_t max_bytes,
+    char stream[33], char *error, size_t error_size);
+/* Returns ownership of a CLOEXEC stream directory, not the cache/root directory.
+ * Fork children close inherited writers and open a fresh OFD via this directory.
+ */
+int latcd_journal_register_capability(const char *cache, const char *snapshot,
+    const uint8_t source_sha[32], const uint8_t build[32], const uint8_t codegen[32],
+    int config_fd, uint64_t capacity, uint64_t max_bytes,
+    char stream[33], int *directory_fd, char *error, size_t error_size);
+int latcd_journal_recover(const char *cache, const uint8_t build[32],
+    const uint8_t codegen[32], uint64_t max_bytes, unsigned *count,
+    char *error, size_t error_size);
+/* Copy committed records into per-stream received.tbset, atomically preserving
+ * prior received keys. This is quarantined receipt, NOT compile admission or a
+ * protocol accepted/published sequence. Sources and executable RVAs are checked.
+ */
+int latcd_journal_collect(const char *cache, const uint8_t build[32],
+    const uint8_t codegen[32], uint64_t max_bytes, unsigned *count,
+    uint64_t *received_keys, char *error, size_t error_size);
+
+#endif

@@ -12,6 +12,7 @@
 void li_d(IR2_OPND opnd2, int64_t value);
 void li_w(IR2_OPND opnd2, uint32_t lo32);
 void li_wu(IR2_OPND opnd2, uint32_t lo32);
+void li_numeric_wu(IR2_OPND opnd2, uint32_t lo32);
 
 #define li_host_addr(opnd2, value)   li_d(opnd2, (ADDR)value)
 #ifdef TARGET_X86_64

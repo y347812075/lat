@@ -1,6 +1,7 @@
 #include "lat-fallback.h"
 #include "lat-native-image.h"
 #include "native-image.h"
+#include "lat-translation-config.h"
 
 #include <elf.h>
 #include <stddef.h>
@@ -11,15 +12,15 @@ _Static_assert(sizeof(LatX86StateV1) == 560,
                "LatX86StateV1 ABI size changed");
 _Static_assert(offsetof(LatX86StateV1, xmm) == 300,
                "LatX86StateV1 XMM offset changed");
-_Static_assert(sizeof(LatNativeImageHeaderV2) == 240,
+_Static_assert(sizeof(LatNativeImageHeaderV2) == 280,
                "native image header size changed");
 _Static_assert(sizeof(LatNativeTbV1) == 56,
                "native TB record size changed");
-_Static_assert(sizeof(LatNativeRelocationV1) == 40,
+_Static_assert(sizeof(LatNativeRelocationV1) == 64,
                "native relocation record size changed");
 _Static_assert(sizeof(LatNativePcMapV2) == 32,
                "native PC map record size changed");
-_Static_assert(sizeof(LatNativeTuV1) == 32,
+_Static_assert(sizeof(LatNativeTuV1) == 48,
                "native TU record size changed");
 
 static int write_image(const char *path, const void *image, size_t size)
@@ -38,12 +39,12 @@ static int test_branch_target_decode(void)
             words, 1, 8, 32, &target) || target != 12) {
         return 1;
     }
-    words[0] = 0x48000000u | (0xffffu << 10) | (0x1fu << 16);
+    words[0] = 0x48000000u | (0xffffu << 10) | 0x1fu;
     if (!lat_native_decode_local_branch_target(
             words, 1, 8, 32, &target) || target != 4) {
         return 1;
     }
-    words[0] = 0x50000000u | (0xfffeu << 10) | (0x3ffu << 16);
+    words[0] = 0x50000000u | (0xfffeu << 10) | 0x3ffu;
     if (!lat_native_decode_local_branch_target(
             words, 1, 8, 32, &target) || target != 0) {
         return 1;
@@ -53,12 +54,70 @@ static int test_branch_target_decode(void)
             words, 1, 8, 32, &target) || target != 4) {
         return 1;
     }
-    words[0] = 0x1e000000u;
-    words[1] = 0x4c000000u;
+    words[0] = 0x1e00000cu;
+    words[1] = 0x4c000180u;
     if (!lat_native_decode_local_branch_target(
             words, 2, 8, 32, &target) || target != 8) {
         return 1;
     }
+    /* Encodings independently produced by llvm-mc, not the decoder formula. */
+    static const struct {
+        uint32_t word;
+        uint64_t site;
+        uint64_t target;
+    } cases[] = {
+        {0x53fffbffu, 8, 0},             /* b -8 */
+        {0x54000401u, 0, 262148},        /* bl 262148 */
+        {0x43fffc9fu, 8, 4},            /* beqz $a0, -4 */
+        {0x44000181u, 0, 262144},        /* bnez $t0, 262144 */
+        {0x48000068u, 0, 2097152},       /* bceqz $fcc3, 2097152 */
+        {0x480001f8u, 2097152, 0},       /* bcnez $fcc7, -2097152 */
+        {0x5bfffc85u, 8, 4},            /* beq $a0, $a1, -4 */
+        {0x53fffdffu, 0, 134217724},    /* b maximum */
+        {0x50000200u, 134217728, 0},    /* b minimum */
+        {0x43fffc8fu, 0, 4194300},      /* beqz maximum */
+        {0x40000090u, 4194304, 0},      /* beqz minimum */
+        {0x59fffc85u, 0, 131068},       /* beq maximum */
+        {0x5a000085u, 131072, 0},       /* beq minimum */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        words[0] = cases[i].word;
+        if (!lat_native_decode_local_branch_target(words, 1, cases[i].site,
+                268435456, &target) || target != cases[i].target) return 1;
+    }
+    words[0] = 0x1fffffecu;             /* pcaddu18i $t0, -1 */
+    words[1] = 0x4c000180u;             /* jirl $zero, $t0, 0 */
+    if (!lat_native_decode_local_branch_target(words, 2, 262144, 524288,
+            &target) || target != 0) return 1;
+    words[0] = 0x1e00002cu;
+    words[1] = 0x4ffffd81u;             /* upper +1, lower -4 bytes */
+    if (!lat_native_decode_local_branch_target(words, 2, 0, 524288,
+            &target) || target != 262140) return 1;
+    words[0] = 0x1fffffecu;
+    words[1] = 0x4dfffd81u;             /* upper -1, lower +131068 bytes */
+    if (!lat_native_decode_local_branch_target(words, 2, 262144, 524288,
+            &target) || target != 131068) return 1;
+    words[1] = 0x4c0001a0u;             /* Different JIRL source register. */
+    if (lat_native_decode_local_branch_target(words, 2, 262144, 524288,
+            &target)) return 1;
+    words[0] = 0x1e000000u;             /* PCADDU18I to zero discards PC. */
+    words[1] = 0x4c000000u;
+    if (lat_native_decode_local_branch_target(words, 2, 8, 32, &target)) return 1;
+    /* Negative displacement must not wrap, and a forward target must fit. */
+    words[0] = 0x53fffbffu;
+    if (lat_native_decode_local_branch_target(words, 1, 4, 32, &target)) return 1;
+    words[0] = 0x54000401u;
+    if (lat_native_decode_local_branch_target(words, 1, 0, 262144, &target)) return 1;
+    words[0] = 0x480001f8u;
+    if (lat_native_decode_local_branch_target(words, 1, 0, 4194304, &target)) return 1;
+    words[0] = 0x1fffffecu;
+    words[1] = 0x4c000180u;
+    if (lat_native_decode_local_branch_target(words, 2, 0, 524288, &target)) return 1;
+    words[0] = 0x50000400u;             /* b +4, uint64 boundary */
+    if (!lat_native_decode_local_branch_target(words, 1, UINT64_MAX - 4,
+            UINT64_MAX, &target) || target != UINT64_MAX) return 1;
+    if (lat_native_decode_local_branch_target(words, 1, UINT64_MAX - 3,
+            UINT64_MAX, &target)) return 1;
     return lat_native_decode_local_branch_target(
                words, 1, 8, 4, &target);
 }
@@ -129,6 +188,26 @@ int main(int argc, char **argv)
         fprintf(stderr, "valid image rejected: %s\n", error);
         return 1;
     }
+    tu->config_dependency_version = LAT_TRANSLATION_CONFIG_VERSION;
+    tu->config_dependencies = LAT_CONFIG_ALL_BITS;
+    if (lat_native_image_validate(image, image_size, error, sizeof(error))) {
+        fprintf(stderr, "valid configuration dependencies rejected: %s\n", error);
+        return 1;
+    }
+    const LatNativeTuV1 good_tu = *tu;
+    for (int bad = 0; bad < 4; bad++) {
+        *tu = good_tu;
+        if (bad == 0) tu->config_dependency_version = 0;
+        if (bad == 1) tu->config_dependency_version++;
+        if (bad == 2) tu->config_dependencies |= UINT64_C(1) << 63;
+        if (bad == 3) tu->config_dependency_reserved = 1;
+        if (!lat_native_image_validate(image, image_size, error, sizeof(error)) ||
+            !strstr(error, "configuration dependencies")) {
+            fprintf(stderr, "bad configuration dependencies accepted\n");
+            return 1;
+        }
+    }
+    *tu = good_tu;
     uint32_t *code = (void *)(image + header->code_offset);
     code[0] = 0x58000400u; /* beq zero, zero, +4 */
     tb->conditional_exit_offset = 1;
@@ -169,6 +248,22 @@ int main(int argc, char **argv)
         return 1;
     }
     header->version = LAT_NATIVE_IMAGE_VERSION;
+    header->translation_config_sha256[0] = 1;
+    if (!lat_native_image_validate(image, image_size, error, sizeof(error))) {
+        fprintf(stderr, "unmarked native configuration accepted\n");
+        return 1;
+    }
+    header->flags |= LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED;
+    if (!lat_native_image_validate(image, image_size, error, sizeof(error))) {
+        fprintf(stderr, "missing native configuration snapshot accepted\n");
+        return 1;
+    }
+    header->translation_config_sha256[0] = 0;
+    if (!lat_native_image_validate(image, image_size, error, sizeof(error))) {
+        fprintf(stderr, "missing native configuration digest accepted\n");
+        return 1;
+    }
+    header->flags &= ~LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED;
     if (argc == 4) {
         if (write_image(argv[1], image, image_size)) return 1;
         tb->guest_pc = 0x401010;
@@ -199,6 +294,10 @@ int main(int argc, char **argv)
             merged_tbs[1].code_offset != 32 ||
             merged_tus[0].code_offset != 0 ||
             merged_tus[1].code_offset != 32 ||
+            merged_tus[0].config_dependencies != LAT_CONFIG_ALL_BITS ||
+            merged_tus[1].config_dependencies != LAT_CONFIG_ALL_BITS ||
+            merged_tus[0].config_dependency_version != LAT_TRANSLATION_CONFIG_VERSION ||
+            merged_tus[1].config_dependency_version != LAT_TRANSLATION_CONFIG_VERSION ||
             merged_relocations[0].physical_target_plus_one != 1 ||
             merged_relocations[1].physical_target_plus_one != 2) {
             fprintf(stderr, "merged conditional exit metadata changed\n");

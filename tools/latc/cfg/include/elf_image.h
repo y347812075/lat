@@ -17,6 +17,16 @@
 #include "got_plt.h"
 #include "ijmp_resolve.h"
 
+/* The imported runner ELF header predates these loader ABI constants. */
+#ifndef PT_GNU_RELRO
+#define PT_GNU_RELRO 0x6474e552
+#endif
+#ifndef DT_RELR
+#define DT_RELRSZ 35
+#define DT_RELR 36
+#define DT_RELRENT 37
+#endif
+
 typedef struct {
     /* mmap-like owned file buffer loaded by elf_load(). */
     uint8_t *data;
@@ -46,6 +56,16 @@ bool elf_function_file_offset(const ElfFile *elf, uint64_t addr,
 
 /* Build allocated section metadata for indirect-jump table recovery. */
 IjmpSection *elf_build_ijmp_sections(const ElfFile *elf, size_t *count_out);
+
+typedef struct ElfPointerIndex ElfPointerIndex;
+/* NULL means unsupported/ambiguous loader metadata, not an empty index. */
+ElfPointerIndex *elf_pointer_index_new(const ElfFile *elf);
+void elf_pointer_index_free(ElfPointerIndex *index);
+bool elf_read_immutable_pointer(const void *index, uint64_t slot,
+                                 uint64_t *target);
+/* Raw file byte outside relocation writes and loader-owned dynamic/GOT data. */
+bool elf_read_immutable_byte(const void *index, uint64_t address,
+                              uint8_t *value);
 
 /* Adapter view consumed by the GOT/PLT parser. */
 GotPltElf elf_gotplt_view(const ElfFile *elf);

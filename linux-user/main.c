@@ -201,6 +201,12 @@ static void usage(int exitcode);
 const char *interp_prefix = CONFIG_QEMU_INTERP_PREFIX;
 const char *qemu_uname_release;
 static bool runtime_info_requested;
+static bool translation_config_requested;
+static const char *translation_config_input;
+static const char *translation_config_output;
+static LatTranslationConfig replay_config;
+static bool translation_config_native_worker;
+static bool translation_config_export_domain;
 
 /* XXX: on x86 MAP_GROWSDOWN only works if ESP <= address + 32, so
    we allocate a bigger stack. Need a better solution, for example
@@ -644,6 +650,163 @@ static void handle_arg_version(const char *arg)
 static void handle_arg_runtime_info(const char *arg)
 {
     runtime_info_requested = true;
+}
+
+static void handle_arg_translation_config(const char *arg)
+{
+    translation_config_requested = true;
+}
+
+static void handle_arg_translation_config_input(const char *arg)
+{
+    translation_config_input = arg;
+}
+
+static void handle_arg_translation_config_output(const char *arg)
+{
+    translation_config_requested = true;
+    translation_config_output = arg;
+}
+
+static void handle_arg_translation_config_native(const char *arg)
+{
+    translation_config_requested = true;
+    translation_config_export_domain = true;
+}
+
+static bool native_translation_config_domain(void)
+{
+#if defined(CONFIG_LATX_DEBUG) || defined(CONFIG_DEBUG_TCG)
+    return false;
+#else
+    return !option_real_maps && !option_begin_trace_addr &&
+           !option_end_trace_addr && !imm_skip_pc && !option_softfpu &&
+           !option_jr_ra && !option_anonym && !option_mem_test &&
+           !option_minke_16k_page_check;
+#endif
+}
+
+static int write_translation_config(const LatTranslationConfig *snapshot)
+{
+    g_autoptr(GBytes) bytes = NULL;
+    char error[256];
+
+    if (lat_translation_config_encode(snapshot, &bytes, error, sizeof(error))) {
+        fprintf(stderr, "latc: %s\n", error);
+        return -1;
+    }
+    int fd = open(translation_config_output,
+                  O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "latc: cannot create translation configuration: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    size_t remaining;
+    const uint8_t *data = g_bytes_get_data(bytes, &remaining);
+    int saved_error = 0;
+    while (remaining) {
+        ssize_t written = write(fd, data, remaining);
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        if (written <= 0) {
+            saved_error = written < 0 ? errno : EIO;
+            break;
+        }
+        data += written;
+        remaining -= written;
+    }
+    if (!saved_error && fsync(fd)) {
+        saved_error = errno;
+    }
+    if (close(fd) && !saved_error) {
+        saved_error = errno;
+    }
+    if (saved_error) {
+        unlink(translation_config_output);
+        fprintf(stderr, "latc: cannot write translation configuration: %s\n",
+                strerror(saved_error));
+        return -1;
+    }
+    return 0;
+}
+
+static int load_translation_config(void)
+{
+    uint8_t data[LAT_TRANSLATION_CONFIG_HEADER_SIZE +
+        8 * (LAT_CONFIG_FIELD_COUNT + LAT_TRANSLATION_CONFIG_FEATURE_LIMIT)];
+    struct stat status;
+    char error[256];
+    LatTranslationConfig identity;
+    int fd = open(translation_config_input,
+                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0 || fstat(fd, &status) || !S_ISREG(status.st_mode) ||
+        status.st_size < LAT_TRANSLATION_CONFIG_HEADER_SIZE ||
+        status.st_size > sizeof(data) ||
+        pread(fd, data, status.st_size, 0) != status.st_size) {
+        fprintf(stderr, "latc: cannot read bounded translation configuration\n");
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    close(fd);
+    if (lat_translation_config_init(&identity, LATC_BUILD_ID,
+#ifdef TARGET_X86_64
+                                     LAT_CONFIG_ABI_X86_64,
+#else
+                                     LAT_CONFIG_ABI_I386,
+#endif
+                                     FEATURE_WORDS, error, sizeof(error)) ||
+        lat_translation_config_decode(data, status.st_size, identity.build_id,
+                                       &replay_config, error, sizeof(error))) {
+        fprintf(stderr, "latc: %s\n", error);
+        return -1;
+    }
+    /* Incomplete replay is quarantined to verified native-export bundles. */
+    const char *native_output = getenv("LATC_NATIVE_IMAGE_OUT");
+    const char *emit_aot = getenv("LATC_EMIT_AOT");
+    uint8_t guest_digest[32];
+    translation_config_native_worker = !translation_config_requested &&
+        emit_aot && !strcmp(emit_aot, "1") && native_output && *native_output &&
+        latc_bundle_native_export_eligible() &&
+        latc_bundle_verified_guest_digest(guest_digest) == 1;
+    if (!translation_config_requested && !translation_config_native_worker) {
+        fprintf(stderr, "latc: configuration replay is diagnostic-only; "
+                        "compilation replay is not implemented\n");
+        return -1;
+    }
+    if (replay_config.guest_abi != identity.guest_abi ||
+        replay_config.feature_count != FEATURE_WORDS ||
+        replay_config.compatibility_complete) {
+        fprintf(stderr, "latc: unsupported translation configuration domain\n");
+        return -1;
+    }
+    if (translation_config_native_worker) {
+        if (replay_config.guest_abi != LAT_CONFIG_ABI_X86_64 ||
+            !replay_config.native_replay_domain ||
+            replay_config.values[LAT_CONFIG_LEGACY_AOT] != 0 ||
+            replay_config.values[LAT_CONFIG_PARALLEL] != 1 ||
+            replay_config.values[LAT_CONFIG_SOFTFPU] ||
+            replay_config.values[LAT_CONFIG_JR_RA] ||
+            replay_config.values[LAT_CONFIG_ANONYM] ||
+            replay_config.values[LAT_CONFIG_MEM_TEST] ||
+            replay_config.values[LAT_CONFIG_MINKE_16K_PAGE_CHECK] ||
+            !native_translation_config_domain() ||
+            getenv("LATC_DISABLE_PRETRANSLATE")) {
+            fprintf(stderr, "latc: unsupported native configuration replay mode\n");
+            return -1;
+        }
+        latx_translation_config_set_native_replay(&replay_config);
+        /* Relocation recording is internal to export, not a guest capability. */
+        replay_config.values[LAT_CONFIG_LEGACY_AOT] = 1;
+    }
+    /* Domain provenance is retained in native metadata, not a translator option. */
+    replay_config.native_replay_domain = false;
+    if (latx_translation_config_apply(&replay_config, error, sizeof(error))) {
+        fprintf(stderr, "latc: %s\n", error);
+        return -1;
+    }
+    return 0;
 }
 
 static void handle_arg_ld_prefix(const char *arg)
@@ -1142,6 +1305,14 @@ static const struct qemu_argument arg_table[] = {
      "path",       "set the elf interpreter prefix to 'path'"},
     {"runtime-info", NULL,             false, handle_arg_runtime_info,
      "",           "display selected guest runtime information and exit"},
+    {"latc-translation-config", NULL, false, handle_arg_translation_config,
+     "",           "display effective translation configuration for a guest"},
+    {"latc-translation-config-from", NULL, true, handle_arg_translation_config_input,
+     "path",       "replay a binary configuration for a diagnostic query"},
+    {"latc-translation-config-out", NULL, true, handle_arg_translation_config_output,
+     "path",       "export a binary configuration for a diagnostic query"},
+    {"latc-translation-config-native", NULL, false, handle_arg_translation_config_native,
+     "",           "restrict binary export to the native replay domain"},
     {"version",    "LAT_VERSION",     false, handle_arg_version,
      "",           "display version information and exit"},
     {NULL, NULL, false, NULL, NULL, NULL}
@@ -1354,11 +1525,17 @@ static int parse_args(int argc, char **argv)
                     }
                     parse_options[arg_count].opt_name = arginfo->argv;
                     parse_options[arg_count].opt_arg = argv[optind];
+                    if (arginfo->handle_opt == handle_arg_translation_config_input ||
+                        arginfo->handle_opt == handle_arg_translation_config_output) {
+                        arginfo->handle_opt(argv[optind]);
+                    }
                     optind++;
                 } else {
                     if (!strcmp(r, "version") || !strcmp(r, "h")
                         || !strcmp(r, "help")
                         || !strcmp(r, "runtime-info")
+                        || !strcmp(r, "latc-translation-config")
+                        || !strcmp(r, "latc-translation-config-native")
                         || !strcmp(r, "kzt-libs")) {
                         /*
                          * Query options must take effect here so they can be
@@ -1388,6 +1565,16 @@ static int parse_args(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
+    if (runtime_info_requested &&
+        (translation_config_requested || translation_config_input)) {
+        fprintf(stderr, "runtime-info and latc-translation-config conflict\n");
+        exit(EXIT_FAILURE);
+    }
+    if (translation_config_export_domain && !translation_config_output) {
+        fprintf(stderr, "latc: native configuration query requires an output\n");
+        exit(EXIT_FAILURE);
+    }
+
     if (optind < argc) {
         exec_path = argv[optind];
         real_path = realpath(exec_path, (char *)malloc(MAX_PATH));
@@ -1413,6 +1600,7 @@ int main(int argc, char **argv, char **envp)
     int log_mask;
     unsigned long max_reserved_va;
     bool preserve_argv0;
+    bool query_aot_v2 = false;
 
     if (argc == 2 && !strcmp(argv[1], "--latc-build-id")) {
         puts(LATC_BUILD_ID);
@@ -1495,6 +1683,14 @@ int main(int argc, char **argv, char **envp)
             return EXIT_FAILURE;
         }
     }
+    const char *worker_config = getenv("LATC_TRANSLATION_CONFIG_FROM");
+    if (worker_config) {
+        if (latc_bundle <= 0 || !*worker_config) {
+            fprintf(stderr, "latc: configuration worker input requires a bundle\n");
+            return EXIT_FAILURE;
+        }
+        translation_config_input = worker_config;
+    }
 #ifdef TARGET_I386
     int initial_guest_exe_fd = -1;
     unsigned int inherited_guest_mdwe = 0;
@@ -1536,6 +1732,7 @@ int main(int argc, char **argv, char **envp)
         "LATC_COMPILE_TIMING", "LATC_DEBUG_CFG",
         "LATC_DISABLE_PRETRANSLATE", "LATC_EMIT_AOT",
         "LATC_NAMED_GUEST", "LATC_PROFILE_OUT", "LATC_STATS_OUT",
+        "LATC_TRANSLATION_CONFIG_FROM",
         "LATX_AOT_V2_SOURCE", "LATX_AOT_V2_TEST_HWCAP",
         "LATX_AOT_V2_TEST_LIFECYCLE_ROUNDS",
         "LATX_AOT_V2_TEST_SIGNAL_INVALIDATION_RACE",
@@ -1626,6 +1823,9 @@ int main(int argc, char **argv, char **envp)
 
     /* set environment variables */
     options_set(target_argv);
+    if (translation_config_input && load_translation_config()) {
+        return EXIT_FAILURE;
+    }
 
 #if defined(CONFIG_LATX) && defined(TARGET_I386) && TARGET_ABI_BITS == 32
     if (option_mem_test) {
@@ -1660,20 +1860,35 @@ int main(int argc, char **argv, char **envp)
 #ifdef TARGET_X86_64
     char aot_config_error[256];
     int aot_selection = explicit_legacy_aot ? requested_legacy_aot : option_aot;
-    if (lat_aot_config_init(&aot_selection, explicit_legacy_aot,
+    int aot_config_status;
+    if (translation_config_requested) {
+        aot_config_status = lat_aot_config_select(
+            &aot_selection, explicit_legacy_aot, &query_aot_v2,
+            aot_config_error, sizeof(aot_config_error));
+    } else {
+        aot_config_status = lat_aot_config_init(&aot_selection, explicit_legacy_aot,
                             CONFIG_BINDIR, CONFIG_LATC_LIBDIR,
-                            aot_config_error, sizeof(aot_config_error))) {
+                            aot_config_error, sizeof(aot_config_error));
+    }
+    if (aot_config_status) {
         error_report("%s", aot_config_error);
         return EXIT_FAILURE;
     }
     if (!aot_selection) option_aot = 0;
+    if (translation_config_native_worker &&
+        (aot_selection != 1 || latc_aot_v2_mapping_enabled())) {
+        fprintf(stderr, "latc: native configuration replay requires export mode\n");
+        return EXIT_FAILURE;
+    }
 #endif
 
     /* Scan interp_prefix dir for replacement files. */
     init_paths(interp_prefix);
 
 #ifdef CONFIG_LATX
-    latx_steam_prepare(exec_path, target_argv, envlist);
+    if (!translation_config_requested) {
+        latx_steam_prepare(exec_path, target_argv, envlist);
+    }
 #endif
 
     error_init(argv[0]);
@@ -1753,8 +1968,14 @@ int main(int argc, char **argv, char **envp)
 #ifdef CONFIG_LATX
     /* AOT v2 stores only the thread-safe CF_PARALLEL translation.  Keep JIT
      * fallback and AOT execution on that same CPU mode from process start. */
-    if (latc_aot_v2_mapping_enabled()) {
+    if (latc_aot_v2_mapping_enabled() || query_aot_v2) {
         cpu->tcg_cflags |= CF_PARALLEL;
+    }
+    if (translation_config_input) {
+        cpu->tcg_cflags &= ~CF_PARALLEL;
+        if (replay_config.values[LAT_CONFIG_PARALLEL]) {
+            cpu->tcg_cflags |= CF_PARALLEL;
+        }
     }
 #endif
 
@@ -1766,12 +1987,56 @@ int main(int argc, char **argv, char **envp)
 
 
 #ifdef CONFIG_LATX
+    if (translation_config_requested) {
+        g_autoptr(GString) config = NULL;
+        LatTranslationConfig snapshot;
+
+        if (!translation_config_input) latx_handle_args(exec_path);
+        if (translation_config_input) {
+            char error[256];
+            if (latx_translation_config_verify(env, cpu->tcg_cflags,
+                    &replay_config, error, sizeof(error))) {
+                fprintf(stderr, "latc: %s\n", error);
+                close(execfd);
+                return EXIT_FAILURE;
+            }
+        }
+        latx_translation_config_capture(env, cpu->tcg_cflags, &snapshot);
+        if (translation_config_export_domain) {
+            if (!native_translation_config_domain() ||
+                snapshot.guest_abi != LAT_CONFIG_ABI_X86_64 ||
+                snapshot.values[LAT_CONFIG_LEGACY_AOT] != 0 ||
+                snapshot.values[LAT_CONFIG_PARALLEL] != 1) {
+                fprintf(stderr, "latc: unsupported native configuration export domain\n");
+                close(execfd);
+                return EXIT_FAILURE;
+            }
+            snapshot.native_replay_domain = true;
+        }
+        if (translation_config_output && write_translation_config(&snapshot)) {
+            close(execfd);
+            return EXIT_FAILURE;
+        }
+        config = latx_translation_config_json(&snapshot);
+        puts(config->str);
+        close(execfd);
+        return EXIT_SUCCESS;
+    }
     latx_init_fpu_regs(env);
     latx_lsenv_init(env);
     tcg_prologue_init(tcg_ctx);
     tcg_region_init();
     latx_dt_init();
-    latx_handle_args(exec_path);
+    if (!translation_config_input) latx_handle_args(exec_path);
+    if (translation_config_native_worker) {
+        char error[256];
+        if (latx_translation_config_verify(env, cpu->tcg_cflags, &replay_config,
+                                          error, sizeof(error))) {
+            fprintf(stderr, "latc: %s\n", error);
+            close(execfd);
+            return EXIT_FAILURE;
+        }
+    }
 #endif
     thread_cpu = cpu;
 
@@ -2046,6 +2311,15 @@ int main(int argc, char **argv, char **envp)
     }
 #endif
 
+    if (translation_config_native_worker) {
+        char error[256];
+        if (latx_translation_config_verify(env, cpu->tcg_cflags, &replay_config,
+                                          error, sizeof(error)) ||
+            !native_translation_config_domain()) {
+            fprintf(stderr, "latc: native replay changed before translation\n");
+            exit(EXIT_FAILURE);
+        }
+    }
     /* Prewarm every statically discovered TB before entering the CPU loop. */
     latc_bundle_pretranslate(cpu, info->exec_entry);
 

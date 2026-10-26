@@ -142,4 +142,22 @@ signal_helper_resume:
     signal_verify_sigreturn
 .size signal_helper_site, .-signal_helper_site
 
+.macro signal_trap_case name, bytes:vararg
+.global signal_\name\()_site
+.global signal_\name\()_fault
+.global signal_\name\()_resume
+.type signal_\name\()_site,@function
+signal_\name\()_site:
+    signal_prepare_state
+signal_\name\()_fault:
+    .byte \bytes
+signal_\name\()_resume:
+    signal_verify_sigreturn
+.size signal_\name\()_site, .-signal_\name\()_site
+.endm
+
+signal_trap_case int3, 0xcc
+signal_trap_case ud0, 0x0f, 0xff, 0xc0
+signal_trap_case ud1, 0x67, 0x0f, 0xb9, 0x40, 0x02
+
 .section .note.GNU-stack,"",@progbits

@@ -9960,6 +9960,9 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         if (flags & CLONE_INVALID_FORK_FLAGS) {
             return -TARGET_EINVAL;
         }
+        if (namespace_flags || (flags & CLONE_FS)) {
+            latc_aot_v2_prepare_submission_channel();
+        }
 
         if (userns_via_unshare && pipe2(namespace_pipe, O_CLOEXEC) < 0) {
             return -1;
@@ -16560,6 +16563,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_chroot:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
+        latc_aot_v2_prepare_submission_channel();
 #ifdef CONFIG_LATX
         latx_syscall_fs_lock();
 #endif
@@ -21685,6 +21689,7 @@ defined(__loongarch__)
                 }
             }
 
+            latc_aot_v2_prepare_submission_channel();
 #ifdef CONFIG_LATX
             latx_syscall_fd_begin();
 #endif
@@ -21704,6 +21709,7 @@ defined(__loongarch__)
 #endif
 #if defined(TARGET_NR_unshare) && defined(CONFIG_SETNS)
     case TARGET_NR_unshare:
+        latc_aot_v2_prepare_submission_channel();
 #ifdef CONFIG_LATX
         latx_syscall_fd_begin();
 #endif

@@ -21,7 +21,9 @@ typedef struct LatGuestElfInfoV2 {
     uint64_t load_bias;
     uint64_t guest_begin;
     uint64_t guest_end;
+    /* Page ranges track mapping invalidation; exact ranges admit source keys. */
     LatGuestElfRangeV2 exec_ranges[LAT_GUEST_ELF_MAX_EXEC_RANGES];
+    LatGuestElfRangeV2 exact_exec_ranges[LAT_GUEST_ELF_MAX_EXEC_RANGES];
 } LatGuestElfInfoV2;
 
 typedef struct LatGuestElfTrackerV2 LatGuestElfTrackerV2;

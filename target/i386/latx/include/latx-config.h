@@ -11,6 +11,7 @@
 #include "optimize-config.h"
 #include "exec/exec-all.h"
 #include "latx-disassemble-trace.h"
+#include "lat-translation-config.h"
 
 extern void *interpret_glue;
 extern ADDR context_switch_bt_to_native;
@@ -43,6 +44,16 @@ void ht_pc_thunk_insert(uint32_t thunk_addr, int reg_index);
 int ht_pc_thunk_lookup(uint32_t thunk_addr);
 void ht_pc_thunk_invalidate(uint32_t start, uint32_t end);
 void latx_handle_args(char *filename);
+GString *latx_translation_config_json(const LatTranslationConfig *snapshot);
+void latx_translation_config_capture(CPUX86State *env, uint32_t cflags,
+                                    LatTranslationConfig *output);
+int latx_translation_config_apply(const LatTranslationConfig *config,
+                                 char *error, size_t error_size);
+int latx_translation_config_verify(CPUX86State *env, uint32_t cflags,
+    const LatTranslationConfig *expected, char *error, size_t error_size);
+void latx_translation_config_set_native_replay(const LatTranslationConfig *config);
+bool latx_translation_config_native_replay_digest(uint8_t digest[32]);
+GBytes *latx_translation_config_native_replay_bytes(void);
 
 #ifdef CONFIG_LATX_TU
 void target_disasm(struct TranslationBlock *tb, int max_insns);

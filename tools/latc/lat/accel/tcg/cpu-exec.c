@@ -496,6 +496,9 @@ void cpu_exec_step_atomic(CPUState *cpu)
         cpu->running = true;
 
         cpu_get_tb_cpu_state(env, &pc, &cs_base, &flags);
+#ifdef CONFIG_LATX
+        latc_aot_v2_key_scope_enter(cpu, cflags, true);
+#endif
         tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
 
         if (tb == NULL) {
@@ -533,6 +536,9 @@ void cpu_exec_step_atomic(CPUState *cpu)
     g_assert(cpu_in_exclusive_context(cpu));
     cpu->running = false;
     end_exclusive();
+#ifdef CONFIG_LATX
+    latc_aot_v2_key_scope_leave();
+#endif
 }
 
 struct tb_desc {
@@ -907,6 +913,16 @@ retry_guest_lookup:
         }
         mmap_unlock();
     }
+#ifdef CONFIG_LATX
+    else if (tb && latc_aot_v2_key_resume_jrra(pc, cflags)) {
+        /* Never retain a TB pointer across the lockouter journal service. */
+        mmap_lock();
+        tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
+        if (!tb) tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
+        jrra_pre_translate((void **)&tb, 1, cpu, flags, cflags);
+        mmap_unlock();
+    }
+#endif
 #endif
     if (tb == NULL && !aot_v2) {
 #if (defined CONFIG_LATX_AOT) && (defined CONFIG_LATX_DEBUG)
@@ -1372,6 +1388,9 @@ int cpu_exec(CPUState *cpu)
                 cpu->cflags_next_tb = -1;
             }
 
+#ifdef CONFIG_LATX
+            latc_aot_v2_key_scope_enter(cpu, cflags, false);
+#endif
             tb = tb_find(cpu, last_tb, tb_exit, cflags, &aot_target);
 #ifdef CONFIG_LATX_DEBUG
             if (tb) {
@@ -1395,6 +1414,9 @@ int cpu_exec(CPUState *cpu)
     cpu_exec_exit(cpu);
 #endif
     rcu_read_unlock();
+#ifdef CONFIG_LATX
+    latc_aot_v2_key_scope_leave();
+#endif
 
     return ret;
 }

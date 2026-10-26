@@ -98,22 +98,33 @@ void lat_aot_config_environment(void)
     }
 }
 
-int lat_aot_config_init(int *legacy, bool explicit_legacy, const char *bindir,
-                        const char *libdir, char *error, size_t error_size)
+int lat_aot_config_select(int *legacy, bool explicit_legacy, bool *selected,
+                         char *error, size_t error_size)
 {
     if ((mode && strcmp(mode, "0") && strcmp(mode, "1")) ||
         (autostart && strcmp(autostart, "0") && strcmp(autostart, "1"))) {
         snprintf(error, error_size, "AOT v2 enable/autostart values must be 0 or 1");
         return -1;
     }
-    enabled = mode ? !strcmp(mode, "1") :
+    *selected = mode ? !strcmp(mode, "1") :
         ((cache && *cache) || (socket_path && *socket_path) || (module && *module));
-    if (!enabled) return 0;
+    if (!*selected) return 0;
     if (explicit_legacy && *legacy) {
         snprintf(error, error_size, "LATX_AOT and AOT v2 cannot both be enabled");
         return -1;
     }
     *legacy = 0;
+    return 0;
+}
+
+int lat_aot_config_init(int *legacy, bool explicit_legacy, const char *bindir,
+                        const char *libdir, char *error, size_t error_size)
+{
+    if (lat_aot_config_select(legacy, explicit_legacy, &enabled,
+                              error, error_size)) {
+        return -1;
+    }
+    if (!enabled) return 0;
     if (getauxval(AT_SECURE) || getuid() != geteuid() || getgid() != getegid()) {
         enabled = false;
         return 0;
@@ -178,23 +189,45 @@ const char *lat_aot_cache_path(void) { return enabled ? cache : NULL; }
 const char *lat_aot_socket_path(void) { return enabled ? socket_path : NULL; }
 const char *lat_aot_module_path(void) { return enabled ? module : NULL; }
 
-static bool hello(void)
+static bool cache_identity(uint8_t digest[32])
 {
-    char error[256];
-    uint8_t digest[32];
     bool check_cache = cache && *cache;
     char *canonical = check_cache ? realpath(cache, NULL) : NULL;
     if (check_cache && !canonical) return false;
     if (canonical) {
         GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
         g_checksum_update(checksum, (const guchar *)canonical, strlen(canonical));
-        gsize size = sizeof(digest);
+        gsize size = 32;
         g_checksum_get_digest(checksum, digest, &size);
         g_checksum_free(checksum);
         free(canonical);
     }
+    return true;
+}
+
+static bool hello(void)
+{
+    char error[256];
+    uint8_t digest[32];
+    if (!cache_identity(digest)) return false;
     return !latcd_client_hello(socket_path, LATC_BUILD_ID,
-                              check_cache ? digest : NULL, error, sizeof(error));
+                              cache && *cache ? digest : NULL, error, sizeof(error));
+}
+
+int lat_aot_open_channel(char *error, size_t error_size)
+{
+    if (!lat_aot_ensure_daemon()) {
+        snprintf(error, error_size, "latcd unavailable before namespace change");
+        return -1;
+    }
+    uint8_t digest[32];
+    if (!cache_identity(digest)) {
+        snprintf(error, error_size, "cannot resolve channel cache identity: %s",
+                 strerror(errno));
+        return -1;
+    }
+    return latcd_client_open_channel(socket_path, LATC_BUILD_ID,
+        cache && *cache ? digest : NULL, error, error_size);
 }
 
 bool lat_aot_ensure_daemon(void)

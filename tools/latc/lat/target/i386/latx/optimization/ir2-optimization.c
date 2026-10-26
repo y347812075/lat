@@ -556,6 +556,7 @@ void ir2_opt_push_pop_fix(TranslationBlock *tb, CPUState *cpu, int i)
     }
     TranslationBlock *ntb = tcg_tb_alloc(tcg_ctx);
     memcpy(ntb, tb, sizeof(TranslationBlock));
+    ntb->numeric_provenance_words = NULL;
 
     tr_disasm(ntb, TCG_MAX_INSNS);
     ir1_optimization(ntb);

@@ -51,8 +51,8 @@ def parse_image(path):
     if data[:8] != b"LATNAT2\0":
         raise ValueError("%s: invalid LAT native image magic" % path)
     version, header_size = struct.unpack_from("<II", data, 8)
-    expected_header = 240 if version >= 7 else 224
-    if version not in (2, 3, 4, 5, 6, 7, 8) or header_size != expected_header or len(data) < header_size:
+    expected_header = 280 if version >= 9 else 240 if version >= 7 else 224
+    if version not in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11) or header_size != expected_header or len(data) < header_size:
         raise ValueError("%s: unsupported LAT native image header" % path)
     flags = struct.unpack_from("<I", data, 16)[0]
     code_offset, code_size, tb_offset, tb_count, reloc_offset, reloc_count = \
@@ -62,13 +62,16 @@ def parse_image(path):
     if version >= 7:
         tu_offset, tu_count = struct.unpack_from("<QQ", data, 120)
     tb_stride = 56 if version >= 7 else {2: 24, 3: 32, 4: 40, 5: 48, 6: 48}[version]
-    reloc_stride = 40 if version >= 7 else 32
+    reloc_stride = 64 if version >= 11 else 40 if version >= 7 else 32
     pc_map_end = pc_map_offset + pc_map_count * 32
+    config_size = struct.unpack_from('<I', data, 272)[0] if version >= 9 else 0
+    if config_size > 1024 or config_size > len(data) - header_size:
+        raise ValueError('%s: invalid LAT native configuration size' % path)
     if not tu_count and not tu_offset:
         tu_offset = pc_map_end
     if (reloc_offset + reloc_count * reloc_stride != pc_map_offset or
             pc_map_end != tu_offset or
-            tu_offset + tu_count * 32 != len(data)):
+            tu_offset + tu_count * (48 if version >= 10 else 32) != len(data) - config_size):
         raise ValueError("%s: invalid LAT native PC map" % path)
 
     exact_targets = set()

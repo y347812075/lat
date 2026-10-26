@@ -7,6 +7,7 @@
 #include "accel/tcg/internal.h"
 #include "exec/exec-all.h"
 #include "aot.h"
+#include "latx-config.h"
 #include "jrra.h"
 #include "tcg/tcg.h"
 
@@ -574,6 +575,11 @@ static int hex_nibble(char value)
     return -1;
 }
 
+bool latc_bundle_native_export_eligible(void)
+{
+    return bundle_self_fd >= 0 && !bundle_footer.aot_size;
+}
+
 int latc_bundle_verified_guest_digest(uint8_t digest[32])
 {
     if (!digest) {
@@ -770,6 +776,8 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
 
     if (getenv("LATC_EMIT_AOT")) {
 #ifdef CONFIG_LATX_AOT
+        uint8_t replay_digest[32];
+        bool replay = latx_translation_config_native_replay_digest(replay_digest);
         for (uint64_t i = 0; i < header.tb_count; i++) {
             LatcDiskTb disk_tb;
             if (read_cfg(&disk_tb, sizeof(disk_tb),
@@ -779,6 +787,10 @@ void latc_bundle_pretranslate(struct CPUState *cpu, uint64_t guest_entry)
             }
             if (!disk_tb.selected) {
                 continue;
+            }
+            if (replay && !(disk_tb.semantic_flags & LAT_AOT_TB_PARALLEL)) {
+                fprintf(stderr, "latc: native replay requires parallel TB keys\n");
+                exit(EXIT_FAILURE);
             }
             selected++;
             uint64_t pc = disk_tb.start + load_bias;

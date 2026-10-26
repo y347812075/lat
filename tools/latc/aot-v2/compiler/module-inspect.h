@@ -30,4 +30,11 @@ int lat_aot_v2_module_missing_tbset_file(
     const char *path, const char *tbset_path, LatAotModuleInfoV2 *info,
     LatTbKeySet *missing, char *error, size_t error_size);
 
+int lat_aot_v2_module_read_tbset_file(
+    const char *path, LatAotModuleInfoV2 *info, LatTbKeySet *keys,
+    char *error, size_t error_size);
+int lat_aot_v2_module_validate_replacement_file(
+    const char *previous, const char *replacement,
+    char *error, size_t error_size);
+
 #endif

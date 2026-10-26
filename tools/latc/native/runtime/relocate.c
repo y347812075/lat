@@ -158,6 +158,7 @@ int lat_native_code_load(const LatNativeImageHeaderV2 *header,
                          size_t error_size)
 {
     if (!header || !image || !code ||
+        (header->flags & LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED) ||
         header->code_offset > image_size ||
         header->code_size > image_size - header->code_offset ||
         header->relocation_offset > image_size ||
@@ -205,10 +206,7 @@ int lat_native_code_load(const LatNativeImageHeaderV2 *header,
              relocation->code_offset >= header->code_size ||
              relocation->slots * 4 >
                  header->code_size - relocation->code_offset ||
-             relocation->addend < 0 || !relocation->reserved ||
-             (uint64_t)relocation->addend >= header->code_size ||
-             relocation->reserved >
-                 header->code_size - (uint64_t)relocation->addend)) {
+             !lat_native_data_object_valid(relocation, header->code_size))) {
             errno = EINVAL;
             munmap(address, mapped_size);
             return fail(error, error_size, "invalid native data relocation");

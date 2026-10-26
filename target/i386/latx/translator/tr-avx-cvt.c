@@ -134,7 +134,7 @@ bool translate_vcvtps2dq(IR1_INST * pir1) {
     }
     prepare_sse_rounding_mode();
 
-    if (option_cvt_opt) {
+    if (latx_translation_cvt_opt()) {
         return translate_vcvtps2dq_opt(pir1);
     }
     IR1_OPND *opnd0 = ir1_get_opnd(pir1, 0);
@@ -434,7 +434,7 @@ bool translate_vcvtpd2dq(IR1_INST * pir1) {
     }
     prepare_sse_rounding_mode();
 
-    if (option_cvt_opt) {
+    if (latx_translation_cvt_opt()) {
         return translate_vcvtpd2dq_opt(pir1);
     }
 
@@ -700,7 +700,7 @@ bool translate_vcvttpd2dq(IR1_INST * pir1) {
         return translate_vcvttpd2dq_lsx(pir1);
     }
 
-    if (option_cvt_opt) {
+    if (latx_translation_cvt_opt()) {
         return translate_vcvttpd2dq_opt(pir1);
     }
 
@@ -865,7 +865,7 @@ bool translate_vcvttps2dq(IR1_INST * pir1) {
         return translate_vcvttps2dq_lsx(pir1);
     }
 
-    if (option_cvt_opt) {
+    if (latx_translation_cvt_opt()) {
         return translate_vcvttps2dq_opt(pir1);
     }
 

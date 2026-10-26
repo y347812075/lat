@@ -715,6 +715,7 @@ static inline void get_ts_queue(CPUState *cpu, target_ulong cs_base,
                     break;
                 case IR1_TYPE_JUMPIN:
                 case IR1_TYPE_RET:
+                case IR1_TYPE_TRAP:
                     break;
                 default:
                     lsassert(0);
@@ -758,6 +759,7 @@ static void delet_static_tb(TranslationBlock **tb_list, uint32_t *tb_num_in_tu)
              * pre-translation and free it in the live path only.
              */
             if (!in_pre_translate) {
+                g_clear_pointer(&tb->numeric_provenance_words, g_array_unref);
                 free(tb->s_data);
                 free(tb);
             }

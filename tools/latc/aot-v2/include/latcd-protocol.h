@@ -6,6 +6,7 @@
 #include <sys/un.h>
 
 #define LATCD_REQUEST_MAGIC UINT32_C(0x4c415444)
+#define LATCD_CHANNEL_REQUEST_MAGIC UINT32_C(0x4c415443)
 #define LATCD_RESPONSE_MAGIC UINT32_C(0x4c415452)
 #define LATCD_PROTOCOL_VERSION 2u
 #define LATCD_RESPONSE_MESSAGE_SIZE 192u
@@ -23,6 +24,15 @@ enum LatcdOperation {
     LATCD_OP_PRECOMPILE_SOURCE = 4,
     LATCD_OP_HELLO = 5,
     LATCD_OP_SUBMIT_STATIC_KEYS = 6,
+    LATCD_OP_OPEN_CHANNEL = 7,
+    /* source_fd + immutable translation-config fd; sequence is slot capacity.
+     * Success registers a recoverable stream, not accepted/published keys.
+     */
+    LATCD_OP_REGISTER_JOURNAL = 8,
+    /* Quarantined receipt only; does not admit compilation or advance watermarks. */
+    LATCD_OP_COLLECT_JOURNALS = 9,
+    /* Like REGISTER_JOURNAL, but success also returns one stream directory fd. */
+    LATCD_OP_REGISTER_JOURNAL_CAPABILITY = 10,
 };
 
 enum LatcdStatus {
@@ -65,10 +75,25 @@ int latcd_send_request(int socket_fd, int source_fd, int keys_fd,
 int latcd_receive_request(int socket_fd, LatcdRequestV2 *request,
                           int *source_fd, int *keys_fd,
                           char *error, size_t error_size);
+/* Connected channels use a separate reply socket for every inherited sender. */
+int latcd_send_channel_request(int socket_fd, int source_fd, int keys_fd,
+                               int reply_fd, const LatcdRequestV2 *request,
+                               char *error, size_t error_size);
+int latcd_receive_channel_request(int socket_fd, LatcdRequestV2 *request,
+                                  int *source_fd, int *keys_fd, int *reply_fd,
+                                  char *error, size_t error_size);
 int latcd_send_response(int socket_fd, const LatcdResponseV2 *response,
                         char *error, size_t error_size);
 int latcd_receive_response(int socket_fd, LatcdResponseV2 *response,
                            char *error, size_t error_size);
+/* The fd is transferred only with an OK response. Receivers reject unexpected,
+ * missing or truncated ancillary data and close every received fd on failure.
+ * A non-NULL output expects exactly one fd on success, zero on rejection.
+ */
+int latcd_send_response_fd(int socket_fd, const LatcdResponseV2 *response,
+                           int fd, char *error, size_t error_size);
+int latcd_receive_response_fd(int socket_fd, LatcdResponseV2 *response,
+                              int *fd, char *error, size_t error_size);
 
 /* Keep directory_fd open through bind/connect when a pathname exceeds sun_path. */
 int latcd_socket_address(const char *path, struct sockaddr_un *address,

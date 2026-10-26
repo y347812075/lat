@@ -2181,6 +2181,7 @@ static void over_tb_shbr_opt(TranslationBlock **tb_list, int tb_num_in_tu,
                     tb->s_data->xmm_out = SHBR_XMM_ALL;
                     break;
                 case IR1_TYPE_RET:
+                case IR1_TYPE_TRAP:
                     tb->s_data->xmm_out = SHBR_XMM_ALL;
                     /* tb->s_data->xmm_out = 0x3; */
                     break;
@@ -2428,6 +2429,7 @@ static void over_tb_gpr_opt(TranslationBlock **tb_list, int tb_num_in_tu)
                     tb->s_data->gpr_out = GHBR_GPR_ALL;
                     break;
                 case IR1_TYPE_RET:
+                case IR1_TYPE_TRAP:
                     tb->s_data->gpr_out = GHBR_GPR_ALL;
                     break;
                 default:

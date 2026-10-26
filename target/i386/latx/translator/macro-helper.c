@@ -195,6 +195,13 @@ void li_wu(IR2_OPND opnd2, uint32_t lo32)
     imm_helper(opnd2, 0, lo32);
 }
 
+void li_numeric_wu(IR2_OPND opnd2, uint32_t lo32)
+{
+    int first_id = lsenv->tr_data->ir2_inst_num_current;
+    imm_helper(opnd2, 0, lo32);
+    ir2_record_numeric_range(first_id);
+}
+
 /**
 * @brief la_ld_by_op_size - load by opnd size
 *

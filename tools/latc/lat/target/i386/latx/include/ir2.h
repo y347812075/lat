@@ -81,6 +81,10 @@ IR2_INST *ir2_allocate(void);
 
 uint32 ir2_assemble(const IR2_INST *);
 
+/* Diagnostic provenance only; final TU movement needs a separate certificate. */
+void ir2_record_numeric_range(int first_id);
+bool ir2_has_numeric_provenance(const IR2_INST *);
+
 bool ir2_opcode_is_branch(IR2_OPCODE);
 bool ir2_opcode_is_branch_with_3opnds(IR2_OPCODE);
 bool ir2_opcode_is_branch_with_2opnds(IR2_OPCODE);

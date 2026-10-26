@@ -5,8 +5,9 @@
 #include <string.h>
 
 #define LAT_NATIVE_IMAGE_MAGIC "LATNAT2"
-#define LAT_NATIVE_IMAGE_VERSION 8u
+#define LAT_NATIVE_IMAGE_VERSION 11u
 #define LAT_NATIVE_BUILD_ID_SIZE 65u
+#define LAT_NATIVE_CONFIG_CAPACITY 1024u
 
 #define LAT_NATIVE_INDIRECT_EXIT_WORDS 38u
 #define LAT_NATIVE_AOT_V2_INDIRECT_EXIT_WORDS 27u
@@ -22,7 +23,9 @@ static inline int lat_native_decode_local_branch_target(
     int64_t offset;
     if (slots == 2) {
         if ((words[0] & 0xfe000000u) != 0x1e000000u ||
-            (words[1] & 0xfc000000u) != 0x4c000000u) {
+            (words[1] & 0xfc000000u) != 0x4c000000u ||
+            !(words[0] & 31u) ||
+            (words[0] & 31u) != ((words[1] >> 5) & 31u)) {
             return 0;
         }
         int64_t upper = (int32_t)(words[0] >> 5) & 0xfffff;
@@ -30,20 +33,20 @@ static inline int lat_native_decode_local_branch_target(
             upper -= 1 << 20;
         }
         int64_t lower = (int16_t)(words[1] >> 10);
-        offset = (upper << 18) + lower * 4;
+        offset = upper * (INT64_C(1) << 18) + lower * 4;
     } else {
         uint32_t word = words[0];
         uint32_t opcode = word & 0xfc000000u;
         uint32_t opcode20 = word & 0xfc000100u;
         if (opcode == 0x50000000u || opcode == 0x54000000u) {
             uint32_t raw = ((word >> 10) & 0xffffu) |
-                           (((word >> 16) & 0x3ffu) << 16);
+                           ((word & 0x3ffu) << 16);
             offset = (int64_t)((int32_t)(raw << 6) >> 6) * 4;
         } else if (opcode == 0x40000000u || opcode == 0x44000000u ||
                    opcode20 == 0x48000000u || opcode20 == 0x48000100u) {
             uint32_t raw = ((word >> 10) & 0xffffu) |
-                           (((word >> 16) & 0x1fu) << 16);
-            offset = (int64_t)((int32_t)(raw << 12) >> 12) * 4;
+                           ((word & 0x1fu) << 16);
+            offset = (int64_t)((int32_t)(raw << 11) >> 11) * 4;
         } else if (opcode >= 0x58000000u && opcode <= 0x6c000000u) {
             offset = (int64_t)(int16_t)(word >> 10) * 4;
         } else {
@@ -176,6 +179,8 @@ enum LatNativeImageFlags {
     LAT_NATIVE_IMAGE_LSX = 1u << 3,
     LAT_NATIVE_IMAGE_NO_PRECISE_SIGNAL_MAP = 1u << 4,
     LAT_NATIVE_IMAGE_CROSS_MODULE_TARGETS = 1u << 5,
+    /* Real configuration replay, not yet authorized for module publication. */
+    LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED = 1u << 6,
     LAT_NATIVE_IMAGE_X86_STATIC_EXEC = 1u << 28,
     LAT_NATIVE_IMAGE_X86_EXIT_SMOKE = LAT_NATIVE_IMAGE_X86_STATIC_EXEC,
     LAT_NATIVE_IMAGE_C_ABI_DISPATCH_SMOKE = 1u << 29,
@@ -292,6 +297,9 @@ typedef struct LatNativeImageHeaderV2 {
     uint8_t guest_sha256[32];
     char lat_build_id[LAT_NATIVE_BUILD_ID_SIZE];
     uint8_t reserved_tail[7];
+    uint8_t translation_config_sha256[32];
+    uint32_t translation_config_size;
+    uint32_t translation_config_projection;
 } LatNativeImageHeaderV2;
 
 typedef struct LatNativeTbV1 {
@@ -325,7 +333,30 @@ typedef struct LatNativeRelocationV1 {
     uint32_t reserved;
     /* Physical TB index plus one for a local TB/JRRA edge; zero is none. */
     uint32_t physical_target_plus_one;
+    /* Complete pointer-free object, not just the suffix starting at addend. */
+    uint64_t data_object_offset;
+    uint64_t data_object_size;
+    uint32_t data_object_alignment;
+    uint32_t data_object_flags;
 } LatNativeRelocationV1;
+
+#define LAT_NATIVE_DATA_POINTER_FREE 1u
+
+static inline int lat_native_data_object_valid(
+    const LatNativeRelocationV1 *rel, uint64_t code_size)
+{
+    uint32_t alignment = rel->data_object_alignment;
+    return rel->kind == LAT_NATIVE_RELOC_IMAGE_DATA &&
+        rel->data_object_flags == LAT_NATIVE_DATA_POINTER_FREE &&
+        alignment && !(alignment & (alignment - 1)) && alignment <= 4096 &&
+        !(rel->data_object_offset & (alignment - 1)) &&
+        rel->data_object_size && rel->data_object_offset < code_size &&
+        rel->data_object_size <= code_size - rel->data_object_offset &&
+        rel->addend >= 0 && (uint64_t)rel->addend >= rel->data_object_offset &&
+        (uint64_t)rel->addend - rel->data_object_offset < rel->data_object_size &&
+        rel->reserved == rel->data_object_size -
+            ((uint64_t)rel->addend - rel->data_object_offset);
+}
 
 typedef struct LatNativePcMapV2 {
     uint64_t guest_pc;
@@ -341,6 +372,10 @@ typedef struct LatNativeTuV1 {
     uint64_t search_offset;
     uint32_t flags;
     uint32_t reserved;
+    /* Zero version means unknown, never configuration independent. */
+    uint64_t config_dependencies;
+    uint32_t config_dependency_version;
+    uint32_t config_dependency_reserved;
 } LatNativeTuV1;
 
 #endif

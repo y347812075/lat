@@ -93,7 +93,7 @@ static bool translate_cvttpx2dq_opt(IR1_INST *pir1)
 
 bool translate_cvttpx2dq(IR1_INST *pir1)
 {
-    if (option_cvt_opt) {
+    if (latx_translation_cvt_opt()) {
         return translate_cvttpx2dq_opt(pir1);
     }
 
@@ -279,7 +279,7 @@ static bool translate_cvtpd2dq_opt(IR1_INST *pir1)
 bool translate_cvtpd2dq(IR1_INST *pir1)
 {
     prepare_sse_rounding_mode();
-    if (option_cvt_opt) {
+    if (latx_translation_cvt_opt()) {
         return translate_cvtpd2dq_opt(pir1);
     }
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
@@ -410,7 +410,7 @@ static bool translate_cvtps2dq_opt(IR1_INST *pir1)
 bool translate_cvtps2dq(IR1_INST *pir1)
 {
     prepare_sse_rounding_mode();
-    if (option_cvt_opt) {
+    if (latx_translation_cvt_opt()) {
         return translate_cvtps2dq_opt(pir1);
     }
     IR2_OPND temp_fcsr = ra_alloc_itemp();
@@ -537,7 +537,7 @@ static bool translate_cvtpd2pi_opt(IR1_INST *pir1)
 bool translate_cvtpd2pi(IR1_INST *pir1)
 {
     prepare_sse_rounding_mode();
-    if (option_cvt_opt) {
+    if (latx_translation_cvt_opt()) {
         return translate_cvtpd2pi_opt(pir1);
     }
     tr_x87_to_mmx();
@@ -650,7 +650,7 @@ static bool translate_cvttpd2pi_opt(IR1_INST *pir1)
 
 bool translate_cvttpd2pi(IR1_INST *pir1)
 {
-    if (option_cvt_opt) {
+    if (latx_translation_cvt_opt()) {
         return translate_cvttpd2pi_opt(pir1);
     }
     tr_x87_to_mmx();
@@ -829,7 +829,7 @@ static bool translate_cvtps2pi_opt(IR1_INST *pir1)
 bool translate_cvtps2pi(IR1_INST *pir1)
 {
     prepare_sse_rounding_mode();
-    if (option_cvt_opt) {
+    if (latx_translation_cvt_opt()) {
         return translate_cvtps2pi_opt(pir1);
     }
     tr_x87_to_mmx();
@@ -937,7 +937,7 @@ static bool translate_cvttps2pi_opt(IR1_INST *pir1)
 
 bool translate_cvttps2pi(IR1_INST *pir1)
 {
-    if (option_cvt_opt) {
+    if (latx_translation_cvt_opt()) {
         return translate_cvttps2pi_opt(pir1);
     }
     tr_x87_to_mmx();
@@ -1285,7 +1285,7 @@ static bool translate_cvtsx2si_opt(IR1_INST *pir1)
 
 bool translate_cvtsx2si(IR1_INST *pir1)
 {
-    if (option_cvt_opt) {
+    if (latx_translation_cvt_opt()) {
         return translate_cvtsx2si_opt(pir1);
     }
 
@@ -1494,7 +1494,7 @@ static bool translate_cvttsx2si_opt(IR1_INST *pir1)
 
 bool translate_cvttsx2si(IR1_INST *pir1)
 {
-    if (option_cvt_opt) {
+    if (latx_translation_cvt_opt()) {
         return translate_cvttsx2si_opt(pir1);
     }
     IR2_OPND src_lo = load_freg128_from_ir1(ir1_get_opnd(pir1, 1));

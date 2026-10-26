@@ -12,6 +12,8 @@ linux_user_ss.add(files(
   'auto-config.c',
   'latcd-protocol.c',
   'tb-key-set.c',
+  'translation-config.c',
+  'key-journal.c',
   'mmap.c',
   'safe-syscall.S',
   'signal.c',

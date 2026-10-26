@@ -210,6 +210,52 @@ static int write_fixture(const char *path, int overlap, int incomplete_map,
     return 0;
 }
 
+static int test_unrelated_physical_target(const char *directory)
+{
+    char *path = g_build_filename(directory, "unrelated-physical.native", NULL);
+    char *text_path = g_build_filename(directory, "text.bin", NULL);
+    char error[256] = {0};
+    gchar *image = NULL, *expected = NULL, *actual = NULL;
+    gsize image_size = 0, expected_size = 0, actual_size = 0;
+    int failed = 0;
+    for (unsigned test = 0; test < 3 && !failed; test++) {
+        failed = write_fixture(path, 0, 0, test == 0, 0) ||
+            !g_file_get_contents(path, &image, &image_size, NULL);
+        if (failed) break;
+        LatNativeImageHeaderV2 *header = (void *)image;
+        LatNativeTbV1 *tbs = (void *)(image + header->tb_table_offset);
+        LatNativeRelocationV1 *rel = (void *)(image + header->relocation_offset);
+        if (test == 1) {
+            header->flags |= LAT_NATIVE_IMAGE_CROSS_MODULE_TARGETS;
+            tbs[0].guest_pc = rel[0].addend;
+            tbs[0].flags = LAT_AOT_TB_CODE64;
+            tbs[1].flags = LAT_AOT_TB_PARALLEL;
+        }
+        failed = !g_file_set_contents(path, image, image_size, NULL) ||
+            lat_aot_v2_emit_module_sources(path, directory, error, sizeof(error)) ||
+            !g_file_get_contents(text_path, &expected, &expected_size, NULL);
+        /* Ignore unrelated addresses, mismatched flags, and irrelevant hints. */
+        rel[0].physical_target_plus_one = test == 2 ? 2 : 1;
+        failed = failed || !g_file_set_contents(path, image, image_size, NULL) ||
+            lat_aot_v2_emit_module_sources(path, directory, error, sizeof(error)) ||
+            !g_file_get_contents(text_path, &actual, &actual_size, NULL) ||
+            actual_size != expected_size ||
+            memcmp(actual, expected, expected_size);
+        g_clear_pointer(&actual, g_free);
+        g_clear_pointer(&expected, g_free);
+        g_clear_pointer(&image, g_free);
+    }
+    if (failed) {
+        fprintf(stderr, "unrelated physical target changed logical exit: %s\n", error);
+    }
+    g_free(actual);
+    g_free(expected);
+    g_free(image);
+    g_free(text_path);
+    g_free(path);
+    return failed ? -1 : 0;
+}
+
 static int test_primary_tb_aliases(const char *directory)
 {
     unsigned char image[1024] = {0};
@@ -1291,7 +1337,7 @@ static int test_edge_flags(const char *directory)
     char *text_path = g_build_filename(directory, "text.bin", NULL);
     const unsigned mode_count = 18 + G_N_ELEMENTS(flag_instructions);
     for (unsigned mode = 0; mode < mode_count; mode++) {
-        unsigned char image[512] = {0};
+        unsigned char image[1024] = {0};
         LatNativeImageHeaderV2 *h = (void *)image;
         memcpy(h->magic, LAT_NATIVE_IMAGE_MAGIC, 8);
         h->version = LAT_NATIVE_IMAGE_VERSION;
@@ -1544,7 +1590,8 @@ int main(void)
         g_free(image_path);
         return 1;
     }
-    if (test_primary_tb_aliases(directory)) {
+    if (test_unrelated_physical_target(directory) ||
+        test_primary_tb_aliases(directory)) {
         g_free(image_path);
         return 1;
     }

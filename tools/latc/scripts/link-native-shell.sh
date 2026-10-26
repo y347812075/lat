@@ -44,6 +44,7 @@ cp "$offsets" "$work/latx-x86-env-offsets.h"
 "$cc" -O2 -g -fPIE $ldflags -Wall -Wextra -Werror -std=c11 \
     -I"$work" -I"$root/native/include" -I"$root/native/format" \
     -I"$root/native/runtime" \
+    -I"$root/aot-v2/include" $(pkg-config --cflags glib-2.0) \
     "$root/native/runtime/main.c" "$root/native/runtime/guest-loader.c" \
     "$root/native/runtime/relocate.c" \
     "$root/native/runtime/runtime-symbols.c" \
@@ -52,6 +53,7 @@ cp "$offsets" "$work/latx-x86-env-offsets.h"
     "$root/native/runtime/dispatch-x86.S" \
     "$root/native/runtime/enter-x86.S" \
     "$root/native/format/native-image.c" \
-    "$work/image.o" -o "$work/program"
+    "$root/aot-v2/common/translation-config.c" \
+    "$work/image.o" -o "$work/program" $(pkg-config --libs glib-2.0)
 chmod 0755 "$work/program"
 mv "$work/program" "$output"

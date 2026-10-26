@@ -88,6 +88,379 @@ build/latc compile-module /path/to/x86-program -o program.so \
 build/latc inspect-module --json program.so
 ```
 
+An observed input TB set may be smaller than the actual compiled module
+(CFG selection and direct closure can add entries). To preserve coverage
+when rebuilding a module with the same source and codegen identity, export
+the actual keys and validate the replacement, not just its observed inputs:
+
+```sh
+build/latc emit-module-tbset old.so -o old-module.tbset
+build/latc validate-module-replacement old.so new.so
+```
+
+The export refuses to overwrite an existing file. Replacement validation
+rejects identity changes or any missing `(RVA, flags)` pair. `latcd` performs
+this check before committing a replacement of a valid current generation,
+including publication of an already cached candidate.
+Before compilation, `latcd` also unions the actual current module keys with
+the complete requested set for any clean recompilation (including a retry
+after an incremental merge failure). The observed-key manifest remains a
+request record; it is not treated as a complete inventory of translated TBs.
+
+The standalone `lat-key-journal` primitive is exercised by
+`build/tests/test-key-journal` and the full `make test` target. It uses a bounded,
+append-only, size-sealed shared memfd with independent reservation/commit slots.
+Tests cover producer SIGKILL before/after commit, abandoned slots, concurrent
+threads/forks, format/identity rejection and capacity exhaustion. An external
+owner must retain the fd for the memfd backend. A named-file backend supports
+reopening after all previous fd owners exit, using private-directory checks and
+positioned I/O with independent OFD slot locks; it does not map unsealed files.
+Each writer must open its own view and reopen after fork. File operations must
+run outside the translation mmap_lock. Neither backend is connected to runner
+collection yet. Service operation `LATCD_OP_REGISTER_JOURNAL` takes a source fd
+and a write/grow/shrink-sealed configuration fd; its sequence is the slot capacity.
+The daemon pins its verified source snapshot, stores configuration and identity,
+and creates `.journals/<random-epoch>/keys`. A successful reply contains the epoch
+basename, with accepted/published sequences still zero. Startup validates stored
+registrations; invalid or incompatible-build stores fail visibly, without GC.
+The store is bounded to 128 streams and a separate logical-byte budget equal to
+`--max-cache-bytes`, not a unified module-plus-journal quota. Registration currently
+performs snapshot/validation I/O in the request loop. Incomplete registration after
+a daemon crash can require operator recovery; no automatic discard is attempted.
+An incomplete effective-config snapshot may be retained but never authorizes cache
+compatibility or compilation. Startup also scans committed slots into a quarantined
+per-stream `received.tbset`; operation 9 (`COLLECT_JOURNALS`, no descriptors) repeats
+this bounded scan explicitly. Collection checks executable source ranges and that
+all previously received keys remain in the journal. It atomically replaces a
+changed receipt and reserves space for the final and temporary maximum receipts.
+Unchanged sets retain their inode. Accepted/published sequences remain zero:
+receipt storage is not compiler admission, compile-job recovery or an execution
+before-commit gate, and it does not provide power-loss durability. Existing runtime
+collection remains best effort. `build/tests/test-journal-store` covers registration,
+producer/service SIGKILL, source unlink, restart collection, binding, limits,
+executable-range boundaries, receipt corruption and preservation on failure.
+
+The client provides ordinary and authenticated inherited-channel journal
+registration APIs. Both require the returned source SHA, lowercase epoch basename
+and zero accepted/published watermarks to match the registration contract. Channel
+registration uses a dedicated reply socket, without reconnecting by pathname;
+registration may succeed remotely even if its reply is lost, so automatic retry
+does not yet provide idempotence. These APIs are not connected to runner collection
+or compiler admission. The store test includes a fork child registering after the
+server socket pathname has been temporarily moved, then appending and collecting
+its key. This is a descriptor-path test, not full namespace/seccomp acceptance.
+
+Operation 10 (`REGISTER_JOURNAL_CAPABILITY`) has the same registration inputs,
+but also transfers an owned CLOEXEC private stream directory fd in its successful
+reply. The capability client APIs require exactly one descriptor on success and
+none on rejection, validate the directory owner/mode, and clear outputs on any
+failure. Callers still validate the complete journal identity with `open_at`.
+Fork children close inherited writer views and open a fresh OFD through this
+directory, without resolving the cache pathname. Protocol tests cover malformed
+ancillary data and reply backpressure; service tests cover a moved store path,
+fork reopen, producer SIGKILL and receipt collection. This does not establish
+availability of the required host syscalls under a real application sandbox,
+protect runner fds from guest operations, or implement the preexecution gate.
+
+Experimental runner integration is now available when
+`LATX_AOT_V2_KEY_JOURNAL` is present. It uses operation 10 and a dedicated
+outer-loop retry to commit missing file keys before normal TB generation;
+fork children reopen an independent writer OFD and JRRA retry uses guest identity.
+The earlier disconnected-component descriptions above are historical boundaries.
+This is not a default or complete delivery guarantee: direct TU/tunnel/bundle
+misses can exit125, mapping identity/classification and exact executable ranges,
+guest fd protection, real sandbox, atomic/signal/flush interleavings and managed
+cold-start validation remain incomplete. Config is still incomplete/quarantined;
+receipt collection does not admit compilation, recover jobs or publish modules.
+See `docs/aot-v2-handoff/runtime-key-delivery.md` and `STATUS.md`.
+
+In service mode, `flush-source` and `flush-all` freeze the accepted sequence
+for each applicable source when admitted. They wait for those targets without
+blocking the request loop or extending the barrier to later submissions.
+Pending flush replies are bounded to 128; excess requests report queue-full.
+Disconnected clients are reclaimed, and stopping the daemon reports failure
+for unfinished barriers. `--flush-only` still requires a flush to schedule new
+work; new keys received during compilation remain pending for a later compile,
+and an admitted flush cannot be undone by a subsequent submission.
+
+Use a static guest with valid instructions at entry, entry+5 and entry+10
+(the service `x86-exit42` fixture) for the controlled asynchronous flush test:
+
+```sh
+make -C tools/latc test-latcd-async-flush \
+  INSTALL_PREFIX=/path/to/install X86_GUEST=/path/to/x86-exit42 \
+  WORK=$HOME/tmp/latcd-async-flush-test
+```
+
+The target runs concurrent flush handling, deferred scheduling and later static
+failure checks
+in separate work directories. An already satisfied flush must not schedule
+later keys, even when another source admission wakes a compiler worker.
+A later static failure must not fail an earlier runtime barrier, but a flush
+including that static request must report its failure.
+Runtime targets and static barriers are tracked separately: a repeated static
+request cannot complete an unrelated runtime request with a larger sequence.
+
+To calculate a bounded request's missing keys without exporting the entire
+module table, use:
+
+```sh
+build/latc missing-module-tbset old.so planned-shard.tbset -o delta.tbset
+```
+
+This validates the module table, the request's source SHA and the current
+compiler's codegen identity. It preserves request sequence and key ordering;
+an entirely covered request produces a valid zero-record TB set. It refuses
+existing output paths, including symlinks. Aggregate modules may exceed the
+TB-set export limit, while each input/output request remains bounded.
+This command is only a membership primitive: it does not prove a paired
+native image or configuration compatibility. New daemon publications record
+module/native content digests. Incremental jobs freeze and verify both files
+from that manifest before passing them together to the discovery-plan consumer.
+Each original shard is retained and validated; only its missing keys are
+translated, and fully covered shards are skipped. When all shards are covered,
+the paired native is reused without an empty translator invocation. Final
+linking still validates the entire plan and all previous actual module keys.
+Historical manifests without both digests do not enable this optimization,
+and a cache hit does not upgrade them into a proven pair. This does not solve
+the separately tracked effective-configuration identity/migration gap.
+Both cached candidates and newly compiled modules must cover every requested
+key; small missing sets are not accepted as implicitly JIT-only. Every fresh
+compile stages a distinct immutable generation without overwriting existing
+files, so failure before manifest commit leaves the old generation intact.
+
+### Pretranslation Capability And Cache Update Contract
+
+Pretranslation must use the translator's effective instruction and optimization
+capabilities, including build options, startup options, and environment overrides.
+It must not proactively compile a disabled or unsupported ISA path or enable an
+optimization on its own. A disabled optimization may still have a valid ordinary
+translation path; it is not automatically an unsupported instruction.
+The same rule applies to static precompilation, runtime incremental compilation,
+and recovery recompilation. Every entry point and compiler worker must use the
+target runtime's effective configuration, not independently inherited daemon or
+worker environment values or defaults.
+When effective capabilities change, update the existing cache incrementally:
+compile newly enabled missing entries, recompile affected existing units, and
+reuse only proven-compatible unaffected code. Track effective configuration and
+compatibility, validate coverage, and atomically publish the new generation;
+never relabel incompatible native images or weaken the accepted-key gate.
+Clearing the cache and recompiling everything is not a substitute for incremental
+configuration migration.
+Compare fully resolved effective values, not raw environment strings: changed
+inputs that resolve to the same configuration must not cause unrelated recompiles.
+This is a required contract, not a claim that environment-driven cache migration
+is already implemented. See [the repository capability rules](../../docs/aot-v2-handoff/capability-consistency.md).
+
+`latx-x86_64 --latc-translation-config GUEST` exports a versioned JSON diagnostic
+snapshot after the real configuration-file, environment, and command-line
+processing, CPU initialization, and guest-name adjustments. It does not execute
+the guest or prepare AOT cache directories. The snapshot currently reports
+`compatibility_complete: false`: its field audit and configured daemon/compiler
+workflow are unfinished, and it must not be used as a cache compatibility identity or proof
+that incremental configuration migration is implemented.
+The shared configuration schema supplies explicit little-endian serialization,
+strict decoding, a configuration SHA256 independent of the build identity, and
+a field-level difference bitmap. The JSON query exposes this diagnostic digest
+as `configuration_sha256`. Equality is not sufficient for reuse: the shared
+compatibility predicate rejects incomplete snapshots, and native/module cache
+validation does not yet consume this configuration metadata.
+`--latc-translation-config-from PATH` can replay a bounded binary snapshot only
+alongside the diagnostic query. Writable options are restored before CPU setup;
+host/build/CPU facts are not overwritten and the final snapshot is compared
+field by field. Ordinary incomplete snapshots are not accepted for real
+compilation, and setting their complete flag does not enable compilation replay.
+`--latc-translation-config-out PATH` selects the same diagnostic query and also
+writes its canonical binary snapshot directly from the translator. The path must
+not exist; a new file is created with mode 0600 (subject to umask), and a handled
+write, sync, or close failure removes the partial output. It can be combined with
+`--latc-translation-config-from` to export a verified replay. The exported snapshot
+remains incomplete and does not authorize worker compilation or cache reuse.
+
+An isolated native-export experiment is available through
+`--latc-translation-config-native --latc-translation-config-out PATH GUEST`.
+It captures a restricted non-debug x86-64 v2/parallel configuration and reports
+`native_replay_domain: true`; the JSON and binary outputs describe the same
+snapshot and digest. Unsupported effective settings are refused. The internal
+`LATC_TRANSLATION_CONFIG_FROM=PATH` worker input accepts this snapshot only in
+a verified bundle without embedded AOT, with `LATC_EMIT_AOT=1` and
+`LATC_NATIVE_IMAGE_OUT` set. It projects only the internal legacy-AOT export
+mode, verifies the remaining effective configuration, and requires parallel keys.
+The resulting v11 native image preserves the original snapshot and digest, but
+is explicitly unverified for execution: module packaging, executable marking,
+and native runtime loading refuse it. Merge requires identical original
+snapshots. Old native readers reject v11 rather than ignoring its metadata.
+This experiment proves real option replay, not runnable configured caches,
+daemon protocol propagation, or selective TU migration. Run its integration
+test with `make -C tools/latc test-native-config-replay INSTALL_PREFIX=...`
+and the `X86_GUEST`, `TBSET`, and fresh `WORK` paths.
+
+`latc plan-native-tus IMAGE SEED_TBSET -o OUTPUT_TBSET` expands existing seed
+keys into a native TU metadata dependency plan. It includes complete shared
+TUs, all same-key physical aliases, and transitive incoming physical-target
+dependencies. Source and current build identities must match; unknown seed keys,
+missing TU ownership, and oversized plans fail. The output preserves the input
+sequence and uses sorted unique RVA/parallel keys, including a legal empty plan.
+The output path must not exist. This command neither changes native code nor
+authorizes configuration compatibility: unrecorded local branches and constant
+data references still need extraction proofs, and complete configuration
+classification, code replacement, and atomic migration publication are pending.
+
+Native v11 also stores a configuration-schema version and dependency mask per
+physical TU. Successful ordinary translations record audited CVT option reads
+under both option values; other configuration fields conservatively affect every
+TU. Missing or unsupported translation records contribute all dependency bits.
+Masks are unioned across TU members, preserved by merge, and validated on input.
+A zero dependency version means unknown, not independent. These records alone
+do not authorize cache compatibility or selective reuse. Exercise real multi-TU
+exports with `make -C tools/latc test-native-tu-config INSTALL_PREFIX=...` and
+`X86_GUEST`, `TBSET`, and a fresh `WORK` path.
+
+Native v11 data relocations additionally record the complete pointer-free
+constant object, its code-section offset, byte size and power-of-two alignment
+(at most 4096), separately from the referenced interior address. Shared references
+must agree on object bounds, flags and alignment; partial/conflicting object
+overlaps, code/patch overlap and metadata on other relocation kinds are refused.
+Merge preserves object alignment and shifts both object and reference addresses.
+These records enable future object extraction, not proof that arbitrary TU code
+is movable or authorization for configuration reuse.
+
+`latc plan-native-config IMAGE CONFIG -o OUTPUT_TBSET` compares an embedded
+native snapshot against a canonical target snapshot, then applies the same
+complete-TU/alias/incoming-dependency closure. Unknown TU dependencies select
+the TU on any configuration change; equal configurations produce an empty
+plan. Missing snapshots, mismatched domains/builds, malformed inputs, and
+existing output paths fail. Target configurations must be bounded regular
+files, not symlinks or FIFOs. This command only plans recompilation: it neither
+authorizes reuse nor changes native code, configuration labels, or manifests.
+Run real-export regression with `make -C tools/latc test-native-config-plan
+INSTALL_PREFIX=... EXPORTS=... EXPECTED=... WORK=...`; `EXPORTS` contains real
+two-configuration native exports and snapshots, and `EXPECTED` maps guest PCs
+to their audited CVT dependency in the fixture.
+
+`latc extract-native-tus IMAGE REMOVE_TBSET -o OUTPUT_NATIVE` implements actual
+compaction of the complement of a closed removal plan. It copies whole retained
+TUs and only their referenced complete constant objects, preserving internal
+layout/alignment/sharing and remapping TB/TU indices, physical target indices,
+patch offsets and PC maps. Empty complements are rejected. Outputs are exclusive
+new files; failed writes are removed. Only quarantined configuration-replay
+images are accepted and their exact original snapshot remains unchanged.
+This is not a machine-code movement certificate: unrecorded references and
+producer provenance still require proof before reuse, replacement, execution or
+publication. Existing CONFIG_UNVERIFIED loading/packaging restrictions remain.
+Run `make -C tools/latc test-native-tu-extract INSTALL_PREFIX=... EXPORTS=...
+PLANS=... WORK=...` after the real-export configuration-plan regression above.
+
+`latc audit-native-tu-references IMAGE` checks final TU executable prefixes and
+the recorded patch templates, rejects overlapping/unowned patch windows, and
+checks unrecorded direct branches and supported PC-relative address expressions
+remain inside the same TU prefix. It includes code beyond ordinary TB ranges,
+such as moved unlink stubs. Unrecorded PCALAU12I and unsupported PCADDU12I uses
+fail; recorded JRRA windows require their full patch template. Extraction runs
+the audit before and after compaction. This is not an absolute-address provenance,
+reachability, fallthrough or complete movement certificate; the CLI explicitly
+reports `movement_certified=false`. Configuration quarantine remains mandatory.
+
+`latc audit-native-tu-execution IMAGE` additionally walks conservative control
+flow from every physical TB entry, checking branch/call continuations and
+rejecting execution outside the owning TU prefix or into patch/far-pair/helper/
+dispatch interiors. Relocated helper calls require an exact address-load and
+JIRL sequence, optionally with one non-clobbering OR argument instruction;
+returning helpers must set `ra`, whereas proved nonreturning helpers may tail
+exit. Nonstandard link registers are rejected except the two recorded JIRL
+epilogue `rd4` conventions. Nonzero runtime-entry addends are rejected.
+Existing complete validated fast-dispatch windows may exit through cache hits,
+but their miss continuation is still checked. Unresolved indirect transfers
+fail. Extraction runs this audit, including the reference audit, before and
+after compaction. It does not certify instruction validity, absolute-address or
+dynamic-target provenance, nor the producer's executable-layout declaration;
+`movement_certified=false` and configuration quarantine are unchanged.
+
+The native WAIT producer constructs its float constants directly with numeric
+bits and MOVGR2FR.W instead of embedding exporter-process addresses. On LoongArch
+the full test runs the real emitter against memory loads and its single-precision
+arithmetic/FCSR results under four rounding modes. The installed export test is
+`make -C tools/latc test-fwait-constants INSTALL_PREFIX=... X86_GUEST=...
+TBSET=... WORK=...`, using `tests/x86-fwait-constants.S` compiled on x86. It checks
+the actual constant values, absence of the old FLD.S loads, repeated exports and
+JIT execution. This focused producer fix is not a general provenance certificate
+or a full WAIT exception/trap equivalence claim.
+
+`LATC_TRACE_PROVENANCE=1` enables opt-in producer diagnostics on stderr. Each
+emitted TB-assembly word has its guest PC, TB-relative offset, exact word,
+`numeric-bits` or `unknown` origin, and `certified=0`. Legacy immediate helpers
+remain unknown; only explicit numeric emitters opt in. Per-IR-index snapshots
+check opcode and active operands after optimization and are cleared per
+translation and destroyed with the translation thread. Native export retains
+only sparse numeric-word records on their owning TB, remaps moved unlink stubs,
+clears records on retranslation, and emits `native-final` records after final
+export rewrites. Changed words and overlapping relocation windows become unknown.
+Live JIT tracing does not retain these sparse arrays. This is not a register
+dataflow proof, a complete final TU inventory, a persistent native manifest, or
+authorization to move/reuse code. Use only for bounded
+diagnostics: a large translation can produce a large log. The default is off;
+other values do not enable it.
+
+`make test-final-provenance-export INSTALL_PREFIX=... X86_GUEST=... TBSET=...
+WORK=...` exercises final offsets in a real shared TU. A test-only builder uses
+the product CFG analyzer and bundle writer to select unbounded parallel entries;
+it does not change the product's bounded-key policy. Compile
+`tests/x86-provenance-tu.S` on x86 and include `_start|provenance_.*` symbols in
+the input key evidence set. The check compares actual final native words and verifies
+that tracing does not change code outside recorded relocation windows.
+
+`LATC_TBSET_CLOSURE_LIMIT` controls only the number of additional direct
+successors (zero disables that expansion). Selection is independently set by
+`LATC_TBSET_SELECTION=cfg|bounded|exact|exact-static`: direct `latc compile`
+defaults to `cfg`; module compilation and `latcd` default to `bounded` with a
+20000 direct-successor budget. `LATC_TBSET_EXPAND_FUNCTIONS` additionally expands
+containing functions in bounded mode. Changing a budget does not switch policy.
+
+`exact` consumes only the supplied mandatory keys; `exact-static` consumes only
+the supplied static candidates and retains static capability filtering. Neither
+exact mode inserts dynamic/PLT roots, expands functions or follows successors,
+even if expansion environment variables are set. These are batch-consumption
+primitives, not proof that discovery has finished. Static candidates must not be
+replayed in `exact`, which intentionally preserves mandatory requests. Replacement
+coverage is checked regardless of these choices.
+
+Exact bundle compilation loads only the ELF executable ranges before applying
+the supplied keys. It does not reconstruct the whole-program CFG for each shard.
+Discovery and final module packing still perform their full analysis; in
+particular, the final packer's function and edge metadata is not removed.
+Ordinary non-export bundle prewarming consequently has no whole-CFG extents or
+edge metadata in these exact modes; successful execution alone does not prove
+equivalent prewarming coverage or zero runtime JIT compilation.
+
+Normal module native compilation now prepares a private discovery plan before
+translation. `plan-tbset ELF TBSET DIRECTORY [--static]` drains the direct/PIC
+frontier, separates mandatory keys from static candidates, filters unsupported
+static paths, and writes bounded sorted shards. Optional `--batch-size` and
+`--work-budget` control slicing, not final coverage. `list-tbplan ELF DIRECTORY`
+validates all shard hashes, source/build identities, permissions, ordering and
+the complete marker before printing exact-consumption inputs. The normalized
+collection identity includes provenance but not shard boundaries. Module linking
+then checks every plan shard using `validate-tbplan-module ELF DIRECTORY MODULE`.
+Native shards are merged in levels; successfully merged children are removed.
+The plan is a private job intermediate, not a persistent daemon request format
+or a restart checkpoint. Discovery memory still grows with the frontier; source
+CLI inputs must remain stable (the daemon supplies an immutable snapshot).
+The legacy direct bundle selector retains its one-shot closure budget behavior.
+
+Static discovery also recognizes a bounded 64-bit CFI sequence that computes
+`ROR64(pointer - base, rotation)`, rejects values above a small unsigned bound,
+then calls or jumps through a fixed pointer slot. It enumerates the exact
+inverse rotation, not an inferred vtable length. An optional constant-register
+`BT` followed by a carry-clear rejection further filters that finite domain,
+including the architectural modulo-64 bit-index behavior. Slots require unique local
+`R_X86_64_RELATIVE` records from loader-declared RELA tables, unambiguous
+file-backed mappings, and read-only or RELRO storage. Conflicting writes,
+unknown dynamic relocation formats, dependency clobbers and known bypass
+entries leave the pattern unresolved. These results are candidate TB seeds
+only: they do not create function metadata, close an indirect edge, or change
+guest dynamic-linker and dispatch semantics. Static capability filtering and
+the complete old-key/new-request publication checks still apply.
+
 M4 adds a separate per-user compiler process. The first implemented step
 accepts one read-only x86 ELF file descriptor over a Unix socket, compiles a
 stable snapshot, validates the module source digest, and publishes it with an
@@ -411,6 +784,15 @@ assembler. They are not formatted as a large C source file for the host C
 compiler to parse. `latcd` accepts a cached module as a TB-set hit only when
 every requested `(RVA, flags)` pair exists in that module.
 
+Module translation handles code-buffer exhaustion by bisecting the complete
+input TB set, translating both halves, and merging their native images before
+linking one module. Only the offline translator's dedicated buffer-exhaustion
+status triggers this retry; other compilation failures remain failures. A
+single-key input that still exhausts the buffer fails rather than retrying
+indefinitely. Each successful merge removes its intermediate native children.
+This resource handling does not exempt unsupported instructions or missing
+requested keys from the daemon's publication checks.
+
 For each source ELF, the version 2 `current` manifest names exactly one `.so`,
 one canonical `.native` image, and one complete `.tbset`. The first publication
 translates the complete set. A later publication subtracts the current module's
@@ -536,8 +918,10 @@ created. A background thread submits pending per-source sets every 100 ms;
 normal exit and pre-`execve` handling submit any remainder. It never scans the
 global JIT TB table. latcd unions keys from all processes; an unchanged set
 does not schedule another compile. In `--flush-only` mode it performs no
-compilation until `FLUSH_SOURCE` or `FLUSH_ALL`, then compiles each final source
-set once. The flush waits until every previously accepted set is published or
+compilation until `FLUSH_SOURCE` or `FLUSH_ALL`, then schedules the accepted
+source sets. Concurrent new keys may require another compile; keys accepted
+after a flush need a later flush to schedule that increment. The flush waits
+until every previously accepted set is published or
 an explicit compile error is returned. A successful flush has already merged
 and relinked every accepted increment; it never reports success for a pending
 fragment.

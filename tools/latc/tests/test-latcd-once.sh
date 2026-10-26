@@ -125,6 +125,7 @@ test -z "$(find "$invalid_cache/.tmp" -mindepth 1 -maxdepth 1 -print -quit)"
 
 cache=$work/cache
 mkdir -m 700 "$cache"
+published_cache=$cache
 source_sha=$(sha256sum "$guest" | cut -d ' ' -f 1)
 tbset_sha=$(sha256sum "$guest_tbset" | cut -d ' ' -f 1)
 module_name=$source_sha-$tbset_sha.so
@@ -135,6 +136,12 @@ timeout 60 "$latcd" --submit --socket "$work/publish.sock" \
   --tbset "$guest_tbset" "$guest" >"$work/publish.client"
 wait "$server_pid"
 
+module_name=$(python3 - "$cache/$source_sha.current" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1]))["module"])
+PY
+)
 module=$cache/$module_name
 test -f "$module"
 test "$(stat -c %a "$module")" = 444
@@ -191,6 +198,18 @@ chmod 0444 "$module"
 eviction_cache=$work/eviction-cache
 mkdir -m 700 "$eviction_cache"
 cp "$module" "$eviction_cache/$module_name"
+python3 - "$cache" "$eviction_cache" "$source_sha" <<'PY'
+import json
+from pathlib import Path
+import shutil
+import sys
+source, target = map(Path, sys.argv[1:3])
+manifest = source / f"{sys.argv[3]}.current"
+data = json.loads(manifest.read_text())
+for key in ("native", "tbset"):
+    shutil.copy2(source / data[key], target / data[key])
+shutil.copy2(manifest, target / manifest.name)
+PY
 chmod 0444 "$eviction_cache/$module_name"
 touch -t 200001010000 "$eviction_cache/$module_name"
 cp "$guest" "$work/eviction-input.elf"
@@ -200,12 +219,27 @@ eviction_tbset=$work/eviction.tbset
 python3 "$script_dir/make-tbset.py" "$work/eviction-input.elf" "$eviction_tbset"
 eviction_tbset_sha=$(sha256sum "$eviction_tbset" | cut -d ' ' -f 1)
 eviction_module=$eviction_sha-$eviction_tbset_sha.so
-cache_limit=$(( $(stat -c %s "$module") + 4096 ))
+cache_limit=$(python3 - "$cache" "$source_sha" <<'PY'
+import json
+from pathlib import Path
+import sys
+cache = Path(sys.argv[1])
+manifest = json.loads((cache / f"{sys.argv[2]}.current").read_text())
+print(sum((cache / manifest[key]).stat().st_size
+          for key in ("module", "native", "tbset")) + 4096)
+PY
+)
 start_once "$work/eviction.sock" "$eviction_cache" "$latc" \
   --max-cache-bytes "$cache_limit"
 timeout 60 "$latcd" --submit --socket "$work/eviction.sock" \
   --tbset "$eviction_tbset" "$work/eviction-input.elf" >"$work/eviction.client"
 wait "$server_pid"
+eviction_module=$(python3 - "$eviction_cache/$eviction_sha.current" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1]))["module"])
+PY
+)
 test -f "$eviction_cache/$eviction_module"
 test ! -e "$eviction_cache/$module_name"
 test ! -e "$eviction_cache/$source_sha.current"
@@ -216,8 +250,19 @@ old_tbset=$(printf old-tbset | sha256sum | cut -d ' ' -f 1)
 old_name=$source_sha-$old_tbset.so
 cp "$module" "$versioned_cache/$old_name"
 chmod 0444 "$versioned_cache/$old_name"
-printf '{"module":"%s","source_sha256":"%s"}\n' \
-  "$old_name" "$source_sha" >"$versioned_cache/$source_sha.current"
+python3 - "$published_cache" "$versioned_cache" "$source_sha" "$old_name" <<'PY'
+import json
+from pathlib import Path
+import shutil
+import sys
+source, target = map(Path, sys.argv[1:3])
+name = f"{sys.argv[3]}.current"
+data = json.loads((source / name).read_text())
+for key in ("native", "tbset"):
+    shutil.copy2(source / data[key], target / data[key])
+data["module"] = sys.argv[4]
+(target / name).write_text(json.dumps(data, separators=(",", ":")) + "\n")
+PY
 chmod 0444 "$versioned_cache/$source_sha.current"
 touch -t 200001010000 "$versioned_cache/$old_name"
 start_once "$work/versioned-eviction.sock" "$versioned_cache" "$latc" \
@@ -226,6 +271,12 @@ timeout 60 "$latcd" --submit --socket "$work/versioned-eviction.sock" \
   --tbset "$eviction_tbset" "$work/eviction-input.elf" \
   >"$work/versioned-eviction.client"
 wait "$server_pid"
+eviction_module=$(python3 - "$versioned_cache/$eviction_sha.current" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1]))["module"])
+PY
+)
 test -f "$versioned_cache/$eviction_module"
 test ! -e "$versioned_cache/$old_name"
 test ! -e "$versioned_cache/$source_sha.current"

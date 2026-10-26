@@ -21,6 +21,7 @@
 #include "jrra.h"
 #include "reg-alloc.h"
 #include "latx-options.h"
+#include "latc-aot-v2-runner.h"
 #include "aot_page.h"
 #ifdef CONFIG_LATX_AOT
 #include "aot.h"
@@ -33,7 +34,9 @@ void get_last_info(TranslationBlock *tb, IR1_INST* pir1)
     }
     tb->s_data->next_pc = ir1_addr_next(pir1);
 
-    if (ir1_is_branch(pir1)) {
+    if (ir1_is_terminal_trap(pir1)) {
+        tb->s_data->last_ir1_type = (int8)IR1_TYPE_TRAP;
+    } else if (ir1_is_branch(pir1)) {
         if (likely(ir1_opnd_is_imm(ir1_get_opnd(pir1, 0)))) {
             tb->s_data->last_ir1_type = (int8)IR1_TYPE_BRANCH;
             tb->s_data->target_pc = ir1_target_addr(pir1);
@@ -150,6 +153,8 @@ void tu_enough_space(CPUState *cpu)
 
 void tu_reset_tb(TranslationBlock *tb)
 {
+    tb->translation_config_dependencies_valid = false;
+    tb->numeric_provenance_words = NULL;
     qemu_spin_init(&tb->jmp_lock);
     tb->jmp_dest[0] = (uintptr_t)NULL;
     tb->jmp_dest[1] = (uintptr_t)NULL;
@@ -338,6 +343,8 @@ static void generate_tu_switch_native_tb(TranslationBlock *broken_tb)
 
 static int tu_switch_native_tb(TranslationBlock *broken_tb)
 {
+    g_clear_pointer(&broken_tb->numeric_provenance_words, g_array_unref);
+    broken_tb->translation_config_dependencies_valid = false;
     int code_nr = 0;
     TRANSLATION_DATA *lat_ctx = lsenv->tr_data;
 
@@ -510,6 +517,7 @@ static inline void get_tu_queue(CPUState *cpu,
             break;
         case IR1_TYPE_JUMPIN:
         case IR1_TYPE_RET:
+        case IR1_TYPE_TRAP:
             break;
         default:
             lsassert(0);
@@ -963,6 +971,16 @@ static void mov_unlink_stub_to_end(uint32_t tb_num_in_tu, TranslationBlock **tb_
         if (use_tu_jmp(tb)) {
             tb->tu_unlink.stub_offset = curr_pos  + tb->tu_unlink.stub_offset
                 - (uintptr_t)tb->tc.ptr;
+            tr_provenance_move_stub(tb, tb->tc.size,
+                                    tb->tu_unlink.stub_offset);
+            const char *trace = getenv("LATC_TRACE_PROVENANCE");
+            if (trace && !strcmp(trace, "1")) {
+                fprintf(stderr,
+                        "latc: provenance-stage=tu-stub-layout pc=0x%llx "
+                        "old_offset=%u new_offset=%u certified=0\n",
+                        (unsigned long long)tb->pc, (unsigned)tb->tc.size,
+                        (unsigned)tb->tu_unlink.stub_offset);
+            }
             /* relocate pcaddi in unlink stub */
             relocate_tu_unlink_stub(tb);
         }
@@ -982,6 +1000,7 @@ static char ir1_type_name[IR1_TYPE_COUNT][8] = {
     [IR1_TYPE_JUMPIN]  = "jmpin",
     [IR1_TYPE_CALLIN]  = "callin",
     [IR1_TYPE_SYSCALL] = "syscall",
+    [IR1_TYPE_TRAP]    = "trap",
 };
 
 static void dump_tu_ir2(uint32 tb_num_in_tu, TranslationBlock **tb_list)
@@ -1117,6 +1136,9 @@ retry:
 static void register_tu(uint32 tb_num_in_tu, TranslationBlock **tb_list,
 		CPUState *cpu, int cflags)
 {
+    for (unsigned i = 0; i < tb_num_in_tu; i++) {
+        latc_aot_v2_key_publish_check(cpu, tb_list[i]->pc, cflags);
+    }
     for (int i = 0; i < tb_num_in_tu; i++) {
         TranslationBlock *tb = tb_list[i];
         if (tb->s_data->tu_tb_mode != TU_TB_MODE_BROKEN

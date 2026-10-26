@@ -179,6 +179,7 @@ i386_ss.add(when: 'CONFIG_LATX', if_true: files(
   'mem.c',
   'latx-config.c',
   'latx-options.c',
+  'latx-translation-config.c',
   'latx-perf.c',
   'latx-name-demangling.cpp',
   'latx-special-args.c',

@@ -68,6 +68,12 @@ def main() -> None:
     replace_once(source / "linux-user/meson.build",
                  "  'latcd-client.c',\n",
                  "  'latcd-client.c',\n  'auto-config.c',\n")
+    replace_once(source / "linux-user/meson.build",
+                 "  'auto-config.c',\n",
+                 "  'auto-config.c',\n  'translation-config.c',\n")
+    replace_once(source / "linux-user/meson.build",
+                 "  'translation-config.c',\n",
+                 "  'translation-config.c',\n  'key-journal.c',\n")
     if (source / "meson.build").is_file():
         replace_once(source / "meson.build",
                      "config_host_data.set_quoted('CONFIG_BINDIR', get_option('prefix') / get_option('bindir'))\n",
@@ -75,6 +81,9 @@ def main() -> None:
                      "config_host_data.set_quoted('CONFIG_LATC_LIBDIR', get_option('prefix') / get_option('libdir'))\n")
     replace_once(source / "target/i386/latx/sbt/meson.build",
                  "  'aot.c',\n", "  'aot.c',\n  'latc_native_export.c',\n")
+    replace_once(source / "target/i386/latx/meson.build",
+                 "  'latx-options.c',\n",
+                 "  'latx-options.c',\n  'latx-translation-config.c',\n")
     # The minimal static linux-user runner uses neither OpenSSL nor zlib.
     replace_once(source / "configure",
                  '  QEMU_LDFLAGS="-lcrypto -lz $QEMU_LDFLAGS"\n', "")

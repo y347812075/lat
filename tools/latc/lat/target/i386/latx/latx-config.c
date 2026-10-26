@@ -691,6 +691,7 @@ void latx_lsenv_destroy(void)
     TRANSLATION_DATA *t = &tr_data_real;
 
     free(t->ir2_inst_array);
+    g_clear_pointer(&t->numeric_provenance, g_hash_table_destroy);
     if (t->imm_cache) {
         free(t->imm_cache->bucket);
         free(t->imm_cache);

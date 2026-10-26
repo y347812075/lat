@@ -5,13 +5,21 @@ HOST_ARCH := $(shell uname -m)
 AOT_V2_BUILD_ID := $(shell python3 scripts/compute-aot-v2-build-id.py ../..)
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=c11
 FUZZ_CC ?= clang
-CPPFLAGS += -Icfg/include
+CPPFLAGS += -Icfg/include -I../../include
 CPPFLAGS += -DLATC_BUILD_ID=\"$(AOT_V2_BUILD_ID)\"
 CPPFLAGS += -Iformat -Ilat/include -Inative/include -Inative/format \
 	-Inative/runtime -Iaot-v2/include -Iaot-v2/runtime \
 	-Iaot-v2/compiler -Iaot-v2/common \
 	$(shell pkg-config --cflags glib-2.0)
 LDLIBS += $(shell pkg-config --libs glib-2.0)
+
+CAPSTONE_DIR := ../../target/i386/latx/capstone_git
+CPPFLAGS += -I$(CAPSTONE_DIR)/include
+CAPSTONE_SRC := cs.c MCInst.c MCInstrDesc.c MCRegisterInfo.c MCInstPrinter.c \
+	Mapping.c SStream.c utils.c arch/X86/X86Disassembler.c \
+	arch/X86/X86DisassemblerDecoder.c arch/X86/X86InstPrinterCommon.c \
+	arch/X86/X86ATTInstPrinter.c arch/X86/X86IntelInstPrinter.c \
+	arch/X86/X86Mapping.c arch/X86/X86Module.c
 
 BUILD := build
 CFG_SRC := \
@@ -20,11 +28,15 @@ CFG_SRC := \
 	cfg/src/function_symbols.c \
 	cfg/src/ijmp_resolve.c \
 	cfg/src/cfg_decoder.c \
+	cfg/src/cfg_return_proof.c \
 	cfg/src/cfg_program.c
 CFG_OBJ := $(CFG_SRC:%.c=$(BUILD)/%.o)
+CAPSTONE_OBJ := $(CAPSTONE_SRC:%.c=$(BUILD)/capstone/%.o)
 FORMAT_OBJ := $(BUILD)/format/bundle.o
 
 .PHONY: all clean test test-native test-native-shell test-native-long-tb \
+	 test-native-config-replay test-native-tu-config test-native-config-plan test-native-constants \
+	 test-native-tu-extract \
 	test-aot-native test-spec-analyze test-spec-gzip test-spec-gzip-aot \
 		test-spec-gzip-native test-specint-native test-aot-v2 \
 		test-specint-aot-v2 \
@@ -44,19 +56,49 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 
 all: $(BUILD)/latc $(BUILD)/latcd/latcd $(BUILD)/liblatc_cfg.a
 
-$(BUILD)/liblatc_cfg.a: $(CFG_OBJ)
+test-native-config-replay:
+	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)" || \
+	  { echo "usage: make test-native-config-replay INSTALL_PREFIX=... X86_GUEST=... TBSET=... WORK=..."; exit 2; }
+	python3 tests/test-native-config-replay.py "$(INSTALL_PREFIX)" "$(X86_GUEST)" "$(TBSET)" "$(WORK)"
+
+test-native-tu-config:
+	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)" || \
+	  { echo "usage: make test-native-tu-config INSTALL_PREFIX=... X86_GUEST=... TBSET=... WORK=..."; exit 2; }
+	python3 tests/test-native-tu-config.py "$(INSTALL_PREFIX)" "$(X86_GUEST)" "$(TBSET)" "$(WORK)"
+
+test-native-config-plan:
+	@test -n "$(INSTALL_PREFIX)" -a -n "$(EXPORTS)" -a -n "$(EXPECTED)" -a -n "$(WORK)" || \
+	  { echo "usage: make test-native-config-plan INSTALL_PREFIX=... EXPORTS=... EXPECTED=... WORK=..."; exit 2; }
+	python3 tests/test-native-config-plan.py "$(INSTALL_PREFIX)/bin/latc" "$(EXPORTS)" "$(EXPECTED)" "$(WORK)"
+
+test-native-tu-extract:
+	@test -n "$(INSTALL_PREFIX)" -a -n "$(EXPORTS)" -a -n "$(PLANS)" -a -n "$(WORK)"
+	python3 tests/test-native-tu-extract.py "$(INSTALL_PREFIX)/bin/latc" "$(EXPORTS)" "$(PLANS)" "$(WORK)"
+
+$(BUILD)/liblatc_cfg.a: $(CFG_OBJ) $(CAPSTONE_OBJ)
 	$(AR) rcs $@ $^
 
-$(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/tbset.o \
+$(BUILD)/capstone/%.o: $(CAPSTONE_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -std=gnu99 -w -DCAPSTONE_HAS_X86 \
+	  -DCAPSTONE_USE_SYS_DYN_MEM -I$(CAPSTONE_DIR)/include \
+	  -MMD -MP -c -o $@ $<
+
+$(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/tbset.o $(BUILD)/compiler/tbplan.o \
 		$(BUILD)/aot-v2/common/tb-key-set.o \
 		$(BUILD)/aot-v2/compiler/module-pack.o \
 		$(BUILD)/aot-v2/compiler/module-inspect.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o \
-		$(FORMAT_OBJ) $(BUILD)/native/format/native-image.o $(BUILD)/liblatc_cfg.a
+		$(BUILD)/aot-v2/common/translation-config.o \
+		$(FORMAT_OBJ) $(BUILD)/native/format/native-image.o \
+		$(BUILD)/native/format/native-tu-plan.o \
+		$(BUILD)/native/format/native-tu-audit.o $(BUILD)/liblatc_cfg.a
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD)/latcd/latcd: $(BUILD)/latcd/main.o $(BUILD)/latcd/protocol.o \
 		$(BUILD)/latcd/precompile.o \
+		$(BUILD)/latcd/journal-store.o $(BUILD)/aot-v2/common/key-journal.o \
+		$(BUILD)/aot-v2/common/translation-config.o \
 		$(BUILD)/aot-v2/common/tb-key-set.o \
 		$(BUILD)/aot-v2/compiler/module-inspect.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o
@@ -73,6 +115,14 @@ $(BUILD)/tests/cfg-fixture: tests/cfg-fixture.S
 $(BUILD)/tests/x86-exit42: tests/x86-exit42.S
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-bounded-pic: tests/x86-bounded-pic.S
+	@mkdir -p $(dir $@)
+	$(X86_CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+
+$(BUILD)/tests/x86-masked-pic: tests/x86-masked-pic.S
+	@mkdir -p $(dir $@)
+	$(X86_CC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
 
 $(BUILD)/tests/x86-pie-exit42: tests/x86-pie-exit42.S
 	@mkdir -p $(dir $@)
@@ -272,9 +322,14 @@ $(BUILD)/tests/x86-semantics-main: tests/x86-semantics-main.c \
 
 $(BUILD)/tests/test-cfg: tests/test-cfg.c $(BUILD)/liblatc_cfg.a
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
+	$(BUILD)/tests/test-native-constants \
+	$(BUILD)/tests/test-native-tu-plan \
+	$(BUILD)/tests/test-native-tu-extract \
+	$(BUILD)/tests/test-native-tu-audit \
+	$(BUILD)/tests/test-translation-config \
 	$(BUILD)/tests/test-fallback-loader $(BUILD)/tests/test-native-format \
 	$(BUILD)/tests/test-native-relocate $(BUILD)/tests/test-native-dispatch \
 	$(BUILD)/tests/test-aot-recover-tu \
@@ -330,6 +385,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  tests/test-aot-v2-dynamic-semantics.sh \
 	  tests/test-aot-v2-invalidation.sh tests/test-latcd-once.sh \
 	  tests/test-aot-v2-fork.sh \
+	  tests/test-aot-v2-cfi-entry.sh \
 	  tests/fake-latc-invalid-module.sh tests/fake-latc-fail.sh \
 	  tests/test-latcd-service.sh \
 	  tests/fake-latc-slow.sh tests/fake-latc-cpu.sh \
@@ -340,6 +396,8 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	  scripts/prepare-complex-rootfs.sh
 	sh tests/test-compile-aot-native-direct.sh scripts/compile-aot.sh
 	sh tests/test-compile-native-one-pass.sh scripts/compile-native-image.sh
+	python3 tests/test-native-batching.py $(BUILD)/latc \
+	  scripts/compile-native-image.sh
 	python3 tests/test-check-aot-v2-coverage.py \
 	  tests/check-aot-v2-coverage.py
 	$(BUILD)/tests/test-fallback-loader \
@@ -349,15 +407,51 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-native-format $(BUILD)/tests/base.native \
 	  $(BUILD)/tests/delta.native $(BUILD)/tests/merged.native
 	$(BUILD)/tests/test-native-relocate
+	$(BUILD)/tests/test-native-tu-plan
+	$(BUILD)/tests/test-native-tu-extract
+	$(BUILD)/tests/test-native-tu-audit
+	$(BUILD)/tests/test-native-constants $(BUILD)/tests/constant-base.native \
+	  $(BUILD)/tests/constant-delta.native $(BUILD)/tests/constant-merged.native
 	$(BUILD)/tests/test-native-dispatch
 	$(BUILD)/tests/test-aot-recover-tu
 	tests/test-old-aot-tu-replay-space.sh
 	$(BUILD)/tests/test-aot-v2-module-pack
+	$(BUILD)/tests/test-module-coverage $(abspath $(BUILD)/latc)
+	$(BUILD)/tests/test-tb-key-set
+	$(BUILD)/tests/test-key-journal
+	$(BUILD)/tests/test-journal-store
+	$(BUILD)/tests/test-latcd-coverage
+	$(BUILD)/tests/test-latcd-channel
+	$(BUILD)/tests/test-tbset-selection $(BUILD)/tests/cfg-fixture
+	$(BUILD)/tests/test-tb-closure
+	python3 tests/test-tbplan.py $(BUILD)/latc $(BUILD)/tests/cfg-fixture
+	$(BUILD)/tests/test-static-capability $(BUILD)/tests/cfg-fixture
+	$(BUILD)/tests/test-gpr-writes
+	$(BUILD)/tests/test-gpr-constants
+	$(BUILD)/tests/test-return-proof
+	$(BUILD)/tests/test-bounded-pic
+	$(BUILD)/tests/test-cfi-entry
+	@if test -n "$(SPLIT_CFI_GUEST)"; then \
+	  python3 tests/test-split-cfi-static.py $(BUILD)/latc "$(SPLIT_CFI_GUEST)"; \
+	fi
+	$(BUILD)/tests/test-elf-pointer
+	@if test -n "$(CFI_ENTRY_GUEST)"; then \
+	  python3 tests/test-cfi-static.py $(BUILD)/latc "$(CFI_ENTRY_GUEST)"; \
+	fi
+	@if test -n "$(MASKED_PIC_GUEST)"; then \
+	  python3 tests/test-masked-pic-static.py $(BUILD)/latc \
+	    "$(MASKED_PIC_GUEST)" $(BUILD)/tests/masked-pic.tbset; \
+	fi
+	@if test -n "$(BOUNDED_PIC_GUEST)"; then \
+	  $(BUILD)/tests/test-tbset-selection $(BUILD)/tests/cfg-fixture \
+	    "$(BOUNDED_PIC_GUEST)"; \
+	fi
 	$(BUILD)/tests/test-latcd-protocol
 	$(BUILD)/tests/test-latcd-client
 	mkdir -p "$${TMPDIR:-$$HOME/tmp}"
 	TMPDIR="$${TMPDIR:-$$HOME/tmp}" $(BUILD)/tests/test-auto-config
 	$(BUILD)/tests/test-precompile
+	$(BUILD)/tests/test-translation-config
 	$(BUILD)/tests/test-aot-v2-guest-elf-map \
 	  $(BUILD)/tests/x86-pie-exit42 $(BUILD)/tests/x86-pie-exit42 \
 	  $(BUILD)/tests/x86-exit42
@@ -443,7 +537,13 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	python3 tests/test-aot-v2-submission-signals.py
 	python3 tests/test-native-search-data.py
 	python3 tests/test-native-tu-relocations.py
+	python3 tests/test-native-constant-export.py
+	python3 tests/test-fwait-constant-emitter.py
+	python3 tests/test-ir2-provenance.py
+	python3 tests/test-final-provenance.py
 	python3 tests/test-aot-metadata-buffer.py
+	python3 tests/test-terminal-trap.py
+	python3 tests/test-module-selection-environment.py scripts/compile-aot-v2-module.sh
 	python3 tests/test-module-runtime-prefix.py
 	$(MAKE) check-import
 
@@ -451,6 +551,125 @@ $(BUILD)/tests/test-latcd-protocol: \
 		aot-v2/tests/test-latcd-protocol.c $(BUILD)/latcd/protocol.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+
+test: $(BUILD)/tests/test-module-coverage
+
+test: $(BUILD)/tests/test-tb-key-set
+
+test: $(BUILD)/tests/test-key-journal
+test: $(BUILD)/tests/test-journal-store
+
+$(BUILD)/tests/test-journal-store: aot-v2/tests/test-journal-store.c latcd/main.c \
+		$(BUILD)/aot-v2/runtime/latcd-client.o \
+		$(BUILD)/latcd/journal-store.o $(BUILD)/aot-v2/common/key-journal.o \
+		$(BUILD)/aot-v2/common/translation-config.o $(BUILD)/latcd/protocol.o \
+		$(BUILD)/latcd/precompile.o $(BUILD)/aot-v2/compiler/module-inspect.o \
+		$(BUILD)/aot-v2/runtime/elf-validate.o $(BUILD)/aot-v2/common/tb-key-set.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ aot-v2/tests/test-journal-store.c \
+	  $(filter %.o,$^) $(LDLIBS) -pthread -ldl
+
+$(BUILD)/tests/test-key-journal: aot-v2/tests/test-key-journal.c \
+		aot-v2/common/key-journal.c aot-v2/include/lat-key-journal.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
+	  aot-v2/tests/test-key-journal.c aot-v2/common/key-journal.c -pthread
+
+$(BUILD)/tests/test-tb-key-set: aot-v2/tests/test-tb-key-set.c \
+		$(BUILD)/aot-v2/common/tb-key-set.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+
+test: $(BUILD)/tests/test-latcd-coverage
+test: $(BUILD)/tests/test-latcd-channel
+
+$(BUILD)/tests/test-latcd-channel: aot-v2/tests/test-latcd-channel.c \
+		aot-v2/runtime/latcd-client.c $(BUILD)/latcd/protocol.o \
+		$(BUILD)/latcd/precompile.o $(BUILD)/aot-v2/compiler/module-inspect.o \
+		$(BUILD)/aot-v2/runtime/elf-validate.o \
+		$(BUILD)/aot-v2/common/tb-key-set.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
+	  aot-v2/tests/test-latcd-channel.c aot-v2/runtime/latcd-client.c \
+	  $(filter %.o,$^) $(LDLIBS) -pthread -ldl
+
+$(BUILD)/tests/test-latcd-channel: latcd/main.c
+
+$(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
+		$(BUILD)/latcd/journal-store.o $(BUILD)/aot-v2/common/key-journal.o \
+		$(BUILD)/aot-v2/common/translation-config.o
+
+test: $(BUILD)/tests/test-tbset-selection
+test: $(BUILD)/tests/test-tb-closure
+test: $(BUILD)/tests/test-static-capability
+test: $(BUILD)/tests/test-gpr-writes
+test: $(BUILD)/tests/test-gpr-constants
+test: $(BUILD)/tests/test-return-proof
+
+$(BUILD)/tests/test-return-proof: tests/test-return-proof.c $(BUILD)/liblatc_cfg.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/test-gpr-constants: tests/test-gpr-constants.c $(BUILD)/liblatc_cfg.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/test-gpr-writes: tests/test-gpr-writes.c $(BUILD)/liblatc_cfg.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/test-tb-closure: tests/test-tb-closure.c \
+		$(BUILD)/compiler/tbset.o $(BUILD)/aot-v2/common/tb-key-set.o \
+		$(BUILD)/liblatc_cfg.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Icompiler -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/test-static-capability: tests/test-static-capability.c \
+		$(BUILD)/compiler/tbset.o $(BUILD)/aot-v2/common/tb-key-set.o \
+		$(BUILD)/liblatc_cfg.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Icompiler -o $@ $^ $(LDLIBS)
+
+test: $(BUILD)/tests/test-bounded-pic
+test: $(BUILD)/tests/test-cfi-entry
+test: $(BUILD)/tests/test-elf-pointer
+
+$(BUILD)/tests/test-elf-pointer: tests/test-elf-pointer.c $(BUILD)/liblatc_cfg.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/test-cfi-entry: tests/test-cfi-entry.c $(BUILD)/liblatc_cfg.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/test-bounded-pic: tests/test-bounded-pic.c $(BUILD)/liblatc_cfg.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/test-tbset-selection: tests/test-tbset-selection.c \
+		$(BUILD)/compiler/tbset.o $(BUILD)/aot-v2/common/tb-key-set.o \
+		$(BUILD)/liblatc_cfg.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Icompiler -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/test-latcd-coverage: aot-v2/tests/test-latcd-coverage.c \
+		aot-v2/tests/elf-fixture.c $(BUILD)/latcd/protocol.o \
+		$(BUILD)/latcd/precompile.o $(BUILD)/aot-v2/compiler/module-inspect.o \
+		$(BUILD)/aot-v2/runtime/elf-validate.o \
+		$(BUILD)/aot-v2/common/tb-key-set.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iaot-v2/tests -o $@ \
+	  aot-v2/tests/test-latcd-coverage.c aot-v2/tests/elf-fixture.c \
+	  $(filter %.o,$^) $(LDLIBS) -pthread -ldl
+
+$(BUILD)/tests/test-latcd-coverage: latcd/main.c aot-v2/tests/test-module-coverage.c
+
+$(BUILD)/tests/test-module-coverage: aot-v2/tests/test-module-coverage.c \
+		aot-v2/tests/elf-fixture.c $(BUILD)/aot-v2/compiler/module-inspect.o \
+		$(BUILD)/aot-v2/runtime/elf-validate.o \
+		$(BUILD)/aot-v2/common/tb-key-set.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iaot-v2/tests -o $@ $^ $(LDLIBS)
 
 $(BUILD)/tests/test-aot-recover-tu: tests/test-aot-recover-tu.c \
 		../../target/i386/latx/include/aot_recover_tu.h
@@ -619,6 +838,7 @@ $(BUILD)/tests/test-aot-v2-translated-module: \
 		$(BUILD)/aot-v2/runtime/registry.o \
 		$(BUILD)/aot-v2/compiler/module-pack.o \
 		$(BUILD)/native/format/native-image.o \
+		$(BUILD)/aot-v2/common/translation-config.o \
 		$(BUILD)/aot-v2/liblat-aot-runtime.so.2 \
 		native/runtime/enter-x86.S native/runtime/guest-loader.c
 	@mkdir -p $(dir $@)
@@ -629,6 +849,7 @@ $(BUILD)/tests/test-aot-v2-translated-module: \
 	  $(BUILD)/aot-v2/runtime/registry.o \
 	  $(BUILD)/aot-v2/compiler/module-pack.o \
 	  $(BUILD)/native/format/native-image.o native/runtime/enter-x86.S \
+	  $(BUILD)/aot-v2/common/translation-config.o \
 	  native/runtime/guest-loader.c \
 	  -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
 	  -l:liblat-aot-runtime.so.2 -ldl -pthread $(LDLIBS)
@@ -897,9 +1118,56 @@ $(BUILD)/tests/test-fallback-loader: tests/test-fallback-loader.c \
 	  $(BUILD)/native/runtime/fallback-loader.o -ldl
 
 $(BUILD)/tests/test-native-format: tests/test-native-format.c \
-		$(BUILD)/native/format/native-image.o
+		$(BUILD)/native/format/native-image.o $(BUILD)/aot-v2/common/translation-config.o
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/test-native-constants: tests/test-native-constants.c \
+		$(BUILD)/native/format/native-image.o $(BUILD)/aot-v2/common/translation-config.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+test-native-constants: all
+	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)"
+	python3 tests/test-native-constants.py "$(INSTALL_PREFIX)" "$(X86_GUEST)" "$(TBSET)" "$(WORK)"
+
+.PHONY: test-final-provenance-export
+$(BUILD)/tests/make-provenance-tu-bundle: tests/make-provenance-tu-bundle.c $(FORMAT_OBJ) $(BUILD)/liblatc_cfg.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+test-final-provenance-export: all $(BUILD)/tests/make-provenance-tu-bundle
+	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)"
+	python3 tests/test-final-provenance-export.py "$(INSTALL_PREFIX)" "$(X86_GUEST)" "$(TBSET)" "$(WORK)" "$(BUILD)/tests/make-provenance-tu-bundle"
+
+test-fwait-constants: all
+	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)"
+	python3 tests/test-fwait-constants.py "$(INSTALL_PREFIX)" "$(X86_GUEST)" "$(TBSET)" "$(WORK)"
+
+$(BUILD)/tests/test-native-tu-plan: tests/test-native-tu-plan.c \
+		$(BUILD)/native/format/native-tu-plan.o \
+		$(BUILD)/native/format/native-tu-audit.o \
+		$(BUILD)/native/format/native-image.o \
+		$(BUILD)/aot-v2/common/tb-key-set.o \
+		$(BUILD)/aot-v2/common/translation-config.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/test-native-tu-extract: tests/test-native-tu-extract.c \
+		$(BUILD)/native/format/native-tu-plan.o \
+		$(BUILD)/native/format/native-tu-audit.o \
+		$(BUILD)/native/format/native-image.o \
+		$(BUILD)/aot-v2/common/tb-key-set.o \
+		$(BUILD)/aot-v2/common/translation-config.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/test-native-tu-audit: tests/test-native-tu-audit.c \
+		$(BUILD)/native/format/native-tu-audit.o \
+		$(BUILD)/native/format/native-image.o \
+		$(BUILD)/aot-v2/common/translation-config.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD)/tests/test-native-relocate: tests/test-native-relocate.c \
 		native/runtime/relocate.c native/runtime/runtime-symbols.c \
@@ -915,6 +1183,7 @@ $(BUILD)/tests/test-native-dispatch: tests/test-native-dispatch.c \
 
 $(BUILD)/tests/test-aot-v2-module-pack: \
 		tests/test-aot-v2-module-pack.c \
+		$(BUILD)/aot-v2/common/translation-config.o \
 		$(BUILD)/aot-v2/compiler/module-pack.o \
 		$(BUILD)/native/format/native-image.o
 	@mkdir -p $(dir $@)
@@ -923,6 +1192,11 @@ $(BUILD)/tests/test-aot-v2-module-pack: \
 $(BUILD)/tests/test-auto-config: CFLAGS += -D_GNU_SOURCE -Wwrite-strings
 $(BUILD)/tests/test-auto-config: aot-v2/tests/test-auto-config.c \
 		aot-v2/runtime/auto-config.c aot-v2/runtime/latcd-client.c $(BUILD)/latcd/protocol.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/test-translation-config: aot-v2/tests/test-translation-config.c \
+		aot-v2/common/translation-config.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -1055,6 +1329,15 @@ test-aot-v2-install:
 	sh tests/test-aot-v2-install.sh $(INSTALL_PREFIX) $(X86_ROOTFS) \
 	  $(X86_GUEST) $(BUILD)/aot-v2-install-test
 
+.PHONY: test-latcd-async-flush
+test-latcd-async-flush:
+	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(WORK)" || \
+	  { echo "usage: make test-latcd-async-flush INSTALL_PREFIX=... X86_GUEST=... WORK=..."; exit 2; }
+	python3 tests/test-latcd-async-flush.py "$(INSTALL_PREFIX)" "$(X86_GUEST)" "$(WORK)"
+	python3 tests/test-latcd-async-flush.py "$(INSTALL_PREFIX)" "$(X86_GUEST)" "$(WORK)-deferred" --deferred
+	python3 tests/test-latcd-async-flush.py "$(INSTALL_PREFIX)" "$(X86_GUEST)" "$(WORK)-static-failure" --static-failure
+	python3 tests/test-latcd-async-flush.py "$(INSTALL_PREFIX)" "$(X86_GUEST)" "$(WORK)-static-duplicate" --static-duplicate
+
 sync-aot-v2-sources:
 	python3 scripts/sync-aot-v2-sources.py
 
@@ -1066,6 +1349,9 @@ clean:
 
 -include $(CFG_OBJ:.o=.d) $(BUILD)/compiler/latc.d \
 	$(BUILD)/compiler/tbset.d $(BUILD)/format/bundle.d \
+	$(BUILD)/native/format/native-tu-plan.d \
+	$(BUILD)/native/format/native-tu-audit.d \
+	$(BUILD)/native/format/native-image.d \
 	$(BUILD)/aot-v2/compiler/module-pack.d \
 	$(BUILD)/aot-v2/runtime/elf-validate.d \
 	$(BUILD)/aot-v2/runtime/registry.d \

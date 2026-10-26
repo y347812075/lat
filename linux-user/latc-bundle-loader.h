@@ -2,6 +2,7 @@
 #define LATC_BUNDLE_LOADER_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /* Return 1 for a bundle, 0 for a normal runner invocation, or -1 on error. */
 int latc_bundle_inject_argv(int *argc, char ***argv);
@@ -10,6 +11,7 @@ int latc_bundle_inject_argv(int *argc, char ***argv);
 int latc_bundle_verified_guest(uint8_t digest[32], uint64_t *guest_begin,
                                uint64_t *guest_end);
 int latc_bundle_verified_guest_digest(uint8_t digest[32]);
+bool latc_bundle_native_export_eligible(void);
 /* Validated CFG upper bound for standalone compiler allocation. */
 uint64_t latc_bundle_tb_count(void);
 

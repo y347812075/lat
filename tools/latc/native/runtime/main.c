@@ -154,6 +154,10 @@ int main(int argc, char **argv, char **envp)
     }
     const LatNativeImageHeaderV2 *header =
         (const void *)latc_embedded_image_start;
+    if (header->flags & LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED) {
+        fprintf(stderr, "latc: native configuration replay is not authorized for execution\n");
+        return 125;
+    }
     if (argc == 2 && strcmp(argv[1], "--latc-inspect") == 0) {
         return inspect_image(header);
     }

@@ -8,6 +8,7 @@
 #include "latc-build-id.h"
 #include "module-inspect.h"
 #include "precompile.h"
+#include "journal-store.h"
 
 #include <dlfcn.h>
 #include <elf.h>
@@ -58,6 +59,8 @@ static long superseded_grace_seconds(void);
 #define LATCD_BATCH_QUIET_US (INT64_C(100) * 1000)
 #define LATCD_BATCH_MAX_US (INT64_C(500) * 1000)
 #define LATCD_SUPERSEDED_DIRNAME ".superseded"
+#define LATCD_MAX_CHANNELS 128u
+#define LATCD_MAX_FLUSHES 128u
 
 typedef struct LatcdConfig {
     const char *socket_path;
@@ -86,6 +89,8 @@ typedef struct LatcdCurrentManifest {
     char *module;
     char *native;
     char *tbset;
+    char *module_sha256;
+    char *native_sha256;
     uint64_t published_sequence;
 } LatcdCurrentManifest;
 
@@ -110,6 +115,7 @@ static uint32_t default_worker_count(void)
 
 typedef struct LatcdJob {
     char *snapshot;
+    struct stat source_identity;
     char *tbset;
     bool tbset_canonical;
     bool static_tbset;
@@ -122,6 +128,7 @@ typedef struct LatcdJob {
     uint64_t sequence;
     uint64_t accepted_sequence;
     uint64_t compile_sequence;
+    uint64_t flush_sequence;
     uint64_t source_size;
     int64_t batch_started_at_us;
     int64_t ready_at_us;
@@ -129,6 +136,7 @@ typedef struct LatcdJob {
 
 typedef struct LatcdSourceState {
     uint64_t accepted_sequence;
+    uint64_t runtime_accepted_sequence;
     uint64_t published_sequence;
     uint64_t failed_sequence;
 } LatcdSourceState;
@@ -175,6 +183,18 @@ typedef struct LatcdWorker {
     uint32_t index;
 } LatcdWorker;
 
+typedef struct LatcdFlushTarget {
+    char source_key[65];
+    uint64_t sequence;
+    uint64_t runtime_sequence;
+} LatcdFlushTarget;
+
+typedef struct LatcdFlushRequest {
+    int client_fd;
+    GArray *targets;
+    LatcdResponseV2 response;
+} LatcdFlushRequest;
+
 typedef struct LatcdPrecompileRequest {
     const LatcdConfig *config;
     int client_fd;
@@ -185,6 +205,30 @@ typedef struct LatcdPrecompileRequest {
 static volatile sig_atomic_t stop_requested;
 static volatile sig_atomic_t compiler_process_groups[LATCD_MAX_WORKERS];
 static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Stack-owned entries exist only while a publisher drops cache_lock. */
+typedef struct LatcdPublicationPin {
+    const char *cache_dir;
+    const char *names[6];
+    struct LatcdPublicationPin *next;
+} LatcdPublicationPin;
+static LatcdPublicationPin *publication_pins;
+
+static bool cache_publication_pinned(const LatcdConfig *config,
+                                      const char *name, bool source)
+{
+    for (LatcdPublicationPin *pin = publication_pins; pin; pin = pin->next) {
+        if (strcmp(pin->cache_dir, config->cache_dir)) continue;
+        for (unsigned i = 0; i < G_N_ELEMENTS(pin->names); i++) {
+            const char *pinned = pin->names[i];
+            if (pinned && *pinned && (source ? !strncmp(name, pinned, 64) :
+                                             !strcmp(name, pinned))) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 static LatcdSourceState *source_state_locked(LatcdService *service,
                                              const char *source_key);
@@ -998,64 +1042,11 @@ static int prepare_static_tbset(const LatcdConfig *config,
     return result;
 }
 
-/*
- * A module may legitimately omit a small number of collected TBs: the
- * native exporter skips TBs without stable PC maps, and a few relocations
- * (for example guest addresses below the load bias) can only be served by
- * the runtime JIT.  Accept such modules when the missing set is small, so
- * one unsupported TB does not invalidate an otherwise complete module.
- */
-static int module_missing_is_jit_only(const char *module, const char *tbset,
-                                      const uint8_t digest[32],
-                                      LatAotModuleInfoV2 *info,
-                                      char *error, size_t error_size)
-{
-    LatTbKeySet requested = {0};
-    LatTbKeySet missing = {0};
-    if (lat_tb_key_set_read_file(tbset, digest, &requested,
-                                 error, error_size)) {
-        return -1;
-    }
-    if (lat_aot_v2_module_missing_tbset_file(module, tbset, info, &missing,
-                                             error, error_size)) {
-        lat_tb_key_set_destroy(&requested);
-        return -1;
-    }
-    size_t allowed = requested.count / 100;
-    if (allowed < 1024) {
-        allowed = 1024;
-    }
-    int accepted = missing.count && missing.count <= allowed;
-    if (accepted) {
-        fprintf(stderr,
-                "latcd: module %s covers %zu/%zu TBs; %zu unsupported TBs "
-                "will stay JIT-only (first 0x%" PRIx64 ")\n",
-                module, requested.count - missing.count, requested.count,
-                missing.count, missing.keys[0].guest_rva);
-        for (size_t i = 0; i < missing.count; i++) {
-            fprintf(stderr,
-                    "latcd: unsupported TB rva=0x%" PRIx64 " flags=0x%x\n",
-                    missing.keys[i].guest_rva, missing.keys[i].flags);
-        }
-        if (error && error_size) {
-            error[0] = '\0';
-        }
-    } else if (missing.count) {
-        snprintf(error, error_size,
-                 "TB set is not fully covered: covered=%zu total=%zu "
-                 "first_missing_rva=0x%" PRIx64 " flags=0x%x",
-                 requested.count - missing.count, requested.count,
-                 missing.keys[0].guest_rva, missing.keys[0].flags);
-    }
-    lat_tb_key_set_destroy(&missing);
-    lat_tb_key_set_destroy(&requested);
-    return accepted;
-}
-
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *source, const char *tbset,
                         bool static_tbset,
-                        const char *base_native, const char *output_native,
+                        const char *base_native, const char *base_module,
+                        const char *output_native,
                         const char *output, const uint8_t digest[32],
                         char *error, size_t error_size)
 {
@@ -1102,6 +1093,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                                          aot_thread_count);
     char *native_base = base_native ?
         g_strdup_printf("LATC_NATIVE_BASE=%s", base_native) : NULL;
+    char *module_base = base_module ?
+        g_strdup_printf("LATC_NATIVE_BASE_MODULE=%s", base_module) : NULL;
     char *native_output = g_strdup_printf("LATC_NATIVE_OUTPUT=%s",
                                            output_native);
     char digest_text[65];
@@ -1114,7 +1107,10 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     }
     char *closure_environment = g_strdup_printf(
         "LATC_TBSET_CLOSURE_LIMIT=%s", closure_limit);
-    const char *environment[16];
+    const char *selection = getenv("LATC_TBSET_SELECTION");
+    char *selection_environment = g_strdup_printf("LATC_TBSET_SELECTION=%s",
+        selection && *selection ? selection : "bounded");
+    const char *environment[18];
     size_t environment_count = 0;
     environment[environment_count++] = "PATH=/usr/bin:/bin";
     environment[environment_count++] = "LANG=C";
@@ -1125,6 +1121,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     environment[environment_count++] = trusted_digest;
     if (guest_prefix) environment[environment_count++] = guest_prefix;
     if (native_base) environment[environment_count++] = native_base;
+    if (module_base) environment[environment_count++] = module_base;
     environment[environment_count++] = native_output;
     if (compile_timing) environment[environment_count++] = compile_timing;
     if (expand_functions) environment[environment_count++] = expand_functions;
@@ -1132,6 +1129,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         environment[environment_count++] = allow_zero_eflags_stub;
     }
     environment[environment_count++] = closure_environment;
+    environment[environment_count++] = selection_environment;
     environment[environment_count++] = "LATC_SKIP_FINAL_INSPECT=1";
     environment[environment_count] = NULL;
     pid_t child = fork();
@@ -1171,9 +1169,11 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         g_free(guest_prefix);
         g_free(aot_threads);
         g_free(native_base);
+        g_free(module_base);
         g_free(native_output);
         g_free(trusted_digest);
         g_free(closure_environment);
+        g_free(selection_environment);
         return fail(error, error_size, "cannot start compiler: %s",
                     strerror(errno));
     }
@@ -1205,8 +1205,11 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     g_free(guest_prefix);
     g_free(aot_threads);
     g_free(native_base);
+    g_free(module_base);
     g_free(native_output);
     g_free(trusted_digest);
+    g_free(closure_environment);
+    g_free(selection_environment);
     if (waited < 0) {
         return fail(error, error_size, "cannot wait for compiler: %s",
                     strerror(errno));
@@ -1236,11 +1239,9 @@ static int sync_file(const char *path, char *error, size_t error_size)
     return 0;
 }
 
-static int snapshot_cached_file(const char *source, const char *temporary_dir,
-                                uint64_t max_size, char **snapshot,
-                                char *error, size_t error_size)
+static int open_cached_file(const char *source, uint64_t max_size,
+                             char *error, size_t error_size)
 {
-    *snapshot = NULL;
     int input = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat status;
     if (input < 0 || fstat(input, &status) || !S_ISREG(status.st_mode) ||
@@ -1254,10 +1255,20 @@ static int snapshot_cached_file(const char *source, const char *temporary_dir,
                     "cannot open canonical native image: %s",
                     strerror(errno));
     }
+    return input;
+}
+
+static int snapshot_cached_fd(int input, const char *temporary_dir,
+                              char **snapshot, char *error, size_t error_size)
+{
+    *snapshot = NULL;
+    struct stat before, after;
+    if (fstat(input, &before)) {
+        return fail(error, error_size, "cannot inspect pinned cache file");
+    }
     char *path = g_build_filename(temporary_dir, "base-native-XXXXXX", NULL);
     int output = g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
     if (output < 0) {
-        close(input);
         g_free(path);
         return fail(error, error_size,
                     "cannot create canonical native snapshot: %s",
@@ -1265,8 +1276,10 @@ static int snapshot_cached_file(const char *source, const char *temporary_dir,
     }
     unsigned char buffer[128 * 1024];
     int result = 0;
-    for (;;) {
-        ssize_t count = read(input, buffer, sizeof(buffer));
+    off_t position = 0;
+    while (position < before.st_size) {
+        size_t wanted = MIN(sizeof(buffer), (uint64_t)(before.st_size - position));
+        ssize_t count = pread(input, buffer, wanted, position);
         if (count < 0 && errno == EINTR) continue;
         if (count < 0) {
             result = fail(error, error_size,
@@ -1274,7 +1287,11 @@ static int snapshot_cached_file(const char *source, const char *temporary_dir,
                           strerror(errno));
             break;
         }
-        if (!count) break;
+        if (!count) {
+            result = fail(error, error_size, "pinned cache file was truncated");
+            break;
+        }
+        position += count;
         ssize_t offset = 0;
         while (offset < count) {
             ssize_t written = write(output, buffer + offset, count - offset);
@@ -1289,10 +1306,14 @@ static int snapshot_cached_file(const char *source, const char *temporary_dir,
         }
         if (result) break;
     }
-    if (close(input) && !result) {
+    /* Rename/unlink can change ctime/link count without changing pinned bytes. */
+    if (!result && (fstat(input, &after) ||
+        before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
+        before.st_size != after.st_size || before.st_mode != after.st_mode ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+        before.st_mtim.tv_nsec != after.st_mtim.tv_nsec)) {
         result = fail(error, error_size,
-                      "cannot close canonical native image: %s",
-                      strerror(errno));
+                      "pinned cache file changed while copying");
     }
     if (close(output) && !result) {
         result = fail(error, error_size,
@@ -1306,6 +1327,119 @@ static int snapshot_cached_file(const char *source, const char *temporary_dir,
     }
     *snapshot = path;
     return 0;
+}
+
+static int snapshot_cached_file(const char *source, const char *temporary_dir,
+                                uint64_t max_size, char **snapshot,
+                                char *error, size_t error_size)
+{
+    *snapshot = NULL;
+    int input = open_cached_file(source, max_size, error, error_size);
+    if (input < 0) return -1;
+    /* Caller holds cache_lock; the descriptor survives retirement/eviction. */
+    pthread_mutex_unlock(&cache_lock);
+    int result = snapshot_cached_fd(input, temporary_dir, snapshot,
+                                    error, error_size);
+    close(input);
+    pthread_mutex_lock(&cache_lock);
+    return result;
+}
+
+static char *cached_fd_digest(int fd)
+{
+    struct stat status;
+    if (fd < 0) return NULL;
+    if (fstat(fd, &status) || !S_ISREG(status.st_mode) ||
+        status.st_uid != geteuid() || (status.st_mode & 0222) ||
+        status.st_size <= 0) {
+        return NULL;
+    }
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    unsigned char buffer[128 * 1024];
+    bool failed = false;
+    off_t offset = 0;
+    while (offset < status.st_size) {
+        size_t wanted = MIN(sizeof(buffer), (uint64_t)(status.st_size - offset));
+        ssize_t count = pread(fd, buffer, wanted, offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) { failed = true; break; }
+        if (!count) { failed = true; break; }
+        g_checksum_update(checksum, buffer, count);
+        offset += count;
+    }
+    struct stat after;
+    if (fstat(fd, &after) || !metadata_equal(&status, &after) ||
+        status.st_mode != after.st_mode) failed = true;
+    char *digest = failed ? NULL : g_strdup(g_checksum_get_string(checksum));
+    g_checksum_free(checksum);
+    return digest;
+}
+
+static char *cached_file_digest(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    char *digest = cached_fd_digest(fd);
+    if (fd >= 0 && close(fd)) g_clear_pointer(&digest, g_free);
+    return digest;
+}
+
+static int snapshot_current_pair(const LatcdConfig *config,
+                                 const LatcdCurrentManifest *manifest,
+                                 const uint8_t digest[32], const char *temporary,
+                                 char **native, char **module,
+                                 char *error, size_t error_size)
+{
+    /* Caller holds cache_lock. Old manifests have no proof for plan dedup. */
+    if (!manifest->module_sha256 && !manifest->native_sha256) return 0;
+    if (!manifest->module_sha256 || !manifest->native_sha256) {
+        return fail(error, error_size, "incomplete module/native pair digests");
+    }
+    if (strlen(manifest->module_sha256) != 64 ||
+        strlen(manifest->native_sha256) != 64) {
+        return fail(error, error_size, "invalid module/native pair digests");
+    }
+    char *module_path = g_build_filename(config->cache_dir, manifest->module, NULL);
+    char *native_path = g_build_filename(config->cache_dir, manifest->native, NULL);
+    int native_fd = open_cached_file(native_path, config->file_size_limit,
+                                     error, error_size);
+    int module_fd = native_fd >= 0 ? open_cached_file(
+        module_path, config->file_size_limit, error, error_size) : -1;
+    g_free(module_path);
+    g_free(native_path);
+    if (module_fd < 0) {
+        if (native_fd >= 0) close(native_fd);
+        return -1;
+    }
+    /* Pin both members of one selected generation before releasing the lock. */
+    pthread_mutex_unlock(&cache_lock);
+    int result = snapshot_cached_fd(native_fd, temporary, native,
+                                    error, error_size);
+    if (!result) result = snapshot_cached_fd(module_fd, temporary, module,
+                                             error, error_size);
+    close(native_fd);
+    close(module_fd);
+    if (!result && (chmod(*native, 0400) || chmod(*module, 0400))) {
+        result = fail(error, error_size, "cannot protect module/native snapshots");
+    }
+    char *module_sha = !result ? cached_file_digest(*module) : NULL;
+    char *native_sha = !result ? cached_file_digest(*native) : NULL;
+    LatAotModuleInfoV2 info;
+    if (!result && (!module_sha || !native_sha ||
+        strcmp(module_sha, manifest->module_sha256) ||
+        strcmp(native_sha, manifest->native_sha256) ||
+        !cached_module_inspect(*module, digest, &info))) {
+        result = fail(error, error_size, "module/native pair snapshot mismatch");
+    }
+    g_free(module_sha);
+    g_free(native_sha);
+    pthread_mutex_lock(&cache_lock);
+    if (result) {
+        if (*native) unlink(*native);
+        if (*module) unlink(*module);
+        g_clear_pointer(native, g_free);
+        g_clear_pointer(module, g_free);
+    }
+    return result;
 }
 
 static int sync_directory(const char *path, char *error, size_t error_size)
@@ -1602,6 +1736,7 @@ static void reconcile_superseded_generations(const LatcdConfig *config)
     const char *name;
     while ((name = g_dir_read_name(directory))) {
         if (!cache_generated_name(name) ||
+            cache_publication_pinned(config, name, false) ||
             cache_current_generation_name(config, name)) {
             continue;
         }
@@ -1686,7 +1821,8 @@ static int cache_make_room(const LatcdConfig *config, uint64_t incoming,
             int low = g_ascii_xdigit_value(digest_text[i * 2 + 1]);
             digest[i] = (high << 4) | low;
         }
-        if (!strcmp(name, incoming_name)) {
+        if (!strcmp(name, incoming_name) ||
+            cache_publication_pinned(config, name, true)) {
             g_free(module_path);
             continue;
         }
@@ -1782,7 +1918,33 @@ static void current_manifest_clear(LatcdCurrentManifest *manifest)
     g_free(manifest->module);
     g_free(manifest->native);
     g_free(manifest->tbset);
+    g_free(manifest->module_sha256);
+    g_free(manifest->native_sha256);
     memset(manifest, 0, sizeof(*manifest));
+}
+
+static int validate_current_replacement(const LatcdConfig *config,
+                                 const char *hex, const char *candidate,
+                                 const LatAotModuleInfoV2 *info,
+                                 char *error, size_t error_size)
+{
+    /* cache_lock is held. Observed tbsets need not list every compiled TB. */
+    LatcdCurrentManifest previous = {0};
+    int result = 0;
+    if (!current_manifest_read(config, hex, &previous)) {
+        char *old_path = g_build_filename(config->cache_dir,
+                                          previous.module, NULL);
+        LatAotModuleInfoV2 old_info;
+        if (cached_module_inspect(old_path,
+            info->note.source_sha256, &old_info) &&
+            lat_aot_v2_module_validate_replacement_file(
+                old_path, candidate, error, error_size)) {
+            result = -1;
+        }
+        g_free(old_path);
+    }
+    current_manifest_clear(&previous);
+    return result;
 }
 
 static int publish_current_index(const LatcdConfig *config, const char *hex,
@@ -1791,12 +1953,96 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
                                  const char *tbset_name,
                                  const LatAotModuleInfoV2 *info,
                                  uint64_t published_sequence,
+                                 bool new_pair,
                                  char *error, size_t error_size)
 {
+    char *candidate = g_build_filename(config->cache_dir, module_name, NULL);
+    int validation = validate_current_replacement(config, hex, candidate,
+                                                   info, error, error_size);
+    g_free(candidate);
+    if (validation) {
+        return -1;
+    }
+    char *module_path = g_build_filename(config->cache_dir, module_name, NULL);
+    char *native_path = g_build_filename(config->cache_dir, native_name, NULL);
+    char *tbset_path = *tbset_name ?
+        g_build_filename(config->cache_dir, tbset_name, NULL) : NULL;
+    LatcdCurrentManifest selected = {0}, latest = {0};
+    bool selected_valid = !current_manifest_read(config, hex, &selected);
+    struct stat module_before, native_before, module_after, native_after;
+    struct stat tbset_before, tbset_after;
+    int module_fd = open_cached_file(module_path, UINT64_MAX, error, error_size);
+    int native_fd = open_cached_file(native_path, UINT64_MAX, error, error_size);
+    int tbset_fd = tbset_path ?
+        open_cached_file(tbset_path, UINT64_MAX, error, error_size) : -1;
+    bool pinned = module_fd >= 0 && native_fd >= 0 &&
+        !fstat(module_fd, &module_before) && !fstat(native_fd, &native_before) &&
+        (!tbset_path || (tbset_fd >= 0 && !fstat(tbset_fd, &tbset_before)));
+    LatcdPublicationPin pin = {.cache_dir = config->cache_dir,
+        .names = {module_name, native_name, tbset_name, selected.module,
+                  selected.native, selected.tbset}, .next = publication_pins};
+    publication_pins = &pin;
+    /* No publication/eviction lock is needed for the expensive content hashes.
+     * Open fds pin both inodes; path and generation checks below guard commit. */
+    pthread_mutex_unlock(&cache_lock);
+    char *module_sha256 = pinned ? cached_fd_digest(module_fd) : NULL;
+    char *native_sha256 = pinned ? cached_fd_digest(native_fd) : NULL;
+    pthread_mutex_lock(&cache_lock);
+    bool latest_valid = !current_manifest_read(config, hex, &latest);
+    bool unchanged = pinned && !lstat(module_path, &module_after) &&
+        !lstat(native_path, &native_after) &&
+        metadata_equal(&module_before, &module_after) &&
+        metadata_equal(&native_before, &native_after) &&
+        module_before.st_mode == module_after.st_mode &&
+        native_before.st_mode == native_after.st_mode &&
+        (!tbset_path || (!lstat(tbset_path, &tbset_after) &&
+         metadata_equal(&tbset_before, &tbset_after) &&
+         tbset_before.st_mode == tbset_after.st_mode)) &&
+        selected_valid == latest_valid && (!selected_valid ||
+        (!strcmp(selected.module, latest.module) &&
+         !strcmp(selected.native, latest.native) &&
+         !strcmp(selected.tbset, latest.tbset) &&
+         !g_strcmp0(selected.module_sha256, latest.module_sha256) &&
+         !g_strcmp0(selected.native_sha256, latest.native_sha256) &&
+         selected.published_sequence == latest.published_sequence));
+    LatcdPublicationPin **link = &publication_pins;
+    while (*link != &pin) link = &(*link)->next;
+    *link = pin.next;
+    if (module_fd >= 0) close(module_fd);
+    if (native_fd >= 0) close(native_fd);
+    if (tbset_fd >= 0) close(tbset_fd);
+    current_manifest_clear(&selected);
+    current_manifest_clear(&latest);
+    g_free(module_path);
+    g_free(native_path);
+    g_free(tbset_path);
+    if (!unchanged || !module_sha256 || !native_sha256) {
+        g_free(module_sha256);
+        g_free(native_sha256);
+        return fail(error, error_size,
+                    "published file set or current changed during digest");
+    }
+    LatcdCurrentManifest previous = {0};
+    bool same_pair = !current_manifest_read(config, hex, &previous) &&
+        !strcmp(previous.module, module_name) &&
+        !strcmp(previous.native, native_name);
+    bool record_pair = new_pair || (same_pair && previous.module_sha256 &&
+                                    previous.native_sha256);
+    if (same_pair &&
+        ((previous.module_sha256 && strcmp(previous.module_sha256, module_sha256)) ||
+         (previous.native_sha256 && strcmp(previous.native_sha256, native_sha256)))) {
+        current_manifest_clear(&previous);
+        g_free(module_sha256);
+        g_free(native_sha256);
+        return fail(error, error_size, "current module/native pair content changed");
+    }
+    current_manifest_clear(&previous);
     char *temporary_dir = g_build_filename(config->cache_dir, ".tmp", NULL);
     char *temporary = g_build_filename(temporary_dir, "current-XXXXXX", NULL);
     int fd = g_mkstemp_full(temporary, O_RDWR | O_CLOEXEC, 0600);
     if (fd < 0) {
+        g_free(module_sha256);
+        g_free(native_sha256);
         g_free(temporary_dir);
         g_free(temporary);
         return fail(error, error_size, "cannot create current index: %s",
@@ -1808,10 +2054,17 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     g_string_append_printf(contents,
         "{\"version\":2,\"module\":\"%s\",\"native\":\"%s\","
         "\"tbset\":\"%s\",\"source_sha256\":\"%s\","
-        "\"codegen_id\":\"%s\","
-        "\"published_sequence\":%" PRIu64 "}\n",
-        module_name, native_name, tbset_name, hex, codegen,
+        "\"codegen_id\":\"%s\",",
+        module_name, native_name, tbset_name, hex, codegen);
+    if (record_pair) {
+        g_string_append_printf(contents,
+            "\"module_sha256\":\"%s\",\"native_sha256\":\"%s\",",
+            module_sha256, native_sha256);
+    }
+    g_string_append_printf(contents, "\"published_sequence\":%" PRIu64 "}\n",
         published_sequence);
+    g_free(module_sha256);
+    g_free(native_sha256);
     ssize_t written = write(fd, contents->str, contents->len);
     int result = 0;
     if (written != (ssize_t)contents->len || fchmod(fd, 0444) || fsync(fd)) {
@@ -1874,6 +2127,8 @@ static int current_manifest_read(const LatcdConfig *config, const char *hex,
     manifest->module = manifest_string(contents, "module");
     manifest->native = manifest_string(contents, "native");
     manifest->tbset = manifest_string(contents, "tbset");
+    manifest->module_sha256 = manifest_string(contents, "module_sha256");
+    manifest->native_sha256 = manifest_string(contents, "native_sha256");
     const char *sequence = strstr(contents, "\"published_sequence\":");
     const char *sequence_value = sequence ? strchr(sequence, ':') + 1 : NULL;
     char *end = NULL;
@@ -1935,6 +2190,7 @@ static void remove_superseded_generation(const LatcdConfig *config,
                          g_str_has_suffix(name, ".native") ||
                          g_str_has_suffix(name, ".tbset");
         if (!generated || !g_str_has_prefix(name, prefix) ||
+            cache_publication_pinned(config, name, false) ||
             !strcmp(name, module_name) || !strcmp(name, native_name) ||
             !strcmp(name, tbset_name)) {
             continue;
@@ -2078,7 +2334,7 @@ static int publish_covered_tbset(const LatcdConfig *config,
     }
     if (publish_current_index(config, source_hex, manifest.module,
                               manifest.native, tbset_name, &info,
-                              published_sequence, error, sizeof(error))) {
+                              published_sequence, false, error, sizeof(error))) {
         current_manifest_clear(&manifest);
         pthread_mutex_unlock(&cache_lock);
         goto out;
@@ -2126,6 +2382,64 @@ out:
     return result;
 }
 
+static int preserve_current_keys(const LatcdConfig *config, const char *hex,
+                                 const uint8_t digest[32],
+                                 const char *requested,
+                                 const char *temporary_dir, char **output,
+                                 char *error, size_t error_size)
+{
+    if (!requested) {
+        return 0;
+    }
+    LatcdCurrentManifest previous = {0};
+    LatTbKeySet old_keys = {0}, incoming = {0}, complete = {0};
+    LatAotModuleInfoV2 info;
+    int result = 0;
+    pthread_mutex_lock(&cache_lock);
+    char *module = !current_manifest_read(config, hex, &previous) ?
+        g_build_filename(config->cache_dir, previous.module, NULL) : NULL;
+    if (module && cached_module_inspect(module, digest, &info)) {
+        result = lat_aot_v2_module_read_tbset_file(module, &info, &old_keys,
+                                                   error, error_size);
+    }
+    g_free(module);
+    current_manifest_clear(&previous);
+    pthread_mutex_unlock(&cache_lock);
+    if (result || !old_keys.count) {
+        goto out;
+    }
+    if (lat_tb_key_set_read_file(requested, digest, &incoming,
+                                 error, error_size) ||
+        lat_tb_key_set_union(&old_keys, &incoming, &complete,
+                              error, error_size)) {
+        result = -1;
+        goto out;
+    }
+    char *path = g_build_filename(temporary_dir, "retained-XXXXXX", NULL);
+    int fd = g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        result = fail(error, error_size, "cannot create retained TB set: %s",
+                      strerror(errno));
+    } else {
+        result = lat_tb_key_set_write_fd(fd, &complete, error, error_size);
+        if (close(fd) && !result) {
+            result = fail(error, error_size, "cannot close retained TB set: %s",
+                          strerror(errno));
+        }
+    }
+    if (result) {
+        unlink(path);
+        g_free(path);
+    } else {
+        *output = path;
+    }
+out:
+    lat_tb_key_set_destroy(&old_keys);
+    lat_tb_key_set_destroy(&incoming);
+    lat_tb_key_set_destroy(&complete);
+    return result;
+}
+
 static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
                             const char *snapshot, const char *compile_tbset,
                             const char *complete_tbset,
@@ -2143,6 +2457,8 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     char *final_native = NULL;
     char *final_tbset = NULL;
     char *base_native = NULL;
+    char *base_module = NULL;
+    char *retained_tbset = NULL;
     char *module_name = NULL;
     char *native_name = NULL;
     char *tbset_name = NULL;
@@ -2190,6 +2506,39 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
 
     LatAotModuleInfoV2 info;
     pthread_mutex_lock(&cache_lock);
+    LatcdCurrentManifest current = {0};
+    if (!static_tbset && !current_manifest_read(config, hex, &current)) {
+        char *current_module = g_build_filename(config->cache_dir,
+                                                 current.module, NULL);
+        char *current_native = g_build_filename(config->cache_dir,
+                                                 current.native, NULL);
+        char *current_tbset = *current.tbset ?
+            g_build_filename(config->cache_dir, current.tbset, NULL) : NULL;
+        bool current_hit = cached_module_inspect(current_module, digest, &info) &&
+            !access(current_native, R_OK) &&
+            (!complete_tbset || (current_tbset && !access(current_tbset, R_OK) &&
+             !lat_aot_v2_module_validate_tbset_file(current_module,
+                 complete_tbset, error, sizeof(error))));
+        if (current_hit) {
+            g_free(module_name);
+            g_free(native_name);
+            g_free(tbset_name);
+            g_free(final_module);
+            g_free(final_native);
+            g_free(final_tbset);
+            module_name = g_strdup(current.module);
+            native_name = g_strdup(current.native);
+            tbset_name = g_strdup(current.tbset);
+            final_module = current_module;
+            final_native = current_native;
+            final_tbset = current_tbset;
+        } else {
+            g_free(current_module);
+            g_free(current_native);
+            g_free(current_tbset);
+        }
+    }
+    current_manifest_clear(&current);
     bool cache_hit = !static_tbset &&
         cached_module_inspect(final_module, digest, &info) &&
         !access(final_native, R_OK) &&
@@ -2197,19 +2546,11 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     if (cache_hit && complete_tbset) {
         cache_hit = !lat_aot_v2_module_inspect_and_validate_tbset_file(
             final_module, complete_tbset, &info, error, sizeof(error));
-        if (!cache_hit) {
-            int jit_only = module_missing_is_jit_only(
-                final_module, complete_tbset, digest, &info, error,
-                sizeof(error));
-            if (jit_only > 0) {
-                cache_hit = 1;
-            }
-        }
     }
     if (cache_hit) {
         int publish_result = publish_current_index(
             config, hex, module_name, native_name, tbset_name, &info,
-            published_sequence, error, sizeof(error));
+            published_sequence, false, error, sizeof(error));
         if (publish_result) {
             pthread_mutex_unlock(&cache_lock);
             goto out;
@@ -2234,22 +2575,39 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         LatcdCurrentManifest previous = {0};
         if (!current_manifest_read(config, hex, &previous) &&
             persisted_manifest_valid(config, hex, digest)) {
-            char *cached_base = g_build_filename(config->cache_dir,
-                                                  previous.native, NULL);
-            if (snapshot_cached_file(cached_base, temporary_dir,
-                                     config->file_size_limit, &base_native,
+            if (snapshot_current_pair(config, &previous, digest, temporary_dir,
+                                     &base_native, &base_module,
                                      error, sizeof(error))) {
-                g_free(cached_base);
                 current_manifest_clear(&previous);
                 pthread_mutex_unlock(&cache_lock);
                 goto out;
             }
-            g_free(cached_base);
+            if (!base_native) {
+                char *cached_base = g_build_filename(config->cache_dir,
+                                                      previous.native, NULL);
+                int result = snapshot_cached_file(cached_base, temporary_dir,
+                    config->file_size_limit, &base_native, error, sizeof(error));
+                g_free(cached_base);
+                if (result) {
+                    current_manifest_clear(&previous);
+                    pthread_mutex_unlock(&cache_lock);
+                    goto out;
+                }
+            }
         }
         current_manifest_clear(&previous);
     }
     pthread_mutex_unlock(&cache_lock);
-    if (!base_native) compile_tbset = complete_tbset;
+    if (!base_native && preserve_current_keys(config, hex, digest, complete_tbset,
+                              temporary_dir, &retained_tbset,
+                              error, sizeof(error))) {
+        goto out;
+    }
+    const char *full_compile_tbset =
+        retained_tbset ? retained_tbset : complete_tbset;
+    if (!base_native) {
+        compile_tbset = full_compile_tbset;
+    }
 
     module = g_build_filename(temporary_dir, "module-XXXXXX", NULL);
     int placeholder = g_mkstemp_full(module, O_RDWR | O_CLOEXEC, 0600);
@@ -2271,7 +2629,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     unlink(native);
     int compiler_result = run_compiler(config, worker_index, snapshot,
                                        compile_tbset, static_tbset,
-                                       base_native, native,
+                                       base_native, base_module, native,
                                        module, digest, error, sizeof(error));
     if (compiler_result) {
         if (!base_native) {
@@ -2289,14 +2647,25 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         unlink(module);
         unlink(native);
         error[0] = '\0';
+        if (preserve_current_keys(config, hex, digest, complete_tbset,
+                                  temporary_dir, &retained_tbset,
+                                  error, sizeof(error))) {
+            status = LATCD_STATUS_COMPILE_FAILED;
+            goto out;
+        }
+        full_compile_tbset = retained_tbset ? retained_tbset : complete_tbset;
         compiler_result = run_compiler(config, worker_index, snapshot,
-                                       complete_tbset, static_tbset,
-                                       NULL, native, module, digest,
+                                       full_compile_tbset, static_tbset,
+                                       NULL, NULL, native, module, digest,
                                        error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
             goto out;
         }
+        unlink(base_native);
+        g_clear_pointer(&base_native, g_free);
+        if (base_module) unlink(base_module);
+        g_clear_pointer(&base_module, g_free);
     }
     uint8_t codegen_id[32];
     expected_codegen_id(codegen_id);
@@ -2305,15 +2674,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
             module, complete_tbset, &info, error, sizeof(error)) :
         lat_aot_v2_module_inspect_file(module, &info,
                                        error, sizeof(error));
-    bool retry_full = false;
-    if (inspect_result && complete_tbset) {
-        int jit_only = module_missing_is_jit_only(
-            module, complete_tbset, digest, &info, error, sizeof(error));
-        if (jit_only > 0) {
-            inspect_result = 0;
-            retry_full = base_native != NULL;
-        }
-    }
+    bool retry_full = inspect_result && complete_tbset && base_native;
     if (retry_full) {
         /*
          * Incremental merging can omit requested TBs even though a full
@@ -2323,9 +2684,16 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         unlink(module);
         unlink(native);
         error[0] = '\0';
+        if (preserve_current_keys(config, hex, digest, complete_tbset,
+                                  temporary_dir, &retained_tbset,
+                                  error, sizeof(error))) {
+            status = LATCD_STATUS_COMPILE_FAILED;
+            goto out;
+        }
+        full_compile_tbset = retained_tbset ? retained_tbset : complete_tbset;
         compiler_result = run_compiler(config, worker_index, snapshot,
-                                       complete_tbset, static_tbset,
-                                       NULL, native, module, digest,
+                                       full_compile_tbset, static_tbset,
+                                       NULL, NULL, native, module, digest,
                                        error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
@@ -2333,13 +2701,6 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         }
         inspect_result = lat_aot_v2_module_inspect_and_validate_tbset_file(
             module, complete_tbset, &info, error, sizeof(error));
-        if (inspect_result) {
-            int jit_only = module_missing_is_jit_only(
-                module, complete_tbset, digest, &info, error, sizeof(error));
-            if (jit_only > 0) {
-                inspect_result = 0;
-            }
-        }
     }
     if (inspect_result || memcmp(info.note.source_sha256, digest, 32) ||
         memcmp(info.note.codegen_id, codegen_id, 32)) {
@@ -2347,6 +2708,11 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
             snprintf(error, sizeof(error),
                      "compiled module source or codegen identity mismatch");
         }
+        status = LATCD_STATUS_INVALID_MODULE;
+        goto out;
+    }
+    if (retained_tbset && lat_aot_v2_module_validate_tbset_file(
+            module, retained_tbset, error, sizeof(error))) {
         status = LATCD_STATUS_INVALID_MODULE;
         goto out;
     }
@@ -2383,7 +2749,36 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         }
     }
 
+    /*
+     * Recompilation must never overwrite a file referenced by current, even
+     * when the requested set has not changed.  link() below also refuses any
+     * unexpected collision instead of replacing an existing generation.
+     */
+    char *generation = g_compute_checksum_for_string(G_CHECKSUM_SHA256,
+                                                       module, -1);
+    g_free(module_name);
+    g_free(native_name);
+    g_free(tbset_name);
+    g_free(final_module);
+    g_free(final_native);
+    g_free(final_tbset);
+    module_name = g_strdup_printf("%s-%s.so", hex, generation);
+    native_name = g_strdup_printf("%s-%s.native", hex, generation);
+    tbset_name = complete_tbset ?
+        g_strdup_printf("%s-%s.tbset", hex, generation) : g_strdup("");
+    final_module = g_build_filename(config->cache_dir, module_name, NULL);
+    final_native = g_build_filename(config->cache_dir, native_name, NULL);
+    final_tbset = complete_tbset ?
+        g_build_filename(config->cache_dir, tbset_name, NULL) : NULL;
+    g_free(generation);
+
     pthread_mutex_lock(&cache_lock);
+    if (validate_current_replacement(config, hex, module, &info,
+                                      error, sizeof(error))) {
+        status = LATCD_STATUS_INVALID_MODULE;
+        pthread_mutex_unlock(&cache_lock);
+        goto out;
+    }
     uint64_t incoming = (uint64_t)module_status.st_size +
                         (uint64_t)native_status.st_size + tbset_size;
     if (cache_make_room(config, incoming, module_name, false,
@@ -2391,10 +2786,16 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         pthread_mutex_unlock(&cache_lock);
         goto out;
     }
-    if (!rename(module, final_module)) module_staged = true;
-    if (module_staged && !rename(native, final_native)) native_staged = true;
+    if (!link(module, final_module)) {
+        module_staged = true;
+    }
+    if (module_staged && !link(native, final_native)) {
+        native_staged = true;
+    }
     if (native_staged && complete_tbset &&
-        !rename(tbset_copy, final_tbset)) tbset_staged = true;
+        !link(tbset_copy, final_tbset)) {
+        tbset_staged = true;
+    }
     if (!module_staged || !native_staged ||
         (complete_tbset && !tbset_staged)) {
         if (!error[0]) {
@@ -2404,8 +2805,22 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         pthread_mutex_unlock(&cache_lock);
         goto out;
     }
+    /* Drop and persist temporary links before current can reference this
+     * generation: the loader requires each published file to have one link. */
+    if (unlink(module) || unlink(native) ||
+        (tbset_copy && unlink(tbset_copy)) ||
+        sync_directory(temporary_dir, error, sizeof(error))) {
+        if (!error[0]) {
+            fail(error, sizeof(error), "cannot retire staged links: %s",
+                 strerror(errno));
+        }
+        pthread_mutex_unlock(&cache_lock);
+        goto out;
+    }
     module[0] = native[0] = '\0';
-    if (tbset_copy) tbset_copy[0] = '\0';
+    if (tbset_copy) {
+        tbset_copy[0] = '\0';
+    }
     if (sync_directory(config->cache_dir, error, sizeof(error))) {
         pthread_mutex_unlock(&cache_lock);
         goto out;
@@ -2419,7 +2834,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     }
     int publish_result = publish_current_index(
         config, hex, module_name, native_name, tbset_name, &info,
-        published_sequence, error, sizeof(error));
+        published_sequence, true, error, sizeof(error));
     if (publish_result) {
         pthread_mutex_unlock(&cache_lock);
         goto out;
@@ -2453,8 +2868,14 @@ out:
     if (native_staged) unlink(final_native);
     if (tbset_staged) unlink(final_tbset);
     g_free(tbset_data);
+    if (retained_tbset) {
+        unlink(retained_tbset);
+    }
+    g_free(retained_tbset);
     if (base_native) unlink(base_native);
     g_free(base_native);
+    if (base_module) unlink(base_module);
+    g_free(base_module);
     g_free(final_tbset);
     g_free(final_native);
     g_free(final_module);
@@ -2734,6 +3155,19 @@ static void negative_record_locked(LatcdService *service, const char *key,
         (int64_t)service->config->negative_ms * 1000 * (UINT64_C(1) << shift);
 }
 
+static void mark_job_failed_locked(LatcdService *service, const LatcdJob *job)
+{
+    if (job->static_tbset) {
+        LatcdStaticBarrier *barrier = g_hash_table_lookup(
+            service->static_barriers, job->key);
+        if (barrier) barrier->failed = true;
+        return;
+    }
+    /* Static failures are scoped by first_sequence in their own barrier. */
+    LatcdSourceState *state = source_state_locked(service, job->source_key);
+    state->failed_sequence = MAX(state->failed_sequence, job->accepted_sequence);
+}
+
 static void *compiler_worker(void *opaque)
 {
     LatcdWorker *worker = opaque;
@@ -2878,33 +3312,31 @@ static void *compiler_worker(void *opaque)
         LatcdSourceState *source_state = source_state_locked(
             service, job->source_key);
         if (job->static_tbset) {
-            LatcdStaticBarrier *barrier = g_hash_table_lookup(
-                service->static_barriers, job->key);
             if (!result) {
                 g_hash_table_remove(service->static_barriers, job->key);
-            } else if (barrier) {
-                barrier->failed = true;
             }
         }
         if (!result) {
             service->compiled++;
             uint64_t published_sequence = job->dirty ?
                 job->compile_sequence : job->accepted_sequence;
-            if (published_sequence > source_state->published_sequence) {
+            if (!job->static_tbset &&
+                published_sequence > source_state->published_sequence) {
                 source_state->published_sequence = published_sequence;
             }
-            if (source_state->failed_sequence <= published_sequence) {
+            if (!job->static_tbset &&
+                source_state->failed_sequence <= published_sequence) {
                 source_state->failed_sequence = 0;
+            }
+            if (job->flush_sequence <= published_sequence) {
+                job->flush_sequence = 0;
             }
             g_hash_table_remove(service->negative, job->key);
         } else {
             service->failed++;
             /* This failed job is removed, including requests accepted while
              * it was running. None can wait for a nonexistent retry job. */
-            uint64_t failed_sequence = job->accepted_sequence;
-            if (failed_sequence > source_state->failed_sequence) {
-                source_state->failed_sequence = failed_sequence;
-            }
+            mark_job_failed_locked(service, job);
             negative_record_locked(service, job->key, response.status);
             fprintf(stderr, "latcd: job %s failed status=%d: %s\n",
                     job->key, response.status,
@@ -2914,6 +3346,9 @@ static void *compiler_worker(void *opaque)
             job->running = false;
             job->dirty = false;
             job->sequence = service->next_sequence++;
+            if (job->flush_sequence > job->compile_sequence) {
+                job->ready_at_us = 0;
+            }
             g_ptr_array_add(service->queue, job);
             service->queued_bytes += job->source_size;
             service->queued++;
@@ -3025,6 +3460,7 @@ static void load_persisted_source_states(LatcdService *service)
         if (known_valid) {
             LatcdSourceState *state = source_state_locked(service, source_key);
             state->accepted_sequence = known.sequence;
+            state->runtime_accepted_sequence = known.sequence;
             if (fully_published) state->published_sequence = known.sequence;
             else state->failed_sequence = known.sequence;
             if (known.sequence > service->next_sequence) {
@@ -3042,6 +3478,73 @@ static void load_persisted_source_states(LatcdService *service)
     g_free(directory);
 }
 
+static char *reuse_active_source(LatcdService *service, int source_fd,
+                                 const char *temporary_dir,
+                                 uint8_t digest[32], struct stat *identity)
+{
+    struct stat before, after, snapshot_before, snapshot_after;
+    int flags = fcntl(source_fd, F_GETFL);
+    if (flags < 0 || (flags & O_ACCMODE) != O_RDONLY ||
+        fstat(source_fd, &before) || !S_ISREG(before.st_mode) ||
+        before.st_size < 0 ||
+        (uint64_t)before.st_size > service->config->max_input) {
+        return NULL;
+    }
+    char *path = NULL;
+    pthread_mutex_lock(&service->lock);
+    GHashTableIter iterator;
+    gpointer value;
+    g_hash_table_iter_init(&iterator, service->active);
+    while (g_hash_table_iter_next(&iterator, NULL, &value)) {
+        LatcdJob *job = value;
+        if (!metadata_equal(&before, &job->source_identity)) continue;
+        path = g_build_filename(temporary_dir, "source-reuse-XXXXXX", NULL);
+        int fd = g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
+        if (fd >= 0) close(fd);
+        if (fd < 0 || unlink(path) || link(job->snapshot, path)) {
+            g_free(path);
+            path = NULL;
+        } else {
+            memcpy(digest, job->digest, 32);
+        }
+        break;
+    }
+    pthread_mutex_unlock(&service->lock);
+    if (!path) return NULL;
+
+    /* The private link pins the snapshot while the worker finishes its job. */
+    int snapshot = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    bool equal = snapshot >= 0 && !fstat(snapshot, &snapshot_before) &&
+        S_ISREG(snapshot_before.st_mode) &&
+        snapshot_before.st_size == before.st_size;
+    unsigned char source_bytes[128 * 1024], snapshot_bytes[128 * 1024];
+    for (off_t offset = 0; equal && offset < before.st_size;) {
+        size_t size = MIN(sizeof(source_bytes), (uint64_t)(before.st_size - offset));
+        ssize_t a, b;
+        do {
+            a = pread(source_fd, source_bytes, size, offset);
+        } while (a < 0 && errno == EINTR);
+        do {
+            b = pread(snapshot, snapshot_bytes, size, offset);
+        } while (b < 0 && errno == EINTR);
+        equal = a == (ssize_t)size && b == a &&
+                !memcmp(source_bytes, snapshot_bytes, size);
+        offset += size;
+    }
+    equal = equal && !fstat(source_fd, &after) &&
+        metadata_equal(&before, &after) &&
+        !fstat(snapshot, &snapshot_after) &&
+        metadata_equal(&snapshot_before, &snapshot_after);
+    if (snapshot >= 0) close(snapshot);
+    if (!equal) {
+        unlink(path);
+        g_free(path);
+        return NULL;
+    }
+    *identity = before;
+    return path;
+}
+
 static int service_queue_request(LatcdService *service, int source_fd,
                                  int tbset_fd,
                                  const LatcdRequestV2 *request,
@@ -3054,7 +3557,9 @@ static int service_queue_request(LatcdService *service, int source_fd,
     char *tbset = NULL;
     response_init(response, request->request_id);
     struct stat identity;
-    if (snapshot_source(source_fd, temporary_dir,
+    snapshot = reuse_active_source(service, source_fd, temporary_dir,
+                                    response->source_sha256, &identity);
+    if (!snapshot && snapshot_source(source_fd, temporary_dir,
                         service->config->max_input, &snapshot,
                         response->source_sha256, &identity,
                         error, sizeof(error))) {
@@ -3148,6 +3653,7 @@ static int service_queue_request(LatcdService *service, int source_fd,
                                    response->source_sha256)) {
         service->cache_hits++;
         source_state->published_sequence = accepted_sequence;
+        source_state->runtime_accepted_sequence = accepted_sequence;
         response->published_sequence = accepted_sequence;
         response->status = LATCD_STATUS_OK;
         snprintf(response->message, sizeof(response->message),
@@ -3165,6 +3671,7 @@ static int service_queue_request(LatcdService *service, int source_fd,
                              tbset)) {
         service->cache_hits++;
         source_state->published_sequence = accepted_sequence;
+        source_state->runtime_accepted_sequence = accepted_sequence;
         response->published_sequence = accepted_sequence;
         response->status = LATCD_STATUS_OK;
         snprintf(response->message, sizeof(response->message),
@@ -3180,7 +3687,14 @@ static int service_queue_request(LatcdService *service, int source_fd,
         LatcdJob *active = g_hash_table_lookup(service->active, key);
         if (tbset_canonical && tbset_changed && active) {
             int64_t now = g_get_monotonic_time();
-            if (service->config->flush_only) {
+            if (active->running) {
+                if (!active->dirty) active->batch_started_at_us = now;
+                active->dirty = true;
+            }
+            if (active->flush_sequence > (active->running ?
+                                          active->compile_sequence : 0)) {
+                active->ready_at_us = 0;
+            } else if (service->config->flush_only) {
                 active->ready_at_us = INT64_MAX;
             } else if (!active->running) {
                 int64_t quiet_ready = now + LATCD_BATCH_QUIET_US;
@@ -3189,10 +3703,6 @@ static int service_queue_request(LatcdService *service, int source_fd,
                 active->ready_at_us = quiet_ready < maximum_ready ?
                                       quiet_ready : maximum_ready;
             } else {
-                if (!active->dirty) {
-                    active->batch_started_at_us = now;
-                }
-                active->dirty = true;
                 int64_t quiet_ready = now + LATCD_BATCH_QUIET_US;
                 int64_t maximum_ready = active->batch_started_at_us +
                                         LATCD_BATCH_MAX_US;
@@ -3209,6 +3719,9 @@ static int service_queue_request(LatcdService *service, int source_fd,
             if (barrier) barrier->last_sequence = accepted_sequence;
         }
         service->deduplicated++;
+        if (!static_tbset) {
+            source_state->runtime_accepted_sequence = accepted_sequence;
+        }
         response->status = LATCD_STATUS_OK;
         snprintf(response->message, sizeof(response->message),
                  "deduplicated: %s", key);
@@ -3256,6 +3769,7 @@ static int service_queue_request(LatcdService *service, int source_fd,
     }
     LatcdJob *job = g_new0(LatcdJob, 1);
     job->snapshot = snapshot;
+    job->source_identity = identity;
     job->tbset = tbset;
     job->tbset_canonical = tbset_canonical;
     job->static_tbset = static_tbset;
@@ -3288,6 +3802,9 @@ static int service_queue_request(LatcdService *service, int source_fd,
     service->queued_bytes += source_size;
     g_hash_table_insert(service->active, g_strdup(key), job);
     service->queued++;
+    if (!static_tbset) {
+        source_state->runtime_accepted_sequence = accepted_sequence;
+    }
     response->status = LATCD_STATUS_OK;
     snprintf(response->message, sizeof(response->message), "queued: %s", key);
     write_stats_locked(service);
@@ -3299,7 +3816,7 @@ static int service_queue_request(LatcdService *service, int source_fd,
 static int source_flush_state_locked(LatcdService *service,
                                      const char *source_key,
                                      LatcdSourceState *state,
-                                     uint64_t target)
+                                     uint64_t target, uint64_t runtime_target)
 {
     GHashTableIter iterator;
     gpointer value;
@@ -3314,41 +3831,23 @@ static int source_flush_state_locked(LatcdService *service,
         }
     }
     if (pending) return 0;
-    if (!state || state->published_sequence >= target) return 1;
-    if (state->failed_sequence >= target) return -1;
+    if (!state || state->published_sequence >= runtime_target) return 1;
+    if (state->failed_sequence >= runtime_target) return -1;
     return 0;
 }
 
-static int all_flush_state_locked(LatcdService *service,
-                                  uint64_t *accepted,
-                                  uint64_t *published)
+static void flush_request_free(LatcdFlushRequest *flush)
 {
-    int result = 1;
-    *accepted = 0;
-    *published = 0;
-    GHashTableIter iterator;
-    gpointer key, value;
-    g_hash_table_iter_init(&iterator, service->source_states);
-    while (g_hash_table_iter_next(&iterator, &key, &value)) {
-        LatcdSourceState *state = value;
-        if (state->accepted_sequence > *accepted) {
-            *accepted = state->accepted_sequence;
-        }
-        if (state->published_sequence > *published) {
-            *published = state->published_sequence;
-        }
-        int current = source_flush_state_locked(service, key, state,
-                                                state->accepted_sequence);
-        if (current < 0) return -1;
-        if (!current) result = 0;
-    }
-    return result;
+    close(flush->client_fd);
+    g_array_free(flush->targets, TRUE);
+    g_free(flush);
 }
 
-static int service_flush_request(LatcdService *service, int source_fd,
-                                 const LatcdRequestV2 *request,
-                                 LatcdResponseV2 *response)
+static int prepare_flush_request(LatcdService *service, int source_fd,
+                                  const LatcdRequestV2 *request,
+                                  LatcdFlushRequest *flush)
 {
+    LatcdResponseV2 *response = &flush->response;
     response_init(response, request->request_id);
     char source_key[65] = {0};
     if (request->operation == LATCD_OP_FLUSH_SOURCE) {
@@ -3363,6 +3862,23 @@ static int service_flush_request(LatcdService *service, int source_fd,
     }
 
     pthread_mutex_lock(&service->lock);
+    flush->targets = g_array_new(FALSE, FALSE, sizeof(LatcdFlushTarget));
+    GHashTableIter states;
+    gpointer key, value;
+    g_hash_table_iter_init(&states, service->source_states);
+    while (g_hash_table_iter_next(&states, &key, &value)) {
+        LatcdSourceState *state = value;
+        if (request->operation == LATCD_OP_FLUSH_SOURCE &&
+            strcmp(key, source_key)) continue;
+        LatcdFlushTarget target = {
+            .sequence = state->accepted_sequence,
+            .runtime_sequence = state->runtime_accepted_sequence,
+        };
+        g_strlcpy(target.source_key, key, sizeof(target.source_key));
+        g_array_append_val(flush->targets, target);
+        response->accepted_sequence = MAX(response->accepted_sequence,
+                                           target.sequence);
+    }
     GHashTableIter active_iterator;
     gpointer active_value;
     g_hash_table_iter_init(&active_iterator, service->active);
@@ -3370,40 +3886,64 @@ static int service_flush_request(LatcdService *service, int source_fd,
         LatcdJob *job = active_value;
         if (request->operation == LATCD_OP_FLUSH_ALL ||
             !strcmp(job->source_key, source_key)) {
+            job->flush_sequence = job->accepted_sequence;
             job->ready_at_us = 0;
         }
     }
     pthread_cond_broadcast(&service->ready);
-    int state_result = 0;
-    if (request->operation == LATCD_OP_FLUSH_SOURCE) {
-        LatcdSourceState *state = g_hash_table_lookup(service->source_states,
-                                                       source_key);
-        uint64_t target = state ? state->accepted_sequence : 0;
-        while (!(state_result = source_flush_state_locked(
-                     service, source_key, state, target))) {
-            pthread_cond_wait(&service->ready, &service->lock);
-        }
-        response->accepted_sequence = target;
-        response->published_sequence = state ? state->published_sequence : 0;
-    } else {
-        while (!(state_result = all_flush_state_locked(
-                     service, &response->accepted_sequence,
-                     &response->published_sequence))) {
-            pthread_cond_wait(&service->ready, &service->lock);
-        }
-    }
-    if (state_result < 0) {
-        response->status = LATCD_STATUS_COMPILE_FAILED;
-        g_strlcpy(response->message,
-                  "an accepted key set failed to compile",
-                  sizeof(response->message));
-    } else {
-        response->status = LATCD_STATUS_OK;
-        g_strlcpy(response->message, "all accepted key sets are published",
-                  sizeof(response->message));
-    }
     pthread_mutex_unlock(&service->lock);
-    return state_result < 0 ? -1 : 0;
+    return 0;
+}
+
+static int flush_request_state_locked(LatcdService *service,
+                                      LatcdFlushRequest *flush)
+{
+    int result = 1;
+    flush->response.published_sequence = 0;
+    for (guint i = 0; i < flush->targets->len; i++) {
+        LatcdFlushTarget *target = &g_array_index(flush->targets,
+                                                  LatcdFlushTarget, i);
+        LatcdSourceState *state = g_hash_table_lookup(service->source_states,
+                                                       target->source_key);
+        int current = source_flush_state_locked(service, target->source_key,
+            state, target->sequence, target->runtime_sequence);
+        if (state) {
+            flush->response.published_sequence = MAX(
+                flush->response.published_sequence,
+                current > 0 ? target->sequence : state->published_sequence);
+        }
+        if (current < 0) return -1;
+        if (!current) result = 0;
+    }
+    return result;
+}
+
+static void finish_flush_requests(LatcdService *service, GPtrArray *pending,
+                                   bool stopping)
+{
+    for (guint i = 0; i < pending->len;) {
+        LatcdFlushRequest *flush = g_ptr_array_index(pending, i);
+        struct pollfd peer = {.fd = flush->client_fd, .events = POLLIN};
+        bool disconnected = poll(&peer, 1, 0) > 0 &&
+            (peer.revents & (POLLHUP | POLLERR | POLLNVAL));
+        pthread_mutex_lock(&service->lock);
+        int state = flush_request_state_locked(service, flush);
+        pthread_mutex_unlock(&service->lock);
+        if (!disconnected && !state && !stopping) {
+            i++;
+            continue;
+        }
+        LatcdResponseV2 *response = &flush->response;
+        response->status = !state ? LATCD_STATUS_IO_ERROR :
+                           state < 0 ? LATCD_STATUS_COMPILE_FAILED : LATCD_STATUS_OK;
+        g_strlcpy(response->message, !state ? "latcd is stopping" :
+            state < 0 ? "an accepted key set failed to compile" :
+                        "all accepted key sets are published",
+            sizeof(response->message));
+        if (!disconnected) latcd_send_response(flush->client_fd, response, NULL, 0);
+        g_ptr_array_remove_index_fast(pending, i);
+        flush_request_free(flush);
+    }
 }
 
 static int make_server(const char *path, char *error, size_t error_size)
@@ -3612,6 +4152,51 @@ static int peer_is_current_user(int fd)
            size == sizeof(credentials) && credentials.uid == geteuid();
 }
 
+static int journal_build_id(uint8_t build[32])
+{
+    return strlen(LATC_BUILD_ID) == 64 ? hex_digest(LATC_BUILD_ID, build) : -1;
+}
+
+static void register_journal(const LatcdConfig *config, int source, int config_fd,
+                              const LatcdRequestV2 *request, LatcdResponseV2 *response,
+                              int *directory_fd)
+{
+    *directory_fd = -1;
+    response_init(response, request->request_id);
+    uint8_t build[32], codegen[32];
+    char error[sizeof(response->message)] = {0};
+    char *temporary = g_build_filename(config->cache_dir, ".tmp", NULL);
+    char *snapshot = NULL;
+    expected_codegen_id(codegen);
+    if (journal_build_id(build) || snapshot_source(source, temporary, config->max_input,
+            &snapshot, response->source_sha256, NULL, error, sizeof(error))) {
+        response->status = LATCD_STATUS_BAD_SOURCE;
+    } else {
+        char stream[33];
+        int result;
+        if (request->operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY) {
+            result = latcd_journal_register_capability(config->cache_dir, snapshot,
+                response->source_sha256, build, codegen, config_fd, request->sequence,
+                config->max_cache_bytes, stream, directory_fd, error, sizeof(error));
+        } else {
+            result = latcd_journal_register(config->cache_dir, snapshot, response->source_sha256,
+                build, codegen, config_fd, request->sequence, config->max_cache_bytes,
+                stream, error, sizeof(error));
+        }
+        if (result) {
+            response->status = LATCD_STATUS_BAD_REQUEST;
+        } else {
+            g_strlcpy(response->message, stream, sizeof(response->message));
+        }
+    }
+    if (snapshot) unlink(snapshot);
+    g_free(snapshot);
+    g_free(temporary);
+    if (response->status != LATCD_STATUS_OK)
+        g_strlcpy(response->message, error[0] ? error : "journal registration failed",
+                  sizeof(response->message));
+}
+
 static int request_is_ready(int fd)
 {
     struct pollfd request = { .fd = fd, .events = POLLIN };
@@ -3633,6 +4218,26 @@ static int run_service(const LatcdConfig *config)
         return 1;
     }
     g_free(temporary_dir);
+    uint8_t journal_build[32], journal_codegen[32];
+    unsigned recovered_journals;
+    expected_codegen_id(journal_codegen);
+    if (journal_build_id(journal_build) || latcd_journal_recover(config->cache_dir,
+            journal_build, journal_codegen, config->max_cache_bytes,
+            &recovered_journals, error, sizeof(error))) {
+        fprintf(stderr, "latcd: journal recovery validation failed: %s\n", error);
+        return 1;
+    }
+    if (recovered_journals)
+    {
+        uint64_t received;
+        if (latcd_journal_collect(config->cache_dir, journal_build, journal_codegen,
+                config->max_cache_bytes, &recovered_journals, &received, error, sizeof(error))) {
+            fprintf(stderr, "latcd: journal receipt recovery failed: %s\n", error);
+            return 1;
+        }
+        fprintf(stderr, "latcd: recovered %u journals, quarantined keys=%llu; no compile admission\n",
+                recovered_journals, (unsigned long long)received);
+    }
     int server = make_server(config->socket_path, error, sizeof(error));
     if (server < 0) {
         fprintf(stderr, "latcd: %s\n", error);
@@ -3717,15 +4322,20 @@ static int run_service(const LatcdConfig *config)
         stop_requested = 1;
     }
     int64_t last_activity = g_get_monotonic_time();
+    struct pollfd channels[LATCD_MAX_CHANNELS + 1] = {
+        { .fd = server, .events = POLLIN },
+    };
+    nfds_t channel_count = 1;
+    GPtrArray *pending_flushes = g_ptr_array_new();
     while (!stop_requested) {
-        struct pollfd poll_fd = { .fd = server, .events = POLLIN };
-        int available = poll(&poll_fd, 1, 250);
+        finish_flush_requests(&service, pending_flushes, false);
+        int available = poll(channels, channel_count, 250);
         if (available < 0 && errno == EINTR) {
             continue;
         }
-        if (available <= 0 || !(poll_fd.revents & POLLIN)) {
+        if (available <= 0) {
             pthread_mutex_lock(&service.lock);
-            bool busy = service.queue->len ||
+            bool busy = channel_count > 1 || pending_flushes->len || service.queue->len ||
                 g_hash_table_size(service.running_sources);
             pthread_mutex_unlock(&service.lock);
             busy |= atomic_load(&active_precompiles) ||
@@ -3738,6 +4348,46 @@ static int run_service(const LatcdConfig *config)
             }
             continue;
         }
+        for (nfds_t i = 1; i < channel_count;) {
+            short events = channels[i].revents;
+            if (!(events & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) {
+                i++;
+                continue;
+            }
+            LatcdRequestV2 request = {0};
+            int source = -1, tbset = -1, reply = -1, directory = -1;
+            if (!(events & POLLIN) || latcd_receive_channel_request(
+                    channels[i].fd, &request, &source, &tbset, &reply,
+                    error, sizeof(error))) {
+                close(channels[i].fd);
+                channels[i] = channels[--channel_count];
+                continue;
+            }
+            LatcdResponseV2 response;
+            response_init(&response, request.request_id);
+            if (request.operation == LATCD_OP_REGISTER_JOURNAL ||
+                request.operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY) {
+                register_journal(config, source, tbset, &request, &response, &directory);
+            } else if (request.operation != LATCD_OP_SUBMIT_KEYS) {
+                response.status = LATCD_STATUS_BAD_REQUEST;
+                g_strlcpy(response.message, "channel only accepts runtime keys or journal registration",
+                          sizeof(response.message));
+            } else {
+                service_queue_request(&service, source, tbset,
+                                      &request, &response);
+            }
+            /* A client that abandons its reply must not block the service. */
+            latcd_send_response_fd(reply, &response, directory, NULL, 0);
+            if (directory >= 0) close(directory);
+            close(reply);
+            if (source >= 0) close(source);
+            if (tbset >= 0) close(tbset);
+            last_activity = g_get_monotonic_time();
+            i++;
+        }
+        if (!(channels[0].revents & POLLIN)) {
+            continue;
+        }
         int client = accept4(server, NULL, NULL, SOCK_CLOEXEC);
         if (client < 0) {
             continue;
@@ -3748,6 +4398,7 @@ static int run_service(const LatcdConfig *config)
         response_init(&response, 0);
         int source = -1;
         int tbset = -1;
+        int directory = -1;
         bool handed_off = false;
         if (!peer_is_current_user(client) || !request_is_ready(client)) {
             response.status = LATCD_STATUS_BAD_REQUEST;
@@ -3757,7 +4408,8 @@ static int run_service(const LatcdConfig *config)
                                          error, sizeof(error))) {
             response.status = LATCD_STATUS_BAD_REQUEST;
             g_strlcpy(response.message, error, sizeof(response.message));
-        } else if (request.operation == LATCD_OP_HELLO) {
+        } else if (request.operation == LATCD_OP_HELLO ||
+                   request.operation == LATCD_OP_OPEN_CHANNEL) {
             response.request_id = request.request_id;
             g_strlcpy(response.message, LATC_BUILD_ID, sizeof(response.message));
             char *canonical = realpath(config->cache_dir, NULL);
@@ -3771,10 +4423,43 @@ static int run_service(const LatcdConfig *config)
             } else {
                 response.status = LATCD_STATUS_IO_ERROR;
             }
+            if (request.operation == LATCD_OP_OPEN_CHANNEL &&
+                response.status == LATCD_STATUS_OK) {
+                if (channel_count == LATCD_MAX_CHANNELS + 1) {
+                    response.status = LATCD_STATUS_QUEUE_FULL;
+                    g_strlcpy(response.message, "too many runtime channels",
+                              sizeof(response.message));
+                } else {
+                    int flags = fcntl(client, F_GETFL);
+                    if (flags < 0 || fcntl(client, F_SETFL, flags | O_NONBLOCK)) {
+                        response.status = LATCD_STATUS_IO_ERROR;
+                    } else if (!latcd_send_response(client, &response, NULL, 0)) {
+                        channels[channel_count++] = (struct pollfd) {
+                            .fd = client, .events = POLLIN,
+                        };
+                        handed_off = true;
+                    }
+                }
+            }
         } else if (request.operation == LATCD_OP_SUBMIT_KEYS ||
                    request.operation == LATCD_OP_SUBMIT_STATIC_KEYS) {
             service_queue_request(&service, source, tbset, &request,
                                   &response);
+        } else if (request.operation == LATCD_OP_REGISTER_JOURNAL ||
+                   request.operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY) {
+            register_journal(config, source, tbset, &request, &response, &directory);
+        } else if (request.operation == LATCD_OP_COLLECT_JOURNALS) {
+            response_init(&response, request.request_id);
+            uint64_t received;
+            unsigned count;
+            if (latcd_journal_collect(config->cache_dir, journal_build, journal_codegen,
+                    config->max_cache_bytes, &count, &received, error, sizeof(error))) {
+                response.status = LATCD_STATUS_BAD_REQUEST;
+                g_strlcpy(response.message, error, sizeof(response.message));
+            } else {
+                snprintf(response.message, sizeof(response.message),
+                         "quarantined streams=%u keys=%llu", count, (unsigned long long)received);
+            }
         } else if (request.operation == LATCD_OP_PRECOMPILE_SOURCE) {
             LatcdPrecompileRequest *work = g_new0(
                 LatcdPrecompileRequest, 1);
@@ -3802,10 +4487,34 @@ static int run_service(const LatcdConfig *config)
                           sizeof(response.message));
             }
         } else {
-            service_flush_request(&service, source, &request, &response);
+            response_init(&response, request.request_id);
+            if (pending_flushes->len >= LATCD_MAX_FLUSHES) {
+                response.status = LATCD_STATUS_QUEUE_FULL;
+                g_strlcpy(response.message, "too many pending flush requests",
+                          sizeof(response.message));
+            } else {
+                LatcdFlushRequest *flush = g_new0(LatcdFlushRequest, 1);
+                flush->client_fd = client;
+                int flags = fcntl(client, F_GETFL);
+                if (flags < 0 || fcntl(client, F_SETFL, flags | O_NONBLOCK)) {
+                    response.status = LATCD_STATUS_IO_ERROR;
+                    g_strlcpy(response.message, "cannot make flush reply nonblocking",
+                              sizeof(response.message));
+                    g_free(flush);
+                } else if (prepare_flush_request(&service, source, &request, flush)) {
+                    response = flush->response;
+                    g_free(flush);
+                } else {
+                    g_ptr_array_add(pending_flushes, flush);
+                    if (source >= 0) close(source);
+                    handed_off = true;
+                }
+            }
         }
         if (handed_off) continue;
-        latcd_send_response(client, &response, NULL, 0);
+        if (directory >= 0) latcd_send_response_fd(client, &response, directory, NULL, 0);
+        else latcd_send_response(client, &response, NULL, 0);
+        if (directory >= 0) close(directory);
         if (source >= 0) {
             close(source);
         }
@@ -3814,8 +4523,13 @@ static int run_service(const LatcdConfig *config)
         }
         close(client);
     }
+    for (nfds_t i = 1; i < channel_count; i++) {
+        close(channels[i].fd);
+    }
     close(server);
     unlink(config->socket_path);
+    finish_flush_requests(&service, pending_flushes, true);
+    g_ptr_array_free(pending_flushes, TRUE);
     if (precompile_pool) {
         g_thread_pool_free(precompile_pool, FALSE, TRUE);
     }

@@ -8,6 +8,9 @@
 #define LATC_BUNDLE_VERSION 4u
 #define LATC_CFG_VERSION 5u
 
+/* Retryable offline translation failure, not a guest exit status. */
+#define LATC_EXIT_CODE_BUFFER_EXHAUSTED 75
+
 /* Compiler-only provenance carried from CFG selection into translation. */
 #define LATC_CFG_TB_BOUNDED (1u << 2)
 

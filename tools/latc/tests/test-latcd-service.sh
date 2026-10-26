@@ -574,6 +574,83 @@ assert len(list(cache.glob(f"{source_sha}-*.tbset"))) == 1
 PY
 stop_service
 
+retained_marker=$work/retained-coverage.marker
+retained_compiler=$work/retained-coverage-latc
+retained_trace=$work/retained-coverage.trace
+printf '%s\n' '#!/bin/sh' 'set -eu' \
+  "if [ \"\${1:-}\" = build-id ]; then exec $latc \"\$@\"; fi" \
+  "if [ -e $retained_marker ]; then" \
+  "  if [ -n \"\${LATC_NATIVE_BASE:-}\" ]; then" \
+  "    printf 'incremental-failure\\n' >>$retained_trace" \
+  '    exit 1' \
+  '  fi' \
+  "  printf 'full-rebuild\\n' >>$retained_trace" \
+  '  export LATC_TBSET_CLOSURE_LIMIT=0 LATC_TBSET_SELECTION=bounded' \
+  'fi' \
+  "exec $latc \"\$@\"" >"$retained_compiler"
+chmod 755 "$retained_compiler"
+start_service retained-coverage "$retained_compiler" --flush-only
+submit_source "$socket" "$guest" "$phase/initial.client"
+"$latcd" --flush-source --socket "$socket" "$guest" \
+  >"$phase/initial-flush.client"
+retained_sha=$(sha256sum "$guest" | cut -d ' ' -f 1)
+retained_old_module=$(python3 - "$cache/$retained_sha.current" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1]))["module"])
+PY
+)
+"$latc" emit-module-tbset "$cache/$retained_old_module" \
+  -o "$phase/old-actual.tbset"
+python3 - "$cache" "$guest" "$phase" "$script_dir" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+cache, source, phase = map(Path, sys.argv[1:4])
+sys.path.insert(0, sys.argv[4])
+from tb_key_set import read_key_set, write_key_set
+sha = hashlib.sha256(source.read_bytes()).hexdigest()
+manifest = json.loads((cache / f"{sha}.current").read_text())
+_, _, observed = read_key_set(cache / manifest["tbset"])
+_, _, actual = read_key_set(phase / "old-actual.tbset")
+assert set(actual) - set(observed), (actual, observed)
+delta = (observed[0][0] + 5, 3)
+assert delta not in actual, (delta, actual)
+write_key_set(source, phase / "delta.tbset", [delta])
+PY
+touch "$retained_marker"
+"$latcd" --submit --socket "$socket" --tbset "$phase/delta.tbset" \
+  "$guest" >"$phase/delta.client"
+"$latcd" --flush-source --socket "$socket" "$guest" \
+  >"$phase/rebuilt-flush.client"
+grep -q '^status=0$' "$phase/rebuilt-flush.client"
+test "$(sed -n '1p' "$retained_trace")" = incremental-failure
+test "$(sed -n '2p' "$retained_trace")" = full-rebuild
+test "$(wc -l <"$retained_trace")" -eq 2
+retained_new_module=$(python3 - "$cache/$retained_sha.current" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1]))["module"])
+PY
+)
+"$latc" emit-module-tbset "$cache/$retained_new_module" \
+  -o "$phase/new-actual.tbset"
+python3 - "$phase" "$script_dir" <<'PY'
+from pathlib import Path
+import sys
+
+phase = Path(sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+from tb_key_set import read_key_set
+_, _, old = read_key_set(phase / "old-actual.tbset")
+_, _, delta = read_key_set(phase / "delta.tbset")
+_, _, new = read_key_set(phase / "new-actual.tbset")
+assert set(old) | set(delta) <= set(new), (old, delta, new)
+PY
+stop_service
+
 atomic_marker=$work/atomic-before-manifest.fail
 export LATCD_TEST_FAIL_BEFORE_MANIFEST=$atomic_marker
 start_service atomic "$latc" --flush-only --negative-ms 10

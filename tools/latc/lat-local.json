@@ -1,5 +1,19 @@
 {
   "added": [
+    {"path": "lat/target/i386/latx/optimization/tunnel-lib.c", "generated": true,
+     "reason": "check preexecution journal invariant before direct TB publication"},
+    {"path": "lat/linux-user/i386/cpu_loop.c", "generated": true,
+     "reason": "service preexecution journal retries outside runtime and exclusive scopes"},
+    {
+      "path": "lat/target/i386/latx/latx-translation-config.c",
+      "generated": true,
+      "reason": "effective translator configuration diagnostic snapshot"
+    },
+    {
+      "path": "lat/include/latc-translation-capabilities.h",
+      "generated": true,
+      "reason": "shared translator and pretranslation build capability policy"
+    },
     {
       "path": "lat/include/latc-bundle-format.h",
       "generated": true,
@@ -70,6 +84,19 @@
     }
   ],
   "modified": [
+    {"path": "lat/target/i386/latx/include/ir2.h", "generated": true,
+     "reason": "share diagnostic numeric producer provenance interface"},
+    {"path": "lat/target/i386/latx/include/macro-inst.h", "generated": true,
+     "reason": "share explicit numeric immediate API"},
+    {"path": "lat/target/i386/latx/ir2/ir2.c", "generated": true,
+     "reason": "share opt-in IR provenance recording and invalidation"},
+    {"path": "lat/target/i386/latx/translator/macro-helper.c", "generated": true,
+     "reason": "share explicit numeric emitter diagnostics"},
+    {
+      "path": "lat/target/i386/latx/translator/tr-fctrl.c",
+      "generated": true,
+      "reason": "share canonical x87 control translation and pointer-free WAIT constants"
+    },
     {
       "path": "lat/util/rcu.c",
       "generated": true,
@@ -224,6 +251,11 @@
       "path": "lat/target/i386/latx/translator/tr-simd-cvt.c",
       "generated": true,
       "reason": "share SHBR scalar conversion code generation with the standalone AOT translator"
+    },
+    {
+      "path": "lat/target/i386/latx/translator/tr-avx-cvt.c",
+      "generated": true,
+      "reason": "share audited CVT configuration dependency reads with the standalone AOT translator"
     },
     {
       "path": "lat/target/i386/latx/translator/tr-simd-mov.c",

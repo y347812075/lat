@@ -15,6 +15,9 @@ def create_staging(root: Path) -> Path:
     (root / "target/i386/latx/sbt/meson.build").write_text(
         "  'aot.c',\n"
     )
+    (root / "target/i386/latx/meson.build").write_text(
+        "  'latx-options.c',\n"
+    )
     (root / "configure").write_text(
         '  QEMU_LDFLAGS="-lcrypto -lz $QEMU_LDFLAGS"\n'
     )
@@ -50,6 +53,11 @@ def main() -> int:
             "accel/tcg/cpu-exec.c",
             "include/exec/fasttb.h",
             "target/i386/latx/sbt/latc_native_export.c",
+            "target/i386/latx/latx-translation-config.c",
+            "linux-user/translation-config.c",
+            "linux-user/key-journal.c",
+            "include/lat-translation-config.h",
+            "include/lat-key-journal.h",
         ):
             assert (staging / relative).read_bytes() == (
                 repository / relative
@@ -57,6 +65,14 @@ def main() -> int:
         assert (staging / "include/latc-build-id.h").read_bytes() == (
             repository / "tools/latc/aot-v2/include/latc-build-id.h"
         ).read_bytes()
+        build_text = (staging / "target/i386/latx/meson.build").read_text()
+        assert build_text.count("  'latx-translation-config.c',\n") == 1
+        assert (staging / "linux-user/meson.build").read_text().count(
+            "  'key-journal.c',\n") == 1
+        assert prepare(script, staging).returncode == 0
+        assert (staging / "target/i386/latx/meson.build").read_text() == build_text
+        assert (staging / "linux-user/meson.build").read_text().count(
+            "  'translation-config.c',\n") == 1
 
         without = create_staging(Path(temp) / "source-without-aot-v2")
         completed = prepare(script, without, "--without-aot-v2")

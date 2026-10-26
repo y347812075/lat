@@ -30,7 +30,7 @@ LATC_STRICT_AOT=1 \
 LATC_STATS_OUT="$work/stats.json" \
   "$work/runner" >"$work/stdout" 2>"$work/stderr"
 
-printf '%s\n' 'AOT v2 signal recovery boundary=1 internal=1 end=1 helper=1 gprs=1 rflags=1 vector=1 mask=1 nested=1 altstack=1 sigreturn=1' >"$work/expected"
+printf '%s\n' 'AOT v2 signal recovery boundary=1 internal=1 end=1 helper=1 int3=1 ud0=1 ud1=1 gprs=1 rflags=1 vector=1 mask=1 nested=1 altstack=1 sigreturn=1' >"$work/expected"
 cmp "$work/expected" "$work/stdout"
 grep -Eq 'direct_targets=[1-9][0-9]* compat_tb_allocations=0' "$work/stderr"
 # The UD2 case raises through the LAT helper with guest state already set;

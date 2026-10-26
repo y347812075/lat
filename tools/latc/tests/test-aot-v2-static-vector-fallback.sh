@@ -18,9 +18,11 @@ for threads in 1 4; do
     native=$work/module-$threads.native
     LATC_AOT_THREADS=$threads "$scripts/compile-native-image.sh" --module \
       "$latc" "$runner" "$guest" "$native" >"$work/compile-$threads.log" 2>&1
-    grep -q 'reason=ZMM register' "$work/compile-$threads.log"
-    grep -q 'reason=opmask register' "$work/compile-$threads.log"
-    grep -q 'reason=extended vector register' "$work/compile-$threads.log"
+    grep -q 'reason=build-disabled-avx512' "$work/compile-$threads.log"
+    if grep -q 'unsupported static instruction' "$work/compile-$threads.log"; then
+        echo 'disabled static candidate reached native translation' >&2
+        exit 1
+    fi
     python3 - "$native" "$guest" <<'PY'
 from pathlib import Path
 import struct
@@ -62,8 +64,10 @@ PY
     grep -Eq 'module=registered aot_lookups=[1-9][0-9]* jit_fallbacks=0' \
       "$work/run-$threads.err"
 done
-if "$scripts/compile-native-image.sh" "$latc" "$runner" "$guest" \
-    "$work/strict.native" >"$work/strict.log" 2>&1; then
+python3 "$(dirname "$0")/make-symbol-tbset.py" "$guest" \
+    'unsupported_(zmm|opmask|extended)' "$work/explicit.tbset"
+if "$scripts/compile-native-image.sh" --static-tbset "$latc" "$runner" "$guest" \
+    "$work/strict.native" "$work/explicit.tbset" >"$work/strict.log" 2>&1; then
     echo 'strict native compilation accepted an unsupported vector TB' >&2
     exit 1
 fi

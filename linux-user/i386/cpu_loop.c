@@ -224,6 +224,11 @@ void cpu_loop(CPUX86State *env)
         cpu_exec_end(cs);
         process_queued_cpu_work(cs);
 #ifdef CONFIG_LATX
+        if (trapnr == LATC_AOT_V2_KEY_RETRY) {
+            latc_aot_v2_key_retry_service(cs);
+            process_pending_signals(env);
+            continue;
+        }
         latc_aot_v2_flush_deferred_pending();
 #endif
 #if defined(CONFIG_LATX_KZT)
@@ -381,6 +386,12 @@ void cpu_loop(CPUX86State *env)
             break;
         case EXCP_ATOMIC:
             cpu_exec_step_atomic(cs);
+#ifdef CONFIG_LATX
+            while (latc_aot_v2_key_retry_pending()) {
+                latc_aot_v2_key_retry_service(cs);
+                cpu_exec_step_atomic(cs);
+            }
+#endif
             break;
         default:
             pc = env->segs[R_CS].base + env->eip;

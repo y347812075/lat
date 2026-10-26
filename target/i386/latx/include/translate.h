@@ -1503,7 +1503,15 @@ TRANS_FUNC_DEF(salc);
 TRANS_FUNC_DEF(pclmulqdq);
 
 void tr_init(void *tb);
+typedef struct TrNumericWord {
+    uint32_t offset;
+    uint32_t word;
+} TrNumericWord;
+
+void tr_provenance_move_stub(TranslationBlock *tb, uint32_t old_offset,
+                             uint32_t new_offset);
 void tr_fini(bool check_the_extension); /* default TRUE */
+int latx_translation_cvt_opt(void);
 
 void tr_disasm(struct TranslationBlock *tb, int max_insns);
 void etb_add_succ(void* etb,int depth);

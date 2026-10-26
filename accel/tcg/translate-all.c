@@ -528,6 +528,9 @@ static int cpu_restore_state_from_tb(CPUState *cpu, TranslationBlock *tb,
 
 void tb_destroy(TranslationBlock *tb)
 {
+#ifdef CONFIG_LATX
+    g_clear_pointer(&tb->numeric_provenance_words, g_array_unref);
+#endif
     qemu_spin_destroy(&tb->jmp_lock);
 }
 
@@ -1987,6 +1990,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 #ifdef CONFIG_LATX
     latc_bundle_note_tb_attempt(pc, cflags);
 #if defined(CONFIG_USER_ONLY) && defined(TARGET_X86_64)
+    latc_aot_v2_key_gate(cpu, pc, cflags);
     latc_aot_v2_note_jit_key(pc, cflags);
 #endif
 #endif
@@ -2455,6 +2459,9 @@ void latc_aot_v2_collect_existing_jit_tbs(target_ulong guest_begin,
 #ifdef CONFIG_LATX_AOT
 void aot_tb_register(TranslationBlock *tb, AOTTBOrigin origin)
 {
+#if defined(CONFIG_USER_ONLY) && defined(TARGET_X86_64)
+    latc_aot_v2_key_publish_check(current_cpu, tb->pc, tb->cflags);
+#endif
     TranslationBlock *existing_tb;
     tb_page_addr_t phys_pc, phys_page2;
     target_ulong virt_page2;

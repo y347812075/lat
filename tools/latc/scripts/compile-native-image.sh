@@ -22,10 +22,14 @@ output=$4
 tbset=${5:-}
 
 unset LATC_NATIVE_STATIC_CHECK
+if [ "$module" -eq 1 ] && [ -z "${LATC_TBSET_SELECTION+x}" ]; then
+    export LATC_TBSET_SELECTION=bounded
+fi
 if [ "$module" -eq 1 ] && [ -z "${LATC_TBSET_CLOSURE_LIMIT+x}" ]; then
     export LATC_TBSET_CLOSURE_LIMIT=20000
 fi
-if [ -z "$tbset" ] || [ "$static_tbset" -eq 1 ]; then
+if [ -z "$tbset" ] || [ "$static_tbset" -eq 1 ] ||
+   [ "${LATC_TBSET_SELECTION:-}" = exact-static ]; then
     export LATC_NATIVE_STATIC_CHECK=1
 fi
 
@@ -37,15 +41,42 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/latc-native.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
 missing="$work/missing.tbset"
-rm -f "$output" "$missing"
+rm -f "$output"
 if [ "$module" -eq 1 ]; then
     export LATC_NATIVE_ALLOW_MISSING=1
 else
     unset LATC_NATIVE_ALLOW_MISSING
 fi
-if ! LATC_NATIVE_IMAGE_OUT="$output" LATC_NATIVE_MISSING_OUT="$missing" \
-    "$(dirname "$0")/compile-aot.sh" "$latc" "$runner" "$guest" \
-    "$work/compile-bundle" "$tbset" >/dev/null; then
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+compile_part()
+(
+    part=$1
+    image=$2
+    directory=$3
+    mkdir "$directory"
+    missing=$directory/missing.tbset
+    status=0
+    LATC_NATIVE_IMAGE_OUT="$image" LATC_NATIVE_MISSING_OUT="$missing" \
+        "$script_dir/compile-aot.sh" "$latc" "$runner" "$guest" \
+        "$directory/compile-bundle" "$part" >/dev/null || status=$?
+    if [ "$status" -eq 0 ]; then
+        test -s "$image"
+        exit 0
+    fi
+    rm -f "$image"
+    if [ "$module" -eq 1 ] && [ "$status" -eq 75 ]; then
+        echo "latc: splitting exhausted native translation input" >&2
+        "$latc" split-tbset "$part" "$directory/left.tbset" \
+            "$directory/right.tbset" || exit 1
+        compile_part "$directory/left.tbset" "$directory/left.native" \
+            "$directory/left" || exit 1
+        compile_part "$directory/right.tbset" "$directory/right.native" \
+            "$directory/right" || exit 1
+        "$latc" merge-native "$directory/left.native" \
+            "$directory/right.native" -o "$image" || exit 1
+        rm -f "$directory/left.native" "$directory/right.native"
+        exit 0
+    fi
     if [ -s "$missing" ]; then
         missing_count=$(wc -l <"$missing")
         echo "latc: native compilation missing $missing_count static targets; first entries:" >&2
@@ -53,7 +84,99 @@ if ! LATC_NATIVE_IMAGE_OUT="$output" LATC_NATIVE_MISSING_OUT="$missing" \
     else
         echo "latc: native compilation failed without static missing targets" >&2
     fi
-    exit 1
+    exit "$status"
+)
+
+if [ "$module" -eq 1 ] && [ -z "$tbset" ]; then
+    static_tbset=1
+    tbset=$work/static.tbset
+    "$latc" emit-static-tbset "$guest" -o "$tbset" >/dev/null
+fi
+status=0
+case "${LATC_TBSET_SELECTION:-}" in
+    exact|exact-static) planned=0 ;;
+    *) planned=$module ;;
+esac
+if [ "$planned" -eq 1 ]; then
+    plan=${LATC_NATIVE_PLAN_DIRECTORY:-$work/plan}
+    set --
+    if [ "$static_tbset" -eq 1 ]; then set -- --static; fi
+    "$latc" plan-tbset "$guest" "$tbset" "$plan" "$@"
+    "$latc" list-tbplan "$guest" "$plan" >"$work/parts"
+    index=0
+    paired=${LATC_NATIVE_BASE_MODULE:-}
+    if [ -n "$paired" ] && [ -z "${LATC_NATIVE_BASE:-}" ]; then
+        echo 'latc: base module requires paired native image' >&2
+        exit 1
+    fi
+    if [ -n "$paired" ]; then
+        "$latc" validate-native-base "$paired" "$LATC_NATIVE_BASE"
+    fi
+    while read -r mode name; do
+        case "$mode" in exact|exact-static) ;; *) exit 1 ;; esac
+        case "$name" in required-*.tbset|static-*.tbset) ;; *) exit 1 ;; esac
+        image=$work/part.native
+        part=$plan/$name
+        if [ -n "$paired" ]; then
+            delta=$work/delta-$index.tbset
+            "$latc" missing-module-tbset "$paired" "$part" -o "$delta" \
+                >"$work/delta-count"
+            count=$(sed -n 's/^missing_tb_keys=//p' "$work/delta-count")
+            case "$count" in ''|*[!0-9]*) exit 1 ;; esac
+            printf '%s %s %s\n' "$mode" "$name" "$count" >>"$plan/consumed-deltas.log"
+            if [ "$count" -eq 0 ]; then
+                rm -f "$delta"
+                index=$((index + 1))
+                continue
+            fi
+            part=$delta
+        fi
+        (
+            export LATC_TBSET_SELECTION=$mode
+            unset LATC_NATIVE_STATIC_CHECK
+            if [ "$mode" = exact-static ]; then export LATC_NATIVE_STATIC_CHECK=1; fi
+            compile_part "$part" "$image" "$work/part-$index"
+        ) || { status=$?; break; }
+        if [ -n "$paired" ]; then rm -f "$part"; fi
+        level=0
+        while [ -f "$work/level-$level.native" ]; do
+            "$latc" merge-native "$work/level-$level.native" "$image" \
+                -o "$work/merge.native" || { status=$?; break; }
+            rm -f "$work/level-$level.native" "$image"
+            mv "$work/merge.native" "$image"
+            level=$((level + 1))
+        done
+        if [ "$status" -ne 0 ]; then break; fi
+        mv "$image" "$work/level-$level.native"
+        index=$((index + 1))
+    done <"$work/parts"
+    if [ "$status" -eq 0 ]; then
+        for image in "$work"/level-*.native; do
+            test -f "$image" || continue
+            if [ ! -f "$output" ]; then mv "$image" "$output"; continue; fi
+            "$latc" merge-native "$image" "$output" -o "$work/final.native" || { status=$?; break; }
+            rm -f "$image" "$output"
+            mv "$work/final.native" "$output"
+        done
+        if [ "$status" -eq 0 ] && [ -n "$paired" ]; then
+            if [ -f "$output" ]; then
+                "$latc" merge-native "$LATC_NATIVE_BASE" "$output" \
+                    -o "$work/paired.native" || status=$?
+                if [ "$status" -eq 0 ]; then
+                    rm -f "$output"
+                    mv "$work/paired.native" "$output"
+                fi
+            else
+                cp "$LATC_NATIVE_BASE" "$output" || status=$?
+            fi
+        fi
+    fi
+else
+    compile_part "$tbset" "$output" "$work/root" || status=$?
+fi
+if [ "$status" -ne 0 ]; then
+    rm -f "$output"
+    exit "$status"
 fi
 if [ ! -s "$output" ]; then
     echo "latc: native compilation produced no image" >&2

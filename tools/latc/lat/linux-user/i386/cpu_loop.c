@@ -22,6 +22,9 @@
 #include "qemu.h"
 #include "cpu_loop-common.h"
 #include "latx-options.h"
+#ifdef CONFIG_LATX
+#include "latc-aot-v2-runner.h"
+#endif
 #include <linux/audit.h>
 
 /***********************************************************/
@@ -220,7 +223,16 @@ void cpu_loop(CPUX86State *env)
         trapnr = cpu_exec(cs);
         cpu_exec_end(cs);
         process_queued_cpu_work(cs);
+#ifdef CONFIG_LATX
+        if (trapnr == LATC_AOT_V2_KEY_RETRY) {
+            latc_aot_v2_key_retry_service(cs);
+            process_pending_signals(env);
+            continue;
+        }
+        latc_aot_v2_flush_deferred_pending();
+#endif
 #if defined(CONFIG_LATX_KZT)
+        kzt_reclaim_unloaded_headers();
         if (latx_kzt_runtime_enabled() && trapnr == 0xCC)
             break;
 #endif
@@ -374,6 +386,12 @@ void cpu_loop(CPUX86State *env)
             break;
         case EXCP_ATOMIC:
             cpu_exec_step_atomic(cs);
+#ifdef CONFIG_LATX
+            while (latc_aot_v2_key_retry_pending()) {
+                latc_aot_v2_key_retry_service(cs);
+                cpu_exec_step_atomic(cs);
+            }
+#endif
             break;
         default:
             pc = env->segs[R_CS].base + env->eip;

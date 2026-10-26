@@ -94,6 +94,7 @@ static void shift_runtime_prefix(ModulePack *pack)
         pack->relocations[i].code_offset += prefix;
         if (pack->relocations[i].kind == LAT_NATIVE_RELOC_IMAGE_DATA) {
             pack->relocations[i].addend += prefix;
+            pack->relocations[i].data_object_offset += prefix;
         }
     }
     for (uint64_t i = 0; prefix && i < pack->header->pc_map_count; i++) {
@@ -1270,8 +1271,12 @@ static void select_supported_tbs(ModulePack *pack)
             }
             uint32_t physical = relocation->physical_target_plus_one;
             if (physical && pack->supported[physical - 1] &&
+                pack->tbs[physical - 1].guest_pc ==
+                    (uint64_t)relocation->addend &&
+                pack->tbs[physical - 1].flags == relocation->target &&
                 (physical - 1) != (uint32_t)target &&
                 candidate_count < G_N_ELEMENTS(candidates)) {
+                /* Encoded runtime exits are not logical guest targets. */
                 candidates[candidate_count++] = (int)(physical - 1);
             }
             int patchable = 0;
@@ -2640,6 +2645,11 @@ static int emit_module_sources(const char *native_image,
                     output_directory);
     }
     const LatNativeImageHeaderV2 *original = (const void *)image;
+    if (original->flags & LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED) {
+        g_free(image);
+        return fail(error, error_size,
+                    "native configuration replay is not authorized for modules");
+    }
     LatNativeImageHeaderV2 adjusted = *original;
     uint64_t prefix = original->code_size >= (UINT64_C(1) << 31) ? 4096 : 0;
     if (original->code_size > SIZE_MAX - prefix) {

@@ -97,6 +97,10 @@ void latc_aot_v2_start_deferred_submission(void)
 {
 }
 
+void latc_aot_v2_prepare_submission_channel(void)
+{
+}
+
 int latc_aot_v2_relocate_source_fd(int fd)
 {
     (void)fd;
@@ -107,6 +111,27 @@ void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
 {
     (void)guest_pc;
     (void)cflags;
+}
+
+void latc_aot_v2_key_scope_enter(CPUState *cpu, uint32_t cflags, bool atomic_step)
+{
+    (void)cpu; (void)cflags; (void)atomic_step;
+}
+
+void latc_aot_v2_key_scope_leave(void) { }
+void latc_aot_v2_key_gate(CPUState *cpu, target_ulong pc, uint32_t cflags)
+{
+    (void)cpu; (void)pc; (void)cflags;
+}
+void latc_aot_v2_key_publish_check(CPUState *cpu, target_ulong pc, uint32_t cflags)
+{
+    (void)cpu; (void)pc; (void)cflags;
+}
+bool latc_aot_v2_key_retry_pending(void) { return false; }
+bool latc_aot_v2_key_retry_service(CPUState *cpu) { (void)cpu; return false; }
+bool latc_aot_v2_key_resume_jrra(target_ulong pc, uint32_t cflags)
+{
+    (void)pc; (void)cflags; return false;
 }
 
 void latc_aot_v2_collect_existing_jit_tbs(target_ulong guest_begin,

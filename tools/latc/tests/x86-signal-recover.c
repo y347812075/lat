@@ -16,12 +16,19 @@ extern int signal_end_site(void);
 extern char signal_end_fault[], signal_end_resume[];
 extern int signal_helper_site(void);
 extern char signal_helper_fault[], signal_helper_resume[];
+extern int signal_int3_site(void), signal_ud0_site(void), signal_ud1_site(void);
+extern char signal_int3_fault[], signal_int3_resume[];
+extern char signal_ud0_fault[], signal_ud0_resume[];
+extern char signal_ud1_fault[], signal_ud1_resume[];
 
 enum SignalCase {
     SIGNAL_BOUNDARY = 1,
     SIGNAL_INTERNAL,
     SIGNAL_END,
     SIGNAL_HELPER,
+    SIGNAL_INT3,
+    SIGNAL_UD0,
+    SIGNAL_UD1,
 };
 
 enum SignalGpr {
@@ -149,7 +156,8 @@ static void handle_fault(int signal, siginfo_t *info, void *opaque)
 {
     volatile unsigned char stack_byte = 0;
     ucontext_t *context = opaque;
-    int expected_signal = current_case == SIGNAL_HELPER ? SIGILL : SIGFPE;
+    int expected_signal = current_case == SIGNAL_INT3 ? SIGTRAP :
+        current_case >= SIGNAL_HELPER ? SIGILL : SIGFPE;
 
     if (signal != expected_signal || info->si_signo != expected_signal ||
         !context || (uintptr_t)context->uc_mcontext.gregs[REG_RIP] !=
@@ -194,6 +202,7 @@ static int run_case(enum SignalCase test, uintptr_t fault, uintptr_t resume,
            sigismember(&mask, SIGUSR2) != 1 ||
            sigismember(&mask, SIGFPE) != 0 ||
            sigismember(&mask, SIGILL) != 0 ||
+           sigismember(&mask, SIGTRAP) != 0 ||
            sigismember(&mask, SIGUSR1) != 0;
 }
 
@@ -228,6 +237,7 @@ int main(void)
         sigaltstack(&alternate, NULL) ||
         sigaction(SIGFPE, &fault_action, NULL) ||
         sigaction(SIGILL, &fault_action, NULL) ||
+        sigaction(SIGTRAP, &fault_action, NULL) ||
         sigaction(SIGUSR1, &nested_action, NULL)) {
         return 3;
     }
@@ -239,7 +249,13 @@ int main(void)
                  (uintptr_t)signal_end_resume, signal_end_site) ||
         run_case(SIGNAL_HELPER, (uintptr_t)signal_helper_fault,
                  (uintptr_t)signal_helper_resume, signal_helper_site) ||
-        recovered_cases != 4 || nested_seen != 1) {
+        run_case(SIGNAL_INT3, (uintptr_t)signal_int3_resume,
+                 (uintptr_t)signal_int3_resume, signal_int3_site) ||
+        run_case(SIGNAL_UD0, (uintptr_t)signal_ud0_fault,
+                 (uintptr_t)signal_ud0_resume, signal_ud0_site) ||
+        run_case(SIGNAL_UD1, (uintptr_t)signal_ud1_fault,
+                 (uintptr_t)signal_ud1_resume, signal_ud1_site) ||
+        recovered_cases != 7 || nested_seen != 1) {
         return 4;
     }
     stack_t observed;
@@ -249,6 +265,7 @@ int main(void)
         return 5;
     }
     puts("AOT v2 signal recovery boundary=1 internal=1 end=1 helper=1 "
+         "int3=1 ud0=1 ud1=1 "
          "gprs=1 rflags=1 vector=1 mask=1 nested=1 altstack=1 sigreturn=1");
     return 0;
 }

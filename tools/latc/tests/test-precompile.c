@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "precompile.h"
+#include "latcd-protocol.h"
 
 #include <elf.h>
 #include <errno.h>
@@ -10,7 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define IMAGE_SIZE 0x500
@@ -110,6 +113,121 @@ static bool contains_guest(GPtrArray *dependencies, const char *path)
     return false;
 }
 
+static void test_backpressure(const char *root, GPtrArray *dependencies,
+                              unsigned jobs, bool fail_compile)
+{
+    char *socket_path = g_build_filename(root, "test.sock", NULL);
+    char *compiler = g_build_filename(root, "fake-latc", NULL);
+    const char script[] = "#!/bin/sh\n: > \"$4\"\necho static_tb_keys=1\n";
+    if (!g_file_set_contents(compiler, script, -1, NULL) ||
+        chmod(compiler, 0700)) {
+        die("fake compiler failed");
+    }
+    int listener = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    if (strlen(socket_path) >= sizeof(address.sun_path)) {
+        die("socket too long");
+    }
+    strcpy(address.sun_path, socket_path);
+    if (listener < 0 || bind(listener, (void *)&address, sizeof(address)) ||
+        listen(listener, 8)) {
+        die("listen failed");
+    }
+    pid_t child = fork();
+    if (child < 0) {
+        die("fork failed");
+    }
+    if (!child) {
+        alarm(30);
+        unsigned pending = 0, completed = 0, rejected = 0;
+        bool accepted[4] = {0};
+        while (completed < dependencies->len) {
+            int client = accept(listener, NULL, NULL), source = -1, keys = -1;
+            LatcdRequestV2 request = {0};
+            char error[256];
+            if (client < 0 || latcd_receive_request(client, &request,
+                    &source, &keys, error, sizeof(error))) {
+                die("request failed");
+            }
+            struct stat actual;
+            if (fstat(source, &actual)) {
+                die("source stat failed");
+            }
+            guint index;
+            for (index = 0; index < dependencies->len; index++) {
+                LatcdPrecompileDependency *dep =
+                    g_ptr_array_index(dependencies, index);
+                struct stat expected;
+                if (stat(dep->host_path, &expected)) {
+                    die("dependency stat failed");
+                }
+                if (actual.st_ino == expected.st_ino &&
+                    actual.st_dev == expected.st_dev) {
+                    break;
+                }
+            }
+            if (index == dependencies->len) {
+                die("unknown source");
+            }
+            LatcdResponseV2 response = {
+                .magic = LATCD_RESPONSE_MAGIC,
+                .version = LATCD_PROTOCOL_VERSION,
+                .size = sizeof(response), .request_id = request.request_id,
+            };
+            if (request.operation == LATCD_OP_SUBMIT_STATIC_KEYS) {
+                if (pending) {
+                    response.status = LATCD_STATUS_QUEUE_FULL;
+                    rejected++;
+                } else {
+                    if (accepted[index]) {
+                        die("duplicate accepted dependency");
+                    }
+                    accepted[index] = true;
+                    pending++;
+                }
+            } else if (request.operation == LATCD_OP_FLUSH_SOURCE) {
+                if (!accepted[index] || !pending) {
+                    die("invalid flush");
+                }
+                pending--;
+                if (!completed && fail_compile) {
+                    response.status = LATCD_STATUS_COMPILE_FAILED;
+                }
+                completed++;
+            } else {
+                die("unexpected operation");
+            }
+            if (latcd_send_response(client, &response, error, sizeof(error))) {
+                die("response failed");
+            }
+            close(source);
+            if (keys >= 0) {
+                close(keys);
+            }
+            close(client);
+        }
+        if ((jobs > 1) != !!rejected || pending) {
+            die("backpressure not exercised");
+        }
+        close(listener);
+        _exit(0);
+    }
+    close(listener);
+    alarm(30);
+    int result = latcd_run_precompile(socket_path, root, compiler,
+                                      "/usr/bin/app", jobs);
+    int status;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+        WEXITSTATUS(status) || result != fail_compile) {
+        die("precompile backpressure result mismatch");
+    }
+    alarm(0);
+    unlink(socket_path);
+    unlink(compiler);
+    g_free(compiler);
+    g_free(socket_path);
+}
+
 int main(void)
 {
     GError *gerror = NULL;
@@ -144,6 +262,9 @@ int main(void)
         }
         die("dependency closure mismatch");
     }
+    test_backpressure(root, dependencies, 1, false);
+    test_backpressure(root, dependencies, 4, false);
+    test_backpressure(root, dependencies, 4, true);
     g_ptr_array_free(dependencies, TRUE);
     if (unlink(libc_path)) die("unlink failed");
     dependencies = NULL;

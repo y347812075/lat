@@ -7,12 +7,17 @@
 #ifndef LATX_IR1_DECODE_H
 #define LATX_IR1_DECODE_H
 
+#include "latc-translation-capabilities.h"
+
 #define IR1_DECODE_TEMPLATE_CACHE_SIZE 16384
 
 /* Static compilation can discover CPU variants that execution never selects. */
 static inline const char *ir1_static_vector_rejection(
         const struct la_dt_insn *info, int code64)
 {
+    if (LATC_TRANSLATOR_AVX512_SUPPORTED) {
+        return NULL;
+    }
     unsigned int register_limit = code64 ? 16 : 8;
     for (unsigned int i = 0; i < info->x86.op_count; i++) {
         const dt_cs_x86_op *opnd = &info->x86.operands[i];
@@ -32,6 +37,9 @@ static inline const char *ir1_static_vector_rejection(
              reg <= dt_X86_REG_YMM31)) {
             return "extended vector register";
         }
+    }
+    if (latc_decoded_uses_evex(info->bytes, info->size)) {
+        return "EVEX instruction";
     }
     return NULL;
 }

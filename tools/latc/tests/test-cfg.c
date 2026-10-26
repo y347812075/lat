@@ -8,6 +8,40 @@
 
 static void test_decoder(void)
 {
+    const unsigned char avx512[][10] = {
+        {0x62, 0xf1, 0xfd, 0x48, 0x6f, 0xc8},
+        {0x62, 0xa1, 0xfd, 0x08, 0x6f, 0xc8},
+        {0x67, 0x62, 0xf1, 0xfd, 0x08, 0x6f, 0x04, 0x24},
+        {0xc5, 0xf8, 0x92, 0xc8},
+        {0xc4, 0xe1, 0xfb, 0x93, 0xda},
+        {0xc4, 0xe3, 0xf9, 0x31, 0xc9, 0x02},
+        {0x62, 0xf1, 0xfd, 0x08, 0x6f, 0x44, 0x24, 0x01},
+    };
+    const size_t vector_lengths[] = {6, 6, 8, 4, 5, 6, 8};
+    for (size_t i = 0; i < sizeof(vector_lengths) / sizeof(vector_lengths[0]); i++) {
+        assert(cfg_insn_requires_avx512(avx512[i], vector_lengths[i]));
+        for (size_t cut = 1; cut < vector_lengths[i]; cut++) {
+            assert(!cfg_insn_requires_avx512(avx512[i], cut));
+        }
+    }
+    const unsigned char ordinary[][6] = {
+        {0x66, 0x0f, 0x6f, 0xc8},
+        {0xc4, 0xe2, 0x78, 0xf2, 0xc0},
+        {0xc5, 0xf9, 0xef, 0xc0},
+        {0xc5, 0xf8, 0x77},
+        {0x62, 0xfd, 0xfd, 0x48, 0x6f, 0xc8},
+        {0xc5, 0xfa, 0x92, 0xc8}, /* Reserved pp, not KMOVW. */
+        {0xc5, 0x78, 0x92, 0xc8}, /* Invalid mask register number. */
+        {0x62, 0xf1, 0xf9, 0x48, 0x6f, 0xc8}, /* Reserved EVEX bit. */
+        {0x62, 0xf1, 0xfd, 0x48, 0x04, 0xc8}, /* Unknown opcode. */
+    };
+    const size_t ordinary_lengths[] = {4, 5, 4, 3, 6, 4, 4, 6, 6};
+    for (size_t i = 0; i < sizeof(ordinary_lengths) / sizeof(ordinary_lengths[0]); i++) {
+        if (cfg_insn_requires_avx512(ordinary[i], ordinary_lengths[i])) {
+            fprintf(stderr, "unexpected capability exclusion case=%zu\n", i);
+        }
+        assert(!cfg_insn_requires_avx512(ordinary[i], ordinary_lengths[i]));
+    }
     const unsigned char direct_call[] = {0xe8, 1, 0, 0, 0};
     Insn in = cfg_decode_insn(direct_call, sizeof(direct_call), 0x1000, 0);
     assert(in.kind == INSN_CALL && in.len == 5 && in.target == 0x1006);
@@ -23,6 +57,28 @@ static void test_decoder(void)
     const unsigned char loop[] = {0xe2, 0xfe};
     in = cfg_decode_insn(loop, sizeof(loop), 0x4000, 0);
     assert(in.kind == INSN_JCC && in.target == 0x4000);
+
+    const unsigned char traps[][8] = {
+        {0xcc}, {0x0f, 0x0b}, {0x0f, 0xb9, 0xc0},
+        {0x67, 0x0f, 0xb9, 0x40, 2},
+        {0x0f, 0xff, 0x84, 0x24, 1, 2, 3, 4},
+        {0x0f, 0xb9, 0x04, 0x24},
+        {0x67, 0x0f, 0xff, 0x04, 0x24},
+        {0x0f, 0xb9, 0x04, 0x25, 1, 2, 3, 4},
+    };
+    const size_t lengths[] = {1, 2, 3, 5, 8, 4, 5, 8};
+    for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+        in = cfg_decode_insn(traps[i], lengths[i], 0x5000, 0);
+        assert(in.kind == INSN_STOP && in.len == lengths[i]);
+        assert(!in.has_target);
+        for (size_t cut = 1; cut < lengths[i]; cut++) {
+            in = cfg_decode_insn(traps[i], cut, 0x5000, 0);
+            assert(in.kind != INSN_STOP);
+        }
+    }
+    const unsigned char not_trap[] = {0x0f, 0xb8, 0xc0};
+    in = cfg_decode_insn(not_trap, sizeof(not_trap), 0x5000, 0);
+    assert(in.kind == INSN_NORMAL);
 }
 
 static void test_absolute_jump_table(void)
@@ -152,6 +208,16 @@ static void test_program(const char *path)
     CfgAnalyzeOptions options = { .resolve_jump_tables = true };
     char error[256] = {0};
     assert(cfg_analyze_elf(path, &options, &p, error, sizeof(error)) == 0);
+    CfgProgram ranges;
+    assert(cfg_load_exec_ranges(path, &ranges, error, sizeof(error)) == 0);
+    assert(ranges.exec_range_count == p.exec_range_count);
+    assert(!ranges.function_count && !ranges.tb_count && !ranges.edge_count &&
+           !ranges.inbound_count);
+    for (size_t i = 0; i < p.exec_range_count; i++) {
+        assert(ranges.exec_ranges[i].start == p.exec_ranges[i].start);
+        assert(ranges.exec_ranges[i].size == p.exec_ranges[i].size);
+    }
+    cfg_program_destroy(&ranges);
     const CfgProgramFunction *start = NULL;
     const CfgProgramFunction *jump_source = NULL;
     const CfgProgramFunction *jump_container = NULL;

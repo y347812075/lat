@@ -503,6 +503,52 @@ void ir2_insert_after(IR2_INST *ir2, int id)
     }
 }
 
+typedef struct Ir2NumericSnapshot {
+    int16 opcode;
+    int op_count;
+    IR2_OPND operands[4];
+} Ir2NumericSnapshot;
+
+void ir2_record_numeric_range(int first_id)
+{
+    TRANSLATION_DATA *t = lsenv->tr_data;
+    if (!t->numeric_provenance) {
+        return;
+    }
+    lsassert(first_id >= 0 && first_id <= t->ir2_inst_num_current);
+    for (int id = first_id; id < t->ir2_inst_num_current; id++) {
+        const IR2_INST *ir2 = &t->ir2_inst_array[id];
+        Ir2NumericSnapshot *snapshot = g_new0(Ir2NumericSnapshot, 1);
+        snapshot->opcode = ir2->_opcode;
+        snapshot->op_count = ir2->op_count;
+        lsassert(snapshot->op_count >= 0 && snapshot->op_count <= 4);
+        for (int i = 0; i < snapshot->op_count; i++) {
+            snapshot->operands[i] = ir2->_opnd[i];
+        }
+        g_hash_table_replace(t->numeric_provenance,
+                             GINT_TO_POINTER(id + 1), snapshot);
+    }
+}
+
+bool ir2_has_numeric_provenance(const IR2_INST *ir2)
+{
+    TRANSLATION_DATA *t = lsenv->tr_data;
+    const Ir2NumericSnapshot *snapshot = t->numeric_provenance ?
+        g_hash_table_lookup(t->numeric_provenance,
+                            GINT_TO_POINTER(ir2_get_id(ir2) + 1)) : NULL;
+    if (!snapshot || snapshot->opcode != ir2->_opcode ||
+        snapshot->op_count != ir2->op_count) {
+        return false;
+    }
+    for (int i = 0; i < snapshot->op_count; i++) {
+        if (snapshot->operands[i]._type != ir2->_opnd[i]._type ||
+            snapshot->operands[i]._val != ir2->_opnd[i]._val) {
+            return false;
+        }
+    }
+    return true;
+}
+
 IR2_INST *ir2_allocate(void)
 {
     TRANSLATION_DATA *t = lsenv->tr_data;
@@ -531,6 +577,10 @@ IR2_INST *ir2_allocate(void)
 
     /* 2. allocate one */
     IR2_INST *p = t->ir2_inst_array + t->ir2_inst_num_current;
+    if (t->numeric_provenance) {
+        g_hash_table_remove(t->numeric_provenance,
+                             GINT_TO_POINTER(t->ir2_inst_num_current + 1));
+    }
     ir2_set_id(p, t->ir2_inst_num_current);
     t->ir2_inst_num_current++;
 

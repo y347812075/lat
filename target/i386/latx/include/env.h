@@ -36,6 +36,8 @@ typedef struct TRANSLATION_DATA {
     int ir2_inst_num_max;
     int ir2_inst_num_current;
     int real_ir2_inst_num;
+    /* Opt-in snapshots keyed by IR index, not reallocatable IR pointers. */
+    GHashTable *numeric_provenance;
 
     /* the list of ir2 */
     IR2_INST *first_ir2;

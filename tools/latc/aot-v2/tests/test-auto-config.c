@@ -49,6 +49,18 @@ static void run_case(int number)
     lat_aot_config_environment();
     if (number == 7) lat_aot_config_option("LATX_AOT_V2", "0");
     char error[256];
+    int selected_legacy = legacy;
+    bool selected = false;
+    int selection_rc = lat_aot_config_select(&selected_legacy, explicit,
+                                            &selected, error, sizeof(error));
+    assert((selection_rc != 0) == (number == 2 || number == 5));
+    assert(lat_aot_cache_path() == NULL);
+    assert(lat_aot_socket_path() == NULL);
+    if (!selection_rc) {
+        bool expected = number != 0 && number != 4 && number != 7 && number != 9;
+        assert(selected == expected);
+        assert(selected_legacy == (expected ? 0 : legacy));
+    }
     int rc = lat_aot_config_init(&legacy, explicit, "/usr/bin", "/usr/lib", error, sizeof(error));
     assert((rc != 0) == (number == 2 || number == 5));
     if (!rc) {

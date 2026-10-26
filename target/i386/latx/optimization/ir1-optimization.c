@@ -92,6 +92,7 @@ static void get_eflag_out(TranslationBlock *tb)
         case IR1_TYPE_CALLIN:
         case IR1_TYPE_JUMPIN:
         case IR1_TYPE_RET:
+        case IR1_TYPE_TRAP:
             tb->s_data->eflag_out |= __ALL_EFLAGS;
             break;
         case IR1_TYPE_SYSCALL:

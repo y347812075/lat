@@ -625,6 +625,10 @@ struct TranslationBlock {
     uint16_t icount;
 
 #ifdef CONFIG_LATX
+    /* Process-local metadata; never copied into the legacy aot_tb format. */
+    uint64_t translation_config_dependencies;
+    bool translation_config_dependencies_valid;
+    GArray *numeric_provenance_words;
 #ifdef CONFIG_LATX_TU
     uint32_t tu_search_addr_offset;
 #endif
@@ -723,6 +727,7 @@ typedef enum IR1_TYPE {
     IR1_TYPE_JUMPIN,
     IR1_TYPE_CALLIN,
     IR1_TYPE_SYSCALL,
+    IR1_TYPE_TRAP,
     IR1_TYPE_COUNT,
 } IR1_TYPE;
 

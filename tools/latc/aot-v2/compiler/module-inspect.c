@@ -15,6 +15,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static int fail(char *error, size_t error_size, const char *format, ...)
@@ -49,47 +50,26 @@ static const Elf64_Shdr *find_section(const unsigned char *file,
     return NULL;
 }
 
-int lat_aot_v2_module_inspect_file(const char *path,
-                                   LatAotModuleInfoV2 *info,
-                                   char *error, size_t error_size)
+static int module_inspect_memory(const unsigned char *file, size_t size,
+                                 LatAotModuleInfoV2 *info,
+                                 char *error, size_t error_size)
 {
-    if (!path || !info) {
-        return fail(error, error_size, "invalid module inspection arguments");
-    }
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) {
-        return fail(error, error_size, "cannot open AOT module: %s",
-                    strerror(errno));
-    }
     memset(info, 0, sizeof(*info));
-    if (lat_aot_v2_elf_validate_fd(fd, NULL, &info->note,
-                                   error, error_size)) {
-        close(fd);
+    if (lat_aot_v2_elf_validate_memory(file, size, NULL, &info->note,
+                                      error, error_size)) {
         return -1;
     }
-    close(fd);
-
-    gchar *contents = NULL;
-    gsize size = 0;
-    if (!g_file_get_contents(path, &contents, &size, NULL) ||
-        size < sizeof(Elf64_Ehdr)) {
-        g_free(contents);
-        return fail(error, error_size, "cannot read AOT module");
-    }
-    const unsigned char *file = (const void *)contents;
     const Elf64_Ehdr *header = (const void *)file;
     if (header->e_shentsize != sizeof(Elf64_Shdr) || !header->e_shnum ||
         header->e_shstrndx >= header->e_shnum ||
         header->e_shoff > size ||
         header->e_shnum > (size - header->e_shoff) / sizeof(Elf64_Shdr)) {
-        g_free(contents);
         return fail(error, error_size, "AOT section table is invalid");
     }
     const Elf64_Shdr *sections = (const void *)(file + header->e_shoff);
     const Elf64_Shdr *names_section = &sections[header->e_shstrndx];
     if (names_section->sh_offset > size ||
         names_section->sh_size > size - names_section->sh_offset) {
-        g_free(contents);
         return fail(error, error_size, "AOT section names are invalid");
     }
     const char *names = (const void *)(file + names_section->sh_offset);
@@ -111,15 +91,60 @@ int lat_aot_v2_module_inspect_file(const char *path,
         slots->sh_offset > size || slots->sh_size > size - slots->sh_offset ||
         ((info->note.module_flags & LAT_AOT_MODULE_PRECISE_PC_MAP) &&
          !maps->sh_size)) {
-        g_free(contents);
         return fail(error, error_size, "AOT module sections are incomplete");
     }
     info->text_size = text->sh_size;
     info->tb_count = tbs->sh_size / sizeof(LatAotTbV2);
     info->pc_map_count = maps->sh_size / sizeof(LatAotPcMapV2);
     info->guest_slot_records = slots->sh_size / sizeof(LatAotGuestSlotV2);
-    g_free(contents);
     return 0;
+}
+
+static GMappedFile *module_map(const char *path, char *error, size_t error_size)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        fail(error, error_size, "cannot open AOT module: %s", strerror(errno));
+        return NULL;
+    }
+    struct stat status;
+    if (fstat(fd, &status) || status.st_size < (off_t)sizeof(Elf64_Ehdr)) {
+        close(fd);
+        fail(error, error_size, "cannot stat AOT ELF");
+        return NULL;
+    }
+    if (!S_ISREG(status.st_mode) || (status.st_mode & (S_IWGRP | S_IWOTH))) {
+        close(fd);
+        fail(error, error_size, "AOT ELF permissions are unsafe");
+        return NULL;
+    }
+    GError *mapping_error = NULL;
+    GMappedFile *mapping = g_mapped_file_new_from_fd(fd, FALSE, &mapping_error);
+    close(fd);
+    if (!mapping) {
+        fail(error, error_size, "cannot map AOT module: %s",
+             mapping_error ? mapping_error->message : "unknown error");
+        g_clear_error(&mapping_error);
+    }
+    return mapping;
+}
+
+int lat_aot_v2_module_inspect_file(const char *path,
+                                   LatAotModuleInfoV2 *info,
+                                   char *error, size_t error_size)
+{
+    if (!path || !info) {
+        return fail(error, error_size, "invalid module inspection arguments");
+    }
+    GMappedFile *mapping = module_map(path, error, error_size);
+    if (!mapping) {
+        return -1;
+    }
+    int result = module_inspect_memory(
+        (const void *)g_mapped_file_get_contents(mapping),
+        g_mapped_file_get_length(mapping), info, error, error_size);
+    g_mapped_file_unref(mapping);
+    return result;
 }
 
 int lat_aot_v2_module_validate_tbset_file(const char *path,
@@ -132,70 +157,193 @@ int lat_aot_v2_module_validate_tbset_file(const char *path,
         path, tbset_path, &info, error, error_size);
 }
 
-static int module_missing_tbset_file(
-    const char *path, const char *tbset_path, LatAotModuleInfoV2 *info,
-    LatTbKeySet *missing, size_t *requested_count,
-    char *error, size_t error_size)
+typedef struct ModuleTbView {
+    GMappedFile *mapping;
+    const unsigned char *records;
+    size_t count;
+} ModuleTbView;
+
+static void module_tb_at(const ModuleTbView *view, size_t index,
+                          LatAotTbV2 *tb)
 {
-    memset(missing, 0, sizeof(*missing));
-    if (lat_aot_v2_module_inspect_file(path, info, error, error_size)) {
+    memcpy(tb, view->records + index * sizeof(*tb), sizeof(*tb));
+}
+
+static int module_tb_key_compare(const LatAotTbV2 *a, const LatAotTbV2 *b)
+{
+    if (a->guest_rva != b->guest_rva) {
+        return a->guest_rva < b->guest_rva ? -1 : 1;
+    }
+    return a->flags < b->flags ? -1 : a->flags > b->flags;
+}
+
+/* Aggregate module coverage is not a bounded compiler request. Keep the
+ * validated sorted table mapped instead of exporting every key to a TB set. */
+static int module_tb_view_open(const char *path, LatAotModuleInfoV2 *info,
+                               ModuleTbView *view,
+                               char *error, size_t error_size)
+{
+    memset(view, 0, sizeof(*view));
+    GMappedFile *mapping = module_map(path, error, error_size);
+    if (!mapping) {
         return -1;
     }
-    gchar *contents = NULL;
-    gsize size = 0;
-    if (!g_file_get_contents(path, &contents, &size, NULL)) {
-        return fail(error, error_size, "cannot read AOT module");
+    const unsigned char *file =
+        (const void *)g_mapped_file_get_contents(mapping);
+    size_t size = g_mapped_file_get_length(mapping);
+    if (module_inspect_memory(file, size, info, error, error_size)) {
+        goto failed;
     }
-    const unsigned char *file = (const void *)contents;
     const Elf64_Ehdr *header = (const void *)file;
     const Elf64_Shdr *sections = (const void *)(file + header->e_shoff);
     const Elf64_Shdr *names_section = &sections[header->e_shstrndx];
     const char *names = (const void *)(file + names_section->sh_offset);
     const Elf64_Shdr *section = find_section(file, header, names,
         names_section->sh_size, ".rodata.lat.tb");
-    if (!section || section->sh_offset > size ||
-        section->sh_size > size - section->sh_offset ||
-        section->sh_size % sizeof(LatAotTbV2)) {
-        g_free(contents);
-        return fail(error, error_size, "AOT TB section is invalid");
+    *view = (ModuleTbView) {
+        .mapping = mapping,
+        .records = file + section->sh_offset,
+        .count = section->sh_size / sizeof(LatAotTbV2),
+    };
+    LatAotTbV2 previous = {0};
+    for (size_t i = 0; i < view->count; i++) {
+        LatAotTbV2 tb;
+        module_tb_at(view, i, &tb);
+        if (tb.flags != (LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL) ||
+            (i && module_tb_key_compare(&previous, &tb) >= 0)) {
+            fail(error, error_size, "AOT TB key %zu is invalid or unordered", i);
+            goto failed;
+        }
+        previous = tb;
     }
-    const LatAotTbV2 *tbs = (const void *)(file + section->sh_offset);
-    size_t tb_count = section->sh_size / sizeof(*tbs);
-    LatTbKeySet tbset;
+    return 0;
+failed:
+    g_mapped_file_unref(mapping);
+    memset(view, 0, sizeof(*view));
+    return -1;
+}
+
+int lat_aot_v2_module_read_tbset_file(
+    const char *path, LatAotModuleInfoV2 *info, LatTbKeySet *keys,
+    char *error, size_t error_size)
+{
+    if (!path || !info || !keys) {
+        return fail(error, error_size, "invalid module key export arguments");
+    }
+    memset(keys, 0, sizeof(*keys));
+    ModuleTbView view;
+    if (module_tb_view_open(path, info, &view, error, error_size)) {
+        return -1;
+    }
+    if (view.count > LAT_AOT_V2_TBSET_RECORD_LIMIT) {
+        g_mapped_file_unref(view.mapping);
+        return fail(error, error_size, "module exceeds TB key-set export limit");
+    }
+    size_t count = view.count;
+    keys->keys = g_try_new(LatTbKey, count);
+    if (count && !keys->keys) {
+        g_mapped_file_unref(view.mapping);
+        return fail(error, error_size, "cannot allocate module TB keys");
+    }
+    memcpy(keys->source_sha256, info->note.source_sha256, 32);
+    for (size_t i = 0; i < count; i++) {
+        LatAotTbV2 tb;
+        module_tb_at(&view, i, &tb);
+        keys->keys[i] = (LatTbKey) {
+            .guest_rva = tb.guest_rva, .flags = tb.flags,
+        };
+    }
+    keys->count = count;
+    g_mapped_file_unref(view.mapping);
+    return 0;
+}
+
+int lat_aot_v2_module_validate_replacement_file(
+    const char *previous, const char *replacement,
+    char *error, size_t error_size)
+{
+    LatAotModuleInfoV2 old_info, new_info;
+    ModuleTbView old = {0}, next = {0};
+    int result = -1;
+    if (module_tb_view_open(previous, &old_info, &old, error, error_size) ||
+        module_tb_view_open(replacement, &new_info, &next, error, error_size)) {
+        goto out;
+    }
+    if (memcmp(old_info.note.source_sha256, new_info.note.source_sha256, 32) ||
+        memcmp(old_info.note.codegen_id, new_info.note.codegen_id, 32)) {
+        fail(error, error_size,
+             "replacement source or codegen identity mismatch");
+        goto out;
+    }
+    size_t missing = 0, j = 0;
+    LatAotTbV2 first = {0};
+    for (size_t i = 0; i < old.count; i++) {
+        LatAotTbV2 wanted, candidate;
+        module_tb_at(&old, i, &wanted);
+        while (j < next.count) {
+            module_tb_at(&next, j, &candidate);
+            if (module_tb_key_compare(&candidate, &wanted) >= 0) break;
+            j++;
+        }
+        if (j == next.count || module_tb_key_compare(&candidate, &wanted)) {
+            if (!missing++) first = wanted;
+        }
+    }
+    if (missing) {
+        fail(error, error_size,
+             "replacement loses module coverage: missing=%zu "
+             "first_missing_rva=0x%" PRIx64 " flags=0x%x",
+             missing, first.guest_rva, first.flags);
+        goto out;
+    }
+    result = 0;
+out:
+    if (old.mapping) g_mapped_file_unref(old.mapping);
+    if (next.mapping) g_mapped_file_unref(next.mapping);
+    return result;
+}
+
+static int module_missing_tbset_file(
+    const char *path, const char *tbset_path, LatAotModuleInfoV2 *info,
+    LatTbKeySet *missing, size_t *requested_count,
+    char *error, size_t error_size)
+{
+    memset(missing, 0, sizeof(*missing));
+    LatTbKeySet tbset = {0};
+    ModuleTbView actual;
+    if (module_tb_view_open(path, info, &actual, error, error_size)) {
+        return -1;
+    }
     if (lat_tb_key_set_read_file(tbset_path, info->note.source_sha256,
                                  &tbset, error, error_size)) {
-        g_free(contents);
+        g_mapped_file_unref(actual.mapping);
         return -1;
     }
     if (requested_count) *requested_count = tbset.count;
-    memcpy(missing->source_sha256, tbset.source_sha256,
-           sizeof(missing->source_sha256));
+    memcpy(missing->source_sha256, tbset.source_sha256, 32);
     missing->sequence = tbset.sequence;
     missing->keys = g_try_new(LatTbKey, tbset.count);
     if (tbset.count && !missing->keys) {
         lat_tb_key_set_destroy(&tbset);
-        g_free(contents);
-        return fail(error, error_size,
-                    "cannot allocate missing module TB set");
+        g_mapped_file_unref(actual.mapping);
+        return fail(error, error_size, "cannot allocate missing module TB keys");
     }
-    size_t module_record = 0;
-    for (size_t record = 0; record < tbset.count; record++) {
-        uint64_t rva = tbset.keys[record].guest_rva;
-        uint32_t flags = tbset.keys[record].flags;
-        while (module_record < tb_count &&
-               (tbs[module_record].guest_rva < rva ||
-                (tbs[module_record].guest_rva == rva &&
-                 tbs[module_record].flags < flags))) {
-            module_record++;
+    size_t j = 0;
+    for (size_t i = 0; i < tbset.count; i++) {
+        LatAotTbV2 wanted = {.guest_rva = tbset.keys[i].guest_rva,
+                             .flags = tbset.keys[i].flags};
+        LatAotTbV2 candidate;
+        while (j < actual.count) {
+            module_tb_at(&actual, j, &candidate);
+            if (module_tb_key_compare(&candidate, &wanted) >= 0) break;
+            j++;
         }
-        if (module_record == tb_count ||
-            tbs[module_record].guest_rva != rva ||
-            tbs[module_record].flags != flags) {
-            missing->keys[missing->count++] = tbset.keys[record];
+        if (j == actual.count || module_tb_key_compare(&candidate, &wanted)) {
+            missing->keys[missing->count++] = tbset.keys[i];
         }
     }
     lat_tb_key_set_destroy(&tbset);
-    g_free(contents);
+    g_mapped_file_unref(actual.mapping);
     return 0;
 }
 

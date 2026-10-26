@@ -614,7 +614,8 @@ static void fill_page_table(struct aot_segment *curr_seg, aot_header *p_header,
 }
 
 static unsigned long fill_tb_table(struct aot_tb *p_aot_tbs, 
-        aot_header *p_header, aot_segment *p_segments)
+        aot_header *p_header, aot_segment *p_segments, GArray *dependencies,
+        GPtrArray *numeric_words)
 {
     /* fill in aot tbs table. We use two pointers to finish this work,
      * @curr_seg points current segment where current tbs will store.
@@ -679,6 +680,15 @@ static unsigned long fill_tb_table(struct aot_tb *p_aot_tbs,
             /* Construct a aot_tb. */
             if(create_aot_tb(curr_aot_tb, tb_vector[i], curr_seg, p_segments)) {
                 return 0;
+            }
+            if (dependencies) {
+                uint64_t mask = tb_vector[i]->translation_config_dependencies_valid ?
+                    tb_vector[i]->translation_config_dependencies : LAT_CONFIG_ALL_BITS;
+                g_array_append_val(dependencies, mask);
+            }
+            if (numeric_words) {
+                g_ptr_array_add(numeric_words,
+                                tb_vector[i]->numeric_provenance_words);
             }
             assert(tb_vector[i]->pc >= curr_seg->details.seg_begin && 
                     tb_vector[i]->pc < curr_seg->details.seg_end);
@@ -989,8 +999,15 @@ int do_generate_aot(int first_seg_in_lib, int end_seg_in_lib)
     struct aot_tb *p_aot_tbs; 
     p_aot_tbs = (struct aot_tb *)ROUND_UP(table_end_addr, 8);
     /* Fill aot table */
+    const char *native_output = getenv("LATC_NATIVE_IMAGE_OUT");
+    g_autoptr(GArray) dependencies = native_output && *native_output ?
+        g_array_new(FALSE, FALSE, sizeof(uint64_t)) : NULL;
+    const char *trace_provenance = getenv("LATC_TRACE_PROVENANCE");
+    g_autoptr(GPtrArray) numeric_words = native_output && *native_output &&
+        trace_provenance && !strcmp(trace_provenance, "1") ?
+        g_ptr_array_new() : NULL;
     unsigned long total_code_cache_size = 
-        fill_tb_table(p_aot_tbs, p_header, p_segments);
+        fill_tb_table(p_aot_tbs, p_header, p_segments, dependencies, numeric_words);
     uintptr_t tb_table_end = table_end_addr;
     if(total_code_cache_size == 0) {
         free(p_header);
@@ -1005,12 +1022,15 @@ int do_generate_aot(int first_seg_in_lib, int end_seg_in_lib)
 
     latc_write_relocation_stats(p_header, p_aot_tbs, tb_table_end,
             total_code_cache_size);
-    const char *native_output = getenv("LATC_NATIVE_IMAGE_OUT");
     if (native_output && *native_output) {
         uint64_t export_started = latc_monotonic_ns();
         int native_result = latc_native_export(
                 native_output, curr_lib_name, p_header, p_segments,
-                p_aot_tbs, tb_table_end, insn_buffer, total_code_cache_size,
+                p_aot_tbs, tb_table_end,
+                (const uint64_t *)dependencies->data, dependencies->len,
+                numeric_words ? (const GArray *const *)numeric_words->pdata : NULL,
+                numeric_words ? numeric_words->len : 0,
+                insn_buffer, total_code_cache_size,
                 (uintptr_t)p_insn - (uintptr_t)p_header);
         if (getenv("LATC_COMPILE_TIMING")) {
             uint64_t finished = latc_monotonic_ns();

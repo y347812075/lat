@@ -124,6 +124,70 @@ static int fail(char *error, size_t size, const char *message)
     return -1;
 }
 
+static bool static_tb_requires_avx512(const ElfFile *elf, uint64_t pc)
+{
+    unsigned section;
+    uint64_t offset;
+    if (!elf_find_exec_section_for_range(elf, pc, 1, &section) ||
+        !elf_function_file_offset(elf, pc, 1, section, &offset)) {
+        return false;
+    }
+    size_t available = elf->sh[section].sh_size -
+                       (pc - elf->sh[section].sh_addr);
+    if (offset > elf->size || available > elf->size - offset) {
+        return false;
+    }
+    size_t cursor = 0;
+    for (unsigned n = 0; n < 254 && cursor < available; n++) {
+        Insn in = cfg_decode_insn(elf->data + offset, available, pc, cursor);
+        if (!in.len || in.len > available - cursor) {
+            break;
+        }
+        if (cfg_insn_requires_avx512(elf->data + offset + cursor, in.len)) {
+            return true;
+        }
+        cursor += in.len;
+        if (in.kind != INSN_NORMAL) {
+            break;
+        }
+    }
+    return false;
+}
+
+static void exclude_unsupported_static(const char *path, CfgProgram *program)
+{
+    ElfFile elf;
+    elf_load(path, &elf);
+    size_t excluded = 0;
+    for (size_t i = 0; i < program->tb_count; i++) {
+        CfgTb *tb = &program->tbs[i];
+        if (tb->selected && !tb->observed &&
+            static_tb_requires_avx512(&elf, tb->start)) {
+            tb->selected = false;
+            excluded++;
+        }
+    }
+    elf_free(&elf);
+    if (excluded) {
+        fprintf(stderr, "latc: static candidates excluded=%zu reason=build-disabled-avx512\n",
+                excluded);
+    }
+}
+
+void latc_tbset_filter_static_keys(const char *source, uint64_t base,
+                                    LatTbKey *keys, size_t *count)
+{
+    ElfFile elf;
+    elf_load(source, &elf);
+    size_t output = 0;
+    for (size_t i = 0; i < *count; i++) {
+        if (!static_tb_requires_avx512(&elf, base + keys[i].guest_rva))
+            keys[output++] = keys[i];
+    }
+    elf_free(&elf);
+    *count = output;
+}
+
 static int source_identity(const char *path, uint8_t digest[32],
                            uint64_t *base, char *error, size_t error_size)
 {
@@ -610,138 +674,250 @@ static int select_all_parallel_cfg(CfgProgram *program, size_t template_count,
     return 0;
 }
 
-/*
- * Follow direct exits even when the destination has no function symbol.
- * Bounded translation does not discover these successors on our behalf.
- */
-static int close_parallel_targets(const char *path, CfgProgram *program,
-                                 char *error, size_t error_size)
-{
+struct LatcTbClosure {
     ElfFile elf;
-    elf_load(path, &elf);
-    GHashTable *seen = g_hash_table_new_full(g_int64_hash, g_int64_equal,
-                                            g_free, NULL);
-    GArray *pending = g_array_new(FALSE, FALSE, sizeof(uint64_t));
-    GArray *added = g_array_new(FALSE, FALSE, sizeof(CfgTb));
-    int result = 0;
-    uint64_t closure_budget = UINT64_MAX;
-    const char *closure_limit = getenv("LATC_TBSET_CLOSURE_LIMIT");
-    if (closure_limit && *closure_limit) {
-        closure_budget = strtoull(closure_limit, NULL, 0);
-    }
-    int truncated = 0;
+    const CfgProgram *program;
+    IjmpSection *sections;
+    size_t section_count;
+    GHashTable *seen;
+    GArray *pending;
+    guint next_node;
+    uint64_t targets[IJMP_MAX_TARGETS + 2];
+    unsigned target_count;
+    unsigned next_target;
+    bool failed;
+};
 
+void latc_tb_closure_free(LatcTbClosure *closure)
+{
+    if (closure) {
+        g_array_free(closure->pending, TRUE);
+        g_hash_table_destroy(closure->seen);
+        free(closure->sections);
+        elf_free(&closure->elf);
+        g_free(closure);
+    }
+}
+
+LatcTbClosure *latc_tb_closure_new(const char *path, const CfgProgram *program,
+                                  char *error, size_t error_size)
+{
+    if (!path || !program) {
+        fail(error, error_size, "missing direct TB closure input");
+        return NULL;
+    }
+    LatcTbClosure *closure = g_new0(LatcTbClosure, 1);
+    elf_load(path, &closure->elf);
+    closure->program = program;
+    closure->sections = elf_build_ijmp_sections(&closure->elf,
+                                               &closure->section_count);
+    closure->seen = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                         g_free, NULL);
+    closure->pending = g_array_new(FALSE, FALSE, sizeof(uint64_t));
     for (size_t i = 0; i < program->tb_count; i++) {
         const CfgTb *tb = &program->tbs[i];
         if (tb->selected && (tb->semantic_flags & CFG_TB_PARALLEL) &&
-            !g_hash_table_contains(seen, &tb->start)) {
+            !g_hash_table_contains(closure->seen, &tb->start)) {
+            if (closure->pending->len == G_MAXUINT) {
+                fail(error, error_size, "direct TB closure queue too large");
+                latc_tb_closure_free(closure);
+                return NULL;
+            }
             uint64_t *key = g_new(uint64_t, 1);
             *key = tb->start;
-            g_hash_table_add(seen, key);
-            g_array_append_val(pending, *key);
+            g_hash_table_add(closure->seen, key);
+            g_array_append_val(closure->pending, *key);
         }
     }
-    for (guint i = 0; i < pending->len; i++) {
-        uint64_t pc = g_array_index(pending, uint64_t, i);
-        unsigned section;
-        uint64_t offset;
-        if (!elf_find_exec_section_for_range(&elf, pc, 1, &section) ||
-            !elf_function_file_offset(&elf, pc, 1, section, &offset)) {
-            continue;
+    return closure;
+}
+
+/* Save a node's entire successor list before consuming any target budget. */
+static void closure_scan_node(LatcTbClosure *closure, uint64_t pc)
+{
+    const ElfFile *elf = &closure->elf;
+    unsigned section;
+    uint64_t offset;
+    closure->target_count = closure->next_target = 0;
+    if (!elf_find_exec_section_for_range(elf, pc, 1, &section) ||
+        !elf_function_file_offset(elf, pc, 1, section, &offset)) {
+        return;
+    }
+    const Elf64_Shdr *sh = &elf->sh[section];
+    size_t available = sh->sh_size - (pc - sh->sh_addr);
+    if (offset > elf->size || available > elf->size - offset) {
+        return;
+    }
+    size_t cursor = 0;
+    Insn insn = {0};
+    for (unsigned count = 0; count < 254 && cursor < available; count++) {
+        insn = cfg_decode_insn(elf->data + offset, available, pc, cursor);
+        if (!insn.len || insn.len > available - cursor) {
+            break;
         }
-        const Elf64_Shdr *sh = &elf.sh[section];
-        size_t available = sh->sh_size - (pc - sh->sh_addr);
-        if (offset > elf.size || available > elf.size - offset) {
-            continue;
-        }
-        size_t cursor = 0;
-        Insn insn = {0};
-        for (unsigned count = 0; count < 254 && cursor < available; count++) {
-            insn = cfg_decode_insn(elf.data + offset, available, pc, cursor);
-            if (!insn.len || insn.len > available - cursor) {
-                break;
-            }
-            cursor += insn.len;
-            if (insn.kind != INSN_NORMAL) {
-                break;
-            }
-        }
-        if (!cursor) {
-            continue;
-        }
-        uint64_t targets[2];
-        unsigned count = 0;
-        if (insn.has_target) {
-            targets[count++] = insn.target;
-        }
-        if (insn.kind == INSN_NORMAL || insn.kind == INSN_CALL ||
-            insn.kind == INSN_ICALL || insn.kind == INSN_JCC ||
-            insn.kind == INSN_SYSCALL) {
-            targets[count++] = pc + cursor;
-        }
-        for (unsigned j = 0; j < count; j++) {
-            uint64_t target = targets[j];
-            if (!cfg_program_address_is_executable(program, target) ||
-                g_hash_table_contains(seen, &target)) {
-                continue;
-            }
-            if (added->len >= closure_budget) {
-                truncated = 1;
-                break;
-            }
-            if (pending->len >= LAT_AOT_V2_TBSET_RECORD_LIMIT) {
-                result = fail(error, error_size, "direct TB closure too large");
-                goto out;
-            }
-            uint64_t *key = g_new(uint64_t, 1);
-            *key = target;
-            g_hash_table_add(seen, key);
-            g_array_append_val(pending, target);
-            CfgTb tb = {
-                .start = target,
-                .end = target + 1,
-                .terminator_pc = target,
-                .selected = true,
-                .semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
-                                  CFG_TB_BOUNDED,
-                .terminator = CFG_TB_FALLTHROUGH,
-            };
-            g_array_append_val(added, tb);
-        }
-        if (truncated) {
+        cursor += insn.len;
+        if (insn.kind != INSN_NORMAL) {
             break;
         }
     }
-    if (truncated) {
-        fprintf(stderr,
-                "latc: TB closure truncated at %u added targets\n",
-                added->len);
+    if (!cursor) {
+        return;
     }
-    if (added->len) {
+    uint64_t *targets = closure->targets;
+    unsigned count = 0;
+    if (insn.has_target) {
+        targets[count++] = insn.target;
+    }
+    if (insn.kind == INSN_NORMAL || insn.kind == INSN_CALL ||
+        insn.kind == INSN_ICALL || insn.kind == INSN_JCC ||
+        insn.kind == INSN_SYSCALL) {
+        targets[count++] = pc + cursor;
+    }
+    if (insn.kind == INSN_JCC) {
+        IjmpContext context = {
+            .file = elf->data, .file_size = elf->size,
+            .sections = closure->sections,
+            .section_count = closure->section_count,
+            .inbound = closure->program->inbound,
+            .inbound_count = closure->program->inbound_count,
+            .inbound_complete = true,
+            .func_addr = pc,
+        };
+        IjmpResult resolved;
+        size_t at = 0;
+        while (at < cursor) {
+            Insn step = cfg_decode_insn(elf->data + offset, available, pc, at);
+            if (!step.len || step.len > cursor - at) {
+                break;
+            }
+            context.func_addr = pc + at;
+            if (ijmp_resolve_bounded_pic_entry(&context,
+                    elf->data + offset + at, available - at, &resolved)) {
+                for (size_t k = 0; k < resolved.count; k++) {
+                    targets[count++] = resolved.targets[k];
+                }
+                break;
+            }
+            at += step.len;
+        }
+    }
+    closure->target_count = count;
+}
+
+int latc_tb_closure_advance(LatcTbClosure *closure, size_t work_budget,
+                             size_t target_budget, CfgTb **targets,
+                             size_t *target_count, bool *done,
+                             char *error, size_t error_size)
+{
+    if (!targets || !target_count || !done) {
+        return fail(error, error_size, "missing direct TB closure output");
+    }
+    *targets = NULL;
+    *target_count = 0;
+    *done = false;
+    if (!closure || closure->failed || !work_budget || !target_budget ||
+        target_budget > G_MAXUINT) {
+        return fail(error, error_size, "invalid direct TB closure budget/state");
+    }
+    GArray *added = g_array_new(FALSE, FALSE, sizeof(CfgTb));
+    while (work_budget && added->len < target_budget) {
+        if (closure->next_target == closure->target_count) {
+            if (closure->next_node == closure->pending->len) {
+                break;
+            }
+            uint64_t pc = g_array_index(closure->pending, uint64_t,
+                                        closure->next_node++);
+            closure_scan_node(closure, pc);
+            work_budget--;
+            continue;
+        }
+        uint64_t target = closure->targets[closure->next_target++];
+        work_budget--;
+        if (!cfg_program_address_is_executable(closure->program, target) ||
+            g_hash_table_contains(closure->seen, &target)) {
+            continue;
+        }
+        if (closure->pending->len == G_MAXUINT) {
+            closure->failed = true;
+            g_array_free(added, TRUE);
+            return fail(error, error_size, "direct TB closure queue too large");
+        }
+        uint64_t *key = g_new(uint64_t, 1);
+        *key = target;
+        g_hash_table_add(closure->seen, key);
+        g_array_append_val(closure->pending, target);
+        CfgTb tb = {
+            .start = target,
+            .end = target + 1,
+            .terminator_pc = target,
+            .selected = true,
+            .semantic_flags = CFG_TB_CODE64 | CFG_TB_PARALLEL |
+                              CFG_TB_BOUNDED,
+            .terminator = CFG_TB_FALLTHROUGH,
+        };
+        g_array_append_val(added, tb);
+    }
+    *done = closure->next_node == closure->pending->len &&
+            closure->next_target == closure->target_count;
+    *target_count = added->len;
+    *targets = (CfgTb *)g_array_free(added, FALSE);
+    return 0;
+}
+
+/* Legacy one-shot selection; callers of the session API can resume instead. */
+static int close_parallel_targets(const char *path, CfgProgram *program,
+                                 char *error, size_t error_size)
+{
+    uint64_t budget = UINT64_MAX;
+    const char *limit = getenv("LATC_TBSET_CLOSURE_LIMIT");
+    if (limit && *limit) {
+        budget = strtoull(limit, NULL, 0);
+    }
+    if (!budget) {
+        return 0;
+    }
+    LatcTbClosure *closure = latc_tb_closure_new(path, program,
+                                               error, error_size);
+    if (!closure) return -1;
+    CfgTb *added = NULL;
+    size_t count = 0;
+    bool done = false;
+    int result = latc_tb_closure_advance(closure, SIZE_MAX,
+        MIN(budget, LAT_AOT_V2_TBSET_RECORD_LIMIT + 1),
+        &added, &count, &done, error, error_size);
+    if (!result && closure->pending->len > LAT_AOT_V2_TBSET_RECORD_LIMIT) {
+        result = fail(error, error_size, "direct TB closure too large");
+    }
+    if (!result && !done) {
+        fprintf(stderr,
+                "latc: TB closure truncated at %zu added targets\n", count);
+    }
+    if (!result && count > SIZE_MAX / sizeof(*program->tbs) -
+                            program->tb_count) {
+        result = fail(error, error_size, "too many direct TB closure entries");
+    }
+    if (!result && count) {
         CfgTb *next = realloc(program->tbs,
-                              (program->tb_count + added->len) * sizeof(*next));
+                              (program->tb_count + count) * sizeof(*next));
         if (!next) {
             result = fail(error, error_size,
                           "out of memory closing TB targets");
-            goto out;
+        } else {
+            program->tbs = next;
+            memcpy(next + program->tb_count, added, count * sizeof(*next));
+            program->tb_count += count;
         }
-        program->tbs = next;
-        memcpy(next + program->tb_count, added->data,
-               added->len * sizeof(*next));
-        program->tb_count += added->len;
     }
-out:
-    g_array_free(added, TRUE);
-    g_array_free(pending, TRUE);
-    g_hash_table_destroy(seen);
-    elf_free(&elf);
+    g_free(added);
+    latc_tb_closure_free(closure);
     return result;
 }
 
-int latc_tbset_apply(const char *path, const char *source_path,
+static int tbset_apply(const char *path, const char *source_path,
                      CfgProgram *program,
                      bool ignore_outside_exec, size_t *matched,
                      size_t *unmatched, size_t *ignored, uint8_t digest[32],
+                     bool discovery, bool input_static,
                      char *error, size_t error_size)
 {
     uint64_t load_base;
@@ -756,10 +932,20 @@ int latc_tbset_apply(const char *path, const char *source_path,
     uint64_t trace_pc = trace_pc_text && *trace_pc_text ?
                         strtoull(trace_pc_text, NULL, 0) : UINT64_MAX;
     bool has_parallel = false;
-    const char *closure_limit_env = getenv("LATC_TBSET_CLOSURE_LIMIT");
-    bool bounded_selection = closure_limit_env && *closure_limit_env;
-    bool expand_functions = !bounded_selection ||
-        getenv("LATC_TBSET_EXPAND_FUNCTIONS") != NULL;
+    const char *selection = getenv("LATC_TBSET_SELECTION");
+    bool exact_selection = selection &&
+        (!strcmp(selection, "exact") || !strcmp(selection, "exact-static"));
+    bool static_input = input_static ||
+        (selection && !strcmp(selection, "exact-static"));
+    if (selection && *selection && strcmp(selection, "bounded") &&
+        strcmp(selection, "cfg") && !exact_selection) {
+        lat_tb_key_set_destroy(&set);
+        return fail(error, error_size, "invalid LATC_TBSET_SELECTION");
+    }
+    bool bounded_selection = exact_selection ||
+        (selection && !strcmp(selection, "bounded"));
+    bool expand_functions = !exact_selection && (!bounded_selection ||
+        getenv("LATC_TBSET_EXPAND_FUNCTIONS") != NULL);
     size_t template_count = program->tb_count;
     if (set.count > (SIZE_MAX / sizeof(*program->tbs)) -
                     program->tb_count) {
@@ -811,7 +997,7 @@ int latc_tbset_apply(const char *path, const char *source_path,
          * templates can match; entries appended by this loop cannot. */
         if (found) {
             program->tbs[exact_index].selected = true;
-            program->tbs[exact_index].observed = true;
+            program->tbs[exact_index].observed = !static_input;
         }
         if (pc == trace_pc) {
             fprintf(stderr,
@@ -832,7 +1018,7 @@ int latc_tbset_apply(const char *path, const char *source_path,
                     .terminator = CFG_TB_FALLTHROUGH,
                 };
             added.selected = true;
-            added.observed = true;
+            added.observed = !static_input;
             added.semantic_flags = key->flags;
             added.first_edge = 0;
             added.edge_count = 0;
@@ -852,7 +1038,7 @@ int latc_tbset_apply(const char *path, const char *source_path,
             return -1;
         }
     }
-    if (has_parallel && add_parallel_dynamic_entries(
+    if (has_parallel && !exact_selection && add_parallel_dynamic_entries(
             source_path, program, error, error_size)) {
         free(templates);
         lat_tb_key_set_destroy(&set);
@@ -907,12 +1093,14 @@ int latc_tbset_apply(const char *path, const char *source_path,
         lat_tb_key_set_destroy(&set);
         return -1;
     }
-    if (has_parallel && close_parallel_targets(source_path, program,
+    if (has_parallel && !exact_selection && !discovery &&
+        close_parallel_targets(source_path, program,
                                                 error, error_size)) {
         free(templates);
         lat_tb_key_set_destroy(&set);
         return -1;
     }
+    exclude_unsupported_static(source_path, program);
     for (size_t i = 0; i < program->tb_count; i++) {
         if (program->tbs[i].selected) {
             program->tbs[i].semantic_flags |= CFG_TB_BOUNDED;
@@ -932,6 +1120,26 @@ int latc_tbset_apply(const char *path, const char *source_path,
     if (unmatched) *unmatched = miss;
     if (ignored) *ignored = skip;
     return 0;
+}
+
+int latc_tbset_apply(const char *path, const char *source_path,
+                     CfgProgram *program,
+                     bool ignore_outside_exec, size_t *matched,
+                     size_t *unmatched, size_t *ignored, uint8_t digest[32],
+                     char *error, size_t error_size)
+{
+    return tbset_apply(path, source_path, program, ignore_outside_exec,
+                        matched, unmatched, ignored, digest, false, false,
+                        error, error_size);
+}
+
+int latc_tbset_prepare_discovery(const char *path, const char *source_path,
+                                  CfgProgram *program, bool static_input,
+                                  uint8_t digest[32],
+                                  char *error, size_t error_size)
+{
+    return tbset_apply(path, source_path, program, true, NULL, NULL, NULL,
+                        digest, true, static_input, error, error_size);
 }
 
 int latc_tbset_write_static(const char *path, const char *source_path,
@@ -955,17 +1163,31 @@ int latc_tbset_write_static(const char *path, const char *source_path,
                     "out of memory creating static TB key set");
     }
     size_t output = 0;
+    size_t excluded = 0;
+    ElfFile elf;
+    elf_load(source_path, &elf);
     for (size_t i = 0; i < program->tb_count; i++) {
         if (program->tbs[i].start < load_base) {
             lat_tb_key_set_destroy(&set);
+            elf_free(&elf);
             return fail(error, error_size,
                         "static CFG block precedes preferred guest base");
+        }
+        if (static_tb_requires_avx512(&elf, program->tbs[i].start)) {
+            excluded++;
+            continue;
         }
         uint64_t rva = program->tbs[i].start - load_base;
         set.keys[output++] = (LatTbKey) {
             .guest_rva = rva,
             .flags = CFG_TB_CODE64 | CFG_TB_PARALLEL,
         };
+    }
+    elf_free(&elf);
+    set.count = output;
+    if (excluded) {
+        fprintf(stderr, "latc: static candidates excluded=%zu reason=build-disabled-avx512\n",
+                excluded);
     }
     if (lat_tb_key_set_sort_unique(&set, error, error_size)) {
         lat_tb_key_set_destroy(&set);

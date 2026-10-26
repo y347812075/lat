@@ -14,7 +14,7 @@ def main():
     begin = source.index("typedef struct NativeTuRange {")
     end = source.index("static gint compare_native_tu_range", begin)
     strip_begin = source.index("static int strip_process_local_search_data(")
-    strip_end = source.index("\nint latc_native_export(", strip_begin)
+    strip_end = source.index("\nstatic void trace_final_numeric_words(", strip_begin)
     lookup_begin = source.index("static int native_tu_index_for_offset(")
     lookup_end = source.index("\nstatic int extract_native_pc_maps(", lookup_begin)
     harness = r'''

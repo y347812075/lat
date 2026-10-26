@@ -1782,8 +1782,31 @@ int ir1_is_syscall(IR1_INST *ir1)
     }
 }
 
+bool ir1_is_terminal_trap(IR1_INST *ir1)
+{
+    switch (ir1_opcode(ir1)) {
+    case dt_X86_INS_INT3:
+#if defined(CONFIG_LATX_KZT)
+        if (CODEIS64 && latx_kzt_runtime_enabled() &&
+            kzt_is_registered_onebridge(ir1_addr(ir1))) {
+            return false;
+        }
+#endif
+        return true;
+    case dt_X86_INS_UD0:
+    case dt_X86_INS_UD1:
+    case dt_X86_INS_UD2:
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool ir1_is_tb_ending(IR1_INST *ir1)
 {
+    if (ir1_is_terminal_trap(ir1)) {
+        return true;
+    }
 #if defined(CONFIG_LATX_KZT)
     if (CODEIS64 && latx_kzt_runtime_enabled() &&
         ir1_opcode(ir1) == dt_X86_INS_INT3 &&

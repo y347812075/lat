@@ -574,25 +574,54 @@ if 'CONFIG_LATX' in config_host
     'tools/latc/aot-v2/common',
   )
   latc_helper_dir = get_option('prefix') / get_option('libexecdir') / 'latc'
+  latc_capstone_root = 'target/i386/latx/capstone_git/'
+  latc_capstone = static_library(
+    'latc-capstone',
+    files(
+      latc_capstone_root + 'cs.c',
+      latc_capstone_root + 'MCInst.c',
+      latc_capstone_root + 'MCInstrDesc.c',
+      latc_capstone_root + 'MCRegisterInfo.c',
+      latc_capstone_root + 'MCInstPrinter.c',
+      latc_capstone_root + 'Mapping.c',
+      latc_capstone_root + 'SStream.c',
+      latc_capstone_root + 'utils.c',
+      latc_capstone_root + 'arch/X86/X86Disassembler.c',
+      latc_capstone_root + 'arch/X86/X86DisassemblerDecoder.c',
+      latc_capstone_root + 'arch/X86/X86InstPrinterCommon.c',
+      latc_capstone_root + 'arch/X86/X86ATTInstPrinter.c',
+      latc_capstone_root + 'arch/X86/X86IntelInstPrinter.c',
+      latc_capstone_root + 'arch/X86/X86Mapping.c',
+      latc_capstone_root + 'arch/X86/X86Module.c',
+    ),
+    include_directories: include_directories(latc_capstone_root + 'include'),
+    c_args: ['-w', '-DCAPSTONE_HAS_X86', '-DCAPSTONE_USE_SYS_DYN_MEM'],
+  )
   latc = executable(
     'latc',
     files(
       'tools/latc/compiler/latc.c',
       'tools/latc/compiler/tbset.c',
+      'tools/latc/compiler/tbplan.c',
       'tools/latc/aot-v2/common/tb-key-set.c',
       'tools/latc/aot-v2/compiler/module-pack.c',
       'tools/latc/aot-v2/compiler/module-inspect.c',
       'tools/latc/aot-v2/runtime/elf-validate.c',
       'tools/latc/format/bundle.c',
       'tools/latc/native/format/native-image.c',
+      'tools/latc/native/format/native-tu-plan.c',
+      'tools/latc/native/format/native-tu-audit.c',
+      'tools/latc/aot-v2/common/translation-config.c',
       'tools/latc/cfg/src/common.c',
       'tools/latc/cfg/src/elf_image.c',
       'tools/latc/cfg/src/function_symbols.c',
       'tools/latc/cfg/src/ijmp_resolve.c',
       'tools/latc/cfg/src/cfg_decoder.c',
+      'tools/latc/cfg/src/cfg_return_proof.c',
       'tools/latc/cfg/src/cfg_program.c',
     ),
-    include_directories: latc_inc,
+    include_directories: [latc_inc, include_directories(latc_capstone_root + 'include')],
+    link_with: latc_capstone,
     dependencies: [glib],
     link_args: qemu_static_link_args,
     c_args: [
@@ -630,7 +659,10 @@ if 'CONFIG_LATX' in config_host
       'tools/latc/latcd/main.c',
       'tools/latc/latcd/protocol.c',
       'tools/latc/latcd/precompile.c',
+      'tools/latc/latcd/journal-store.c',
       'tools/latc/aot-v2/common/tb-key-set.c',
+      'tools/latc/aot-v2/common/key-journal.c',
+      'tools/latc/aot-v2/common/translation-config.c',
       'tools/latc/aot-v2/compiler/module-inspect.c',
       'tools/latc/aot-v2/runtime/elf-validate.c',
     ),
@@ -983,6 +1015,16 @@ foreach target : target_dirs
 
     if get_option('tests').enabled() and \
        'CONFIG_LATX' in config_target
+      test(
+        target + '-latx-translation-config',
+        python,
+        args: [files('tests/runtime/test-latx-translation-config.py'),
+               emulator.full_path(), target_name],
+        depends: emulator,
+        protocol: 'exitcode',
+        suite: 'lat-pr-fast',
+        timeout: 300,
+      )
       test(
         target + '-latx-runtime-info',
         find_program('tests/runtime/test-latx-runtime-info.sh'),

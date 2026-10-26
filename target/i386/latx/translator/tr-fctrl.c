@@ -950,11 +950,13 @@ bool translate_fnstenv(IR1_INST *pir1)
     return true;
 }
 
-static float float_max = FLT_MAX;
-static float float_min = FLT_MIN;
-static float float_1e32 = 1.0e32f;
-static float float_2 = 2.0f;
-static float float_3 = 3.0f;
+static void load_wait_float(IR2_OPND dest, IR2_OPND scratch, float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    li_numeric_wu(scratch, bits);
+    la_movgr2fr_w(dest, scratch);
+}
 
 bool translate_wait(IR1_INST *pir1)
 {
@@ -962,7 +964,7 @@ bool translate_wait(IR1_INST *pir1)
     IR2_OPND sw_opnd = ra_alloc_itemp();
     IR2_OPND ftemp1_opnd = ra_alloc_ftemp();
     IR2_OPND ftemp2_opnd = ra_alloc_ftemp();
-    IR2_OPND value_addr_opnd = ra_alloc_itemp();
+    IR2_OPND value_bits_opnd = ra_alloc_itemp();
 
     IR2_OPND label_exit = ra_alloc_label();
     IR2_OPND label_O_exit = ra_alloc_label();
@@ -984,10 +986,8 @@ bool translate_wait(IR1_INST *pir1)
     la_bstrpick_w(temp, sw_opnd,
                             X87_SR_OFF_OE, X87_SR_OFF_OE);
     la_beq(temp, zero_ir2_opnd, label_O_exit);
-    li_d(value_addr_opnd, (uint64_t)&float_max);
-    la_fld_s(ftemp1_opnd, value_addr_opnd, 0);
-    li_d(value_addr_opnd, (uint64_t)&float_1e32);
-    la_fld_s(ftemp2_opnd, value_addr_opnd, 0);
+    load_wait_float(ftemp1_opnd, value_bits_opnd, FLT_MAX);
+    load_wait_float(ftemp2_opnd, value_bits_opnd, 1.0e32f);
     la_fadd_s(ftemp1_opnd, ftemp1_opnd, ftemp2_opnd);
     la_label(label_O_exit);
 
@@ -995,10 +995,8 @@ bool translate_wait(IR1_INST *pir1)
     la_bstrpick_w(temp, sw_opnd,
                             X87_SR_OFF_UE, X87_SR_OFF_UE);
     la_beq(temp, zero_ir2_opnd, label_U_exit);
-    li_d(value_addr_opnd, (uint64_t)&float_min);
-    la_fld_s(ftemp1_opnd, value_addr_opnd, 0);
-    li_d(value_addr_opnd, (uint64_t)&float_3);
-    la_fld_s(ftemp2_opnd, value_addr_opnd, 0);
+    load_wait_float(ftemp1_opnd, value_bits_opnd, FLT_MIN);
+    load_wait_float(ftemp2_opnd, value_bits_opnd, 3.0f);
     la_fdiv_s(ftemp1_opnd, ftemp1_opnd, ftemp2_opnd);
     la_label(label_U_exit);
 
@@ -1006,15 +1004,13 @@ bool translate_wait(IR1_INST *pir1)
     la_bstrpick_w(temp, sw_opnd,
                             X87_SR_OFF_PE, X87_SR_OFF_PE);
     la_beq(temp, zero_ir2_opnd, label_exit);
-    li_d(value_addr_opnd, (uint64_t)&float_2);
-    la_fld_s(ftemp1_opnd, value_addr_opnd, 0);
-    li_d(value_addr_opnd, (uint64_t)&float_3);
-    la_fld_s(ftemp2_opnd, value_addr_opnd, 0);
+    load_wait_float(ftemp1_opnd, value_bits_opnd, 2.0f);
+    load_wait_float(ftemp2_opnd, value_bits_opnd, 3.0f);
     la_fdiv_s(ftemp1_opnd, ftemp1_opnd, ftemp2_opnd);
 
     la_label(label_exit);
 
-    ra_free_temp(value_addr_opnd);
+    ra_free_temp(value_bits_opnd);
     ra_free_temp(temp);
     ra_free_temp(sw_opnd);
     ra_free_temp(ftemp1_opnd);

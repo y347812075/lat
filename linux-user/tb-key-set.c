@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,11 +60,18 @@ int lat_tb_key_set_sort_unique(LatTbKeySet *set,
         errno = EINVAL;
         return fail(error, error_size, "invalid TB key set");
     }
+    bool ordered = true;
     for (size_t i = 0; i < set->count; i++) {
         if (!key_valid(&set->keys[i])) {
             errno = EINVAL;
             return fail(error, error_size, "TB key %zu is invalid", i);
         }
+        if (i && key_compare(&set->keys[i - 1], &set->keys[i]) >= 0) {
+            ordered = false;
+        }
+    }
+    if (ordered) {
+        return 0;
     }
     qsort(set->keys, set->count, sizeof(*set->keys), key_compare);
     size_t output = 0;
@@ -201,7 +209,10 @@ int lat_tb_key_set_union(const LatTbKeySet *left, const LatTbKeySet *right,
                          LatTbKeySet *result,
                          char *error, size_t error_size)
 {
-    if (!left || !right || !result) {
+    if (!left || !right || !result || result == left || result == right ||
+        left->count > LAT_AOT_V2_TBSET_RECORD_LIMIT ||
+        right->count > LAT_AOT_V2_TBSET_RECORD_LIMIT ||
+        (left->count && !left->keys) || (right->count && !right->keys)) {
         errno = EINVAL;
         return fail(error, error_size, "cannot union TB key sets");
     }
@@ -210,32 +221,68 @@ int lat_tb_key_set_union(const LatTbKeySet *left, const LatTbKeySet *right,
         return fail(error, error_size,
                     "cannot union TB key sets: source digest mismatch");
     }
-    if (left->count > LAT_AOT_V2_TBSET_RECORD_LIMIT - right->count) {
-        errno = E2BIG;
-        return fail(error, error_size,
-                    "cannot union TB key sets: %" PRIu64 " + %" PRIu64
-                    " exceeds record limit %u",
-                    left->count, right->count,
-                    LAT_AOT_V2_TBSET_RECORD_LIMIT);
-    }
     memset(result, 0, sizeof(*result));
+    LatTbKeySet inputs[2] = { *left, *right };
+    inputs[0].keys = NULL;
+    inputs[1].keys = NULL;
+    for (unsigned i = 0; i < 2; i++) {
+        const LatTbKeySet *source = i ? right : left;
+        size_t bytes = source->count * sizeof(LatTbKey);
+        if (bytes) {
+            inputs[i].keys = malloc(bytes);
+            if (!inputs[i].keys) {
+                fail(error, error_size, "out of memory merging TB key sets");
+                goto failed;
+            }
+            memcpy(inputs[i].keys, source->keys, bytes);
+        }
+        if (lat_tb_key_set_sort_unique(&inputs[i], error, error_size)) {
+            goto failed;
+        }
+    }
     memcpy(result->source_sha256, left->source_sha256, 32);
     result->sequence = left->sequence > right->sequence ?
                        left->sequence : right->sequence;
-    result->count = left->count + right->count;
-    result->keys = result->count ? malloc(result->count * sizeof(LatTbKey)) :
-                                   NULL;
-    if (result->count && !result->keys) {
-        return fail(error, error_size, "out of memory merging TB key sets");
+    size_t capacity = inputs[0].count + inputs[1].count;
+    if (capacity > LAT_AOT_V2_TBSET_RECORD_LIMIT) {
+        capacity = LAT_AOT_V2_TBSET_RECORD_LIMIT;
     }
-    memcpy(result->keys, left->keys, left->count * sizeof(LatTbKey));
-    memcpy(result->keys + left->count, right->keys,
-           right->count * sizeof(LatTbKey));
-    if (lat_tb_key_set_sort_unique(result, error, error_size)) {
-        lat_tb_key_set_destroy(result);
-        return -1;
+    result->keys = capacity ? malloc(capacity * sizeof(LatTbKey)) : NULL;
+    if (capacity && !result->keys) {
+        fail(error, error_size, "out of memory merging TB key sets");
+        goto failed;
     }
+    size_t i = 0, j = 0;
+    while (i < inputs[0].count || j < inputs[1].count) {
+        const LatTbKey *key;
+        int order = i == inputs[0].count ? 1 :
+                    j == inputs[1].count ? -1 :
+                    key_compare(&inputs[0].keys[i], &inputs[1].keys[j]);
+        if (order <= 0) {
+            key = &inputs[0].keys[i++];
+            if (!order) {
+                j++;
+            }
+        } else {
+            key = &inputs[1].keys[j++];
+        }
+        if (result->count == capacity) {
+            errno = E2BIG;
+            fail(error, error_size,
+                 "cannot union TB key sets: unique union exceeds record limit %u",
+                 LAT_AOT_V2_TBSET_RECORD_LIMIT);
+            goto failed;
+        }
+        result->keys[result->count++] = *key;
+    }
+    lat_tb_key_set_destroy(&inputs[0]);
+    lat_tb_key_set_destroy(&inputs[1]);
     return 0;
+failed:
+    lat_tb_key_set_destroy(&inputs[0]);
+    lat_tb_key_set_destroy(&inputs[1]);
+    lat_tb_key_set_destroy(result);
+    return -1;
 }
 
 int lat_tb_key_set_difference(const LatTbKeySet *known,

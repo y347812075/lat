@@ -17,6 +17,7 @@
 
 typedef struct { Insn *v; size_t n; size_t cap; } InsnVec;
 typedef struct { uint64_t *v; size_t n; size_t cap; } AddrVec;
+typedef struct { IjmpInbound *v; size_t n; size_t cap; } InboundVec;
 typedef struct {
     InsnVec insns;
     AddrVec insn_addrs;
@@ -58,6 +59,79 @@ static bool addr_push(AddrVec *v, uint64_t value)
     }
     v->v[v->n++] = value;
     return true;
+}
+
+static bool inbound_push(InboundVec *v, uint64_t source, uint64_t target)
+{
+    if (!grow((void **)&v->v, &v->cap, v->n, sizeof(*v->v))) {
+        return false;
+    }
+    v->v[v->n++] = (IjmpInbound) {.source = source, .target = target};
+    return true;
+}
+
+static int cmp_inbound(const void *a, const void *b)
+{
+    const IjmpInbound *x = a, *y = b;
+    if (x->target != y->target) {
+        return (x->target > y->target) - (x->target < y->target);
+    }
+    return (x->source > y->source) - (x->source < y->source);
+}
+
+static int collect_inbound(const ElfFile *elf, const FuncVec *funcs,
+                           const DecodedFunction *decoded, CfgProgram *out)
+{
+    InboundVec inbound = {0};
+    if (!inbound_push(&inbound, UINT64_MAX, elf->eh->e_entry)) {
+        goto fail;
+    }
+    for (size_t i = 0; i < funcs->n; i++) {
+        if (!inbound_push(&inbound, UINT64_MAX, funcs->v[i].addr)) {
+            goto fail;
+        }
+        for (size_t j = 0; j < decoded[i].insns.n; j++) {
+            const Insn *in = &decoded[i].insns.v[j];
+            if (in->has_target &&
+                !inbound_push(&inbound, in->addr, in->target)) {
+                goto fail;
+            }
+        }
+    }
+    /* Include direct transfers outside STT_FUNC/FDE ownership as well. */
+    for (unsigned i = 0; i < elf->eh->e_shnum; i++) {
+        const Elf64_Shdr *sh = &elf->sh[i];
+        uint64_t file_off;
+        if (!elf_executable_section(elf, i) || sh->sh_type == SHT_NOBITS ||
+            !elf_function_file_offset(elf, sh->sh_addr, sh->sh_size,
+                                      i, &file_off)) {
+            continue;
+        }
+        for (size_t off = 0; off < sh->sh_size;) {
+            Insn in = cfg_decode_insn(elf->data + file_off, sh->sh_size,
+                                      sh->sh_addr, off);
+            if (!in.len || in.len > sh->sh_size - off) {
+                break;
+            }
+            if (in.has_target && !inbound_push(&inbound, in.addr, in.target)) {
+                goto fail;
+            }
+            off += in.len;
+        }
+    }
+    qsort(inbound.v, inbound.n, sizeof(*inbound.v), cmp_inbound);
+    size_t n = 0;
+    for (size_t i = 0; i < inbound.n; i++) {
+        if (!n || cmp_inbound(&inbound.v[i], &inbound.v[n - 1])) {
+            inbound.v[n++] = inbound.v[i];
+        }
+    }
+    out->inbound = inbound.v;
+    out->inbound_count = n;
+    return 0;
+fail:
+    free(inbound.v);
+    return -1;
 }
 
 static int cmp_addr(const void *a, const void *b)
@@ -329,6 +403,8 @@ static int analyze_function(const ElfFile *elf, const FuncVec *funcs,
         .program_insn_count = program_insns->n,
         .direct_targets = direct_targets->v,
         .direct_target_count = direct_targets->n,
+        .inbound = out->inbound, .inbound_count = out->inbound_count,
+        .inbound_complete = true,
         .is_func_entry = is_function_entry, .func_entry_data = funcs,
         .func_addr = fn->addr, .func_size = fn->size,
     };
@@ -499,6 +575,195 @@ done:
     return rc;
 }
 
+typedef struct {
+    const ElfFile *elf;
+    const ElfPointerIndex *pointers;
+} ReturnCode;
+
+static bool return_proof_code(const void *data, uint64_t pc, uint8_t bytes[15],
+                               size_t *size)
+{
+    const ReturnCode *source = data;
+    const ElfFile *elf = source->elf;
+    unsigned section;
+    uint64_t offset;
+    if (!elf_find_exec_section_for_range(elf, pc, 1, &section)) return false;
+    *size = elf->sh[section].sh_size - (pc - elf->sh[section].sh_addr);
+    if (*size > 15) *size = 15;
+    if (!elf_function_file_offset(elf, pc, *size, section, &offset)) return false;
+    size_t available = *size;
+    *size = 0;
+    while (*size < available &&
+           elf_read_immutable_byte(source->pointers, pc + *size, bytes + *size))
+        (*size)++;
+    return *size != 0;
+}
+
+static int discover_bounded_pic_roots(const ElfFile *elf,
+                                      const IjmpSection *sections,
+                                      size_t section_count, CfgProgram *out,
+                                      size_t *tb_cap)
+{
+    AddrVec roots = {0}, existing = {0};
+    ElfPointerIndex *pointers = elf_pointer_index_new(elf);
+    ReturnCode return_code = {elf, pointers};
+    CfgReturnContext returns = {.read_code = return_proof_code, .data = &return_code,
+                                .instruction_budget = 512, .call_depth = 4};
+    int rc = -1;
+    IjmpContext context = {
+        .file = elf->data, .file_size = elf->size,
+        .sections = sections, .section_count = section_count,
+        .inbound = out->inbound, .inbound_count = out->inbound_count,
+        .inbound_complete = true,
+        .read_immutable_pointer = elf_read_immutable_pointer,
+        .read_immutable_byte = elf_read_immutable_byte,
+        .pointer_data = pointers,
+        .return_context = &returns,
+    };
+    for (size_t i = 0; i < out->tb_count; i++) {
+        if (!addr_push(&existing, out->tbs[i].start)) {
+            goto done;
+        }
+    }
+    sort_unique(&existing);
+    for (unsigned i = 0; i < elf->eh->e_shnum; i++) {
+        const Elf64_Shdr *sh = &elf->sh[i];
+        uint64_t file_off;
+        if (!elf_executable_section(elf, i) || sh->sh_type == SHT_NOBITS ||
+            !elf_function_file_offset(elf, sh->sh_addr, sh->sh_size,
+                                      i, &file_off)) {
+            continue;
+        }
+        const uint8_t *code = elf->data + file_off;
+        size_t constant_window = 0;
+        size_t local_window = 0;
+        for (size_t off = 0; off < sh->sh_size;) {
+            Insn in = cfg_decode_insn(code, sh->sh_size, sh->sh_addr, off);
+            if (!in.len || in.len > sh->sh_size - off) {
+                break;
+            }
+            context.func_addr = in.addr;
+            IjmpResult resolved;
+            if (ijmp_resolve_bounded_pic_entry(&context, code + off,
+                                               sh->sh_size - off, &resolved)) {
+                if (!addr_push(&roots, in.addr)) {
+                    goto done;
+                }
+                for (size_t j = 0; j < resolved.count; j++) {
+                    if (!addr_push(&roots, resolved.targets[j])) {
+                        goto done;
+                    }
+                }
+            }
+            if (pointers && ijmp_resolve_cfi_entry(&context, code + off,
+                                                  sh->sh_size - off, &resolved)) {
+                for (size_t j = 0; j < resolved.count; j++) {
+                    if (!addr_push(&roots, resolved.targets[j])) goto done;
+                }
+            }
+            /* Expensive all-path analysis is demand-driven by a wide register
+             * copy followed by RIP-relative LEA. Keep a bounded, aligned prefix
+             * rather than guessing a function start from a prologue. */
+            while (off - constant_window > 1024) {
+                Insn first = cfg_decode_insn(code, sh->sh_size, sh->sh_addr,
+                                              constant_window);
+                constant_window += first.len;
+            }
+            if (pointers && in.len == 3 && code[off] >= 0x48 &&
+                code[off] <= 0x4f &&
+                (code[off + 1] == 0x89 || code[off + 1] == 0x8b) &&
+                (code[off + 2] >> 6) == 3 && sh->sh_size - off >= 10 &&
+                code[off + 3] >= 0x48 && code[off + 3] <= 0x4f &&
+                code[off + 4] == 0x8d &&
+                (code[off + 5] & 0xc7) == 5) {
+                context.func_addr = sh->sh_addr + constant_window;
+                bool found = ijmp_resolve_split_cfi_entry(&context,
+                        code + constant_window, sh->sh_size - constant_window,
+                        off - constant_window, &resolved);
+                size_t fallback = local_window > constant_window ?
+                                   local_window : constant_window;
+                if (!found && fallback != constant_window) {
+                    context.func_addr = sh->sh_addr + fallback;
+                    found = ijmp_resolve_split_cfi_entry(&context,
+                        code + fallback, sh->sh_size - fallback,
+                        off - fallback, &resolved);
+                }
+                if (found) {
+                    for (size_t j = 0; j < resolved.count; j++) {
+                        if (!addr_push(&roots, resolved.targets[j])) goto done;
+                    }
+                }
+            }
+            off += in.len;
+            if (in.kind == INSN_RET || in.kind == INSN_STOP ||
+                in.kind == INSN_SYSCALL || in.kind == INSN_IJMP ||
+                in.kind == INSN_ICALL) {
+                constant_window = off;
+                local_window = off;
+            }
+            if (in.kind == INSN_CALL) local_window = off;
+        }
+    }
+    sort_unique(&roots);
+    for (size_t i = 0; i < roots.n; i++) {
+        uint64_t pc = roots.v[i];
+        size_t at = addr_lower_bound(&existing, pc);
+        if (at < existing.n && existing.v[at] == pc) {
+            continue;
+        }
+        CfgTb tb = {
+            .start = pc, .end = pc + 1, .terminator_pc = pc,
+            .semantic_flags = CFG_TB_CODE64,
+            .terminator = CFG_TB_FALLTHROUGH,
+        };
+        if (!push_tb(out, tb_cap, tb)) {
+            goto done;
+        }
+    }
+    rc = 0;
+done:
+    elf_pointer_index_free(pointers);
+    free(roots.v);
+    free(existing.v);
+    return rc;
+}
+
+static int load_exec_ranges(const ElfFile *elf, CfgProgram *program)
+{
+    program->exec_ranges = calloc(elf->eh->e_shnum,
+                                  sizeof(*program->exec_ranges));
+    if (!program->exec_ranges) return -1;
+    for (unsigned i = 0; i < elf->eh->e_shnum; i++) {
+        const Elf64_Shdr *section = &elf->sh[i];
+        if (!elf_executable_section(elf, i) || !section->sh_size ||
+            section->sh_type == SHT_NOBITS) continue;
+        program->exec_ranges[program->exec_range_count++] = (CfgExecRange){
+            .start = section->sh_addr,
+            .size = section->sh_size,
+        };
+    }
+    return 0;
+}
+
+int cfg_load_exec_ranges(const char *path, CfgProgram *program,
+                          char *error, size_t error_size)
+{
+    if (!path || !program) return -1;
+    memset(program, 0, sizeof(*program));
+    ElfFile elf = {0};
+    elf_load(path, &elf);
+    int rc = load_exec_ranges(&elf, program);
+    elf_free(&elf);
+    if (rc) {
+        if (error && error_size) {
+            snprintf(error, error_size, "ELF executable ranges: %s",
+                     strerror(errno));
+        }
+        cfg_program_destroy(program);
+    }
+    return rc;
+}
+
 int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
                     CfgProgram *program, char *error, size_t error_size)
 {
@@ -523,20 +788,12 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
     if (!decoded && funcs.n) goto out;
     if (collect_program_insns_and_direct_targets(
             &elf, &funcs, decoded, &program_insns, &direct_targets)) goto out;
+    if (collect_inbound(&elf, &funcs, decoded, program)) {
+        goto out;
+    }
     size_t section_count = 0;
     sections = elf_build_ijmp_sections(&elf, &section_count);
-    program->exec_ranges = calloc(elf.eh->e_shnum,
-                                  sizeof(*program->exec_ranges));
-    if (!program->exec_ranges) goto out;
-    for (unsigned i = 0; i < elf.eh->e_shnum; i++) {
-        const Elf64_Shdr *section = &elf.sh[i];
-        if (!elf_executable_section(&elf, i) || !section->sh_size ||
-            section->sh_type == SHT_NOBITS) continue;
-        program->exec_ranges[program->exec_range_count++] = (CfgExecRange){
-            .start = section->sh_addr,
-            .size = section->sh_size,
-        };
-    }
+    if (load_exec_ranges(&elf, program)) goto out;
 
     for (size_t i = 0; i < funcs.n; i++) {
         CfgProgramFunction fn = {
@@ -555,6 +812,11 @@ int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
         if (fn.status == CFG_FUNCTION_OPEN) program->open_function_count++;
         if (fn.status == CFG_FUNCTION_ERROR) program->error_function_count++;
         if (!push_function(program, &function_cap, fn)) { free(fn.name); goto out; }
+    }
+    if ((!options || options->resolve_jump_tables) &&
+        discover_bounded_pic_roots(&elf, sections, section_count,
+                                   program, &tb_cap)) {
+        goto out;
     }
     rc = 0;
 out:
@@ -583,6 +845,7 @@ void cfg_program_destroy(CfgProgram *p)
     if (!p) return;
     for (size_t i = 0; i < p->function_count; i++) free(p->functions[i].name);
     free(p->functions); free(p->tbs); free(p->edges); free(p->exec_ranges);
+    free(p->inbound);
     memset(p, 0, sizeof(*p));
 }
 

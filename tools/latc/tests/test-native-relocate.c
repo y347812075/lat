@@ -4,8 +4,41 @@
 #include <stdio.h>
 #include <string.h>
 
+static int test_constant_object(void)
+{
+    unsigned char image[sizeof(LatNativeImageHeaderV2) + 96 +
+                        sizeof(LatNativeRelocationV1)] = {0};
+    LatNativeImageHeaderV2 *h = (void *)image;
+    h->code_offset = sizeof(*h);
+    h->code_size = 96;
+    h->relocation_offset = h->code_offset + h->code_size;
+    h->relocation_count = 1;
+    uint32_t words[] = {0x1400000c, 0x0380018c, 0x1600000c};
+    memcpy(image + h->code_offset, words, sizeof(words));
+    for (unsigned i = 0; i < 32; i++) image[h->code_offset + 64 + i] = i ^ 0x5a;
+    LatNativeRelocationV1 *rel = (void *)(image + h->relocation_offset);
+    *rel = (LatNativeRelocationV1){.kind = LAT_NATIVE_RELOC_IMAGE_DATA,
+        .slots = 3, .addend = 80, .reserved = 16,
+        .data_object_offset = 64, .data_object_size = 32,
+        .data_object_alignment = 32, .data_object_flags = LAT_NATIVE_DATA_POINTER_FREE};
+    LatNativeCode code = {0};
+    char error[256] = {0};
+    if (lat_native_code_load(h, image, sizeof(image), &code, error, sizeof(error))) return 1;
+    const uint32_t *loaded = code.address;
+    int64_t pages = (int32_t)(((loaded[0] >> 5) & 0xfffff) << 12) >> 12;
+    uintptr_t target = (((uintptr_t)loaded & ~(uintptr_t)4095) + pages * 4096) |
+                       ((loaded[1] >> 10) & 4095);
+    int bad = target != (uintptr_t)loaded + 80 || loaded[2] != 0x03400000 ||
+        memcmp((const void *)(target - 16), image + h->code_offset + 64, 32);
+    lat_native_code_unload(&code);
+    if (bad) return 1;
+    rel->data_object_size = 0;
+    return !lat_native_code_load(h, image, sizeof(image), &code, error, sizeof(error));
+}
+
 int main(void)
 {
+    if (test_constant_object()) return 1;
     unsigned char image[sizeof(LatNativeImageHeaderV2) + 56 +
                         sizeof(LatNativeTbV1) +
                         6 * sizeof(LatNativeRelocationV1)] = {0};
@@ -72,6 +105,13 @@ int main(void)
     relocations[5].slots = 4;
 
     size_t image_size = header->pc_map_offset;
+    header->flags = LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED;
+    if (!lat_native_code_load(header, image, image_size, &code,
+                              error, sizeof(error)) || code.address) {
+        fprintf(stderr, "unverified configuration became executable\n");
+        return 1;
+    }
+    header->flags = 0;
     if (lat_native_code_load(header, image, image_size, &code,
                              error, sizeof(error))) {
         fprintf(stderr, "native relocation failed: %s\n", error);

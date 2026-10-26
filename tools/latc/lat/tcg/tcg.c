@@ -44,6 +44,9 @@
 #define NO_CPU_IO_DEFS
 
 #include "exec/exec-all.h"
+#ifdef CONFIG_USER_ONLY
+#include "latc-bundle-format.h"
+#endif
 
 #if !defined(CONFIG_USER_ONLY)
 #include "hw/boards.h"
@@ -809,7 +812,7 @@ static bool tcg_region_alloc(TCGContext *s)
     if (err && getenv("LATC_EMIT_AOT")) {
         error_report("AOT translation buffer exhausted; "
                      "refusing incomplete native image");
-        exit(EXIT_FAILURE);
+        exit(LATC_EXIT_CODE_BUFFER_EXHAUSTED);
     }
 #endif
     return err;
@@ -1390,6 +1393,8 @@ TranslationBlock *tcg_tb_alloc(TCGContext *s)
     qatomic_set(&s->code_gen_ptr, next);
     s->data_gen_ptr = NULL;
     tb->s_data = &s_data;
+    tb->translation_config_dependencies_valid = false;
+    tb->numeric_provenance_words = NULL;
     return tb;
 }
 
@@ -1426,6 +1431,8 @@ TranslationBlock *tcg_tb_alloc_full(TCGContext *s)
     qatomic_set(&s->code_gen_ptr, next);
     s->data_gen_ptr = NULL;
     tb->s_data = new_s_data;
+    tb->translation_config_dependencies_valid = false;
+    tb->numeric_provenance_words = NULL;
     return tb;
 }
 

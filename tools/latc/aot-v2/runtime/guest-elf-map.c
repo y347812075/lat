@@ -295,6 +295,11 @@ int lat_guest_elf_inspect_mapping_v2(int fd, uint64_t guest_start,
                 return invalid(error, error_size,
                                "mapped ELF has too many executable ranges");
             }
+            output.exact_exec_ranges[output.exec_range_count] =
+                (LatGuestElfRangeV2){
+                    .begin = load_bias + phdr->p_vaddr,
+                    .end = load_bias + phdr->p_vaddr + phdr->p_memsz,
+                };
             output.exec_ranges[output.exec_range_count++] =
                 (LatGuestElfRangeV2){ .begin = begin, .end = end };
         }

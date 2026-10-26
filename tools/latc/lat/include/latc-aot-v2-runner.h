@@ -61,10 +61,24 @@ void latc_aot_v2_flush_pending_keys(void);
 void latc_aot_v2_flush_deferred_pending(void);
 /* Resume asynchronous collection after namespace setup allows host threads. */
 void latc_aot_v2_start_deferred_submission(void);
+/* Authenticate a host connection before guest namespaces hide its pathname. */
+void latc_aot_v2_prepare_submission_channel(void);
 /* Preserve internal source references before a guest closes/overwrites fd. */
 int latc_aot_v2_relocate_source_fd(int fd);
 /* Record a file-backed JIT translation request without execution counters. */
 void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags);
+/* Opt-in journal integration. Check is memory-only under mmap_lock; a miss
+ * unwinds the current runtime scope before any TB is allocated/published.
+ * Service must run after cpu_exec_end / end_exclusive, never under mmap_lock.
+ */
+#define LATC_AOT_V2_KEY_RETRY 0x10006
+void latc_aot_v2_key_scope_enter(CPUState *cpu, uint32_t cflags, bool atomic_step);
+void latc_aot_v2_key_scope_leave(void);
+void latc_aot_v2_key_gate(CPUState *cpu, target_ulong pc, uint32_t cflags);
+void latc_aot_v2_key_publish_check(CPUState *cpu, target_ulong pc, uint32_t cflags);
+bool latc_aot_v2_key_retry_pending(void);
+bool latc_aot_v2_key_retry_service(CPUState *cpu);
+bool latc_aot_v2_key_resume_jrra(target_ulong pc, uint32_t cflags);
 /* Add TBs translated before a deferred ELF mapping was registered. */
 void latc_aot_v2_collect_existing_jit_tbs(target_ulong guest_begin,
                                           target_ulong guest_end);

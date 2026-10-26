@@ -264,7 +264,15 @@ done
 kill -TERM "$daemon_pid"
 wait "$daemon_pid"
 daemon_pid=
-"$latc" inspect-module --json "$stale_module" | \
+module_name=$(python3 - "$cache/$source_sha.current" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1]))["module"])
+PY
+)
+test "$cache/$module_name" != "$stale_module"
+test ! -e "$stale_module"
+"$latc" inspect-module --json "$cache/$module_name" | \
   grep -q "\"codegen_id\":\"$codegen\""
 
 echo "test-aot-v2-install: PASS identity=$identity"

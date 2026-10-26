@@ -689,6 +689,24 @@ static void remove_temporary(const char *directory, GPtrArray *dependencies)
     rmdir(directory);
 }
 
+static int flush_dependency(const char *socket_path,
+                            const LatcdPrecompileDependency *dependency)
+{
+    LatcdResponseV2 response = {0};
+    char error[512] = {0};
+    if (send_request(socket_path, LATCD_OP_FLUSH_SOURCE,
+                     dependency->host_path, NULL,
+                     LATCD_PRIORITY_LIBRARY, &response,
+                     error, sizeof(error)) ||
+        response.status != LATCD_STATUS_OK) {
+        fprintf(stderr, "latcd: flush failed for %s: %s\n",
+                dependency->guest_path,
+                error[0] ? error : response.message);
+        return 1;
+    }
+    return 0;
+}
+
 int latcd_run_precompile(const char *socket_path, const char *rootfs,
                          const char *compiler, const char *guest_path,
                          uint32_t jobs)
@@ -759,6 +777,7 @@ int latcd_run_precompile(const char *socket_path, const char *rootfs,
                                     dependencies->len);
     g_array_set_size(submitted, dependencies->len);
     g_array_set_size(hit, dependencies->len);
+    guint oldest = 0, pending = 0;
     for (guint i = 0; i < dependencies->len; i++) {
         LatcdPrecompileDependency *dependency =
             g_ptr_array_index(dependencies, i);
@@ -766,10 +785,30 @@ int latcd_run_precompile(const char *socket_path, const char *rootfs,
         uint32_t priority = i == 0 ? LATCD_PRIORITY_STARTUP :
                                     LATCD_PRIORITY_LIBRARY;
         error[0] = '\0';
-        if (send_request(socket_path, LATCD_OP_SUBMIT_STATIC_KEYS,
+        int request_failed;
+        for (;;) {
+            memset(&response, 0, sizeof(response));
+            error[0] = '\0';
+            request_failed = send_request(socket_path,
+                         LATCD_OP_SUBMIT_STATIC_KEYS,
                          dependency->host_path, dependency->tbset_path,
-                         priority, &response, error, sizeof(error)) ||
-            response.status != LATCD_STATUS_OK) {
+                         priority, &response, error, sizeof(error));
+            if (request_failed ||
+                response.status != LATCD_STATUS_QUEUE_FULL || !pending) {
+                break;
+            }
+            /* Only retry after a finite, accepted request has been drained. */
+            while (!g_array_index(submitted, bool, oldest)) {
+                oldest++;
+            }
+            int failed = flush_dependency(socket_path,
+                g_ptr_array_index(dependencies, oldest));
+            failed_count += failed;
+            compiled += !failed && !g_array_index(hit, bool, oldest);
+            g_array_index(submitted, bool, oldest++) = false;
+            pending--;
+        }
+        if (request_failed || response.status != LATCD_STATUS_OK) {
             fprintf(stderr, "latcd: submit failed for %s: %s\n",
                     dependency->guest_path,
                     error[0] ? error : response.message);
@@ -777,6 +816,7 @@ int latcd_run_precompile(const char *socket_path, const char *rootfs,
             continue;
         }
         g_array_index(submitted, bool, i) = true;
+        pending++;
         bool cache_hit = g_str_has_prefix(response.message, "cache hit:");
         g_array_index(hit, bool, i) = cache_hit;
         cache_hits += cache_hit;
@@ -784,25 +824,25 @@ int latcd_run_precompile(const char *socket_path, const char *rootfs,
                " submit=%s\n", dependency->guest_path,
                dependency->source_sha256, dependency->static_tb_keys,
                cache_hit ? "cache-hit" : "accepted");
+        if (pending >= MAX(1u, jobs)) {
+            while (!g_array_index(submitted, bool, oldest)) {
+                oldest++;
+            }
+            int failed = flush_dependency(socket_path,
+                g_ptr_array_index(dependencies, oldest));
+            failed_count += failed;
+            compiled += !failed && !g_array_index(hit, bool, oldest);
+            g_array_index(submitted, bool, oldest++) = false;
+            pending--;
+        }
     }
     for (guint i = 0; i < dependencies->len; i++) {
         if (!g_array_index(submitted, bool, i)) continue;
         LatcdPrecompileDependency *dependency =
             g_ptr_array_index(dependencies, i);
-        LatcdResponseV2 response = {0};
-        error[0] = '\0';
-        if (send_request(socket_path, LATCD_OP_FLUSH_SOURCE,
-                         dependency->host_path, NULL,
-                         LATCD_PRIORITY_LIBRARY, &response,
-                         error, sizeof(error)) ||
-            response.status != LATCD_STATUS_OK) {
-            fprintf(stderr, "latcd: flush failed for %s: %s\n",
-                    dependency->guest_path,
-                    error[0] ? error : response.message);
-            failed_count++;
-        } else if (!g_array_index(hit, bool, i)) {
-            compiled++;
-        }
+        int failed = flush_dependency(socket_path, dependency);
+        failed_count += failed;
+        compiled += !failed && !g_array_index(hit, bool, i);
     }
     printf("precompile_elfs=%u\nstatic_tb_keys=%" PRIu64
            "\ncache_hits=%" PRIu64 "\ncompiled=%" PRIu64

@@ -10,6 +10,7 @@
 #include "lat-eflags-link.h"
 #include <string.h>
 #include "latx-options.h"
+#include "lat-translation-config.h"
 #include "fpu/softfloat.h"
 #include "profile.h"
 #include "translate.h"
@@ -100,6 +101,26 @@ int XMM_USEDEF_TO_SAVE = 0xffff;
 
 struct lat_lock lat_lock[16];
 
+void tr_provenance_move_stub(TranslationBlock *tb, uint32_t old_offset,
+                             uint32_t new_offset)
+{
+    if (!tb->numeric_provenance_words) {
+        return;
+    }
+    for (guint i = 0; i < tb->numeric_provenance_words->len; i++) {
+        TrNumericWord *record = &g_array_index(tb->numeric_provenance_words,
+                                               TrNumericWord, i);
+        if (record->offset >= old_offset) {
+            uint64_t moved = (uint64_t)new_offset + record->offset - old_offset;
+            if (moved > UINT32_MAX) {
+                g_clear_pointer(&tb->numeric_provenance_words, g_array_unref);
+                return;
+            }
+            record->offset = moved;
+        }
+    }
+}
+
 void tr_init(void *tb)
 {
     TRANSLATION_DATA *t = lsenv->tr_data;
@@ -110,6 +131,10 @@ void tr_init(void *tb)
               "trying to translate (TB*)%p before (TB*)%p finishes.\n", tb,
               t->curr_tb);
     t->curr_tb = tb;
+    if (tb) {
+        TranslationBlock *block = tb;
+        g_clear_pointer(&block->numeric_provenance_words, g_array_unref);
+    }
     t->curr_ir1_inst = NULL;
 #ifdef CONFIG_LATX_OPT_PUSH_POP_TRANS
     t->sp_delta = 0;
@@ -129,6 +154,18 @@ void tr_init(void *tb)
     }
     t->ir2_inst_num_current = 0;
     t->real_ir2_inst_num = 0;
+
+    const char *provenance = getenv("LATC_TRACE_PROVENANCE");
+    if (provenance && !strcmp(provenance, "1")) {
+        if (!t->numeric_provenance) {
+            t->numeric_provenance = g_hash_table_new_full(g_direct_hash,
+                                                        g_direct_equal,
+                                                        NULL, g_free);
+        }
+        g_hash_table_remove_all(t->numeric_provenance);
+    } else {
+        g_clear_pointer(&t->numeric_provenance, g_hash_table_destroy);
+    }
 
     /* reset ir2 first/last/num */
     t->first_ir2 = NULL;
@@ -615,6 +652,26 @@ int tr_ir2_assemble(const void *code_start_addr, const IR2_INST *pir2)
 #endif
 
             *(uint32 *)code_addr = result;
+            if (lsenv->tr_data->numeric_provenance &&
+                lsenv->tr_data->curr_tb) {
+                TranslationBlock *tb = lsenv->tr_data->curr_tb;
+                bool numeric = ir2_has_numeric_provenance(pir2);
+                const char *native_out = getenv("LATC_NATIVE_IMAGE_OUT");
+                if (numeric && in_pre_translate && native_out && *native_out) {
+                    if (!tb->numeric_provenance_words) {
+                        tb->numeric_provenance_words =
+                            g_array_new(FALSE, FALSE, sizeof(TrNumericWord));
+                    }
+                    TrNumericWord record = { (unsigned)code_nr * 4, result };
+                    g_array_append_val(tb->numeric_provenance_words, record);
+                }
+                fprintf(stderr,
+                        "latc: provenance-stage=tb-assembly pc=0x%llx "
+                        "offset=%u word=0x%08x origin=%s certified=0\n",
+                        (unsigned long long)tb->pc, (unsigned)code_nr * 4,
+                        result, numeric ?
+                        "numeric-bits" : "unknown");
+            }
             code_addr = code_addr + 4;
             code_nr += 1;
         }
@@ -2697,6 +2754,11 @@ static int kzt_tr_bridge(struct TranslationBlock *tb)
 #endif
 int tr_translate_tb(struct TranslationBlock *tb)
 {
+    g_clear_pointer(&tb->numeric_provenance_words, g_array_unref);
+    tb->translation_config_dependencies_valid = false;
+    /* All unaudited configuration fields remain conservative dependencies. */
+    tb->translation_config_dependencies = LAT_CONFIG_ALL_BITS &
+        ~(UINT64_C(1) << LAT_CONFIG_CVT_OPT);
     if (CODEIS64) {
         tb->bool_flags |= IS_CODE64;
     }
@@ -2836,6 +2898,13 @@ int tr_translate_tb(struct TranslationBlock *tb)
 
     if (option_dump)
         qemu_log("tr_fini OK. translation done.\n");
+
+    tb->translation_config_dependencies_valid = code_size > 0;
+#if defined(CONFIG_LATX_KZT)
+    if (latx_kzt_runtime_enabled()) {
+        tb->translation_config_dependencies_valid = false;
+    }
+#endif
 
     if (show_tb) {
         option_dump_ir1 = 0;

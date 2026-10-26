@@ -6,6 +6,8 @@
 #include "lat-eflags-link.h"
 #include "latc-build-id.h"
 #include "latc-bundle-loader.h"
+#include "latx-config.h"
+#include "translate.h"
 #include "crypto/aes.h"
 #include "../translator/tr-vpaes.h"
 
@@ -536,6 +538,10 @@ static int append_relocation(GArray *output, RelocationOffsetSet *offsets,
         relocation.kind = LAT_NATIVE_RELOC_IMAGE_DATA;
         relocation.addend = constant_base + offset + source->extra_addend;
         relocation.reserved = constant_size - source->extra_addend;
+        relocation.data_object_offset = constant_base + offset;
+        relocation.data_object_size = constant_size;
+        relocation.data_object_alignment = 32;
+        relocation.data_object_flags = LAT_NATIVE_DATA_POINTER_FREE;
     } else if (source->kind == LOAD_CALL_TARGET) {
         relocation.kind = LAT_NATIVE_RELOC_GUEST_ADDRESS;
         relocation.addend = segment->details.seg_begin + source->extra_addend;
@@ -1039,9 +1045,68 @@ static int strip_process_local_search_data(uint8_t *code, uint64_t code_size,
     return 0;
 }
 
+static void trace_final_numeric_words(const aot_header *header,
+        const aot_segment *segments, const aot_tb *tbs, size_t tb_count,
+        const GArray *const *owners, const GArray *tus,
+        const GArray *relocations, const uint8_t *code, uint64_t code_size,
+        uint64_t aot_code_offset)
+{
+    const char *trace = getenv("LATC_TRACE_PROVENANCE");
+    if (!trace || strcmp(trace, "1") || !owners) {
+        return;
+    }
+    for (size_t i = 0; i < tb_count; i++) {
+        const GArray *records = owners[i];
+        if (!records) {
+            continue;
+        }
+        const aot_segment *segment = find_tb_segment(header, segments, &tbs[i]);
+        if (!segment || tbs[i].tb_cache_offset < aot_code_offset) {
+            continue;
+        }
+        uint64_t base = tbs[i].tb_cache_offset - aot_code_offset;
+        int index = native_tu_index_for_offset(tus, base);
+        if (index < 0) {
+            continue;
+        }
+        const LatNativeTuV1 *tu = &g_array_index(tus, LatNativeTuV1, index);
+        for (guint j = 0; j < records->len; j++) {
+            const TrNumericWord *record = &g_array_index(records, TrNumericWord, j);
+            uint64_t offset = base + record->offset;
+            uint32_t word = 0;
+            bool matches = offset >= base && !(offset & 3) &&
+                offset >= tu->code_offset && offset < tu->search_offset &&
+                tu->search_offset - offset >= 4 &&
+                offset <= code_size && code_size - offset >= 4;
+            if (matches) {
+                memcpy(&word, code + offset, sizeof(word));
+                matches = word == record->word;
+            }
+            for (guint k = 0; matches && k < relocations->len; k++) {
+                const LatNativeRelocationV1 *rel = &g_array_index(
+                    relocations, LatNativeRelocationV1, k);
+                if (offset >= rel->code_offset &&
+                    offset - rel->code_offset < (uint64_t)rel->slots * 4) {
+                    matches = false;
+                }
+            }
+            fprintf(stderr,
+                    "latc: provenance-stage=native-final pc=0x%llx "
+                    "offset=%u code_offset=%llu word=0x%08x "
+                    "origin=%s certified=0\n",
+                    (unsigned long long)(segment->details.seg_begin +
+                                         tbs[i].offset_in_segment),
+                    record->offset, (unsigned long long)offset, word,
+                    matches ? "numeric-bits" : "unknown");
+        }
+    }
+}
+
 int latc_native_export(const char *path, const char *guest_path,
         const aot_header *header, const aot_segment *segments,
         const aot_tb *tbs, uintptr_t tb_table_end,
+        const uint64_t *config_dependencies, size_t dependency_count,
+        const GArray *const *numeric_words, size_t numeric_owner_count,
         const void *code, uint64_t code_size, uint64_t aot_code_offset)
 {
     GByteArray *guest = NULL;
@@ -1084,6 +1149,12 @@ int latc_native_export(const char *path, const char *guest_path,
     native_pc_maps = g_array_new(FALSE, FALSE, sizeof(LatNativePcMapV2));
     native_tus = g_array_new(FALSE, FALSE, sizeof(LatNativeTuV1));
     size_t tb_count = (tb_table_end - (uintptr_t)tbs) / sizeof(*tbs);
+    if (!config_dependencies || dependency_count != tb_count ||
+        ((numeric_words || numeric_owner_count) &&
+         (!numeric_words || numeric_owner_count != tb_count))) {
+        fprintf(stderr, "latc: native configuration dependency count mismatch\n");
+        goto out;
+    }
     const char *trace_pc_text = getenv("LATC_TRACE_NATIVE_PC");
     uint64_t trace_pc = trace_pc_text && *trace_pc_text ?
                         strtoull(trace_pc_text, NULL, 0) : UINT64_MAX;
@@ -1146,6 +1217,9 @@ int latc_native_export(const char *path, const char *guest_path,
             fprintf(stderr, "latc: native TB %zu is outside a TU\n", i);
             goto out;
         }
+        LatNativeTuV1 *native_tu = &g_array_index(native_tus, LatNativeTuV1, tu_index);
+        native_tu->config_dependency_version = LAT_TRANSLATION_CONFIG_VERSION;
+        native_tu->config_dependencies |= config_dependencies[i];
         uint64_t executable_end = code_offset + tbs[i].tb_cache_size;
         if (tbs[i].tu_search_addr_offset &&
             tbs[i].tu_search_addr_offset < tbs[i].tb_cache_size) {
@@ -1386,6 +1460,10 @@ int latc_native_export(const char *path, const char *guest_path,
         g_array_free(missing_targets, TRUE);
     }
 
+    trace_final_numeric_words(header, segments, tbs, tb_count, numeric_words,
+                              native_tus, native_relocations, native_code,
+                              code_size, aot_code_offset);
+
     LatNativeImageHeaderV2 native_header = {0};
     memcpy(native_header.magic, LAT_NATIVE_IMAGE_MAGIC, 8);
     native_header.version = LAT_NATIVE_IMAGE_VERSION;
@@ -1396,6 +1474,18 @@ int latc_native_export(const char *path, const char *guest_path,
                           LAT_NATIVE_IMAGE_NEEDS_FALLBACK |
                           LAT_NATIVE_IMAGE_LBT | LAT_NATIVE_IMAGE_LSX |
                           LAT_NATIVE_IMAGE_NO_PRECISE_SIGNAL_MAP;
+    if (latx_translation_config_native_replay_digest(
+            native_header.translation_config_sha256)) {
+        native_header.flags |= LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED;
+        GBytes *config = latx_translation_config_native_replay_bytes();
+        gsize size = g_bytes_get_size(config);
+        if (size > LAT_NATIVE_CONFIG_CAPACITY) {
+            fprintf(stderr, "latc: native configuration is too large\n");
+            goto out;
+        }
+        native_header.translation_config_projection = 1;
+        native_header.translation_config_size = size;
+    }
     native_header.guest_entry = guest_entry;
     native_header.preferred_guest_base = guest_base;
     native_header.guest_image_offset = sizeof(native_header);
@@ -1465,6 +1555,12 @@ int latc_native_export(const char *path, const char *guest_path,
             sizeof(LatNativeTuV1), native_tus->len, output) !=
             native_tus->len)) {
         goto write_error;
+    }
+    if (native_header.translation_config_size) {
+        GBytes *config = latx_translation_config_native_replay_bytes();
+        gsize size;
+        const void *data = g_bytes_get_data(config, &size);
+        if (fwrite(data, size, 1, output) != 1) goto write_error;
     }
     if (fclose(output)) {
         goto write_error_unclosed;

@@ -335,6 +335,7 @@ int ir1_is_call(IR1_INST *ir1);
 int ir1_is_return(IR1_INST *ir1);
 int ir1_is_indirect(IR1_INST *ir1);
 int ir1_is_syscall(IR1_INST *ir1);
+bool ir1_is_terminal_trap(IR1_INST *ir1);
 bool ir1_is_tb_ending(IR1_INST *ir1);
 
 bool ir1_is_cf_use(IR1_INST *ir1);

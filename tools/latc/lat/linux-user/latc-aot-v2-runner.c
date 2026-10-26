@@ -15,6 +15,9 @@
 #include "latcd-protocol.h"
 #include "auto-config.h"
 #include "lat-tb-key-set.h"
+#include "lat-key-journal.h"
+#include "lat-translation-config.h"
+#include "latx-config.h"
 #include "guest-elf-map.h"
 #include "module-loader.h"
 #include "qemu-def.h"
@@ -62,6 +65,12 @@ typedef struct LatAotV2ModuleStats {
     int source_fd;
     GHashTable *jit_tbset;
     GHashTable *pending_tbset;
+    GHashTable *committed_tbset;
+    int journal_directory;
+    uint16_t key_exec_range_count;
+    LatGuestElfRangeV2 key_exec_ranges[LAT_GUEST_ELF_MAX_EXEC_RANGES];
+    LatKeyJournal journal;
+    LatKeyJournalIdentity journal_identity;
     struct LatAotV2ModuleStats *next;
 } LatAotV2ModuleStats;
 
@@ -148,6 +157,8 @@ typedef struct LatAotV2SourceMapping {
     struct LatAotV2SourceMapping *next;
 } LatAotV2SourceMapping;
 static LatAotV2PendingMapping *pending_mapping_head;
+static _Atomic bool pending_key_discovery;
+static _Atomic bool key_discovery_failed;
 static LatAotV2PendingMapping **pending_mapping_tail = &pending_mapping_head;
 static LatAotV2SourceMapping *source_mappings;
 static __thread LatAotModuleInstanceV2 *aot_v2_current_instance;
@@ -178,12 +189,31 @@ static bool aot_v2_strict;
 static bool aot_v2_reject_miss;
 /* Collect keys without loading provisional modules into the live process. */
 static bool aot_v2_collect_only;
+static bool key_journal_enabled;
+static int key_journal_config_fd = -1;
+static uint8_t key_journal_config_digest[32];
+static pthread_mutex_t key_journal_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct LatAotV2KeyRetry {
+    CPUState *cpu;
+    target_ulong pc;
+    target_ulong outer_pc;
+    target_ulong resume_pc;
+    uint32_t resume_cflags;
+    uint32_t cflags;
+    uint32_t outer_cflags;
+    bool scope_active;
+    bool atomic_step;
+    bool pending;
+    bool resume_jrra;
+} LatAotV2KeyRetry;
+static __thread LatAotV2KeyRetry key_retry;
 
 void latc_aot_v2_consume_environment(void)
 {
     aot_v2_strict = getenv("LATX_AOT_V2_STRICT") != NULL;
     aot_v2_reject_miss = getenv("LATC_STRICT_AOT") != NULL;
     aot_v2_collect_only = getenv("LATX_AOT_V2_COLLECT_ONLY") != NULL;
+    key_journal_enabled = getenv("LATX_AOT_V2_KEY_JOURNAL") != NULL;
 }
 
 bool latc_aot_v2_strict_enabled(void)
@@ -203,6 +233,28 @@ static _Atomic uint64_t revalidation_failures;
 
 static bool submit_runtime_tbsets(void);
 static void schedule_runtime_tbset_submission(void);
+static _Atomic int submission_channel = -1;
+
+void latc_aot_v2_prepare_submission_channel(void)
+{
+    if (!latc_aot_v2_mapping_enabled() ||
+        aot_v2_strict || aot_v2_reject_miss ||
+        (getenv("LATC_STRICT_FILE_AOT") && !getenv("LATC_STRICT_AOT_COLLECT")) ||
+        (getenv("LATC_STRICT_AOT_COLLECT") &&
+         getenv("LATC_STRICT_AOT_COLLECT_NO_SUBMIT"))) {
+        return;
+    }
+    pthread_mutex_lock(&submission_lock);
+    if (submission_channel < 0) {
+        char error[256];
+        submission_channel = lat_aot_open_channel(error, sizeof(error));
+        if (submission_channel < 0 && getenv("LATX_AOT_V2_REPORT")) {
+            fprintf(stderr, "latx: AOT v2 submission channel unavailable: %s\n",
+                    error);
+        }
+    }
+    pthread_mutex_unlock(&submission_lock);
+}
 
 static bool next_compiler_request_id(uint64_t *request_id)
 {
@@ -347,6 +399,7 @@ void latc_aot_v2_fork_start(void)
     pthread_mutex_lock(&elf_tracker_lock);
     pthread_mutex_lock(&submission_control_lock);
     pthread_mutex_lock(&submission_lock);
+    pthread_mutex_lock(&key_journal_lock);
     pthread_mutex_lock(&tbset_lock);
 }
 
@@ -354,6 +407,7 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
 {
     if (!child) {
         pthread_mutex_unlock(&tbset_lock);
+        pthread_mutex_unlock(&key_journal_lock);
         pthread_mutex_unlock(&submission_lock);
         pthread_mutex_unlock(&submission_control_lock);
         pthread_mutex_unlock(&elf_tracker_lock);
@@ -395,6 +449,10 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
     aot_v2_target_cache = NULL;
     signal_recovery_pending = 0;
     submission_thread_started = false;
+    memset(&key_retry, 0, sizeof(key_retry));
+    for (LatAotV2ModuleStats *stats = atomic_load(&module_stats); stats; stats = stats->next) {
+        lat_key_journal_close(&stats->journal);
+    }
 #ifdef CONFIG_LATX_FAST_JMPCACHE
     if (cpu) {
         latx_aot_v2_fast_jmp_cache_set_context(cpu, NULL);
@@ -405,6 +463,7 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
 #endif
 
     pthread_mutex_unlock(&tbset_lock);
+    pthread_mutex_unlock(&key_journal_lock);
     pthread_mutex_unlock(&submission_lock);
     pthread_mutex_unlock(&submission_control_lock);
     pthread_mutex_unlock(&elf_tracker_lock);
@@ -751,12 +810,52 @@ int latc_aot_v2_relocate_source_fd(int fd)
     int result = 0;
     int saved_errno;
     bool submission_locked = false;
+    bool journal_locked = false;
 
     if (fd < 0) {
         return 0;
     }
 retry:
     pthread_mutex_lock(&elf_tracker_lock);
+    if (key_journal_enabled) {
+        if (pthread_mutex_trylock(&submission_lock)) {
+            pthread_mutex_unlock(&elf_tracker_lock);
+            pthread_mutex_lock(&submission_lock);
+            pthread_mutex_unlock(&submission_lock);
+            goto retry;
+        }
+        submission_locked = true;
+        pthread_mutex_lock(&key_journal_lock);
+        journal_locked = true;
+        if (relocate_source_fd(&key_journal_config_fd, fd)) {
+            result = -1;
+            goto out;
+        }
+        for (LatAotV2ModuleStats *stats = atomic_load(&module_stats); stats; stats = stats->next) {
+            if (relocate_source_fd(&stats->journal_directory, fd) ||
+                relocate_source_fd(&stats->journal.fd, fd)) {
+                result = -1;
+                goto out;
+            }
+        }
+    }
+    if (submission_channel == fd) {
+        if (!submission_locked && pthread_mutex_trylock(&submission_lock)) {
+            pthread_mutex_unlock(&elf_tracker_lock);
+            pthread_mutex_lock(&submission_lock);
+            pthread_mutex_unlock(&submission_lock);
+            goto retry;
+        }
+        submission_locked = true;
+        if (submission_channel == fd) {
+            int replacement = fd;
+            if (relocate_source_fd(&replacement, fd)) {
+                result = -1;
+                goto out;
+            }
+            submission_channel = replacement;
+        }
+    }
     for (LatAotV2ModuleStats *stats = atomic_load_explicit(
              &module_stats, memory_order_acquire); stats; stats = stats->next) {
         if (stats->source_fd != fd) {
@@ -796,6 +895,7 @@ retry:
     }
 out:
     saved_errno = errno;
+    if (journal_locked) pthread_mutex_unlock(&key_journal_lock);
     if (submission_locked) {
         pthread_mutex_unlock(&submission_lock);
     }
@@ -826,6 +926,10 @@ static LatAotV2ModuleStats *add_module_stats(
          stats = stats->next) {
         if (!memcmp(stats->source_sha256, info->source_sha256,
                     sizeof(stats->source_sha256))) {
+            if (key_journal_enabled &&
+                atomic_load(&stats->source_base) != info->load_bias + info->preferred_base) {
+                atomic_store(&key_discovery_failed, true);
+            }
             atomic_store_explicit(&stats->guest_begin, info->guest_begin,
                                   memory_order_release);
             atomic_store_explicit(&stats->guest_end, info->guest_end,
@@ -847,6 +951,17 @@ static LatAotV2ModuleStats *add_module_stats(
     }
     stats->source_fd = source_fd >= 0 ?
         fcntl(source_fd, F_DUPFD_CLOEXEC, 3) : -1;
+    stats->journal_directory = -1;
+    stats->journal.fd = -1;
+    stats->key_exec_range_count = info->exec_range_count;
+    for (unsigned i = 0; i < info->exec_range_count; i++) {
+        stats->key_exec_ranges[i].begin = info->exact_exec_ranges[i].begin -
+            info->load_bias - info->preferred_base;
+        stats->key_exec_ranges[i].end = info->exact_exec_ranges[i].end -
+            info->load_bias - info->preferred_base;
+    }
+    stats->committed_tbset = g_hash_table_new_full(tbset_entry_hash,
+                                                 tbset_entry_equal, g_free, NULL);
     stats->jit_tbset = g_hash_table_new_full(tbset_entry_hash,
                                              tbset_entry_equal,
                                              g_free, NULL);
@@ -902,6 +1017,77 @@ static bool dispatch_miss_tracking_enabled(void)
 bool latc_aot_v2_is_file_pc(target_ulong guest_pc)
 {
     return module_stats_for_pc(guest_pc) != NULL;
+}
+
+void latc_aot_v2_key_scope_enter(CPUState *cpu, uint32_t cflags, bool atomic_step)
+{
+    target_ulong cs_base;
+    uint32_t flags;
+    cpu_get_tb_cpu_state(cpu->env_ptr, &key_retry.outer_pc, &cs_base, &flags);
+    key_retry.cpu = cpu;
+    key_retry.outer_cflags = cflags;
+    key_retry.atomic_step = atomic_step;
+    key_retry.scope_active = true;
+}
+
+void latc_aot_v2_key_scope_leave(void)
+{
+    key_retry.scope_active = false;
+}
+
+bool latc_aot_v2_key_retry_pending(void)
+{
+    return key_retry.pending;
+}
+
+bool latc_aot_v2_key_resume_jrra(target_ulong pc, uint32_t cflags)
+{
+    bool resume = key_retry.resume_jrra && pc == key_retry.resume_pc &&
+        cflags == key_retry.resume_cflags;
+    if (resume) key_retry.resume_jrra = false;
+    return resume;
+}
+
+void latc_aot_v2_key_gate(CPUState *cpu, target_ulong pc, uint32_t cflags)
+{
+    if (!key_journal_enabled) return;
+    if (atomic_load_explicit(&key_discovery_failed, memory_order_acquire)) {
+        fprintf(stderr, "latx: journal gate cannot classify a failed file discovery\n");
+        _exit(125);
+    }
+    bool discovery = atomic_load_explicit(&pending_key_discovery, memory_order_acquire);
+    LatAotV2ModuleStats *stats = module_stats_for_pc(pc);
+    bool committed = false;
+    if (stats && pc >= atomic_load(&stats->source_base)) {
+        LatAotV2TbsetEntry candidate = {
+            .rva = pc - atomic_load(&stats->source_base),
+            .flags = aot_v2_semantic_flags(cflags),
+        };
+        pthread_mutex_lock(&tbset_lock);
+        committed = g_hash_table_contains(stats->committed_tbset, &candidate);
+        pthread_mutex_unlock(&tbset_lock);
+    }
+    if (!discovery && (!stats || committed)) return;
+    if (!key_retry.scope_active || key_retry.cpu != cpu || key_retry.pending) {
+        fprintf(stderr, "latx: journal gate requires a runtime retry scope pc=0x%llx\n",
+                (unsigned long long)pc);
+        _exit(125);
+    }
+    key_retry.pc = pc;
+    key_retry.cflags = cflags;
+    key_retry.pending = true;
+    cpu->exception_index = LATC_AOT_V2_KEY_RETRY;
+    mmap_unlock();
+    cpu_loop_exit(cpu);
+}
+
+void latc_aot_v2_key_publish_check(CPUState *cpu, target_ulong pc, uint32_t cflags)
+{
+    bool saved = key_retry.scope_active;
+    key_retry.scope_active = false;
+    /* Direct publication cannot unwind partially built TU/tunnel state. */
+    latc_aot_v2_key_gate(cpu, pc, cflags);
+    key_retry.scope_active = saved;
 }
 
 static void note_dispatch_miss(LatAotV2ModuleStats *stats,
@@ -1048,7 +1234,7 @@ void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
                                   memory_order_release);
         }
         schedule_runtime_tbset_submission();
-        if (getenv("LATC_STRICT_AOT_COLLECT")) {
+        if (getenv("LATC_STRICT_AOT_COLLECT") && !key_journal_enabled) {
             bool flush;
             pthread_mutex_lock(&tbset_lock);
             int current_pid = getpid();
@@ -1115,7 +1301,8 @@ static bool submit_runtime_tbsets(void)
         pthread_mutex_unlock(&submission_lock);
         return true;
     }
-    if (!getenv("LATC_STRICT_AOT_COLLECT") && !lat_aot_ensure_daemon()) {
+    if (submission_channel < 0 && !getenv("LATC_STRICT_AOT_COLLECT") &&
+        !lat_aot_ensure_daemon()) {
         atomic_fetch_add(&compiler_submission_failures, 1);
         pthread_mutex_unlock(&submission_lock);
         return false;
@@ -1206,10 +1393,27 @@ static bool submit_runtime_tbsets(void)
             g_array_free(entries, TRUE);
             continue;
         }
-        if (tbset_fd < 0 || latcd_client_submit_keys_fd(
-                socket, stats->source_fd, tbset_fd,
-                LATCD_PRIORITY_LIBRARY, request_id, request_id,
-                error, sizeof(error))) {
+        int submit_result = -1;
+        if (tbset_fd >= 0) {
+            if (submission_channel >= 0) {
+                submit_result = latcd_client_channel_submit_keys_fd(
+                    submission_channel, stats->source_fd, tbset_fd,
+                    LATCD_PRIORITY_LIBRARY, request_id, request_id,
+                    error, sizeof(error));
+                if (submit_result && (errno == EPIPE || errno == ECONNRESET)) {
+                    int saved = errno;
+                    close(submission_channel);
+                    submission_channel = -1;
+                    errno = saved;
+                }
+            } else {
+                submit_result = latcd_client_submit_keys_fd(
+                    socket, stats->source_fd, tbset_fd,
+                    LATCD_PRIORITY_LIBRARY, request_id, request_id,
+                    error, sizeof(error));
+            }
+        }
+        if (submit_result) {
             atomic_fetch_add(&compiler_submission_failures, 1);
             submitted = false;
             if (getenv("LATX_AOT_V2_REPORT")) {
@@ -1360,6 +1564,7 @@ static void drain_mappings(void)
         pthread_mutex_lock(&elf_tracker_lock);
         LatAotV2PendingMapping *pending = pending_mapping_head;
         if (!pending) {
+            atomic_store_explicit(&pending_key_discovery, false, memory_order_release);
             pthread_mutex_unlock(&elf_tracker_lock);
             break;
         }
@@ -1438,6 +1643,7 @@ static void drain_mappings(void)
                     (unsigned long long)pending->file_offset,
                     error[0] ? error : strerror(errno));
         }
+        if (result) atomic_store_explicit(&key_discovery_failed, true, memory_order_release);
         close(pending->fd);
         free(pending);
         pthread_mutex_unlock(&elf_tracker_lock);
@@ -1486,6 +1692,7 @@ void latc_aot_v2_note_mmap(int fd, uint64_t guest_start,
     }
     *pending_mapping_tail = pending;
     pending_mapping_tail = &pending->next;
+    atomic_store_explicit(&pending_key_discovery, true, memory_order_release);
     pthread_mutex_unlock(&elf_tracker_lock);
     drain_mappings();
 }
@@ -2627,8 +2834,137 @@ static int inspect_source(const char *path, LatAotExpectedV2 *expected,
     return 0;
 }
 
+static int prepare_key_journal_config(CPUArchState *env, char *error, size_t size)
+{
+    LatTranslationConfig config;
+    latx_translation_config_capture(env, env_cpu(env)->tcg_cflags, &config);
+    GBytes *bytes;
+    if (lat_translation_config_encode(&config, &bytes, error, size)) return -1;
+    if (lat_translation_config_digest(&config, key_journal_config_digest, error, size)) {
+        g_bytes_unref(bytes);
+        return -1;
+    }
+    gsize count;
+    const void *data = g_bytes_get_data(bytes, &count);
+    int fd = memfd_create("latc-journal-config", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    bool ok = fd >= 0;
+    size_t done = 0;
+    while (ok && done < count) {
+        ssize_t n = write(fd, (const char *)data + done, count - done);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) ok = false;
+        else done += n;
+    }
+    if (ok) ok = !fcntl(fd, F_ADD_SEALS,
+        F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);
+    g_bytes_unref(bytes);
+    if (!ok) {
+        if (fd >= 0) close(fd);
+        snprintf(error, size, "cannot seal journal configuration");
+        return -1;
+    }
+    key_journal_config_fd = fd;
+    return 0;
+}
+
+static int open_key_journal(LatAotV2ModuleStats *stats, char *error, size_t size)
+{
+    if (stats->journal_directory < 0) {
+        char epoch[33];
+        uint64_t request = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
+        int channel = atomic_load(&submission_channel);
+        int result = channel >= 0 ? latcd_client_channel_register_journal_capability(
+            channel, stats->source_fd, key_journal_config_fd, stats->source_sha256,
+            65536, request, epoch, &stats->journal_directory, error, size) :
+            latcd_client_register_journal_capability(lat_aot_socket_path(), stats->source_fd,
+            key_journal_config_fd, stats->source_sha256, 65536, request, epoch,
+            &stats->journal_directory, error, size);
+        if (result) return -1;
+        for (unsigned i = 0; i < 16; i++)
+            stats->journal_identity.epoch[i] = (g_ascii_xdigit_value(epoch[2 * i]) << 4) |
+                                              g_ascii_xdigit_value(epoch[2 * i + 1]);
+        for (unsigned i = 0; i < 32; i++)
+            stats->journal_identity.build_sha256[i] = (g_ascii_xdigit_value(LATC_BUILD_ID[2 * i]) << 4) |
+                g_ascii_xdigit_value(LATC_BUILD_ID[2 * i + 1]);
+        memcpy(stats->journal_identity.source_sha256, stats->source_sha256, 32);
+        memcpy(stats->journal_identity.config_sha256, key_journal_config_digest, 32);
+        digest_bytes(LATC_BUILD_ID, strlen(LATC_BUILD_ID), stats->journal_identity.codegen_sha256);
+    }
+    if (stats->journal.fd < 0)
+        return lat_key_journal_open_at(stats->journal_directory, "keys", &stats->journal_identity,
+                                       true, &stats->journal, error, size);
+    return 0;
+}
+
+bool latc_aot_v2_key_retry_service(CPUState *cpu)
+{
+    if (!key_retry.pending) return false;
+    g_assert(!have_mmap_lock() && !cpu->running && !cpu_in_exclusive_context(cpu));
+    drain_mappings();
+    char error[256] = {0};
+    /* Match fork/relocation ordering and pin source/channel fds through I/O. */
+    pthread_mutex_lock(&submission_lock);
+    pthread_mutex_lock(&key_journal_lock);
+    LatAotV2ModuleStats *stats = module_stats_for_pc(key_retry.pc);
+    bool ok = true;
+    if (stats) {
+        LatAotV2TbsetEntry candidate = {
+            .rva = key_retry.pc - atomic_load(&stats->source_base), .flags = 3,
+        };
+        bool executable = false;
+        for (unsigned i = 0; i < stats->key_exec_range_count; i++) {
+            executable |= candidate.rva >= stats->key_exec_ranges[i].begin &&
+                candidate.rva < stats->key_exec_ranges[i].end;
+        }
+        if (!executable) {
+            fprintf(stderr, "latx: journal key is outside source executable ranges\n");
+            _exit(125);
+        }
+        pthread_mutex_lock(&tbset_lock);
+        bool committed = g_hash_table_contains(stats->committed_tbset, &candidate);
+        pthread_mutex_unlock(&tbset_lock);
+        if (!committed) {
+            LatTbKey key = {.guest_rva = candidate.rva, .flags = candidate.flags};
+            bool available = atomic_load(&submission_channel) >= 0 || lat_aot_ensure_daemon();
+            if (!available) snprintf(error, sizeof(error), "latcd unavailable for journal registration");
+            ok = available && !open_key_journal(stats, error, sizeof(error)) &&
+                !lat_key_journal_append(&stats->journal, &key, NULL, error, sizeof(error));
+            if (ok) {
+                LatAotV2TbsetEntry *entry = g_new(LatAotV2TbsetEntry, 1);
+                *entry = candidate;
+                pthread_mutex_lock(&tbset_lock);
+                g_hash_table_add(stats->committed_tbset, entry);
+                pthread_mutex_unlock(&tbset_lock);
+            }
+        }
+    }
+    pthread_mutex_unlock(&key_journal_lock);
+    pthread_mutex_unlock(&submission_lock);
+    if (!ok) {
+        fprintf(stderr, "latx: journal commit failed before TB execution pc=0x%llx: %s\n",
+            (unsigned long long)key_retry.pc, error);
+        _exit(125);
+    }
+    if (key_retry.atomic_step) cpu->exception_index = -1;
+    else {
+        cpu->cflags_next_tb = key_retry.outer_cflags;
+        key_retry.resume_jrra = true;
+        key_retry.resume_pc = key_retry.outer_pc;
+        key_retry.resume_cflags = key_retry.outer_cflags;
+    }
+    key_retry.pending = false;
+    return true;
+}
+
 int latc_aot_v2_prepare(CPUArchState *env)
 {
+    if (key_journal_enabled && key_journal_config_fd < 0) {
+        char error[256] = "missing daemon socket";
+        if (!lat_aot_socket_path() || prepare_key_journal_config(env, error, sizeof(error))) {
+            fprintf(stderr, "latx: cannot prepare key journal: %s\n", error);
+            _exit(125);
+        }
+    }
     const char *module_path = lat_aot_module_path();
     const char *source_path = getenv("LATX_AOT_V2_SOURCE");
     bool strict = aot_v2_strict;

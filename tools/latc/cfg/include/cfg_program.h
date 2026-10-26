@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ijmp_resolve.h"
+
 typedef enum {
     CFG_TB_FALLTHROUGH,
     CFG_TB_CALL,
@@ -93,6 +95,8 @@ typedef struct {
     size_t error_function_count;
     size_t resolved_jump_tables;
     size_t resolved_jump_table_targets;
+    IjmpInbound *inbound;
+    size_t inbound_count;
 } CfgProgram;
 
 typedef struct {
@@ -101,6 +105,8 @@ typedef struct {
 
 int cfg_analyze_elf(const char *path, const CfgAnalyzeOptions *options,
                     CfgProgram *program, char *error, size_t error_size);
+int cfg_load_exec_ranges(const char *path, CfgProgram *program,
+                          char *error, size_t error_size);
 void cfg_program_destroy(CfgProgram *program);
 bool cfg_program_address_is_executable(const CfgProgram *program,
                                        uint64_t address);

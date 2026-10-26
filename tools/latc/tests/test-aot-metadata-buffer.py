@@ -90,7 +90,9 @@ static void expect_failure(unsigned which)
     }
     int status;
     assert(waitpid(pid, &status, 0) == pid);
-    assert(WIFEXITED(status) && WEXITSTATUS(status) == EXIT_FAILURE);
+    assert(WIFEXITED(status));
+    assert(WEXITSTATUS(status) == (which == 4 ?
+           LATC_EXIT_CODE_BUFFER_EXHAUSTED : EXIT_FAILURE));
 }
 int main(void)
 {

@@ -1,4 +1,5 @@
 #include "native-image.h"
+#include "lat-translation-config.h"
 
 #include <elf.h>
 #include <stdarg.h>
@@ -134,6 +135,42 @@ int lat_native_image_validate(const void *data, size_t size,
         header->lat_build_id[LAT_NATIVE_BUILD_ID_SIZE - 1] != '\0') {
         return invalid(error, error_size, "invalid LAT build ID");
     }
+    static const uint8_t zero_digest[32];
+    if (!!(header->flags & LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED) ==
+        !memcmp(header->translation_config_sha256, zero_digest, 32)) {
+        return invalid(error, error_size,
+                       "invalid native translation configuration identity");
+    }
+    if (header->flags & LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED) {
+        LatTranslationConfig config, identity;
+        uint8_t digest[32];
+        if (header->translation_config_projection != 1 ||
+            header->translation_config_size > LAT_NATIVE_CONFIG_CAPACITY ||
+            header->translation_config_size > size ||
+            lat_translation_config_decode(
+                (const uint8_t *)data + size - header->translation_config_size,
+                header->translation_config_size, NULL, &config, error, error_size) ||
+            !config.native_replay_domain || config.compatibility_complete ||
+            config.guest_abi != LAT_CONFIG_ABI_X86_64 ||
+            config.values[LAT_CONFIG_LEGACY_AOT] != 0 ||
+            config.values[LAT_CONFIG_PARALLEL] != 1 ||
+            config.values[LAT_CONFIG_SOFTFPU] ||
+            config.values[LAT_CONFIG_JR_RA] ||
+            config.values[LAT_CONFIG_ANONYM] ||
+            config.values[LAT_CONFIG_MEM_TEST] ||
+            config.values[LAT_CONFIG_MINKE_16K_PAGE_CHECK] ||
+            lat_translation_config_digest(&config, digest, error, error_size) ||
+            memcmp(digest, header->translation_config_sha256, 32) ||
+            lat_translation_config_init(&identity, header->lat_build_id,
+                LAT_CONFIG_ABI_X86_64, config.feature_count, error, error_size) ||
+            memcmp(identity.build_id, config.build_id, 32)) {
+            return invalid(error, error_size, "invalid native configuration snapshot");
+        }
+    } else if (header->translation_config_size ||
+               header->translation_config_projection) {
+        return invalid(error, error_size, "unexpected native configuration snapshot");
+    }
+    size_t payload_size = size - header->translation_config_size;
     if (header->tb_count > UINT32_MAX) {
         return invalid(error, error_size, "native image has too many TBs");
     }
@@ -188,12 +225,12 @@ int lat_native_image_validate(const void *data, size_t size,
     }
     table_size = header->tu_count * sizeof(*tus);
     if (!header->tu_count && !header->tu_table_offset &&
-        header->pc_map_offset + header->pc_map_count * sizeof(*pc_maps) == size) {
+        header->pc_map_offset + header->pc_map_count * sizeof(*pc_maps) == payload_size) {
         table_size = 0;
     } else if (!range_valid(header->tu_table_offset, table_size, size) ||
         header->tu_table_offset !=
             header->pc_map_offset + header->pc_map_count * sizeof(*pc_maps) ||
-        header->tu_table_offset + table_size != size) {
+        header->tu_table_offset + table_size != payload_size) {
         return invalid(error, error_size, "native TU table is truncated");
     }
     if (!header->pc_map_count &&
@@ -204,6 +241,13 @@ int lat_native_image_validate(const void *data, size_t size,
     tus = (const void *)((const unsigned char *)data +
                          header->tu_table_offset);
     for (uint64_t i = 0; i < header->tu_count; i++) {
+        if (tus[i].config_dependency_reserved ||
+            (tus[i].config_dependency_version != 0 &&
+             tus[i].config_dependency_version != LAT_TRANSLATION_CONFIG_VERSION) ||
+            (tus[i].config_dependencies & ~LAT_CONFIG_ALL_BITS) ||
+            (!tus[i].config_dependency_version && tus[i].config_dependencies)) {
+            return invalid(error, error_size, "invalid native TU configuration dependencies");
+        }
         if (!tus[i].code_size || tus[i].code_offset >= header->code_size ||
             tus[i].code_size > header->code_size - tus[i].code_offset ||
             tus[i].search_offset < tus[i].code_offset ||
@@ -220,6 +264,10 @@ int lat_native_image_validate(const void *data, size_t size,
     tbs = (const void *)((const unsigned char *)data +
                          header->tb_table_offset);
     for (uint64_t i = 0; i < header->tb_count; i++) {
+        if ((header->flags & LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED) &&
+            tbs[i].flags != 3) {
+            return invalid(error, error_size, "native replay requires parallel TB keys");
+        }
         if (tbs[i].code_offset >= header->code_size ||
             tbs[i].code_size > header->code_size - tbs[i].code_offset) {
             return invalid(error, error_size,
@@ -320,6 +368,11 @@ int lat_native_image_validate(const void *data, size_t size,
     relocations = (const void *)((const unsigned char *)data +
                                  header->relocation_offset);
     for (uint64_t i = 0; i < header->relocation_count; i++) {
+        if (relocations[i].kind != LAT_NATIVE_RELOC_IMAGE_DATA &&
+            (relocations[i].data_object_offset || relocations[i].data_object_size ||
+             relocations[i].data_object_alignment || relocations[i].data_object_flags)) {
+            return invalid(error, error_size, "unexpected native constant object metadata");
+        }
         if (relocations[i].physical_target_plus_one > header->tb_count) {
             return invalid(error, error_size,
                            "native relocation %llu has an invalid physical target",
@@ -353,20 +406,31 @@ int lat_native_image_validate(const void *data, size_t size,
         }
         if (relocations[i].kind == LAT_NATIVE_RELOC_IMAGE_DATA) {
             const LatNativeRelocationV1 *relocation = &relocations[i];
-            uint64_t offset = (uint64_t)relocation->addend;
+            uint64_t offset = relocation->data_object_offset;
             uint32_t words[3] = {0};
             if (relocation->slots < 2 || relocation->slots > 3 ||
                 relocation->target || relocation->physical_target_plus_one ||
-                relocation->addend < 0 || !relocation->reserved ||
-                offset >= header->code_size ||
-                relocation->reserved > header->code_size - offset) {
+                !lat_native_data_object_valid(relocation, header->code_size)) {
                 return invalid(error, error_size,
                                "native data relocation %llu has an invalid range",
                                (unsigned long long)i);
             }
-            uint64_t end = offset + relocation->reserved;
+            uint64_t end = offset + relocation->data_object_size;
             for (uint64_t j = 0; j < header->relocation_count; j++) {
                 const LatNativeRelocationV1 *patch = &relocations[j];
+                if (patch->kind == LAT_NATIVE_RELOC_IMAGE_DATA &&
+                    !lat_native_data_object_valid(patch, header->code_size)) {
+                    return invalid(error, error_size, "invalid native constant object");
+                }
+                if (patch->kind == LAT_NATIVE_RELOC_IMAGE_DATA &&
+                    patch->data_object_offset < end &&
+                    offset < patch->data_object_offset + patch->data_object_size &&
+                    (patch->data_object_offset != offset ||
+                     patch->data_object_size != relocation->data_object_size ||
+                     patch->data_object_alignment != relocation->data_object_alignment ||
+                     patch->data_object_flags != relocation->data_object_flags)) {
+                    return invalid(error, error_size, "conflicting native constant objects");
+                }
                 if (patch->code_offset < end &&
                     (patch->code_offset >= offset ||
                      (uint64_t)patch->slots * 4 > offset - patch->code_offset)) {
@@ -466,6 +530,13 @@ int lat_native_image_merge_files(const char *base_path,
     const LatNativeImageHeaderV2 *base = (const void *)base_data;
     const LatNativeImageHeaderV2 *delta = (const void *)delta_data;
     if (base->flags != delta->flags ||
+        memcmp(base->translation_config_sha256,
+               delta->translation_config_sha256, 32) ||
+        base->translation_config_size != delta->translation_config_size ||
+        base->translation_config_projection != delta->translation_config_projection ||
+        memcmp(base_data + base_size - base->translation_config_size,
+               delta_data + delta_size - delta->translation_config_size,
+               base->translation_config_size) ||
         base->guest_entry != delta->guest_entry ||
         base->preferred_guest_base != delta->preferred_guest_base ||
         base->guest_image_size != delta->guest_image_size ||
@@ -522,7 +593,20 @@ int lat_native_image_merge_files(const char *base_path,
         goto out;
     }
 
-    uint64_t delta_code_offset = align_up(base->code_size, 32);
+    uint64_t delta_alignment = 32;
+    const LatNativeRelocationV1 *delta_objects =
+        (const void *)(delta_data + delta->relocation_offset);
+    for (uint64_t i = 0; i < delta->relocation_count; i++) {
+        if (delta_objects[i].kind == LAT_NATIVE_RELOC_IMAGE_DATA &&
+            delta_objects[i].data_object_alignment > delta_alignment) {
+            delta_alignment = delta_objects[i].data_object_alignment;
+        }
+    }
+    if (base->code_size > UINT64_MAX - (delta_alignment - 1)) {
+        invalid(error, error_size, "merged native constant alignment overflows");
+        goto out;
+    }
+    uint64_t delta_code_offset = align_up(base->code_size, delta_alignment);
     if (delta->code_size > UINT64_MAX - delta_code_offset) {
         invalid(error, error_size, "merged native code is too large");
         goto out;
@@ -582,8 +666,13 @@ int lat_native_image_merge_files(const char *base_path,
         invalid(error, error_size, "merged native TU table is too large");
         goto out;
     }
-    uint64_t output_size64 = merged.tu_table_offset +
+    uint64_t payload_end = merged.tu_table_offset +
         merged.tu_count * sizeof(LatNativeTuV1);
+    if (payload_end > UINT64_MAX - merged.translation_config_size) {
+        invalid(error, error_size, "merged configuration size overflows");
+        goto out;
+    }
+    uint64_t output_size64 = payload_end + merged.translation_config_size;
     size_t output_size = (size_t)output_size64;
     if ((uint64_t)output_size != output_size64 ||
         !(output_data = calloc(output_size ? output_size : 1, 1))) {
@@ -592,6 +681,9 @@ int lat_native_image_merge_files(const char *base_path,
     }
 
     memcpy(output_data, &merged, sizeof(merged));
+    memcpy(output_data + payload_end,
+           base_data + base_size - base->translation_config_size,
+           base->translation_config_size);
     memcpy(output_data + merged.guest_image_offset,
            base_data + base->guest_image_offset, base->guest_image_size);
     memcpy(output_data + merged.code_offset,
@@ -659,6 +751,8 @@ int lat_native_image_merge_files(const char *base_path,
             delta_code_offset;
         if (delta_relocations[i].kind == LAT_NATIVE_RELOC_IMAGE_DATA) {
             merged_relocations[base->relocation_count + i].addend +=
+                delta_code_offset;
+            merged_relocations[base->relocation_count + i].data_object_offset +=
                 delta_code_offset;
         }
         uint32_t physical =
@@ -820,6 +914,10 @@ int lat_native_image_mark_x86_static_file(const char *path,
         goto out;
     }
     LatNativeImageHeaderV2 *header = (void *)data;
+    if (header->flags & LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED) {
+        invalid(error, error_size, "native configuration replay cannot be marked executable");
+        goto out;
+    }
     header->flags |= LAT_NATIVE_IMAGE_X86_STATIC_EXEC;
     if (lat_native_image_validate(data, size, error, error_size)) {
         goto out;

@@ -27,6 +27,7 @@
 #include <tunnel_lib.h>
 #include <latx-options.h>
 #include "qemu/cacheflush.h"
+#include "latc-aot-v2-runner.h"
 
 #include "aot.h"
 
@@ -476,6 +477,7 @@ static void update_tcg_context_after_asm(void *gen_code_buf,
 static bool is_existed_tb(CPUState *cpu,
     TranslationBlock *tb, target_ulong target_pc, void *gen_code_buf)
 {
+    latc_aot_v2_key_publish_check(cpu, target_pc, tb->cflags);
     target_ulong virt_page2, phys_page2, phys_pc;
     phys_pc = get_page_addr_code(cpu->env_ptr, target_pc);
     assert(phys_pc != -1);
