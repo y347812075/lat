@@ -1842,6 +1842,47 @@ static char *cached_fd_digest(int fd)
     return digest;
 }
 
+static int release_copy_task(const LatcdConfig *config, int task_pin,
+                              char *error, size_t error_size)
+{
+    char data[65537];
+    struct stat task, output;
+    GKeyFile *record = g_key_file_new();
+    GKeyFile *release = g_key_file_new();
+    char *id = NULL, *name = NULL;
+    int root = -1, gc = -1, releases = -1, temporary = -1, lease = -1;
+    if (fstat(task_pin, &task) || task.st_size <= 0 || task.st_size > 65536 ||
+        pread(task_pin, data, task.st_size, 0) != task.st_size ||
+        !g_key_file_load_from_data(record, data, task.st_size, G_KEY_FILE_NONE, NULL)) goto out;
+    id = g_key_file_get_string(record, "task", "id", NULL);
+    name = g_key_file_get_string(record, "output", "name", NULL);
+    if (!id || !g_uuid_string_is_valid(id) || !name || !*name || name[0] == '.' ||
+        strchr(name, '/')) goto out;
+    root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (root < 0 || (gc = open_task_directory(root, ".gc")) < 0 ||
+        (releases = open_task_directory(gc, "copy-releases")) < 0 ||
+        (temporary = openat(root, ".tmp", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) < 0 ||
+        !fstatat(temporary, name, &output, AT_SYMLINK_NOFOLLOW) || errno != ENOENT ||
+        fsync(temporary)) goto out;
+    g_key_file_set_string(release, "handoff", "version", "1");
+    g_key_file_set_string(release, "handoff", "task_id", id);
+    g_key_file_set_string(release, "handoff", "state", "RELEASED");
+    g_key_file_set_uint64(release, "handoff", "task_device", task.st_dev);
+    g_key_file_set_uint64(release, "handoff", "task_inode", task.st_ino);
+    lease = persist_task_record(releases, id, release);
+out:
+    if (lease >= 0) close(lease);
+    if (temporary >= 0) close(temporary);
+    if (releases >= 0) close(releases);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    g_free(name);
+    g_free(id);
+    g_key_file_free(record);
+    g_key_file_free(release);
+    return lease < 0 ? fail(error, error_size, "cannot persist copy release") : 0;
+}
+
 static int snapshot_current_pair(const LatcdConfig *config,
                                  const LatcdCurrentManifest *manifest,
                                  const uint8_t digest[32], const char *temporary,
@@ -2946,6 +2987,13 @@ out:
     g_free(base_native);
     if (base_module) unlink(base_module);
     g_free(base_module);
+    for (unsigned i = 2; i < 4; i++) {
+        if (baseline_pins[i] >= 0) {
+            char release_error[128];
+            if (release_copy_task(config, baseline_pins[i], release_error, sizeof(release_error)))
+                fprintf(stderr, "latcd: %s; retaining copy task root\n", release_error);
+        }
+    }
     for (unsigned i = 0; i < 4; i++) {
         if (baseline_pins[i] >= 0) close(baseline_pins[i]);
     }

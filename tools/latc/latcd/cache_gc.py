@@ -102,6 +102,7 @@ class Inventory:
         self.task_refs = {}
         self.copy_receipts = {}
         self.copy_handoffs = {}
+        self.copy_releases = {}
         self.frozen = set()
         self.freeze_all = False
         self.count = 0
@@ -148,6 +149,8 @@ class Inventory:
                         self.read_copy_receipt(fd, name, st)
                     if prefix == ".gc/copy-handoffs":
                         self.read_copy_handoff(fd, name, st)
+                    if prefix == ".gc/copy-releases":
+                        self.read_copy_handoff(fd, name, st, releasing=True)
                     if stat.S_ISDIR(st.st_mode):
                         child = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
                                         os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=fd)
@@ -162,8 +165,8 @@ class Inventory:
         if identity(os.fstat(fd)) != identity(before):
             self.error(prefix or ".", "concurrent_change", "directory changed during scan")
 
-    def read_copy_handoff(self, directory, name, before):
-        relative = ".gc/copy-handoffs/" + name
+    def read_copy_handoff(self, directory, name, before, releasing=False):
+        relative = (".gc/copy-releases/" if releasing else ".gc/copy-handoffs/") + name
         try:
             if (not name.endswith(".ini") or str(uuid.UUID(name[:-4])) != name[:-4] or
                     not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
@@ -183,16 +186,19 @@ class Inventory:
             if parser.defaults() or parser.sections() != ["handoff"]:
                 raise ValueError("invalid copy handoff sections")
             value = dict(parser["handoff"])
-            numbers = {"task_device", "task_inode", "receipt_device", "receipt_inode"}
+            numbers = {"task_device", "task_inode"}
+            if not releasing:
+                numbers |= {"receipt_device", "receipt_inode"}
             if (set(value) != numbers | {"version", "task_id", "state"} or
                     value["version"] != "1" or value["task_id"] != name[:-4] or
-                    value["state"] != "SNAPSHOT_OWNED"):
+                    value["state"] != ("RELEASED" if releasing else "SNAPSHOT_OWNED")):
                 raise ValueError("invalid copy handoff fields")
             for key in numbers:
                 if not re.fullmatch(r"[0-9]+", value[key]) or int(value[key]) >= 2**64:
                     raise ValueError("invalid copy handoff integer")
                 value[key] = int(value[key])
-            self.copy_handoffs[relative] = dict(value, binding_observed=False,
+            target = self.copy_releases if releasing else self.copy_handoffs
+            target[relative] = dict(value, binding_observed=False,
                                                 input_reference_released=False)
         except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
             self.freeze_all = True
@@ -636,6 +642,23 @@ class Inventory:
         return output
 
     def report(self):
+        for relative, release in self.copy_releases.items():
+            task_path = ".gc/tasks/" + release["task_id"] + ".ini"
+            task, row = self.tasks.get(task_path), self.entries.get(task_path)
+            if (not task or task.get("kind") != "COPY" or not row or
+                    (row["device"], row["inode"]) != (release["task_device"], release["task_inode"])):
+                self.freeze_all = True
+                self.error(relative, "copy_release_binding_changed", task_path)
+                continue
+            release["binding_observed"] = True
+            output = ".tmp/" + task["objects"]["output"]["name"]
+            if output in self.entries or task["lease_observation"] != "NO_HOLDER_OBSERVED":
+                continue
+            task["copy_released"] = True
+            task["input_reference_released"] = True
+            release["input_reference_released"] = True
+            for target, refs in self.task_refs.items():
+                self.task_refs[target] = [ref for ref in refs if ref["task"] != task_path]
         for relative, receipt in self.copy_receipts.items():
             task_path = ".gc/tasks/" + receipt["task_id"] + ".ini"
             task, row = self.tasks.get(task_path), self.entries.get(task_path)
@@ -802,6 +825,7 @@ class Inventory:
                 "task_count": len(self.tasks), "tasks": self.tasks,
                 "copy_receipt_count": len(self.copy_receipts), "copy_receipts": self.copy_receipts,
                 "copy_handoff_count": len(self.copy_handoffs), "copy_handoffs": self.copy_handoffs,
+                "copy_release_count": len(self.copy_releases), "copy_releases": self.copy_releases,
                 "transactions": self.transactions,
                 "retirement_plan": {"grace_us": self.grace_us,
                                     "clock": ({"boot_id": self.clock[0], "boottime_us": self.clock[1]}

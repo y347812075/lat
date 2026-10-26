@@ -227,6 +227,19 @@ class PlannerTest(unittest.TestCase):
         self.assertFalse(value['binding_observed'])
         self.assertFalse(next(iter(self.run_plan()['copy_handoffs'].values()))[
             'input_reference_released'])
+        released = (f'[handoff]\nversion=1\ntask_id={task.stem}\nstate=RELEASED\n'
+                    f'task_device={root.st_dev}\ntask_inode={root.st_ino}\n')
+        release = self.put(f'.gc/copy-releases/{task.name}', released.encode())
+        with task.open('rb') as pin:
+            fcntl.flock(pin, fcntl.LOCK_SH)
+            self.assertFalse(next(iter(self.run_plan()['tasks'].values())).get('copy_released', False))
+        plan = self.run_plan()
+        self.assertTrue(next(iter(plan['tasks'].values()))['copy_released'])
+        self.put('.tmp/native-ABC', b'recreated')
+        self.assertFalse(next(iter(self.run_plan(success=False)['tasks'].values())).get('copy_released', False))
+        output.unlink()
+        self.put(str(release.relative_to(self.root)), released.replace('state=RELEASED', 'state=DONE').encode())
+        self.run_plan(success=False)
 
     def generation(self, digit, *, tbset=None):
         stem = SOURCE + "-" + digit * 64

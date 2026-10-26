@@ -23,7 +23,7 @@ def run(prefix, guest, work):
                     str(guest), str(tbset)], env=env, check=True)
     subprocess.run([str(prefix / 'bin/latc'), 'emit-static-tbset', str(guest),
                     '-o', str(full)], env=env, check=True)
-    for stage in ('recorded', 'synced', 'copied', 'handedoff'):
+    for stage in ('recorded', 'synced', 'copied', 'handedoff', 'released'):
         directory = work / stage
         directory.mkdir(mode=0o700)
         cache, socket = directory / 'cache', directory / 's'
@@ -58,6 +58,28 @@ def run(prefix, guest, work):
                 daemon.wait(timeout=30)
         current = next(cache.glob('*.current'))
         original = current.read_bytes()
+        if stage == 'released':
+            with (directory / 'daemon.log').open('wb') as log:
+                daemon = start({}, log)
+                try:
+                    submit(full, log)
+                    subprocess.run([str(latcd), '--flush-source', '--socket', str(socket), str(guest)],
+                                   env=env, stdout=log, stderr=log, check=True, timeout=120)
+                finally:
+                    daemon.terminate()
+                    daemon.wait(timeout=30)
+            observed = plan()
+            (directory / 'released-plan.json').write_text(json.dumps(observed, indent=2))
+            copies = [task for task in observed['tasks'].values() if task.get('kind') == 'COPY']
+            assert len(copies) == 2
+            assert observed['copy_release_count'] == 2
+            assert all(task['copy_released'] for task in copies)
+            assert all(not (cache / '.tmp' / task['objects']['output']['name']).exists() for task in copies)
+            copy_names = {'.gc/tasks/' + task['id'] + '.ini' for task in copies}
+            assert not any(ref['task'] in copy_names for row in observed['entries']
+                           for ref in row['task_references'])
+            assert current.read_bytes() != original
+            continue
         ready, notify = os.pipe()
         resume, release = os.pipe()
         daemon = None
