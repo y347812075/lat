@@ -3,6 +3,8 @@
     {"source": "tools/latc/aot-v2/include/lat-translation-config.h", "target": "include/lat-translation-config.h"},
     {"source": "tools/latc/aot-v2/common/translation-config.c", "target": "linux-user/translation-config.c"},
     {"source": "tools/latc/aot-v2/common/key-journal.c", "target": "linux-user/key-journal.c"},
+    {"source": "tools/latc/aot-v2/common/guest-fd-table.c", "target": "linux-user/guest-fd-table.c"},
+    {"source": "tools/latc/aot-v2/include/guest-fd-table.h", "target": "include/guest-fd-table.h"},
     {"source": "linux-user/i386/cpu_loop.c", "target": "tools/latc/lat/linux-user/i386/cpu_loop.c"},
     {"source": "include/latc-translation-capabilities.h", "target": "tools/latc/lat/include/latc-translation-capabilities.h"},
     {"source": "util/rcu.c", "target": "tools/latc/lat/util/rcu.c"},

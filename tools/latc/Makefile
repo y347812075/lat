@@ -419,6 +419,7 @@ test: all $(BUILD)/tests/cfg-fixture $(BUILD)/tests/test-cfg \
 	$(BUILD)/tests/test-module-coverage $(abspath $(BUILD)/latc)
 	$(BUILD)/tests/test-tb-key-set
 	$(BUILD)/tests/test-key-journal
+	$(BUILD)/tests/test-guest-fd-table
 	$(BUILD)/tests/test-journal-store
 	$(BUILD)/tests/test-latcd-coverage
 	$(BUILD)/tests/test-latcd-channel
@@ -558,6 +559,14 @@ test: $(BUILD)/tests/test-tb-key-set
 
 test: $(BUILD)/tests/test-key-journal
 test: $(BUILD)/tests/test-journal-store
+test: $(BUILD)/tests/test-guest-fd-table
+
+$(BUILD)/tests/test-guest-fd-table: tests/test-guest-fd-table.c \
+		aot-v2/common/guest-fd-table.c aot-v2/include/guest-fd-table.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
+	  tests/test-guest-fd-table.c aot-v2/common/guest-fd-table.c \
+	  $(LDLIBS) -pthread -Wl,--wrap=close
 
 $(BUILD)/tests/test-journal-store: aot-v2/tests/test-journal-store.c latcd/main.c \
 		$(BUILD)/aot-v2/runtime/latcd-client.o \
