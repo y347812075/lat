@@ -1381,8 +1381,6 @@ safe_syscall6(ssize_t, recvfrom, int, fd, void *, buf, size_t, len,
 safe_syscall3(ssize_t, sendmsg, int, fd, const struct msghdr *, msg, int, flags)
 safe_syscall3(ssize_t, recvmsg, int, fd, struct msghdr *, msg, int, flags)
 #ifdef TARGET_X86_64
-safe_syscall4(ssize_t, sendmmsg, int, fd, struct msghdr *, msgvec, unsigned int, vlen,
-              int, flags)
 safe_syscall5(ssize_t, recvmmsg, int, fd, struct msghdr *, msgvec, unsigned int, vlen,
               int, flags, struct timespec *, timeout)
 #endif
@@ -2974,6 +2972,36 @@ static void close_scm_fds(const struct msghdr *message)
         int *fds = (int *)CMSG_DATA(cmsg);
         for (size_t i = 0; i < bytes / sizeof(*fds); i++) close(fds[i]);
     }
+}
+
+/* Pin the guest descriptions before a blocking send. Checking raw fd numbers
+ * alone races guest close/replacement and internal descriptor allocation. */
+static abi_long sendmsg_with_guest_rights(int fd, struct msghdr *message, int flags)
+{
+    GArray *snapshots = g_array_new(FALSE, FALSE, sizeof(int));
+    abi_long result = 0;
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(message); cmsg;
+         cmsg = CMSG_NXTHDR(message, cmsg)) {
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS ||
+            cmsg->cmsg_len < CMSG_LEN(0)) continue;
+        size_t count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        int *fds = (int *)CMSG_DATA(cmsg);
+        for (size_t i = 0; i < count; i++) {
+            int snapshot = latc_aot_v2_fd_snapshot_guest(fds[i]);
+            if (snapshot < 0) {
+                result = get_errno(-1);
+                goto out;
+            }
+            g_array_append_val(snapshots, snapshot);
+            fds[i] = snapshot;
+        }
+    }
+    result = get_errno(safe_sendmsg(fd, message, flags));
+out:
+    for (guint i = 0; i < snapshots->len; i++)
+        latc_aot_v2_fd_snapshot_close(g_array_index(snapshots, int, i));
+    g_array_free(snapshots, TRUE);
+    return result;
 }
 
 /* do_setsockopt() Must return target values and target errnos. */
@@ -4752,7 +4780,7 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
         } else {
             ret = target_to_host_cmsg(&msg, msgp);
             if (ret == 0) {
-                ret = get_errno(safe_sendmsg(fd, &msg, flags));
+                ret = sendmsg_with_guest_rights(fd, &msg, flags);
             }
         }
     } else {
@@ -4870,12 +4898,10 @@ static abi_long do_sendrecvmmsg(int fd, abi_ulong target_msgvec,
                 ret = -TARGET_EACCES;
             }
         }
-    } else {
-        ret = get_errno(safe_sendmmsg(fd, (struct msghdr *)mmsgp, vlen, flags));
+        unlock_user(mmsgp, target_msgvec, sizeof(*mmsgp) * vlen);
+        return ret;
     }
-    unlock_user(mmsgp, target_msgvec, sizeof(*mmsgp) * vlen);
-	return ret;
-#else
+#endif
     /* use sendmsg/recvmsg to emulate sendmmsg/recvmmsg */
     int i;
     for (i = 0; i < vlen; i++) {
@@ -4908,7 +4934,6 @@ static abi_long do_sendrecvmmsg(int fd, abi_ulong target_msgvec,
         return i;
     }
     return ret;
-#endif
 }
 
 /* do_accept4() Must return target values and target errnos. */

@@ -353,7 +353,19 @@ int latc_aot_v2_fd_dup_replace(int oldfd, int newfd, int flags, bool use_dup3)
 
 int latc_aot_v2_fd_snapshot_guest(int fd)
 {
-    return lat_aot_v2_internal_fd_snapshot_guest(fd);
+    int snapshot = lat_aot_v2_internal_fd_snapshot_guest(fd);
+    if (snapshot >= 0) {
+        struct stat st;
+        pthread_mutex_lock(&protected_object_lock);
+        bool protected = !fstat(snapshot, &st) && protected_object_locked(&st);
+        pthread_mutex_unlock(&protected_object_lock);
+        if (protected) {
+            lat_aot_v2_cache_close_fd(snapshot, true, NULL, 0);
+            errno = EACCES;
+            return -1;
+        }
+    }
+    return snapshot;
 }
 
 void latc_aot_v2_fd_snapshot_close(int fd)
