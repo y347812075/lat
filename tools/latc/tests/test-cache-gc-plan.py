@@ -136,6 +136,17 @@ class PlannerTest(unittest.TestCase):
         plan = self.run_plan(success=False)
         self.assertTrue(any(e['reason'] == 'invalid_task' for e in plan['errors']))
 
+    def test_task_interrupted_link_before_staging_unlink(self):
+        record = self.task()
+        staging = record.parent / ('.write-' + record.stem)
+        os.link(record, staging)
+        before = record.stat()
+        plan = self.run_plan(success=False)
+        self.assertTrue(any(e['reason'] == 'invalid_task' for e in plan['errors']))
+        self.assertEqual(record.stat().st_nlink, 2)
+        self.assertEqual(staging.stat().st_ino, before.st_ino)
+        self.assertFalse(plan['delete_authorized'])
+
     def test_task_cache_and_collected_bindings(self):
         record = self.task()
         original = record.read_bytes()

@@ -3,6 +3,11 @@
 #define dlclose coverage_dlclose
 #define rename coverage_rename
 #define pread coverage_pread
+#define write coverage_write
+#define fchmod coverage_fchmod
+#define fsync coverage_fsync
+#define linkat coverage_linkat
+#define unlinkat coverage_unlinkat
 #define main latcd_program_main
 #include "../../latcd/main.c"
 #undef main
@@ -11,7 +16,94 @@
 #undef dlclose
 #undef rename
 #undef pread
+#undef write
+#undef fchmod
+#undef fsync
+#undef linkat
+#undef unlinkat
 #include <glib/gstdio.h>
+
+extern ssize_t write(int fd, const void *buffer, size_t count);
+extern int fchmod(int fd, mode_t mode);
+extern int fsync(int fd);
+extern int linkat(int olddir, const char *oldname, int newdir,
+                  const char *newname, int flags);
+extern int unlinkat(int directory, const char *name, int flags);
+
+enum RecordBoundary {
+    RECORD_NONE, RECORD_WRITE, RECORD_MODE, RECORD_FILE_SYNC,
+    RECORD_LINK, RECORD_UNLINK, RECORD_DIRECTORY_SYNC
+};
+static enum RecordBoundary record_boundary;
+static bool record_crash;
+static unsigned record_hits, record_write_retries;
+
+static bool record_fault(enum RecordBoundary boundary, bool after)
+{
+    if (record_boundary != boundary || after != record_crash) return false;
+    record_boundary = RECORD_NONE; /* Cleanup must use the real syscall. */
+    record_hits++;
+    if (record_crash) {
+        kill(getpid(), SIGKILL);
+        _exit(99);
+    }
+    errno = EIO;
+    return true;
+}
+
+ssize_t coverage_write(int fd, const void *buffer, size_t count)
+{
+    if (record_write_retries == 2) {
+        record_write_retries--;
+        errno = EINTR;
+        return -1;
+    }
+    if (record_write_retries == 1) {
+        record_write_retries--;
+        count = 1;
+    }
+    if (record_fault(RECORD_WRITE, false)) return -1;
+    ssize_t result = write(fd, buffer, count);
+    if (result > 0) record_fault(RECORD_WRITE, true);
+    return result;
+}
+
+int coverage_fchmod(int fd, mode_t mode)
+{
+    if (record_fault(RECORD_MODE, false)) return -1;
+    int result = fchmod(fd, mode);
+    if (!result) record_fault(RECORD_MODE, true);
+    return result;
+}
+
+int coverage_fsync(int fd)
+{
+    struct stat status;
+    g_assert_cmpint(fstat(fd, &status), ==, 0);
+    enum RecordBoundary boundary = S_ISDIR(status.st_mode) ?
+        RECORD_DIRECTORY_SYNC : RECORD_FILE_SYNC;
+    if (record_fault(boundary, false)) return -1;
+    int result = fsync(fd);
+    if (!result) record_fault(boundary, true);
+    return result;
+}
+
+int coverage_linkat(int olddir, const char *oldname, int newdir,
+                    const char *newname, int flags)
+{
+    if (record_fault(RECORD_LINK, false)) return -1;
+    int result = linkat(olddir, oldname, newdir, newname, flags);
+    if (!result) record_fault(RECORD_LINK, true);
+    return result;
+}
+
+int coverage_unlinkat(int directory, const char *name, int flags)
+{
+    if (record_fault(RECORD_UNLINK, false)) return -1;
+    int result = unlinkat(directory, name, flags);
+    if (!result) record_fault(RECORD_UNLINK, true);
+    return result;
+}
 
 extern ssize_t pread(int fd, void *buffer, size_t count, off_t offset);
 static void (*read_hook)(int fd);
@@ -476,6 +568,113 @@ static void test_incremental_retention(const char *compiler, unsigned mode)
     g_free(directory);
 }
 
+static void test_task_record_persistence(void)
+{
+    char *directory = g_dir_make_tmp("latcd-record-faults-XXXXXX", NULL);
+    g_assert_nonnull(directory);
+    int root = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    g_assert_cmpint(root, >=, 0);
+    GKeyFile *record = g_key_file_new();
+    g_key_file_set_string(record, "test", "value", "complete immutable record");
+    gsize length;
+    char *expected = g_key_file_to_data(record, &length, NULL);
+    for (unsigned crash = 0; crash < 2; crash++) {
+        for (enum RecordBoundary boundary = RECORD_WRITE;
+             boundary <= RECORD_DIRECTORY_SYNC; boundary++) {
+            char *id = g_uuid_string_random();
+            char *name = g_strdup_printf("%s.ini", id);
+            char *staging = g_strdup_printf(".write-%s", id);
+            record_boundary = boundary;
+            record_crash = crash;
+            record_hits = 0;
+            if (crash) {
+                pid_t child = fork();
+                g_assert_cmpint(child, >=, 0);
+                if (!child) {
+                    int lease = persist_task_record(root, id, record);
+                    if (lease >= 0) close(lease);
+                    _exit(98); /* Missing boundary must not pass as a crash. */
+                }
+                int status;
+                g_assert_cmpint(waitpid(child, &status, 0), ==, child);
+                g_assert_true(WIFSIGNALED(status));
+                g_assert_cmpint(WTERMSIG(status), ==, SIGKILL);
+            } else {
+                g_assert_cmpint(persist_task_record(root, id, record), ==, -1);
+                g_assert_cmpuint(record_hits, ==, 1);
+            }
+            record_boundary = RECORD_NONE;
+            record_crash = false;
+            /* SIGKILL tests process death, not power-loss durability. A final
+             * name can survive a failed/unacknowledged post-link operation. */
+            bool published = boundary >= (crash ? RECORD_LINK : RECORD_UNLINK);
+            bool staged = crash && boundary <= RECORD_LINK;
+            struct stat final_status, staging_status;
+            g_assert_cmpint(fstatat(root, name, &final_status, 0), ==,
+                            published ? 0 : -1);
+            if (!published) g_assert_cmpint(errno, ==, ENOENT);
+            g_assert_cmpint(fstatat(root, staging, &staging_status, 0), ==,
+                            staged ? 0 : -1);
+            if (!staged) g_assert_cmpint(errno, ==, ENOENT);
+            if (published) {
+                char *path = g_build_filename(directory, name, NULL);
+                char *actual = NULL;
+                gsize size;
+                g_assert_true(g_file_get_contents(path, &actual, &size, NULL));
+                g_assert_cmpmem(actual, size, expected, length);
+                g_assert_cmpuint(final_status.st_mode & 0777, ==, 0400);
+                g_assert_cmpuint(final_status.st_nlink, ==, staged ? 2 : 1);
+                if (staged) {
+                    g_assert_cmpuint(final_status.st_ino, ==, staging_status.st_ino);
+                }
+                int probe = open(path, O_RDONLY | O_CLOEXEC);
+                g_assert_cmpint(probe, >=, 0);
+                g_assert_cmpint(flock(probe, LOCK_EX | LOCK_NB), ==, 0);
+                close(probe);
+                g_free(actual);
+                g_free(path);
+            }
+            if (staged) g_assert_cmpint(unlinkat(root, staging, 0), ==, 0);
+            if (published) g_assert_cmpint(unlinkat(root, name, 0), ==, 0);
+            g_free(staging);
+            g_free(name);
+            g_free(id);
+        }
+    }
+    char *id = g_uuid_string_random();
+    char *name = g_strdup_printf("%s.ini", id);
+    record_write_retries = 2;
+    int lease = persist_task_record(root, id, record);
+    g_assert_cmpint(lease, >=, 0);
+    g_assert_cmpuint(record_write_retries, ==, 0);
+    g_assert_cmpint(fcntl(lease, F_GETFL) & O_ACCMODE, ==, O_RDONLY);
+    g_assert_cmpint(fcntl(lease, F_GETFD) & FD_CLOEXEC, ==, FD_CLOEXEC);
+    struct stat before, after;
+    g_assert_cmpint(fstat(lease, &before), ==, 0);
+    int probe = openat(root, name, O_RDONLY | O_CLOEXEC);
+    g_assert_cmpint(probe, >=, 0);
+    g_assert_cmpint(flock(probe, LOCK_EX | LOCK_NB), ==, -1);
+    g_assert_cmpint(errno, ==, EWOULDBLOCK);
+    g_key_file_set_string(record, "test", "value", "must not overwrite");
+    g_assert_cmpint(persist_task_record(root, id, record), ==, -1);
+    g_assert_cmpint(fstatat(root, name, &after, 0), ==, 0);
+    g_assert_cmpuint(before.st_ino, ==, after.st_ino);
+    g_assert_cmpuint(after.st_nlink, ==, 1);
+    char contents[128];
+    g_assert_cmpint(pread(lease, contents, sizeof(contents), 0), ==, length);
+    g_assert_cmpmem(contents, length, expected, length);
+    close(lease);
+    g_assert_cmpint(flock(probe, LOCK_EX | LOCK_NB), ==, 0);
+    close(probe);
+    close(root);
+    g_free(expected);
+    g_free(name);
+    g_free(id);
+    g_key_file_unref(record);
+    remove_fixture_tree(directory);
+    g_free(directory);
+}
+
 static void test_compile_space(void)
 {
     char error[256];
@@ -508,6 +707,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc == 1) {
+        test_task_record_persistence();
         test_compile_space();
         generation_capacity.ready = true;
         generation_capacity.expected_names = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
