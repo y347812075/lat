@@ -32,6 +32,7 @@
 #include <sys/socket.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <time.h>
 
 #include <sys/types.h>
@@ -212,6 +213,104 @@ typedef struct LatcdPrecompileRequest {
 static volatile sig_atomic_t stop_requested;
 static volatile sig_atomic_t compiler_process_groups[LATCD_MAX_WORKERS];
 static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int fail(char *error, size_t error_size, const char *format, ...);
+
+typedef struct CompileSpaceReservation {
+    dev_t device[2];
+    uint64_t bytes[2];
+    bool active;
+} CompileSpaceReservation;
+
+static pthread_mutex_t compile_space_lock = PTHREAD_MUTEX_INITIALIZER;
+static CompileSpaceReservation compile_space[LATCD_MAX_WORKERS];
+
+static bool space_add(uint64_t *value, uint64_t amount, uint64_t multiplier)
+{
+    if (multiplier && amount > (UINT64_MAX - *value) / multiplier) return false;
+    *value += amount * multiplier;
+    return true;
+}
+
+static int reserve_compile_space(uint32_t worker, const dev_t devices[2],
+                                  const uint64_t available[2], const uint64_t bytes[2],
+                                  char *error, size_t error_size)
+{
+    if (worker >= LATCD_MAX_WORKERS) return fail(error, error_size, "invalid reservation worker");
+    CompileSpaceReservation request = { .active = true };
+    memcpy(request.device, devices, sizeof(request.device));
+    memcpy(request.bytes, bytes, sizeof(request.bytes));
+    if (devices[0] == devices[1]) {
+        if (!space_add(&request.bytes[0], request.bytes[1], 1))
+            return fail(error, error_size, "capacity reservation overflow");
+        request.bytes[1] = 0;
+    }
+    pthread_mutex_lock(&compile_space_lock);
+    int result = 0;
+    if (compile_space[worker].active) result = -1;
+    for (size_t i = 0; !result && i < 2; i++) {
+        if (!request.bytes[i]) continue;
+        uint64_t required = request.bytes[i];
+        for (size_t j = 0; !result && j < LATCD_MAX_WORKERS; j++) {
+            if (!compile_space[j].active) continue;
+            for (size_t k = 0; k < 2; k++)
+                if (compile_space[j].device[k] == request.device[i] &&
+                    !space_add(&required, compile_space[j].bytes[k], 1)) result = -1;
+        }
+        uint64_t free_bytes = available[i];
+        if (devices[0] == devices[1]) free_bytes = MIN(available[0], available[1]);
+        if (required > free_bytes) result = -1;
+    }
+    if (!result) compile_space[worker] = request;
+    pthread_mutex_unlock(&compile_space_lock);
+    return result ? fail(error, error_size, "capacity: insufficient filesystem space or active reservations") : 0;
+}
+
+static void release_compile_space(uint32_t worker)
+{
+    pthread_mutex_lock(&compile_space_lock);
+    if (worker < LATCD_MAX_WORKERS) memset(&compile_space[worker], 0, sizeof(compile_space[worker]));
+    pthread_mutex_unlock(&compile_space_lock);
+}
+
+static int compile_space_admit(uint32_t worker, const char *temporary,
+                               const char *output, const char *source, const char *tbset,
+                               const char *base_native, const char *base_module,
+                               char *error, size_t error_size)
+{
+    /* Estimate, not a hard quota: reserve translation/merge/link coexistence.
+     * Existing bytes are already reflected in statvfs; other reservations are
+     * deliberately counted in full even if partially materialized. */
+    uint64_t estimate = UINT64_C(64) << 20;
+    const char *inputs[] = {source, tbset, base_native, base_module};
+    const uint64_t factors[] = {4, 4096, 4, 4};
+    for (size_t i = 0; i < G_N_ELEMENTS(inputs); i++) {
+        if (!inputs[i]) continue;
+        struct stat st;
+        if (stat(inputs[i], &st) || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+            !space_add(&estimate, st.st_size, factors[i]))
+            return fail(error, error_size, "capacity: cannot estimate compile input");
+    }
+    char *parent = g_path_get_dirname(output);
+    const char *paths[] = {temporary, parent};
+    dev_t devices[2];
+    uint64_t available[2], bytes[] = {estimate, estimate};
+    int result = 0;
+    for (size_t i = 0; i < 2; i++) {
+        struct stat st;
+        struct statvfs fs;
+        if (stat(paths[i], &st) || !S_ISDIR(st.st_mode) || statvfs(paths[i], &fs) ||
+            !fs.f_frsize || fs.f_bavail > UINT64_MAX / fs.f_frsize) {
+            result = fail(error, error_size, "capacity: cannot inspect compile filesystem");
+            break;
+        }
+        devices[i] = st.st_dev;
+        available[i] = (uint64_t)fs.f_bavail * fs.f_frsize;
+    }
+    if (!result) result = reserve_compile_space(worker, devices, available, bytes, error, error_size);
+    g_free(parent);
+    return result;
+}
 
 static LatcdSourceState *source_state_locked(LatcdService *service,
                                              const char *source_key);
@@ -1053,6 +1152,11 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         compile_tmpdir = access("/dev/shm", W_OK | X_OK) == 0 ?
                          "/dev/shm" : "/tmp";
     }
+    if (compile_space_admit(worker_index, compile_tmpdir, output, source, tbset,
+                              base_native, base_module, error, error_size)) {
+        g_free(library_path);
+        return -1;
+    }
     char *temporary_path = g_strdup_printf("TMPDIR=%s", compile_tmpdir);
     char *guest_prefix = config->x86_rootfs ?
         g_strdup_printf("LAT_LD_PREFIX=%s", config->x86_rootfs) : NULL;
@@ -1147,6 +1251,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         _exit(127);
     }
     if (child < 0) {
+        release_compile_space(worker_index);
         g_free(library_path);
         g_free(temporary_path);
         g_free(guest_prefix);
@@ -1183,6 +1288,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         kill(-child, SIGKILL);
     }
     compiler_process_groups[worker_index] = 0;
+    release_compile_space(worker_index);
     g_free(library_path);
     g_free(temporary_path);
     g_free(guest_prefix);

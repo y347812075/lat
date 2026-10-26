@@ -925,6 +925,17 @@ and inode revalidation. UNKNOWN is sticky; an object reappearing after MISSING
 also becomes UNKNOWN. MISSING is persisted only after syncing the root directory
 and is an absence observation, not proof of released disk space. Recovery never
 unlinks objects or removes tombstones. Malformed records reject startup intact.
+
+Before starting a compiler child, latcd estimates temporary translation/merge/link
+coexistence from input sizes and checks `statvfs` for both temporary and output
+filesystems. Per-worker reservations are serialized and summed by filesystem;
+same-filesystem paths are charged together. The reservation is released after
+the compiler wait and descendant termination sequence, including failed builds.
+This is an estimated preflight guard, not a hard aggregate quota: external writes,
+underestimated code expansion and surviving compiler descendants are not prevented.
+Full cache accounting, snapshot/publication reservations, durable task ownership
+and hard peak enforcement remain incomplete. Capacity failures never evict current
+or the incremental native baseline.
 Controlled-domain admission, object-identity tombstones, partial-delete recovery,
 automatic expiry scheduling, and capacity reclamation remain disabled/pending.
 

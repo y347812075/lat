@@ -433,6 +433,30 @@ static void test_incremental_retention(const char *compiler, unsigned mode)
     g_free(directory);
 }
 
+static void test_compile_space(void)
+{
+    char error[256];
+    dev_t same[] = {1, 1}, separate[] = {1, 2};
+    uint64_t available[] = {100, 100}, bytes[] = {40, 30};
+    g_assert_cmpint(reserve_compile_space(0, same, available, bytes, error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(compile_space[0].bytes[0], ==, 70);
+    g_assert_cmpuint(compile_space[0].bytes[1], ==, 0);
+    g_assert_cmpint(reserve_compile_space(1, same, available, bytes, error, sizeof(error)), ==, -1);
+    g_assert_false(compile_space[1].active);
+    g_assert_cmpint(reserve_compile_space(0, same, available, bytes, error, sizeof(error)), ==, -1);
+    release_compile_space(0);
+    g_assert_cmpint(reserve_compile_space(1, separate, available, bytes, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(reserve_compile_space(2, separate, available, bytes, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(reserve_compile_space(3, separate, available, bytes, error, sizeof(error)), ==, -1);
+    release_compile_space(1); release_compile_space(2);
+    uint64_t overflow[] = {UINT64_MAX, 1};
+    g_assert_cmpint(reserve_compile_space(0, same, available, overflow, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(reserve_compile_space(LATCD_MAX_WORKERS, same, available, bytes, error, sizeof(error)), ==, -1);
+    uint64_t n = UINT64_MAX - 1;
+    g_assert_false(space_add(&n, 1, 2));
+    g_assert_cmpuint(n, ==, UINT64_MAX - 1);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && (!strcmp(argv[1], "build-id") ||
@@ -440,6 +464,7 @@ int main(int argc, char **argv)
         puts(LATC_BUILD_ID);
         return 0;
     }
+    if (argc == 1) test_compile_space();
     if (argc > 1 && !strcmp(argv[1], "compile-module")) {
         char *marker = g_strconcat(argv[2], ".mode", NULL);
         char *partial = NULL;
