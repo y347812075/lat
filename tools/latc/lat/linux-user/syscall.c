@@ -13515,7 +13515,8 @@ static abi_long guest_fd_dup_replace(CPUArchState *env, abi_long oldfd,
 {
     abi_long ret;
 
-    if (latc_aot_v2_fd_is_protected(oldfd)) {
+    if (latc_aot_v2_fd_is_protected(oldfd) ||
+        latc_aot_v2_fd_is_protected(newfd)) {
         return -TARGET_EACCES;
     }
 

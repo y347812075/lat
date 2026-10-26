@@ -16,6 +16,18 @@ script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 rm -rf "$work"
 mkdir -m 700 -p "$work"
 
+cleanup()
+{
+  for pid in "${daemon_pid:-}" "${runner_pid:-}"; do
+    [ -n "$pid" ] || continue
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 socket=$work/latcd.sock
 cache=$work/cache
 "$latcd" --once --socket "$socket" --cache-dir "$cache" \
@@ -35,6 +47,7 @@ python3 "$script_dir/make-tbset.py" "$guest" "$tbset"
 timeout 60 "$latcd" --submit --socket "$socket" --tbset "$tbset" "$guest" \
   >"$work/submit.client"
 wait "$daemon_pid"
+daemon_pid=
 
 source_sha=$(sha256sum "$guest" | cut -d ' ' -f 1)
 module=$(python3 - "$cache/$source_sha.current" "$cache" <<'PY'
@@ -68,13 +81,14 @@ while ! grep -q '^CLOSED$' "$work/guest.stdout" 2>/dev/null; do
 done
 grep -q 'module=registered' "$work/guest.stderr"
 if flock -n "$module" -c true; then
-  echo "guest close/flock loop released the AOT module lifetime lease" >&2
+  echo "guest fd mutation loop released the AOT module lifetime lease" >&2
   kill -TERM "$runner_pid" 2>/dev/null || true
   wait "$runner_pid" 2>/dev/null || true
   exit 1
 fi
 kill -TERM "$runner_pid" 2>/dev/null || true
 wait "$runner_pid" 2>/dev/null || true
+runner_pid=
 flock -n "$module" -c true
 
 echo 'test-cache-fd-protection: PASS'
