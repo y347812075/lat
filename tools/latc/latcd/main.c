@@ -1371,6 +1371,17 @@ static int record_compiler_release(const LatcdConfig *config, const char *id,
             g_key_file_load_from_data(bound, data, observed.st_size, G_KEY_FILE_NONE, NULL);
         temporary = openat(root, ".tmp", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         missing &= temporary >= 0;
+        struct stat tmp;
+        const char *identity_fields[] = {"device", "inode"};
+        if (missing) missing = !fstat(temporary, &tmp) && tmp.st_uid == geteuid() &&
+            !(tmp.st_mode & 0077);
+        uint64_t identity_values[] = {missing ? tmp.st_dev : 0, missing ? tmp.st_ino : 0};
+        for (unsigned i = 0; missing && i < G_N_ELEMENTS(identity_fields); i++) {
+            GError *parse_error = NULL;
+            guint64 value = g_key_file_get_uint64(bound, "temporary", identity_fields[i], &parse_error);
+            missing = !parse_error && value == identity_values[i];
+            g_clear_error(&parse_error);
+        }
         const char *roles[] = {"output_native", "output_module"};
         for (unsigned i = 0; missing && i < 2; i++) {
             char *output = g_key_file_get_string(bound, roles[i], "name", NULL);
@@ -1406,8 +1417,75 @@ typedef struct LatcdCompilerTask {
     struct stat identity;
 } LatcdCompilerTask;
 
+static pthread_mutex_t compiler_task_lock = PTHREAD_MUTEX_INITIALIZER;
+static GHashTable *local_compiler_tasks;
+
+static void compiler_task_local(const char *id, bool active)
+{
+    pthread_mutex_lock(&compiler_task_lock);
+    if (active) {
+        if (!local_compiler_tasks) local_compiler_tasks = g_hash_table_new_full(
+            g_str_hash, g_str_equal, g_free, NULL);
+        g_hash_table_add(local_compiler_tasks, g_strdup(id));
+    } else if (local_compiler_tasks) {
+        g_hash_table_remove(local_compiler_tasks, id);
+        if (!g_hash_table_size(local_compiler_tasks)) {
+            g_hash_table_destroy(local_compiler_tasks);
+            local_compiler_tasks = NULL;
+        }
+    }
+    pthread_mutex_unlock(&compiler_task_lock);
+}
+
+static bool compiler_task_is_local(const char *id)
+{
+    pthread_mutex_lock(&compiler_task_lock);
+    bool active = local_compiler_tasks && g_hash_table_contains(local_compiler_tasks, id);
+    pthread_mutex_unlock(&compiler_task_lock);
+    return active;
+}
+
+static bool compiler_input_release_matches(int releases, const char *name,
+                                           const char *id, const struct stat *task)
+{
+    int fd = openat(releases, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    struct stat before, after;
+    char data[65536];
+    GKeyFile *record = g_key_file_new();
+    bool valid = fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) &&
+        before.st_uid == geteuid() && before.st_nlink == 1 && !(before.st_mode & 0222) &&
+        before.st_size > 0 && (uint64_t)before.st_size <= sizeof(data) &&
+        pread(fd, data, before.st_size, 0) == before.st_size &&
+        !fstat(fd, &after) && metadata_equal(&before, &after) &&
+        g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
+    gsize groups = 0, keys = 0;
+    char **names = g_key_file_get_groups(record, &groups);
+    g_strfreev(names);
+    names = g_key_file_get_keys(record, "handoff", &keys, NULL);
+    g_strfreev(names);
+    valid &= groups == 1 && keys == 5;
+    const char *fields[] = {"version", "task_id", "state"};
+    const char *values[] = {"1", id, "INPUTS_RELEASED"};
+    for (unsigned i = 0; valid && i < G_N_ELEMENTS(fields); i++) {
+        char *value = g_key_file_get_string(record, "handoff", fields[i], NULL);
+        valid = value && !strcmp(value, values[i]);
+        g_free(value);
+    }
+    const char *numbers[] = {"task_device", "task_inode"};
+    uint64_t expected[] = {task->st_dev, task->st_ino};
+    for (unsigned i = 0; valid && i < G_N_ELEMENTS(numbers); i++) {
+        GError *error = NULL;
+        guint64 value = g_key_file_get_uint64(record, "handoff", numbers[i], &error);
+        valid = !error && value == expected[i];
+        g_clear_error(&error);
+    }
+    if (fd >= 0) close(fd);
+    g_key_file_free(record);
+    return valid;
+}
+
 /* Caller owns the daemon lease. Recover input ownership only: surviving
- * descendants retain SH on the task inode; outputs and unknown records stay roots. */
+ * descendants retain SH on the task inode; existing outputs stay roots. */
 static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
                                     unsigned budget, unsigned *visited,
                                     char *error, size_t error_size)
@@ -1442,8 +1520,10 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
         memcpy(id, name, 36);
         id[36] = 0;
         if (!g_uuid_string_is_valid(id)) { retained++; continue; }
+        if (compiler_task_is_local(id)) { retained++; continue; }
         struct stat existing;
-        if (!fstatat(releases, name, &existing, AT_SYMLINK_NOFOLLOW) || errno != ENOENT) continue;
+        bool input_exists = !fstatat(releases, name, &existing, AT_SYMLINK_NOFOLLOW);
+        if (!input_exists && errno != ENOENT) { retained++; continue; }
         int task = openat(tasks, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
         struct stat before, after, cache;
         char data[65536];
@@ -1473,12 +1553,39 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
                 device == (guint64)cache.st_dev && inode == (guint64)cache.st_ino;
             g_clear_error(&parse_error);
         }
+        bool temporary_matches = false;
+        if (valid) {
+            GError *parse_error = NULL;
+            guint64 device = g_key_file_get_uint64(record, "temporary", "device", &parse_error);
+            bool parsed = !parse_error;
+            g_clear_error(&parse_error);
+            guint64 inode = g_key_file_get_uint64(record, "temporary", "inode", &parse_error);
+            int tmp = openat(root, ".tmp", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            struct stat identity;
+            temporary_matches = parsed && !parse_error && tmp >= 0 &&
+                !fstat(tmp, &identity) && identity.st_uid == geteuid() &&
+                !(identity.st_mode & 0077) && device == (guint64)identity.st_dev &&
+                inode == (guint64)identity.st_ino;
+            if (tmp >= 0) close(tmp);
+            g_clear_error(&parse_error);
+        }
         g_key_file_free(record);
         if (task >= 0) close(task);
         /* Reopen and retake EX in the normal writer; never upgrade an OFD or
          * treat the earlier observation as permanent authority. */
-        if (valid && !record_compiler_release(config, id, &before, false)) recovered++;
-        else retained++;
+        bool inputs_released = valid && (input_exists ||
+            !record_compiler_release(config, id, &before, false)) &&
+            compiler_input_release_matches(releases, name, id, &before);
+        if (!input_exists && inputs_released) recovered++;
+        if (!inputs_released) { retained++; continue; }
+        int outputs = open_task_directory(gc, "compiler-output-releases");
+        bool output_exists = outputs >= 0 &&
+            !fstatat(outputs, name, &existing, AT_SYMLINK_NOFOLLOW);
+        bool output_absent = outputs >= 0 && !output_exists && errno == ENOENT;
+        if (outputs >= 0) close(outputs);
+        if (output_absent && temporary_matches &&
+            !record_compiler_release(config, id, &before, true)) recovered++;
+        else if (!output_exists) retained++;
     }
 out:
     if (directory && (result != 1 || stop_requested)) {
@@ -1648,6 +1755,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             g_free(task);
             pin_result = -1;
         } else {
+            compiler_task_local(task_id, true);
             g_ptr_array_add(compiler_tasks, task);
         }
     }
@@ -3182,6 +3290,7 @@ out:
         LatcdCompilerTask *task = g_ptr_array_index(compiler_tasks, i);
         if (record_compiler_release(config, task->id, &task->identity, true))
             fprintf(stderr, "latcd: compiler output release not durable; retaining task root\n");
+        compiler_task_local(task->id, false);
     }
     g_ptr_array_free(compiler_tasks, TRUE);
     if (tbset_copy && *tbset_copy) unlink(tbset_copy);

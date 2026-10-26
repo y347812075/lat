@@ -179,11 +179,11 @@ def run(prefix, guest, work):
                         str(cache)], env=env, capture_output=True, text=True, timeout=10)
                     if result.returncode == 0:
                         recovered = json.loads(result.stdout)['tasks'][str(task_record.relative_to(cache))]
-                        if recovered.get('compiler_inputs_released', False):
+                        if recovered.get('compiler_inputs_released', False) and recovered.get('compiler_outputs_released', False):
                             break
                     assert daemon.poll() is None and time.monotonic() < deadline, result.stdout + result.stderr
                     time.sleep(.05)
-                assert not recovered.get('compiler_outputs_released', False), recovered
+                assert recovered['compiler_outputs_released'], recovered
                 assert not recovered['completion_verified']
                 daemon.terminate()
                 assert daemon.wait(timeout=30) == 0

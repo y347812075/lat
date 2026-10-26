@@ -337,6 +337,16 @@ static void test_publication_cleanup(void)
     char *task_path = g_build_filename(task_dir, task_name, NULL);
     g_assert_true(g_file_set_contents(task_path,
         "[output_native]\nname=native-output\n[output_module]\nname=module-output\n", -1, NULL));
+    GKeyFile *bound = g_key_file_new();
+    g_assert_true(g_key_file_load_from_file(bound, task_path, G_KEY_FILE_NONE, NULL));
+    struct stat tmp_identity;
+    g_assert_cmpint(stat(temporary, &tmp_identity), ==, 0);
+    task_object_identity(bound, "temporary", &tmp_identity);
+    gsize bound_size;
+    char *bound_data = g_key_file_to_data(bound, &bound_size, NULL);
+    g_assert_true(g_file_set_contents(task_path, bound_data, bound_size, NULL));
+    g_free(bound_data);
+    g_key_file_free(bound);
     g_assert_cmpint(g_chmod(task_path, 0400), ==, 0);
     int task_fd = open(task_path, O_RDONLY | O_CLOEXEC);
     g_assert_cmpint(task_fd, >=, 0);
@@ -588,6 +598,7 @@ static void test_compiler_input_recovery(void)
     int task = record_task(&config, false, paths, pins, digest, environment,
         &id, error, sizeof(error));
     g_assert_cmpint(task, >=, 0);
+    g_assert_true(g_file_set_contents(native, "unfinished", -1, NULL));
     char *name = g_strdup_printf("%s.ini", id);
     char *release = g_build_filename(directory, ".gc", "compiler-releases", name, NULL);
     g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
@@ -611,6 +622,41 @@ static void test_compiler_input_recovery(void)
     g_assert_true(metadata_equal(&before, &after));
     char *output_release = g_build_filename(directory, ".gc", "compiler-output-releases", name, NULL);
     g_assert_false(g_file_test(output_release, G_FILE_TEST_EXISTS));
+    char *original = NULL;
+    gsize original_size;
+    g_assert_true(g_file_get_contents(release, &original, &original_size, NULL));
+    g_assert_cmpint(g_chmod(release, 0600), ==, 0);
+    g_assert_true(g_file_set_contents(release, "[handoff]\nstate=wrong\n", -1, NULL));
+    g_assert_cmpint(g_chmod(release, 0400), ==, 0);
+    g_assert_cmpint(g_unlink(native), ==, 0);
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_false(g_file_test(output_release, G_FILE_TEST_EXISTS));
+    g_assert_cmpint(g_chmod(release, 0600), ==, 0);
+    g_assert_true(g_file_set_contents(release, original, original_size, NULL));
+    g_assert_cmpint(g_chmod(release, 0400), ==, 0);
+    g_free(original);
+    compiler_task_local(id, true);
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_false(g_file_test(output_release, G_FILE_TEST_EXISTS));
+    compiler_task_local(id, false);
+    char *old_temporary = g_strconcat(temporary, "-old", NULL);
+    g_assert_cmpint(g_rename(temporary, old_temporary), ==, 0);
+    g_assert_cmpint(g_mkdir(temporary, 0700), ==, 0);
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_false(g_file_test(output_release, G_FILE_TEST_EXISTS));
+    g_assert_cmpint(g_rmdir(temporary), ==, 0);
+    g_assert_cmpint(g_rename(old_temporary, temporary), ==, 0);
+    g_free(old_temporary);
+    record_boundary = RECORD_FILE_SYNC;
+    record_hits = 0;
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(record_hits, ==, 1);
+    g_assert_false(g_file_test(output_release, G_FILE_TEST_EXISTS));
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(stat(output_release, &before), ==, 0);
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(stat(output_release, &after), ==, 0);
+    g_assert_true(metadata_equal(&before, &after));
     char *task_directory = g_build_filename(directory, ".gc", "tasks", NULL);
     for (unsigned i = 0; i < 70; i++) {
         char *unknown = g_strdup_printf("%s/unknown-%u", task_directory, i);
