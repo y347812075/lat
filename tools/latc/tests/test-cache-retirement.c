@@ -1183,6 +1183,57 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
             assert(queued >= 0 && stats.visited <= 1 && ++steps < 100);
         } while (queued);
         assert(stats.complete && stats.candidates == 3 && stats.due == 3);
+        LatcdRetirementAttempt attempts[3], invalid;
+        for (unsigned i = 0; i < 3; i++) {
+            assert(latcd_retirement_queue_take(queue, UINT64_MAX - 10000000, &attempts[i]) == 1);
+            assert(latcd_retirement_queue_take(queue, UINT64_MAX - 10000000, &invalid) < 0);
+            invalid = attempts[i]; invalid.sequence++;
+            assert(latcd_retirement_queue_defer(queue, &invalid, 0, true) < 0);
+            for (unsigned j = 0; j < i; j++) assert(strcmp(attempts[j].name, attempts[i].name));
+            assert(!latcd_retirement_queue_defer(queue, &attempts[i], UINT64_MAX - 10000000, true));
+            assert(latcd_retirement_queue_defer(queue, &attempts[i], 0, true) < 0);
+        }
+        assert(!latcd_retirement_queue_take(queue, UINT64_MAX - 10000000, &invalid));
+        assert(latcd_retirement_queue_take(queue, UINT64_MAX - 9800000, &invalid) == 1);
+        assert(!strcmp(invalid.name, attempts[0].name));
+        assert(!latcd_retirement_queue_defer(queue, &invalid, UINT64_MAX, true));
+        const char *other_source = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        /* Snapshots and object evidence are base64, so transform the decoded
+         * fields with the same parser rather than replacing encoded bytes. */
+        GKeyFile *other = g_key_file_new();
+        assert(g_key_file_load_from_data(other, raw, -1, 0, NULL));
+        g_key_file_set_string(other, "transaction", "source", other_source);
+        const char *encoded_fields[] = {"previous", "next", "objects"};
+        for (unsigned field = 0; field < G_N_ELEMENTS(encoded_fields); field++) {
+            char *encoded = g_key_file_get_string(other, "transaction", encoded_fields[field], NULL);
+            gsize length;
+            guchar *decoded = g_base64_decode(encoded, &length);
+            char *text = g_strndup((char *)decoded, length);
+            char **parts = g_strsplit(text, source, -1);
+            char *changed = g_strjoinv(other_source, parts);
+            char *updated = g_base64_encode((guchar *)changed, strlen(changed));
+            g_key_file_set_string(other, "transaction", encoded_fields[field], updated);
+            g_free(updated); g_free(changed); g_strfreev(parts); g_free(text); g_free(decoded); g_free(encoded);
+        }
+        char *other_id = g_uuid_string_random(), *other_file = g_strdup_printf("%s.ini", other_id);
+        char *other_path = g_build_filename(root, ".gc", "transactions", other_file, NULL);
+        char *other_raw = g_key_file_to_data(other, NULL, NULL);
+        put(other_path, other_raw);
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.candidates == 6 && stats.complete);
+        char last[65] = {0};
+        for (unsigned turn = 0; turn < 6; turn++) {
+            LatcdRetirementAttempt selected;
+            assert(latcd_retirement_queue_take(queue, UINT64_MAX, &selected) == 1);
+            if (turn) assert(strncmp(last, selected.name, 64));
+            memcpy(last, selected.name, 64);
+            assert(!latcd_retirement_queue_defer(queue, &selected, 0, true));
+        }
+        assert(!unlink(other_path));
+        g_free(other_raw); g_free(other_path); g_free(other_file); g_free(other_id); g_key_file_unref(other);
         uint64_t wait = stats.oldest_due_wait_us;
         g_usleep(10000);
         do {
@@ -1195,6 +1246,7 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
             queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
         } while (queued > 0);
         assert(queued < 0 && !stats.complete && stats.candidates == 3);
+        assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &invalid));
         assert(!unlink(record_path));
         do {
             queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));

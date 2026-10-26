@@ -97,4 +97,20 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
                                  char *error, size_t error_size);
 void latcd_retirement_queue_free(LatcdRetirementQueue *queue);
 
+typedef struct LatcdRetirementAttempt {
+    char name[138];
+    uint64_t sequence;
+} LatcdRetirementAttempt;
+
+/* Single executor, one outstanding attempt. now_us is BOOTTIME used only for
+ * scheduling, never deletion admission. Returns 1 selected, 0 no ready work,
+ * -1 invalid use. Rotates sources and then least-recently-attempted objects.
+ * Deferral preserves original age and uses bounded exponential busy backoff.
+ * A stale completion token cannot change another attempt. No unlink occurs. */
+int latcd_retirement_queue_take(LatcdRetirementQueue *queue, uint64_t now_us,
+                                LatcdRetirementAttempt *attempt);
+int latcd_retirement_queue_defer(LatcdRetirementQueue *queue,
+                                 const LatcdRetirementAttempt *attempt,
+                                 uint64_t now_us, bool busy);
+
 #endif

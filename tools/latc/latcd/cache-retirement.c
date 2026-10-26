@@ -1555,6 +1555,8 @@ int latcd_tombstone_delete_due(const char *root, const char *name, uint64_t grac
 
 typedef struct RetirementCandidate {
     uint64_t deadline, enqueued, epoch;
+    uint64_t last_attempt, retry_at;
+    unsigned busy_count;
 } RetirementCandidate;
 
 struct LatcdRetirementQueue {
@@ -1564,6 +1566,9 @@ struct LatcdRetirementQueue {
     DIR *cursor;
     GHashTable *candidates;
     bool complete;
+    char last_source[65];
+    LatcdRetirementAttempt active;
+    uint64_t sequence;
 };
 
 LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grace_us)
@@ -1695,7 +1700,11 @@ sweep_complete:
         gpointer value;
         g_hash_table_iter_init(&iterator, queue->candidates);
         while (g_hash_table_iter_next(&iterator, NULL, &value))
-            if (((RetirementCandidate *)value)->epoch != queue->epoch) g_hash_table_iter_remove(&iterator);
+            if (((RetirementCandidate *)value)->epoch != queue->epoch) {
+                const char *active = queue->active.name;
+                if (!*active || g_hash_table_lookup(queue->candidates, active) != value)
+                    g_hash_table_iter_remove(&iterator);
+            }
         queue->complete = true;
     }
 out:
@@ -1717,6 +1726,61 @@ out:
     }
     g_free(boot);
     return result < 0 ? fail(error, error_size, "retirement queue discovery incomplete or unsafe") : result;
+}
+
+int latcd_retirement_queue_take(LatcdRetirementQueue *queue, uint64_t now_us,
+                                LatcdRetirementAttempt *attempt)
+{
+    if (!queue || !attempt || queue->active.sequence || queue->sequence == UINT64_MAX) return -1;
+    memset(attempt, 0, sizeof(*attempt));
+    if (!queue->complete) return 0;
+    const char *after = NULL, *first = NULL;
+    GHashTableIter iterator;
+    gpointer key, value;
+    g_hash_table_iter_init(&iterator, queue->candidates);
+    while (g_hash_table_iter_next(&iterator, &key, &value)) {
+        RetirementCandidate *candidate = value;
+        if (candidate->deadline > now_us || candidate->retry_at > now_us) continue;
+        if (!first || strncmp(key, first, 64) < 0) first = key;
+        if (strncmp(key, queue->last_source, 64) > 0 && (!after || strncmp(key, after, 64) < 0)) after = key;
+    }
+    const char *source = after ? after : first, *selected = NULL;
+    RetirementCandidate *oldest = NULL;
+    if (!source) return 0;
+    g_hash_table_iter_init(&iterator, queue->candidates);
+    while (g_hash_table_iter_next(&iterator, &key, &value)) {
+        RetirementCandidate *candidate = value;
+        if (strncmp(key, source, 64) || candidate->deadline > now_us || candidate->retry_at > now_us) continue;
+        if (!oldest || candidate->last_attempt < oldest->last_attempt ||
+            (candidate->last_attempt == oldest->last_attempt &&
+             (candidate->enqueued < oldest->enqueued ||
+              (candidate->enqueued == oldest->enqueued && strcmp(key, selected) < 0)))) {
+            selected = key; oldest = candidate;
+        }
+    }
+    memcpy(queue->last_source, source, 64);
+    queue->last_source[64] = 0;
+    g_strlcpy(attempt->name, selected, sizeof(attempt->name));
+    attempt->sequence = ++queue->sequence;
+    oldest->last_attempt = attempt->sequence;
+    queue->active = *attempt;
+    return 1;
+}
+
+int latcd_retirement_queue_defer(LatcdRetirementQueue *queue,
+                                 const LatcdRetirementAttempt *attempt,
+                                 uint64_t now_us, bool busy)
+{
+    if (!queue || !attempt || !attempt->sequence ||
+        attempt->sequence != queue->active.sequence ||
+        memcmp(attempt->name, queue->active.name, sizeof(attempt->name))) return -1;
+    RetirementCandidate *candidate = g_hash_table_lookup(queue->candidates, attempt->name);
+    if (!candidate) return -1;
+    candidate->busy_count = busy ? MIN(candidate->busy_count + 1, 7u) : 0;
+    uint64_t delay = busy ? MIN(UINT64_C(100000) << (candidate->busy_count - 1), UINT64_C(5000000)) : 100000;
+    candidate->retry_at = delay > UINT64_MAX - now_us ? UINT64_MAX : now_us + delay;
+    memset(&queue->active, 0, sizeof(queue->active));
+    return 0;
 }
 
 static void recovery_object_free(gpointer pointer)
