@@ -1745,7 +1745,7 @@ out:
 static int snapshot_task_copy(const LatcdConfig *config, const char *source,
                               int input, const uint8_t digest[32],
                               const char *temporary, char **snapshot,
-                              int *snapshot_pin, int *task_pin,
+                              int *snapshot_pin, int *task_pin, char **task_id,
                               char *error, size_t error_size)
 {
     char *id = g_uuid_string_random();
@@ -1753,15 +1753,14 @@ static int snapshot_task_copy(const LatcdConfig *config, const char *source,
     char *output = g_build_filename(temporary, name, NULL);
     const char *paths[6] = {source, NULL, NULL, NULL, output, NULL};
     int inputs[4] = {input, -1, -1, -1};
-    char *task_id = NULL;
     *task_pin = record_task(config, true, paths, inputs, digest, NULL,
-                            &task_id, error, error_size);
+                            task_id, error, error_size);
     if (*task_pin >= 0) copy_test_barrier("recorded");
     int result = *task_pin < 0 ? -1 : snapshot_cached_fd(input, temporary,
         snapshot, snapshot_pin, output, error, error_size);
     if (!result) result = sync_directory(temporary, error, error_size);
     if (!result) copy_test_barrier("synced");
-    if (!result) result = record_copy_receipt(config, task_id, *task_pin,
+    if (!result) result = record_copy_receipt(config, *task_id, *task_pin,
         output, *snapshot_pin, error, error_size);
     if (!result) copy_test_barrier("copied");
     if (result) {
@@ -1773,10 +1772,44 @@ static int snapshot_task_copy(const LatcdConfig *config, const char *source,
         *task_pin = -1;
     }
     g_free(output);
-    g_free(task_id);
     g_free(name);
     g_free(id);
     return result;
+}
+
+static int record_copy_handoff(const LatcdConfig *config, const char *id,
+                                int task_pin, char *error, size_t error_size)
+{
+    int root = -1, gc = -1, receipts = -1, handoffs = -1, receipt = -1, lease = -1;
+    GKeyFile *record = g_key_file_new();
+    char *name = g_strdup_printf("%s.ini", id);
+    struct stat task, copied;
+    root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (root < 0 || (gc = open_task_directory(root, ".gc")) < 0 ||
+        (receipts = open_task_directory(gc, "copy-receipts")) < 0 ||
+        (handoffs = open_task_directory(gc, "copy-handoffs")) < 0 ||
+        (receipt = openat(receipts, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)) < 0 ||
+        fstat(task_pin, &task) || fstat(receipt, &copied) ||
+        !S_ISREG(copied.st_mode) || copied.st_uid != geteuid() ||
+        copied.st_nlink != 1 || (copied.st_mode & 0222)) goto out;
+    g_key_file_set_string(record, "handoff", "version", "1");
+    g_key_file_set_string(record, "handoff", "task_id", id);
+    g_key_file_set_string(record, "handoff", "state", "SNAPSHOT_OWNED");
+    g_key_file_set_uint64(record, "handoff", "task_device", task.st_dev);
+    g_key_file_set_uint64(record, "handoff", "task_inode", task.st_ino);
+    g_key_file_set_uint64(record, "handoff", "receipt_device", copied.st_dev);
+    g_key_file_set_uint64(record, "handoff", "receipt_inode", copied.st_ino);
+    lease = persist_task_record(handoffs, id, record);
+out:
+    if (lease >= 0) close(lease);
+    if (receipt >= 0) close(receipt);
+    if (handoffs >= 0) close(handoffs);
+    if (receipts >= 0) close(receipts);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    g_free(name);
+    g_key_file_free(record);
+    return lease < 0 ? fail(error, error_size, "cannot persist copy handoff") : 0;
 }
 
 static char *cached_fd_digest(int fd)
@@ -1854,10 +1887,11 @@ static int snapshot_current_pair(const LatcdConfig *config,
     }
     /* Pin both members of one selected generation before releasing the lock. */
     pthread_mutex_unlock(&cache_lock);
+    char *task_ids[2] = {NULL, NULL};
     int result = snapshot_task_copy(config, native_path, native_fd, digest,
-        temporary, native, &snapshot_pins[0], &snapshot_pins[2], error, error_size);
+        temporary, native, &snapshot_pins[0], &snapshot_pins[2], &task_ids[0], error, error_size);
     if (!result && pair) result = snapshot_task_copy(config, module_path, module_fd,
-        digest, temporary, module, &snapshot_pins[1], &snapshot_pins[3], error, error_size);
+        digest, temporary, module, &snapshot_pins[1], &snapshot_pins[3], &task_ids[1], error, error_size);
     g_free(module_path);
     g_free(native_path);
     char *module_sha = !result && pair ? cached_fd_digest(snapshot_pins[1]) : NULL;
@@ -1871,8 +1905,15 @@ static int snapshot_current_pair(const LatcdConfig *config,
     }
     g_free(module_sha);
     g_free(native_sha);
+    for (unsigned i = 0; !result && i < (pair ? 2u : 1u); i++) {
+        result = record_copy_handoff(config, task_ids[i], snapshot_pins[i + 2],
+                                      error, error_size);
+    }
+    g_free(task_ids[0]);
+    g_free(task_ids[1]);
     close(native_fd);
     if (module_fd >= 0) close(module_fd);
+    if (!result) copy_test_barrier("handedoff");
     pthread_mutex_lock(&cache_lock);
     if (result) {
         for (unsigned i = 0; i < 4; i++) {

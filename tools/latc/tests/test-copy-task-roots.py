@@ -23,7 +23,7 @@ def run(prefix, guest, work):
                     str(guest), str(tbset)], env=env, check=True)
     subprocess.run([str(prefix / 'bin/latc'), 'emit-static-tbset', str(guest),
                     '-o', str(full)], env=env, check=True)
-    for stage in ('recorded', 'synced', 'copied'):
+    for stage in ('recorded', 'synced', 'copied', 'handedoff'):
         directory = work / stage
         directory.mkdir(mode=0o700)
         cache, socket = directory / 'cache', directory / 's'
@@ -74,7 +74,7 @@ def run(prefix, guest, work):
                 (directory / 'active-plan.json').write_text(json.dumps(observed, indent=2))
                 copies = [(path, task) for path, task in observed['tasks'].items()
                           if task.get('kind') == 'COPY']
-                assert len(copies) == 1, copies
+                assert len(copies) == (2 if stage == 'handedoff' else 1), copies
                 record, task = copies[0]
                 assert task['lease_observation'] == 'HELD_OBSERVED'
                 source = task['objects']['input']
@@ -82,9 +82,11 @@ def run(prefix, guest, work):
                 output = cache / '.tmp' / task['objects']['output']['name']
                 paths = [cache / record, cache / source['name']]
                 assert output.exists() == (stage != 'recorded')
-                assert observed['copy_receipt_count'] == (1 if stage == 'copied' else 0)
-                if stage == 'copied':
-                    receipt = next(iter(observed['copy_receipts'].values()))
+                assert observed['copy_receipt_count'] == (2 if stage == 'handedoff' else
+                                                         1 if stage == 'copied' else 0)
+                assert observed['copy_handoff_count'] == (2 if stage == 'handedoff' else 0)
+                if stage in ('copied', 'handedoff'):
+                    receipt = observed['copy_receipts']['.gc/copy-receipts/' + task['id'] + '.ini']
                     assert receipt['binding_observed']
                     assert not receipt['content_validated']
                     assert receipt['output']['sha256'] == hashlib.sha256(output.read_bytes()).hexdigest()
@@ -95,19 +97,54 @@ def run(prefix, guest, work):
                 for path in paths:
                     fd = os.open(path, os.O_RDONLY)
                     probes.append(fd)
+                    if stage == 'handedoff' and path == cache / source['name']:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        continue
                     try:
                         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                         raise AssertionError('copy lease missing: ' + str(path))
                     except BlockingIOError:
                         pass
                 assert current.read_bytes() == original
+                if stage == 'handedoff':
+                    for copy_path, copied_task in copies:
+                        assert copied_task['input_reference_released']
+                        copied_source = cache / copied_task['objects']['input']['name']
+                        with copied_source.open('rb') as pin:
+                            fcntl.flock(pin, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    assert task['input_reference_released']
+                    input_row = next(row for row in observed['entries']
+                                     if row['path'] == source['name'])
+                    assert not input_row['task_references']
+                    output_row = next(row for row in observed['entries']
+                                      if row['path'] == '.tmp/' + output.name)
+                    assert output_row['task_references']
                 daemon.kill()
                 assert daemon.wait(timeout=10) == -signal.SIGKILL
                 after = plan()
                 assert after['tasks'][record]['lease_observation'] == 'NO_HOLDER_OBSERVED'
                 assert not after['tasks'][record]['completion_verified']
                 assert not after['delete_authorized']
+                if stage == 'handedoff':
+                    assert all(after['tasks'][path]['input_reference_released']
+                               for path, _ in copies)
                 assert current.read_bytes() == original
+                if stage == 'handedoff':
+                    assert all(plan()['tasks'][path]['input_reference_released']
+                               for path, _ in copies)
+                    marker = cache / '.gc/copy-handoffs' / (task['id'] + '.ini')
+                    marker.chmod(0o600)
+                    raw = marker.read_text()
+                    marker.write_text(raw.replace('state=SNAPSHOT_OWNED', 'state=INVALID'))
+                    marker.chmod(0o400)
+                    invalid = subprocess.run([str(latcd), 'gc', '--plan', '--cache-dir', str(cache)],
+                                             env=env, capture_output=True, text=True, timeout=10)
+                    assert invalid.returncode == 1
+                    bad = json.loads(invalid.stdout)
+                    assert not bad['tasks'][record].get('input_reference_released', False)
+                    assert any(error['reason'] == 'invalid_copy_handoff' for error in bad['errors'])
+                    assert current.read_bytes() == original
                 for fd in probes:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     fcntl.flock(fd, fcntl.LOCK_UN)

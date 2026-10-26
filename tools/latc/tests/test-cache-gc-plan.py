@@ -203,12 +203,30 @@ class PlannerTest(unittest.TestCase):
             self.put(str(receipt.relative_to(self.root)), bad.encode())
             self.run_plan(success=False)
         self.put(str(receipt.relative_to(self.root)), record.encode())
+        receipt_stat = receipt.stat()
+        handoff = (f'[handoff]\nversion=1\ntask_id={task.stem}\nstate=SNAPSHOT_OWNED\n'
+                   f'task_device={root.st_dev}\ntask_inode={root.st_ino}\n'
+                   f'receipt_device={receipt_stat.st_dev}\nreceipt_inode={receipt_stat.st_ino}\n')
+        marker = self.put(f'.gc/copy-handoffs/{task.name}', handoff.encode())
+        plan = self.run_plan()
+        value = next(iter(plan['copy_handoffs'].values()))
+        self.assertTrue(value['input_reference_released'])
+        input_row = next(row for row in plan['entries'] if row['path'] == '.tmp/input-ABC')
+        self.assertFalse(input_row['task_references'])
+        for bad in (handoff.replace('SNAPSHOT_OWNED', 'DONE'),
+                    handoff.replace(f'receipt_inode={receipt_stat.st_ino}', 'receipt_inode=0'),
+                    handoff + 'unexpected=1\n'):
+            self.put(str(marker.relative_to(self.root)), bad.encode())
+            self.run_plan(success=False)
+        self.put(str(marker.relative_to(self.root)), handoff.encode())
         self.put('.tmp/native-ABC', b'changed size')
         self.run_plan(success=False)
         output.unlink()
         value = next(iter(self.run_plan()['copy_receipts'].values()))
         self.assertEqual(value['output_observation'], 'MISSING')
         self.assertFalse(value['binding_observed'])
+        self.assertFalse(next(iter(self.run_plan()['copy_handoffs'].values()))[
+            'input_reference_released'])
 
     def generation(self, digit, *, tbset=None):
         stem = SOURCE + "-" + digit * 64

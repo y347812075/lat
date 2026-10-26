@@ -101,6 +101,7 @@ class Inventory:
         self.tasks = {}
         self.task_refs = {}
         self.copy_receipts = {}
+        self.copy_handoffs = {}
         self.frozen = set()
         self.freeze_all = False
         self.count = 0
@@ -145,6 +146,8 @@ class Inventory:
                         self.read_task(fd, name, st)
                     if prefix == ".gc/copy-receipts":
                         self.read_copy_receipt(fd, name, st)
+                    if prefix == ".gc/copy-handoffs":
+                        self.read_copy_handoff(fd, name, st)
                     if stat.S_ISDIR(st.st_mode):
                         child = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
                                         os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=fd)
@@ -158,6 +161,42 @@ class Inventory:
                     self.error(relative, "unreadable_or_changed", str(exc))
         if identity(os.fstat(fd)) != identity(before):
             self.error(prefix or ".", "concurrent_change", "directory changed during scan")
+
+    def read_copy_handoff(self, directory, name, before):
+        relative = ".gc/copy-handoffs/" + name
+        try:
+            if (not name.endswith(".ini") or str(uuid.UUID(name[:-4])) != name[:-4] or
+                    not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
+                    before.st_nlink != 1 or before.st_mode & 0o222 or
+                    not 0 < before.st_size <= 4096):
+                raise ValueError("unsafe copy handoff")
+            fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW |
+                         os.O_NONBLOCK, dir_fd=directory)
+            try:
+                raw = os.read(fd, 4097)
+                if identity(os.fstat(fd)) != identity(before) or len(raw) != before.st_size:
+                    raise ValueError("copy handoff changed during read")
+            finally:
+                os.close(fd)
+            parser = configparser.ConfigParser(interpolation=None, strict=True)
+            parser.read_string(raw.decode("ascii"))
+            if parser.defaults() or parser.sections() != ["handoff"]:
+                raise ValueError("invalid copy handoff sections")
+            value = dict(parser["handoff"])
+            numbers = {"task_device", "task_inode", "receipt_device", "receipt_inode"}
+            if (set(value) != numbers | {"version", "task_id", "state"} or
+                    value["version"] != "1" or value["task_id"] != name[:-4] or
+                    value["state"] != "SNAPSHOT_OWNED"):
+                raise ValueError("invalid copy handoff fields")
+            for key in numbers:
+                if not re.fullmatch(r"[0-9]+", value[key]) or int(value[key]) >= 2**64:
+                    raise ValueError("invalid copy handoff integer")
+                value[key] = int(value[key])
+            self.copy_handoffs[relative] = dict(value, binding_observed=False,
+                                                input_reference_released=False)
+        except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
+            self.freeze_all = True
+            self.error(relative, "invalid_copy_handoff", str(exc))
 
     def read_copy_receipt(self, directory, name, before):
         relative = ".gc/copy-receipts/" + name
@@ -621,6 +660,30 @@ class Inventory:
                     self.freeze_all = True
                     self.error(relative, "copy_receipt_output_changed", obj["name"])
             task["copy_receipt"] = relative
+        for relative, handoff in self.copy_handoffs.items():
+            name = handoff["task_id"] + ".ini"
+            task_path, receipt_path = ".gc/tasks/" + name, ".gc/copy-receipts/" + name
+            task, receipt = self.tasks.get(task_path), self.copy_receipts.get(receipt_path)
+            rows = [self.entries.get(path) for path in (task_path, receipt_path)]
+            matched = task and task.get("kind") == "COPY" and receipt and all(rows)
+            if matched:
+                matched = all((row["device"], row["inode"]) ==
+                    (handoff[prefix + "_device"], handoff[prefix + "_inode"])
+                    for row, prefix in zip(rows, ("task", "receipt")))
+            if not matched:
+                self.freeze_all = True
+                self.error(relative, "copy_handoff_binding_changed", task_path)
+                continue
+            handoff["binding_observed"] = True
+            # Missing/changed snapshots cannot justify releasing a root in a plan.
+            if not receipt["binding_observed"]:
+                continue
+            handoff["input_reference_released"] = True
+            task["input_reference_released"] = True
+            task["copy_handoff"] = relative
+            for target, refs in self.task_refs.items():
+                self.task_refs[target] = [ref for ref in refs if not
+                    (ref["task"] == task_path and ref["role"] == "input")]
         for relative, task in self.tasks.items():
             for role, obj in task["objects"].items():
                 directories = {"cache": "", "temporary": ".tmp", "collected": ".tbsets"}
@@ -632,6 +695,8 @@ class Inventory:
                         obj["device"], obj["inode"], obj["mode"], obj["uid"])
                 elif role == "output" or role.startswith("output_"):
                     continue  # Intent only: never claim an output inode is reserved.
+                elif role == "input" and task.get("input_reference_released"):
+                    continue
                 else:
                     row = self.entries.get(path)
                     if row is None:
@@ -736,6 +801,7 @@ class Inventory:
                 "transaction_count": len(self.transactions),
                 "task_count": len(self.tasks), "tasks": self.tasks,
                 "copy_receipt_count": len(self.copy_receipts), "copy_receipts": self.copy_receipts,
+                "copy_handoff_count": len(self.copy_handoffs), "copy_handoffs": self.copy_handoffs,
                 "transactions": self.transactions,
                 "retirement_plan": {"grace_us": self.grace_us,
                                     "clock": ({"boot_id": self.clock[0], "boottime_us": self.clock[1]}
