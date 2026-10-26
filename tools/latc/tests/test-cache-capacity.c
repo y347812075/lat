@@ -70,6 +70,15 @@ int main(void)
     assert(!unlink(legacy_change)); g_free(legacy_change);
     assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
     assert(capacity.committed == 15 && !capacity.reserved);
+    assert(!latcd_cache_capacity_reserve_transient(&capacity, 4, 20, error, sizeof(error)));
+    assert(capacity.transient_reserved == 4);
+    assert(latcd_cache_capacity_reserve(&capacity, 2, 20, error, sizeof(error)));
+    assert(!latcd_cache_capacity_reserve(&capacity, 1, 20, error, sizeof(error)));
+    assert(latcd_cache_capacity_reserve_transient(&capacity, 1, 20, error, sizeof(error)));
+    assert(latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_finish(&capacity, 1, false);
+    latcd_cache_capacity_finish_transient(&capacity, 4, false);
+    assert(capacity.committed == 15 && !capacity.transient_reserved && !capacity.reserved);
     assert(!latcd_cache_capacity_reserve(&capacity, 5, 20, error, sizeof(error)));
     assert(latcd_cache_capacity_reserve(&capacity, 1, 20, error, sizeof(error)));
     latcd_cache_capacity_finish(&capacity, 5, false);

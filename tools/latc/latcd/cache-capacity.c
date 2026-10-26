@@ -104,7 +104,8 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
                               char *error, size_t error_size)
 {
     pthread_mutex_lock(&capacity->lock);
-    bool busy = capacity->reserved || (capacity->expected_names && g_hash_table_size(capacity->expected_names));
+    bool busy = capacity->reserved || capacity->transient_reserved ||
+        (capacity->expected_names && g_hash_table_size(capacity->expected_names));
     pthread_mutex_unlock(&capacity->lock);
     if (busy) return -1;
     latcd_cache_capacity_close(capacity);
@@ -133,19 +134,35 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
     return result;
 }
 
-int latcd_cache_capacity_reserve(LatcdCacheCapacity *capacity, uint64_t bytes,
-                                 uint64_t limit, char *error, size_t error_size)
+static int reserve_bytes(LatcdCacheCapacity *capacity, uint64_t bytes,
+                           uint64_t limit, bool transient, char *error, size_t error_size)
 {
     pthread_mutex_lock(&capacity->lock);
     check_changes(capacity);
     bool fits = capacity->ready && capacity->committed <= limit &&
         capacity->reserved <= limit - capacity->committed &&
-        bytes <= limit - capacity->committed - capacity->reserved;
-    if (fits) capacity->reserved += bytes;
+        capacity->transient_reserved <= limit - capacity->committed - capacity->reserved &&
+        bytes <= limit - capacity->committed - capacity->reserved - capacity->transient_reserved;
+    if (fits) {
+        if (transient) capacity->transient_reserved += bytes;
+        else capacity->reserved += bytes;
+    }
     pthread_mutex_unlock(&capacity->lock);
     if (!fits && error && error_size)
         snprintf(error, error_size, "capacity: cache capacity requires safe retirement GC (index/reservations/changes)");
     return fits ? 0 : -1;
+}
+
+int latcd_cache_capacity_reserve(LatcdCacheCapacity *capacity, uint64_t bytes,
+                                 uint64_t limit, char *error, size_t error_size)
+{
+    return reserve_bytes(capacity, bytes, limit, false, error, error_size);
+}
+
+int latcd_cache_capacity_reserve_transient(LatcdCacheCapacity *capacity, uint64_t bytes,
+                                           uint64_t limit, char *error, size_t error_size)
+{
+    return reserve_bytes(capacity, bytes, limit, true, error, error_size);
 }
 
 int latcd_cache_capacity_expect(LatcdCacheCapacity *capacity, const char *const *names,
@@ -183,15 +200,26 @@ void latcd_cache_capacity_close(LatcdCacheCapacity *capacity)
     capacity->ready = false;
 }
 
-void latcd_cache_capacity_finish(LatcdCacheCapacity *capacity, uint64_t bytes,
-                                 bool retained)
+static void finish_bytes(LatcdCacheCapacity *capacity, uint64_t bytes,
+                           bool retained, bool transient)
 {
     pthread_mutex_lock(&capacity->lock);
-    if (bytes > capacity->reserved || (retained && bytes > UINT64_MAX - capacity->committed)) {
+    uint64_t *reserved = transient ? &capacity->transient_reserved : &capacity->reserved;
+    if (bytes > *reserved || (retained && bytes > UINT64_MAX - capacity->committed)) {
         capacity->ready = false;
     } else {
-        capacity->reserved -= bytes;
+        *reserved -= bytes;
         if (retained) capacity->committed += bytes;
     }
     pthread_mutex_unlock(&capacity->lock);
+}
+
+void latcd_cache_capacity_finish(LatcdCacheCapacity *capacity, uint64_t bytes, bool retained)
+{
+    finish_bytes(capacity, bytes, retained, false);
+}
+
+void latcd_cache_capacity_finish_transient(LatcdCacheCapacity *capacity, uint64_t bytes, bool retained)
+{
+    finish_bytes(capacity, bytes, retained, true);
 }

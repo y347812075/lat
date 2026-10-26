@@ -43,6 +43,7 @@ def run(prefix, guest, work):
             value = json.loads(stats.read_bytes())
             if value["compiled"] == compiled and value["failed"] == failed and not value["active_jobs"]:
                 assert value["publication_reserved_bytes"] == 0, value
+                assert value["compiler_peak_reserved_bytes"] == 0, value
                 return value
             time.sleep(0.01)
         raise AssertionError("worker statistics did not settle")
@@ -100,7 +101,33 @@ def run(prefix, guest, work):
             if daemon.poll() is None:
                 daemon.send_signal(signal.SIGTERM)
             assert daemon.wait(timeout=20) == 0
-    print("generation-capacity: failed-publication/release/retry/index-total/external-change/strict42 PASS")
+    limited = work / 'limited-cache'
+    limited_socket = work / 'limited.sock'
+    limited_command = command.copy()
+    limited_command[limited_command.index(str(cache))] = str(limited)
+    limited_command[limited_command.index(str(socket))] = str(limited_socket)
+    with (work / 'limited.log').open('wb') as log:
+        daemon = subprocess.Popen(limited_command + ['--max-cache-bytes', '4194304'],
+                                  env=env, stdout=log, stderr=log)
+        try:
+            deadline = time.monotonic() + 20
+            while not limited_socket.is_socket():
+                assert daemon.poll() is None and time.monotonic() < deadline
+                time.sleep(.01)
+            result = subprocess.run([str(latcd), '--submit', '--socket', str(limited_socket),
+                                     '--tbset', str(first), str(guest)], env=env,
+                                    capture_output=True, timeout=30)
+            assert result.returncode == 0
+            result = subprocess.run([str(latcd), '--flush-source', '--socket', str(limited_socket),
+                                     str(guest)], env=env, capture_output=True, timeout=30)
+            assert result.returncode != 0
+            assert not list(limited.glob('*.current'))
+            assert not list((limited / '.gc/tasks').glob('*.ini'))
+            assert b'capacity:' in (work / 'limited.log').read_bytes()
+        finally:
+            daemon.terminate()
+            assert daemon.wait(timeout=20) == 0
+    print("generation-capacity: publication/retry/index/strict42/compiler-peak-admission PASS")
 
 
 if __name__ == "__main__":

@@ -281,7 +281,7 @@ static void release_compile_space(uint32_t worker)
 static int compile_space_admit(uint32_t worker, const char *temporary,
                                const char *output, const char *source, const char *tbset,
                                const char *base_native, const char *base_module,
-                               char *error, size_t error_size)
+                               uint64_t *cache_peak, char *error, size_t error_size)
 {
     /* Estimate, not a hard quota: reserve translation/merge/link coexistence.
      * Existing bytes are already reflected in statvfs; other reservations are
@@ -313,6 +313,7 @@ static int compile_space_admit(uint32_t worker, const char *temporary,
         available[i] = (uint64_t)fs.f_bavail * fs.f_frsize;
     }
     if (!result) result = reserve_compile_space(worker, devices, available, bytes, error, error_size);
+    if (!result) *cache_peak = estimate;
     g_free(parent);
     return result;
 }
@@ -1674,6 +1675,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *base_native, const char *base_module,
                         const char *output_native,
                         const char *output, const uint8_t digest[32], GPtrArray *compiler_tasks,
+                        uint64_t *transient_reservation,
                         char *error, size_t error_size)
 {
     if (validate_toolchain(config, error, error_size)) {
@@ -1696,10 +1698,20 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         compile_tmpdir = access("/dev/shm", W_OK | X_OK) == 0 ?
                          "/dev/shm" : "/tmp";
     }
+    uint64_t cache_peak = 0;
     if (compile_space_admit(worker_index, compile_tmpdir, output, source, tbset,
-                              base_native, base_module, error, error_size)) {
+                              base_native, base_module, &cache_peak, error, error_size)) {
         g_free(library_path);
         return -1;
+    }
+    if (cache_peak > *transient_reservation) {
+        if (latcd_cache_capacity_reserve_transient(&generation_capacity,
+            cache_peak - *transient_reservation, config->max_cache_bytes, error, error_size)) {
+            release_compile_space(worker_index);
+            g_free(library_path);
+            return -1;
+        }
+        *transient_reservation = cache_peak;
     }
     char *temporary_path = g_strdup_printf("TMPDIR=%s", compile_tmpdir);
     char *guest_prefix = config->x86_rootfs ?
@@ -2925,6 +2937,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     char *base_module = NULL;
     int baseline_pins[4] = {-1, -1, -1, -1};
     GPtrArray *compiler_tasks = g_ptr_array_new_with_free_func(g_free);
+    uint64_t transient_reservation = 0;
     char *retained_tbset = NULL;
     char *module_name = NULL;
     char *native_name = NULL;
@@ -3087,7 +3100,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     int compiler_result = run_compiler(config, worker_index, snapshot,
                                        compile_tbset, static_tbset,
                                        base_native, base_module, native,
-                                       module, digest, compiler_tasks, error, sizeof(error));
+                                       module, digest, compiler_tasks, &transient_reservation, error, sizeof(error));
     if (compiler_result) {
         if (!base_native) {
             status = LATCD_STATUS_COMPILE_FAILED;
@@ -3114,7 +3127,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         compiler_result = run_compiler(config, worker_index, snapshot,
                                        full_compile_tbset, static_tbset,
                                        NULL, NULL, native, module, digest,
-                                       compiler_tasks, error, sizeof(error));
+                                       compiler_tasks, &transient_reservation, error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
             goto out;
@@ -3151,7 +3164,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         compiler_result = run_compiler(config, worker_index, snapshot,
                                        full_compile_tbset, static_tbset,
                                        NULL, NULL, native, module, digest,
-                                       compiler_tasks, error, sizeof(error));
+                                       compiler_tasks, &transient_reservation, error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
             goto out;
@@ -3320,14 +3333,19 @@ out:
     response->status = status;
     g_strlcpy(response->message, error[0] ? error : "unknown error",
               sizeof(response->message));
-    if (module && *module) unlink(module);
-    if (native && *native) unlink(native);
+    bool transient_retained = false;
+    if (module && *module && unlink(module) && errno != ENOENT) transient_retained = true;
+    if (native && *native && unlink(native) && errno != ENOENT) transient_retained = true;
     for (guint i = 0; i < compiler_tasks->len; i++) {
         LatcdCompilerTask *task = g_ptr_array_index(compiler_tasks, i);
-        if (record_compiler_release(config, task->id, &task->identity, true))
+        if (record_compiler_release(config, task->id, &task->identity, true)) {
+            transient_retained = true;
             fprintf(stderr, "latcd: compiler output release not durable; retaining task root\n");
+        }
         compiler_task_local(task->id, false);
     }
+    if (transient_reservation) latcd_cache_capacity_finish_transient(
+        &generation_capacity, transient_reservation, transient_retained);
     g_ptr_array_free(compiler_tasks, TRUE);
     if (tbset_copy && *tbset_copy) unlink(tbset_copy);
     if (module_staged && unlink(final_module) && errno != ENOENT) capacity_retained = true;
@@ -3523,6 +3541,7 @@ static void write_stats_locked(LatcdService *service)
     pthread_mutex_lock(&generation_capacity.lock);
     uint64_t generation_bytes = generation_capacity.committed;
     uint64_t publication_bytes = generation_capacity.reserved;
+    uint64_t transient_bytes = generation_capacity.transient_reserved;
     bool capacity_ready = generation_capacity.ready;
     pthread_mutex_unlock(&generation_capacity.lock);
     int length = snprintf(contents, sizeof(contents),
@@ -3534,7 +3553,8 @@ static void write_stats_locked(LatcdService *service)
         ",\"active_jobs\":%u,\"running_sources\":%u,\"workers\":%u"
         ",\"max_cache_bytes\":%" PRIu64
         ",\"cache_owner_pid\":%ld,\"generation_logical_bytes\":%" PRIu64
-        ",\"publication_reserved_bytes\":%" PRIu64 ",\"generation_capacity_ready\":%s}\n",
+        ",\"publication_reserved_bytes\":%" PRIu64 ",\"compiler_peak_reserved_bytes\":%" PRIu64
+        ",\"generation_capacity_ready\":%s}\n",
         service->requests, service->queued, service->deduplicated,
         service->cache_hits, service->compiled, service->failed,
         service->negative_hits, service->queue_full, service->queue->len,
@@ -3542,7 +3562,7 @@ static void write_stats_locked(LatcdService *service)
         g_hash_table_size(service->active),
         g_hash_table_size(service->running_sources), service->config->workers,
         service->config->max_cache_bytes, (long)getpid(), generation_bytes,
-        publication_bytes, capacity_ready ? "true" : "false");
+        publication_bytes, transient_bytes, capacity_ready ? "true" : "false");
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
         ssize_t written = write(fd, contents, length);

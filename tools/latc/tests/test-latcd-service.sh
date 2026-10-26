@@ -971,7 +971,7 @@ PY
 "$latc" inspect-module --json "$module" >"$phase/module.json"
 stop_service
 
-start_service capacity "$latc" --max-cache-bytes 4194304
+start_service capacity "$latc" --max-cache-bytes 268435456
 submit_source "$socket" "$guest" "$phase/a.client"
 "$latcd" --flush-source --socket "$socket" "$guest" \
   >"$phase/a-flush.client"
@@ -993,7 +993,7 @@ output.write_text(json.dumps(
      for path in paths}, sort_keys=True))
 PY
 orphan=$cache/0000000000000000000000000000000000000000000000000000000000000000-1111111111111111111111111111111111111111111111111111111111111111.native
-truncate -s 4188160 "$orphan"
+truncate -s 268429312 "$orphan"
 cp "$guest" "$work/capacity-b.elf"
 printf z >>"$work/capacity-b.elf"
 submit_source "$socket" "$work/capacity-b.elf" "$phase/b.client"
