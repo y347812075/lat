@@ -86,6 +86,7 @@ def run(prefix, guest, work):
         daemon = channel = stream = None
         compiler_pid = None
         probes = []
+        publisher_active = True
         with (directory / 'daemon.log').open('wb') as log:
             try:
                 daemon = start(wrapper, log)
@@ -128,7 +129,7 @@ def run(prefix, guest, work):
                         copies = [value for value in plan['tasks'].values()
                                   if value.get('kind') == 'COPY']
                         assert len(copies) == (2 if incremental else 0)
-                        if daemon.poll() is None:
+                        if publisher_active:
                             assert all(value['lease_observation'] == 'HELD_OBSERVED'
                                        for value in copies)
                         else:
@@ -142,8 +143,17 @@ def run(prefix, guest, work):
                 assert_pinned()
                 daemon.kill()
                 assert daemon.wait(timeout=10) == -signal.SIGKILL
+                publisher_active = False
                 assert_pinned()
                 task_plan('HELD_OBSERVED')
+                # A restarted daemon must not infer input release from the old
+                # daemon's death while the compiler retains the task SH OFD.
+                service_socket.unlink(missing_ok=True)
+                daemon = start(prefix / 'bin/latc', log)
+                assert_pinned()
+                task_plan('HELD_OBSERVED')
+                daemon.terminate()
+                assert daemon.wait(timeout=30) == 0
                 channel.sendall(b'f')
                 child = json.loads(stream.readline())['child']
                 (directory / 'descendant.json').write_text(json.dumps(dict(child=child)))
@@ -164,6 +174,17 @@ def run(prefix, guest, work):
                 for probe in probes:
                     fcntl.flock(probe, fcntl.LOCK_UN)
                 task_plan('NO_HOLDER_OBSERVED')
+                service_socket.unlink(missing_ok=True)
+                daemon = start(prefix / 'bin/latc', log)
+                result = subprocess.run([str(latcd), 'gc', '--plan', '--cache-dir',
+                    str(cache)], env=env, capture_output=True, text=True, timeout=10)
+                assert result.returncode == 0, result.stdout + result.stderr
+                recovered = json.loads(result.stdout)['tasks'][str(task_record.relative_to(cache))]
+                assert recovered['compiler_inputs_released'], recovered
+                assert not recovered.get('compiler_outputs_released', False), recovered
+                assert not recovered['completion_verified']
+                daemon.terminate()
+                assert daemon.wait(timeout=30) == 0
             finally:
                 if compiler_pid is not None:
                     try:

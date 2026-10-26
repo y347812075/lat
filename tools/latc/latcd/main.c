@@ -14,6 +14,7 @@
 #include "cache-capacity.h"
 
 #include <dlfcn.h>
+#include <dirent.h>
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1404,6 +1405,83 @@ typedef struct LatcdCompilerTask {
     char id[37];
     struct stat identity;
 } LatcdCompilerTask;
+
+/* Startup owns the daemon lease. Recover input ownership only: surviving
+ * descendants retain SH on the task inode; outputs and unknown records stay roots. */
+static int recover_compiler_inputs(const LatcdConfig *config,
+                                    char *error, size_t error_size)
+{
+    int root = -1, gc = -1, tasks = -1, releases = -1, result = -1;
+    DIR *directory = NULL;
+    unsigned recovered = 0, retained = 0;
+    root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (root < 0 || (gc = open_task_directory(root, ".gc")) < 0 ||
+        (tasks = open_task_directory(gc, "tasks")) < 0 ||
+        (releases = open_task_directory(gc, "compiler-releases")) < 0) goto out;
+    int scan = dup(tasks);
+    if (scan < 0) goto out;
+    directory = fdopendir(scan);
+    if (!directory) { close(scan); goto out; }
+    for (;;) {
+        if (stop_requested) { result = 1; break; }
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) { result = errno ? -1 : 0; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        const char *name = entry->d_name;
+        char id[37];
+        if (strlen(name) != 40 || strcmp(name + 36, ".ini")) { retained++; continue; }
+        memcpy(id, name, 36);
+        id[36] = 0;
+        if (!g_uuid_string_is_valid(id)) { retained++; continue; }
+        struct stat existing;
+        if (!fstatat(releases, name, &existing, AT_SYMLINK_NOFOLLOW) || errno != ENOENT) continue;
+        int task = openat(tasks, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        struct stat before, after, cache;
+        char data[65536];
+        GKeyFile *record = g_key_file_new();
+        bool valid = task >= 0 && !fstat(task, &before) &&
+            S_ISREG(before.st_mode) && before.st_uid == geteuid() &&
+            before.st_nlink == 1 && !(before.st_mode & 0222) &&
+            before.st_size > 0 && (uint64_t)before.st_size <= sizeof(data) &&
+            !flock(task, LOCK_EX | LOCK_NB) &&
+            pread(task, data, before.st_size, 0) == before.st_size &&
+            !fstat(task, &after) && metadata_equal(&before, &after) &&
+            g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
+        const char *fields[] = {"version", "id", "state", "build_id"};
+        const char *values[] = {"1", id, "BOUND", LATC_BUILD_ID};
+        for (unsigned i = 0; valid && i < G_N_ELEMENTS(fields); i++) {
+            char *value = g_key_file_get_string(record, "task", fields[i], NULL);
+            valid = value && !strcmp(value, values[i]);
+            g_free(value);
+        }
+        if (valid) {
+            GError *parse_error = NULL;
+            guint64 device = g_key_file_get_uint64(record, "cache", "device", &parse_error);
+            valid = !parse_error;
+            g_clear_error(&parse_error);
+            guint64 inode = g_key_file_get_uint64(record, "cache", "inode", &parse_error);
+            valid &= !parse_error && !fstat(root, &cache) &&
+                device == (guint64)cache.st_dev && inode == (guint64)cache.st_ino;
+            g_clear_error(&parse_error);
+        }
+        g_key_file_free(record);
+        if (task >= 0) close(task);
+        /* Reopen and retake EX in the normal writer; never upgrade an OFD or
+         * treat the earlier observation as permanent authority. */
+        if (valid && !record_compiler_release(config, id, &before, false)) recovered++;
+        else retained++;
+    }
+out:
+    if (directory) closedir(directory);
+    if (releases >= 0) close(releases);
+    if (tasks >= 0) close(tasks);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    fprintf(stderr, "latcd: compiler input recovery recovered=%u retained=%u\n", recovered, retained);
+    if (result < 0) fail(error, error_size, "cannot scan compiler task roots: %s", strerror(errno));
+    return result;
+}
 
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *source, const char *tbset,
@@ -5372,6 +5450,7 @@ int main(int argc, char **argv)
     sigaction(SIGTERM, &recovery_action, NULL);
     int recovery = recover_lifecycle(config.cache_dir, false, error, sizeof(error));
     if (!recovery) recovery = recover_lifecycle(config.cache_dir, true, error, sizeof(error));
+    if (!recovery) recovery = recover_compiler_inputs(&config, error, sizeof(error));
     if (recovery) {
         if (recovery < 0) fprintf(stderr, "latcd: %s\n", error);
         else fprintf(stderr, "latcd: recovery deferred by stop request\n");

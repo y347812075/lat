@@ -568,6 +568,103 @@ static void test_incremental_retention(const char *compiler, unsigned mode)
     g_free(directory);
 }
 
+static void test_compiler_input_recovery(void)
+{
+    char *directory = g_dir_make_tmp("latcd-input-recovery-XXXXXX", NULL);
+    g_assert_nonnull(directory);
+    char *temporary = g_build_filename(directory, ".tmp", NULL);
+    g_assert_cmpint(g_mkdir(temporary, 0700), ==, 0);
+    char *source = g_build_filename(temporary, "source", NULL);
+    char *output = g_build_filename(temporary, "module", NULL);
+    char *native = g_build_filename(temporary, "native", NULL);
+    g_assert_true(g_file_set_contents(source, "input", -1, NULL));
+    int pins[4] = {open(source, O_RDONLY | O_CLOEXEC), -1, -1, -1};
+    g_assert_cmpint(pins[0], >=, 0);
+    const char *paths[] = {source, NULL, NULL, NULL, native, output};
+    const char *environment[] = {"TEST=1", NULL};
+    uint8_t digest[32] = {1};
+    LatcdConfig config = {.cache_dir = directory};
+    char error[256], *id = NULL;
+    int task = record_task(&config, false, paths, pins, digest, environment,
+        &id, error, sizeof(error));
+    g_assert_cmpint(task, >=, 0);
+    char *name = g_strdup_printf("%s.ini", id);
+    char *release = g_build_filename(directory, ".gc", "compiler-releases", name, NULL);
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_false(g_file_test(release, G_FILE_TEST_EXISTS));
+    close(task);
+    stop_requested = 1;
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 1);
+    g_assert_false(g_file_test(release, G_FILE_TEST_EXISTS));
+    stop_requested = 0;
+    record_boundary = RECORD_FILE_SYNC;
+    record_crash = false;
+    record_hits = 0;
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(record_hits, ==, 1);
+    g_assert_false(g_file_test(release, G_FILE_TEST_EXISTS));
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    struct stat before, after;
+    g_assert_cmpint(stat(release, &before), ==, 0);
+    g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(stat(release, &after), ==, 0);
+    g_assert_true(metadata_equal(&before, &after));
+    char *output_release = g_build_filename(directory, ".gc", "compiler-output-releases", name, NULL);
+    g_assert_false(g_file_test(output_release, G_FILE_TEST_EXISTS));
+    for (unsigned bad = 0; bad < 7; bad++) {
+        char *bad_id = NULL;
+        int bad_task = record_task(&config, false, paths, pins, digest, environment,
+            &bad_id, error, sizeof(error));
+        g_assert_cmpint(bad_task, >=, 0);
+        close(bad_task);
+        char *bad_name = g_strdup_printf("%s.ini", bad_id);
+        char *path = g_build_filename(directory, ".gc", "tasks", bad_name, NULL);
+        char *receipt = g_build_filename(directory, ".gc", "compiler-releases", bad_name, NULL);
+        char *alias = g_strconcat(path, ".alias", NULL);
+        if (bad < 4) {
+            GKeyFile *record = g_key_file_new();
+            g_assert_true(g_key_file_load_from_file(record, path, G_KEY_FILE_NONE, NULL));
+            if (bad == 0) g_key_file_set_string(record, "task", "build_id", "unknown");
+            if (bad == 1) g_key_file_set_uint64(record, "cache", "inode", 0);
+            if (bad == 2) g_key_file_set_string(record, "task", "version", "2");
+            if (bad == 3) g_key_file_set_string(record, "task", "id", "wrong-id");
+            gsize size;
+            char *contents = g_key_file_to_data(record, &size, NULL);
+            g_assert_cmpint(g_chmod(path, 0600), ==, 0);
+            g_assert_true(g_file_set_contents(path, contents, size, NULL));
+            g_assert_cmpint(g_chmod(path, 0400), ==, 0);
+            g_free(contents);
+            g_key_file_free(record);
+        } else if (bad == 4) {
+            g_assert_cmpint(g_chmod(path, 0600), ==, 0);
+        } else if (bad == 5) {
+            g_assert_cmpint(link(path, alias), ==, 0);
+        } else {
+            g_assert_cmpint(g_rename(path, alias), ==, 0);
+        }
+        g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
+        g_assert_false(g_file_test(receipt, G_FILE_TEST_EXISTS));
+        g_unlink(alias);
+        g_unlink(path);
+        g_free(alias);
+        g_free(receipt);
+        g_free(path);
+        g_free(bad_name);
+        g_free(bad_id);
+    }
+    close(pins[0]);
+    g_free(output_release);
+    g_free(release);
+    g_free(name);
+    g_free(id);
+    g_free(native);
+    g_free(output);
+    g_free(source);
+    g_free(temporary);
+    remove_fixture_tree(directory);
+    g_free(directory);
+}
+
 static void test_task_record_persistence(void)
 {
     char *directory = g_dir_make_tmp("latcd-record-faults-XXXXXX", NULL);
@@ -707,6 +804,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc == 1) {
+        test_compiler_input_recovery();
         test_task_record_persistence();
         test_compile_space();
         generation_capacity.ready = true;
