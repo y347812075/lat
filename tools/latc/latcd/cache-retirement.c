@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <sys/statvfs.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1460,7 +1461,7 @@ static bool tombstone_shape(GKeyFile *record, const char *name,
 
 static int recover_tombstone(const char *root_path, int root, int store,
                               const char *name, bool remove_object, LatcdRecoveryCursor *cursor,
-                              const uint64_t *grace_us)
+                              const uint64_t *grace_us, LatcdRetirementDeletionReport *report)
 {
     char *raw = NULL, *source = NULL, *hash = NULL;
     size_t size;
@@ -1554,20 +1555,32 @@ static int recover_tombstone(const char *root_path, int root, int store,
         close(latch);
         latch = -1;
         if (!strcmp(observation, "MATCHED")) {
+            if (report) {
+                report->logical_bytes = before.st_size;
+                report->allocated_bytes_before = (uint64_t)before.st_blocks * 512;
+            }
             if (record_write_fault("before-unlink") ||
-                unlinkat(root, name, 0) || record_write_fault("unlinked")) {
+                unlinkat(root, name, 0)) {
                 g_free(prior); goto out;
             }
+            if (report) {
+                report->object_unlinked = true;
+                report->unlinked_allocated_bytes = report->allocated_bytes_before;
+            }
+            if (record_write_fault("unlinked")) { g_free(prior); goto out; }
         }
-        if (fsync(root) || record_write_fault("unlink-synced")) {
+        if (fsync(root)) {
             g_free(prior); goto out;
         }
+        if (report) report->namespace_durable = true;
+        if (record_write_fault("unlink-synced")) { g_free(prior); goto out; }
         g_key_file_set_string(record, "tombstone", "deletion_status", "UNLINKED");
         observation = "MISSING";
     }
     g_key_file_set_string(record, "tombstone", "recovery_status", observation);
     result = !remove_object && !g_strcmp0(prior, observation) ? 0 : write_record(store, name, record);
     if (remove_object && strcmp(observation, "MISSING")) result = -1;
+    if (report && !result && remove_object) report->receipt_durable = true;
     g_free(prior);
 out:
     if (object >= 0) close(object);
@@ -1593,9 +1606,20 @@ int latcd_tombstone_recover(const char *root, unsigned *recovered,
     return result;
 }
 
+static bool filesystem_available(int fd, uint64_t *bytes)
+{
+    struct statvfs status;
+    if (fstatvfs(fd, &status) || !status.f_frsize ||
+        status.f_bavail > UINT64_MAX / status.f_frsize) return false;
+    *bytes = (uint64_t)status.f_bavail * status.f_frsize;
+    return true;
+}
+
 static int tombstone_delete(const char *root, const char *name, const uint64_t *grace_us,
+                             LatcdRetirementDeletionReport *report,
                              char *error, size_t error_size)
 {
+    if (report) memset(report, 0, sizeof(*report));
     if (!name || strlen(name) < 64 || strchr(name, '/'))
         return fail(error, error_size, "invalid deletion object name");
     char source[65];
@@ -1605,22 +1629,38 @@ static int tombstone_delete(const char *root, const char *name, const uint64_t *
     int directory = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
     int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
-    int result = store < 0 ? -1 : recover_tombstone(root, directory, store, name, true, NULL, grace_us);
+    if (report && directory >= 0)
+        report->filesystem_before_valid = filesystem_available(directory, &report->filesystem_available_before);
+    int result = store < 0 ? -1 : recover_tombstone(root, directory, store, name, true, NULL, grace_us, report);
     if (store >= 0) close(store);
     if (gc >= 0) close(gc);
+    if (report && directory >= 0)
+        report->filesystem_after_valid = filesystem_available(directory, &report->filesystem_available_after);
     if (directory >= 0) close(directory);
     return result ? fail(error, error_size, "object deletion deferred or rejected") : 0;
 }
 
 int latcd_tombstone_delete(const char *root, const char *name, char *error, size_t error_size)
 {
-    return tombstone_delete(root, name, NULL, error, error_size);
+    return tombstone_delete(root, name, NULL, NULL, error, error_size);
 }
 
 int latcd_tombstone_delete_due(const char *root, const char *name, uint64_t grace_us,
                                char *error, size_t error_size)
 {
-    return tombstone_delete(root, name, &grace_us, error, error_size);
+    return tombstone_delete(root, name, &grace_us, NULL, error, error_size);
+}
+
+int latcd_tombstone_delete_report(const char *root, const char *name,
+    LatcdRetirementDeletionReport *report, char *error, size_t error_size)
+{
+    return tombstone_delete(root, name, NULL, report, error, error_size);
+}
+
+int latcd_tombstone_delete_due_report(const char *root, const char *name, uint64_t grace_us,
+    LatcdRetirementDeletionReport *report, char *error, size_t error_size)
+{
+    return tombstone_delete(root, name, &grace_us, report, error, error_size);
 }
 
 typedef struct RetirementCandidate {
@@ -2149,7 +2189,7 @@ int latcd_recovery_step(LatcdRecoveryCursor *cursor, unsigned entries,
         if (fstatat(dirfd(cursor->directory), cursor->pending, &record, AT_SYMLINK_NOFOLLOW) ||
             !object_stat_equal(&record, &cursor->pending_identity)) goto invalid;
         int result = cursor->tombstones ? recover_tombstone(cursor->root_path, cursor->root,
-            dirfd(cursor->directory), cursor->pending, false, cursor, NULL) :
+            dirfd(cursor->directory), cursor->pending, false, cursor, NULL, NULL) :
             recover_record(cursor->root, dirfd(cursor->directory), cursor->pending, true, cursor);
         if (result < 0) goto invalid;
         if (result > 0) break;

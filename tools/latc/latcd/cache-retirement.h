@@ -86,6 +86,22 @@ int latcd_tombstone_delete(const char *root, const char *name,
 int latcd_tombstone_delete_due(const char *root, const char *name, uint64_t grace_us,
                                char *error, size_t error_size);
 
+typedef struct LatcdRetirementDeletionReport {
+    uint64_t logical_bytes, allocated_bytes_before, unlinked_allocated_bytes;
+    uint64_t filesystem_available_before, filesystem_available_after;
+    bool object_unlinked, namespace_durable, receipt_durable;
+    bool filesystem_before_valid, filesystem_after_valid;
+} LatcdRetirementDeletionReport;
+
+/* Same internal-only admission contract as above. Reports partial progress even
+ * on error. AFTER is sampled after closing the executor's object fd. Free-space
+ * observations include metadata and other writers, never verified release. An
+ * already-missing name does not count as a new unlink or released bytes. */
+int latcd_tombstone_delete_report(const char *root, const char *name,
+    LatcdRetirementDeletionReport *report, char *error, size_t error_size);
+int latcd_tombstone_delete_due_report(const char *root, const char *name, uint64_t grace_us,
+    LatcdRetirementDeletionReport *report, char *error, size_t error_size);
+
 typedef struct LatcdRetirementQueue LatcdRetirementQueue;
 typedef struct LatcdRetirementQueueStats {
     unsigned candidates, due, visited;

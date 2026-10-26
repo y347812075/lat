@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <sys/mman.h>
 #include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -1455,7 +1457,8 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         assert(latcd_tombstone_delete_due(root, names[0], 3600 * UINT64_C(1000000), error, sizeof(error)));
         assert(!access(paths[0], F_OK));
     }
-    int result = executor ? latcd_tombstone_delete_due(root, names[0], 0, error, sizeof(error)) :
+    LatcdRetirementDeletionReport deletion_report;
+    int result = executor ? latcd_tombstone_delete_due_report(root, names[0], 0, &deletion_report, error, sizeof(error)) :
         latcd_retirement_tombstone(root, source, names[0], fd, single, error, sizeof(error));
     close(fd);
     bool accepted = !mutation || (!executor && mutation >= 10);
@@ -1593,8 +1596,107 @@ static void test_hold_crash(bool release, const char *point)
     g_free(evidence); g_free(id); g_free(path); g_free(name); remove_root(root); g_free(root);
 }
 
-int main(void)
+static uint64_t space_available(const char *root)
 {
+    struct statvfs fs;
+    assert(!statvfs(root, &fs));
+    return (uint64_t)fs.f_bavail * fs.f_frsize;
+}
+
+static void test_deletion_report(const char *parent, bool isolated)
+{
+    for (unsigned mode = 0; mode < 3; mode++) {
+        char *root = parent ? g_build_filename(parent, mode == 0 ? "normal" :
+                                               mode == 1 ? "held" : "partial", NULL) : root_new();
+        if (parent) assert(!mkdir(root, 0700));
+        char *name = g_strconcat(source, ".native", NULL);
+        char *path = g_build_filename(root, name, NULL), error[256];
+        size_t length = 8 * 1024 * 1024;
+        char *payload = g_malloc0(length);
+        memset(payload, 'x', length);
+        assert(g_file_set_contents(path, payload, length, NULL));
+        g_free(payload);
+        assert(!chmod(path, 0400));
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        struct stat st;
+        assert(fd >= 0 && !fstat(fd, &st));
+        uint64_t allocated = (uint64_t)st.st_blocks * 512;
+        const char *names[] = {name};
+        char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+        assert(evidence && !latcd_retirement_tombstone(root, source, name, fd,
+                                                      evidence, error, sizeof(error)));
+        close(fd);
+        LatcdRetirementDeletionReport report;
+        if (mode == 1) {
+            fd = open(path, O_RDONLY | O_CLOEXEC);
+            assert(fd >= 0 && !flock(fd, LOCK_SH | LOCK_NB));
+            void *mapping = mmap(NULL, length, PROT_READ, MAP_PRIVATE, fd, 0);
+            assert(mapping != MAP_FAILED);
+            assert(latcd_tombstone_delete_report(root, name, &report, error, sizeof(error)) < 0);
+            assert(!report.object_unlinked && !report.unlinked_allocated_bytes && !access(path, F_OK));
+            assert(((char *)mapping)[length - 1] == 'x');
+            assert(!munmap(mapping, length));
+            close(fd);
+        }
+        if (mode == 2) assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:unlinked", 1));
+        int result = latcd_tombstone_delete_report(root, name, &report, error, sizeof(error));
+        unsetenv("LATCD_TEST_RETIREMENT_IO");
+        assert((result == 0) == (mode != 2));
+        assert(report.object_unlinked && report.logical_bytes == length &&
+               report.allocated_bytes_before == allocated && report.unlinked_allocated_bytes == allocated);
+        assert(report.namespace_durable == (mode != 2) && report.receipt_durable == (mode != 2));
+        assert(report.filesystem_before_valid && report.filesystem_after_valid);
+        if (isolated) {
+            assert(report.filesystem_available_after > report.filesystem_available_before);
+            uint64_t delta = report.filesystem_available_after - report.filesystem_available_before;
+            assert(delta <= allocated && allocated - delta <= 65536);
+            printf("deletion-report mode=%u allocated=%" G_GUINT64_FORMAT
+                   " available_before=%" G_GUINT64_FORMAT " available_after=%" G_GUINT64_FORMAT "\n",
+                   mode, allocated, report.filesystem_available_before, report.filesystem_available_after);
+        }
+        assert(!latcd_tombstone_delete_report(root, name, &report, error, sizeof(error)));
+        assert(!report.object_unlinked && !report.unlinked_allocated_bytes &&
+               report.namespace_durable && report.receipt_durable);
+        g_free(evidence); g_free(path); g_free(name); remove_root(root); g_free(root);
+    }
+    if (isolated) {
+        /* Nonparticipant negative control, never admitted to the executor:
+         * unlink alone cannot reclaim a file kept alive by a mapping. */
+        char *path = g_build_filename(parent, "mapping-control", NULL);
+        size_t length = 8 * 1024 * 1024;
+        int fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        assert(fd >= 0 && !ftruncate(fd, length));
+        char *mapping = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        assert(mapping != MAP_FAILED);
+        memset(mapping, 'x', length);
+        assert(!msync(mapping, length, MS_SYNC));
+        struct stat st;
+        assert(!fstat(fd, &st));
+        uint64_t allocated = (uint64_t)st.st_blocks * 512;
+        uint64_t before = space_available(parent);
+        assert(!unlink(path));
+        close(fd);
+        uint64_t mapped = space_available(parent);
+        assert(mapped <= before + 4096 && mapping[length - 1] == 'x');
+        assert(!munmap(mapping, length));
+        uint64_t after = space_available(parent);
+        assert(after >= mapped && after - mapped == allocated);
+        printf("mapping-control allocated=%" G_GUINT64_FORMAT " before=%" G_GUINT64_FORMAT
+               " mapped=%" G_GUINT64_FORMAT " after=%" G_GUINT64_FORMAT "\n",
+               allocated, before, mapped, after);
+        g_free(path);
+    }
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 3 && !strcmp(argv[1], "--space-root")) {
+        test_deletion_report(argv[2], true);
+        puts("test-cache-retirement: isolated-space PASS");
+        return 0;
+    }
+    assert(argc == 1);
+    test_deletion_report(NULL, false);
     test_roots_latch();
     for (unsigned mutation = 0; mutation < 6; mutation++) {
         test_other_current(mutation, false);
