@@ -1049,8 +1049,99 @@ static void test_partial_generation_delete(void)
     remove_root(root); g_free(root);
 }
 
+static void test_explicit_holds(void)
+{
+    char *root = root_new(), error[256];
+    char *name = g_strconcat(source, ".native", NULL);
+    char *path = g_build_filename(root, name, NULL);
+    char *id = g_uuid_string_random(), *second = g_uuid_string_random();
+    put(path, "held immutable object\n");
+    assert(!latcd_retirement_hold(root, source, name, id, "ROLLBACK", false, error, sizeof(error)));
+    assert(!latcd_retirement_hold(root, source, name, id, "ROLLBACK", false, error, sizeof(error)));
+    assert(latcd_retirement_hold(root, source, name, id, "MIGRATION", false, error, sizeof(error)));
+    assert(!latcd_retirement_hold(root, source, name, second, "MIGRATION", false, error, sizeof(error)));
+    const char *names[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(evidence && fd >= 0);
+    assert(latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+    close(fd);
+    assert(!latcd_retirement_hold(root, source, name, id, "ROLLBACK", true, error, sizeof(error)));
+    assert(!latcd_retirement_hold(root, source, name, id, "ROLLBACK", true, error, sizeof(error)));
+    assert(latcd_retirement_hold(root, source, name, id, "ROLLBACK", false, error, sizeof(error)));
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+    close(fd);
+    assert(!latcd_retirement_hold(root, source, name, second, "MIGRATION", true, error, sizeof(error)));
+    char *file = g_strdup_printf("%s.ini", id);
+    char *hold = g_build_filename(root, ".gc", "holds", name, file, NULL);
+    put(hold, "[hold]\nversion=99\n");
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+    close(fd);
+    assert(latcd_retirement_hold(root, source, name, id, "ROLLBACK", true, error, sizeof(error)));
+    assert(!unlink(hold));
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(!latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+    close(fd);
+    char *third = g_uuid_string_random();
+    assert(latcd_retirement_hold(root, source, name, third, "EXTERNAL", false, error, sizeof(error)));
+    char *released_file = g_strdup_printf("%s.ini", second);
+    char *released_path = g_build_filename(root, ".gc", "holds", name, released_file, NULL);
+    GKeyFile *held = g_key_file_new();
+    assert(g_key_file_load_from_file(held, released_path, 0, NULL));
+    g_key_file_set_string(held, "hold", "state", "ACTIVE");
+    char *active_data = g_key_file_to_data(held, NULL, NULL);
+    put(released_path, active_data);
+    assert(latcd_tombstone_delete(root, name, error, sizeof(error)));
+    assert(!access(path, F_OK));
+    g_free(active_data); g_key_file_unref(held); g_free(released_file); g_free(released_path);
+    /* A pre-existing/corrupt hold must also block the executor's final check. */
+    put(hold, "incomplete hold\n");
+    assert(latcd_tombstone_delete(root, name, error, sizeof(error)));
+    assert(!access(path, F_OK));
+    g_free(third); g_free(hold); g_free(file); g_free(evidence);
+    g_free(second); g_free(id); g_free(path); g_free(name);
+    remove_root(root); g_free(root);
+}
+
+static void test_hold_crash(bool release, const char *point)
+{
+    char *root = root_new(), error[256];
+    char *name = g_strconcat(source, ".native", NULL);
+    char *path = g_build_filename(root, name, NULL), *id = g_uuid_string_random();
+    put(path, "hold crash input\n");
+    if (release) assert(!latcd_retirement_hold(root, source, name, id, "ROLLBACK", false, error, sizeof(error)));
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        char *fault = g_strconcat("crash:", point, NULL);
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", fault, 1));
+        latcd_retirement_hold(root, source, name, id, "ROLLBACK", release, error, sizeof(error));
+        _exit(127);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    const char *names[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(evidence && fd >= 0);
+    bool published_release = release && (!strcmp(point, "renamed") || !strcmp(point, "directory-synced"));
+    int result = latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error));
+    assert((result == 0) == published_release);
+    close(fd);
+    assert(!access(path, F_OK));
+    g_free(evidence); g_free(id); g_free(path); g_free(name); remove_root(root); g_free(root);
+}
+
 int main(void)
 {
+    test_explicit_holds();
+    const char *hold_points[] = {"created", "written", "file-synced", "renamed", "directory-synced"};
+    for (unsigned i = 0; i < G_N_ELEMENTS(hold_points); i++) {
+        test_hold_crash(false, hold_points[i]);
+        test_hold_crash(true, hold_points[i]);
+    }
     for (int phase = 0; phase < 3; phase++) {
         test_crash(phase, false);
         test_crash(phase, true);

@@ -22,6 +22,14 @@ int latcd_recovery_step(LatcdRecoveryCursor *cursor, unsigned entries,
                         LatcdRecoveryProgress *progress, char *error, size_t error_size);
 void latcd_recovery_close(LatcdRecoveryCursor *cursor);
 
+/* Explicit rollback/migration/external roots, not domain admission. The owner
+ * lease is required; these operations acquire source EX themselves. A hold is
+ * bound to cache/object inode and must be explicitly released by exact id.
+ * Released records remain as evidence. No automatic expiry or removal. */
+int latcd_retirement_hold(const char *root, const char *source, const char *name,
+                           const char *id, const char *reason, bool release,
+                           char *error, size_t error_size);
+
 /* Capture at most six immutable objects outside the daemon metadata lock.
  * Returned structured evidence is owned by the caller; NULL means unproven. */
 char *latcd_retirement_capture_objects(const char *root, const char *source,

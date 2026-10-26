@@ -106,6 +106,8 @@ class Inventory:
         self.compiler_releases = {}
         self.compiler_output_releases = {}
         self.compiler_budgets = {}
+        self.explicit_holds = {}
+        self.hold_refs = {}
         self.frozen = set()
         self.freeze_all = False
         self.count = 0
@@ -140,6 +142,9 @@ class Inventory:
                            "links": st.st_nlink, "_identity": identity(st),
                            "_mode": st.st_mode, "_uid": st.st_uid}
                     self.entries[relative] = row
+                    if prefix == ".gc/holds" and (not GENERATED.fullmatch(name) or not stat.S_ISDIR(st.st_mode)):
+                        self.freeze_all = True
+                        self.error(relative, "invalid_explicit_hold_directory", "expected object hold directory")
                     if not prefix and CURRENT.fullmatch(name):
                         self.read_manifest(fd, name, st)
                     if prefix == ".gc/transactions" and not name.startswith(".write-"):
@@ -150,6 +155,8 @@ class Inventory:
                         self.read_task(fd, name, st)
                     if prefix == ".gc/compiler-budgets":
                         self.read_compiler_budget(fd, name, st)
+                    if prefix.startswith(".gc/holds/"):
+                        self.read_explicit_hold(fd, prefix, name, st)
                     if prefix == ".gc/copy-receipts":
                         self.read_copy_receipt(fd, name, st)
                     if prefix == ".gc/copy-handoffs":
@@ -173,6 +180,42 @@ class Inventory:
                     self.error(relative, "unreadable_or_changed", str(exc))
         if identity(os.fstat(fd)) != identity(before):
             self.error(prefix or ".", "concurrent_change", "directory changed during scan")
+
+    def read_explicit_hold(self, directory, prefix, name, before):
+        relative = prefix + "/" + name
+        try:
+            obj = prefix.removeprefix(".gc/holds/")
+            if (not GENERATED.fullmatch(obj) or not name.endswith(".ini") or
+                    str(uuid.UUID(name[:-4])) != name[:-4] or
+                    not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
+                    before.st_nlink != 1 or before.st_mode & 0o222 or not 0 < before.st_size <= 4096):
+                raise ValueError("unsafe explicit hold")
+            fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            try:
+                raw = os.read(fd, 4097)
+                if identity(os.fstat(fd)) != identity(before) or len(raw) != before.st_size:
+                    raise ValueError("hold changed during read")
+            finally:
+                os.close(fd)
+            parser = configparser.ConfigParser(interpolation=None, strict=True)
+            parser.read_string(raw.decode("ascii"))
+            if parser.defaults() or parser.sections() != ["hold"]:
+                raise ValueError("invalid hold sections")
+            value = dict(parser["hold"])
+            numbers = {"cache_device", "cache_inode", "object_device", "object_inode"}
+            if (set(value) != numbers | {"version", "id", "name", "reason", "state"} or
+                    value["version"] != "1" or value["id"] != name[:-4] or value["name"] != obj or
+                    value["reason"] not in {"ROLLBACK", "MIGRATION", "EXTERNAL"} or
+                    value["state"] not in {"ACTIVE", "RELEASED"}):
+                raise ValueError("invalid hold fields")
+            for key in numbers:
+                if not re.fullmatch(r"[0-9]+", value[key]) or int(value[key]) >= 2**64:
+                    raise ValueError("invalid hold integer")
+                value[key] = int(value[key])
+            self.explicit_holds[relative] = dict(value, binding_observed=False)
+        except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
+            self.freeze_all = True
+            self.error(relative, "invalid_explicit_hold", str(exc))
 
     def read_compiler_budget(self, directory, name, before):
         relative = ".gc/compiler-budgets/" + name
@@ -693,6 +736,8 @@ class Inventory:
                 holds.add("current_reference")
             if any(self.task_refs.get(alias["path"]) for alias in aliases):
                 holds.add("persistent_task_reference")
+            if any(self.hold_refs.get(alias["path"]) for alias in aliases) or name in self.hold_refs:
+                holds.add("explicit_retention_reference")
             if source + ".current" not in self.manifests:
                 holds.add("missing_current_root")
             if self.freeze_all or source in self.frozen or self.errors:
@@ -732,6 +777,17 @@ class Inventory:
         return output
 
     def report(self):
+        for relative, hold in self.explicit_holds.items():
+            cache = self.directories.get("")
+            row = self.entries.get(hold["name"])
+            matched = (cache and cache[:2] == (hold["cache_device"], hold["cache_inode"]) and
+                       row and (row["device"], row["inode"]) == (hold["object_device"], hold["object_inode"]))
+            hold["binding_observed"] = bool(matched)
+            if hold["state"] == "ACTIVE" or (row is not None and not matched):
+                self.hold_refs.setdefault(hold["name"], []).append(relative)
+                if not matched:
+                    self.freeze_all = True
+                    self.error(relative, "explicit_hold_binding_changed", hold["name"])
         compiler_inputs = {"source", "tbset", "base_native", "base_module"}
         for relative, release in self.compiler_releases.items():
             task_path = ".gc/tasks/" + release["task_id"] + ".ini"
@@ -937,6 +993,7 @@ class Inventory:
             result.update(category=category, reasons=reasons, references=referrers,
                           transaction_references=self.transaction_refs.get(relative, []),
                           task_references=self.task_refs.get(relative, []),
+                          explicit_hold_references=self.hold_refs.get(relative, []),
                           delete_authorized=False)
             output.append(result)
             group = groups.setdefault(category, {"entries": 0, "logical_bytes": 0,
@@ -960,6 +1017,8 @@ class Inventory:
                 "compiler_budget_count": len(self.compiler_budgets),
                 "compiler_budgets": self.compiler_budgets,
                 "compiler_budget_summary": compiler_budget_summary,
+                "explicit_hold_count": len(self.explicit_holds),
+                "explicit_holds": self.explicit_holds,
                 "transactions": self.transactions,
                 "retirement_plan": {"grace_us": self.grace_us,
                                     "clock": ({"boot_id": self.clock[0], "boottime_us": self.clock[1]}

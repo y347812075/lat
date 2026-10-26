@@ -200,6 +200,39 @@ class PlannerTest(unittest.TestCase):
         plan = self.run_plan()
         self.assertEqual(plan['compiler_budget_summary']['without_output_release_observed_bytes'], 123456)
 
+    def test_explicit_hold_binding_and_release(self):
+        obj = self.root / (STEM + '.native')
+        st, cache = obj.stat(), self.root.stat()
+        hold_id = str(uuid.uuid4())
+        record = (f'[hold]\nversion=1\nid={hold_id}\nname={obj.name}\nreason=ROLLBACK\n'
+                  f'state=ACTIVE\ncache_device={cache.st_dev}\ncache_inode={cache.st_ino}\n'
+                  f'object_device={st.st_dev}\nobject_inode={st.st_ino}\n')
+        path = f'.gc/holds/{obj.name}/{hold_id}.ini'
+        self.put(path, record.encode())
+        plan = self.run_plan()
+        self.assertEqual(plan['explicit_hold_count'], 1)
+        self.assertTrue(plan['explicit_holds'][path]['binding_observed'])
+        row = next(row for row in plan['entries'] if row['path'] == obj.name)
+        self.assertEqual(row['explicit_hold_references'], [path])
+        self.put(path, record.replace('state=ACTIVE', 'state=RELEASED').encode())
+        plan = self.run_plan()
+        row = next(row for row in plan['entries'] if row['path'] == obj.name)
+        self.assertFalse(row['explicit_hold_references'])
+        self.put(path, record.replace(f'object_inode={st.st_ino}', 'object_inode=0').encode())
+        plan = self.run_plan(success=False)
+        self.assertTrue(any(e['reason'] == 'explicit_hold_binding_changed' for e in plan['errors']))
+        for bad in (record.replace('reason=ROLLBACK', 'reason=UNKNOWN'),
+                    record.replace('state=ACTIVE', 'state=EXPIRED'),
+                    record.replace('version=1', 'version=2'),
+                    record + 'extra=1\n', record + 'state=ACTIVE\n',
+                    record.replace(f'object_inode={st.st_ino}', 'object_inode=18446744073709551616')):
+            self.put(path, bad.encode())
+            plan = self.run_plan(success=False)
+            self.assertTrue(any(e['reason'] == 'invalid_explicit_hold' for e in plan['errors']))
+        hold = self.put(path, record.encode())
+        hold.chmod(0o600)
+        self.run_plan(success=False)
+
     def test_task_lease_and_references(self):
         record = self.task()
         with record.open('rb') as pin:

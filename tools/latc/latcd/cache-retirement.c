@@ -526,6 +526,155 @@ int latcd_retirement_validate_binding(const char *source,
     return valid ? 0 : -1;
 }
 
+static bool hold_id_valid(const char *id)
+{
+    return id && strlen(id) == 36 && g_uuid_string_is_valid(id);
+}
+
+static bool hold_record_valid(GKeyFile *record, const char *id, const char *name,
+                               const struct stat *cache, const struct stat *object)
+{
+    const char *fields[] = {"version", "id", "name", "reason", "state",
+        "cache_device", "cache_inode", "object_device", "object_inode"};
+    gsize count;
+    char **groups = g_key_file_get_groups(record, &count);
+    bool valid = count == 1 && !strcmp(groups[0], "hold") &&
+        exact_keys(record, "hold", fields, G_N_ELEMENTS(fields));
+    g_strfreev(groups);
+    const char *keys[] = {"version", "id", "name"};
+    const char *expected[] = {"1", id, name};
+    for (unsigned i = 0; valid && i < G_N_ELEMENTS(keys); i++) {
+        char *value = g_key_file_get_string(record, "hold", keys[i], NULL);
+        valid = !g_strcmp0(value, expected[i]);
+        g_free(value);
+    }
+    char *reason = g_key_file_get_string(record, "hold", "reason", NULL);
+    char *state = g_key_file_get_string(record, "hold", "state", NULL);
+    valid &= (!g_strcmp0(reason, "ROLLBACK") || !g_strcmp0(reason, "MIGRATION") ||
+              !g_strcmp0(reason, "EXTERNAL")) &&
+             (!g_strcmp0(state, "ACTIVE") || !g_strcmp0(state, "RELEASED"));
+    g_free(reason); g_free(state);
+    uint64_t numbers[] = {cache->st_dev, cache->st_ino, object->st_dev, object->st_ino};
+    for (unsigned i = 0; valid && i < G_N_ELEMENTS(numbers); i++) {
+        char *value = g_key_file_get_string(record, "hold", fields[5 + i], NULL);
+        errno = 0;
+        char *end = NULL;
+        uint64_t number = value ? g_ascii_strtoull(value, &end, 10) : 0;
+        valid = value && *value && strspn(value, "0123456789") == strlen(value) &&
+            !errno && end && !*end && number == numbers[i];
+        g_free(value);
+    }
+    return valid;
+}
+
+/* Called under source EX. Any unreadable or partial hold freezes the object.
+ * Bounded work: overflow retains rather than doing a long scan under S. */
+static int object_hold_status(int root, const char *name, const struct stat *object)
+{
+    int gc = open_directory(root, ".gc", false);
+    if (gc < 0) return errno == ENOENT ? 0 : -1;
+    int holds = open_directory(gc, "holds", false);
+    int saved = errno;
+    close(gc);
+    if (holds < 0) return saved == ENOENT ? 0 : -1;
+    int fd = open_directory(holds, name, false);
+    saved = errno;
+    close(holds);
+    if (fd < 0) return saved == ENOENT ? 0 : -1;
+    DIR *directory = fdopendir(fd);
+    if (!directory) { close(fd); return -1; }
+    struct stat cache;
+    int result = fstat(root, &cache) ? -1 : 0;
+    unsigned visited = 0;
+    while (!result) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) { if (errno) result = -1; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        char *raw = NULL;
+        size_t size;
+        if (++visited > 128 || !name_valid(entry->d_name) ||
+            read_file(fd, entry->d_name, MANIFEST_LIMIT, &raw, &size)) { result = -1; break; }
+        char id[37];
+        memcpy(id, entry->d_name, 36); id[36] = 0;
+        GKeyFile *record = g_key_file_new();
+        bool valid = !memchr(raw, 0, size) &&
+            g_key_file_load_from_data(record, raw, size, 0, NULL) &&
+            hold_record_valid(record, id, name, &cache, object);
+        char *state = g_key_file_get_string(record, "hold", "state", NULL);
+        result = !valid ? -1 : !g_strcmp0(state, "ACTIVE") ? 1 : 0;
+        g_free(state); g_free(raw); g_key_file_unref(record);
+    }
+    closedir(directory);
+    return result;
+}
+
+int latcd_retirement_hold(const char *root, const char *source, const char *name,
+                           const char *id, const char *reason, bool release,
+                           char *error, size_t error_size)
+{
+    if (!source_valid(source) || !object_name_valid(source, name) || !hold_id_valid(id) ||
+        (!reason || (strcmp(reason, "ROLLBACK") && strcmp(reason, "MIGRATION") && strcmp(reason, "EXTERNAL"))))
+        return fail(error, error_size, "invalid explicit hold");
+    int latch = lat_aot_v2_cache_source_lock(root, source, LOCK_EX | LOCK_NB, false, error, error_size);
+    if (latch < 0) return -1;
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", true);
+    int holds = gc < 0 ? -1 : open_directory(gc, "holds", true);
+    int store = holds < 0 ? -1 : open_directory(holds, name, !release);
+    struct stat cache, object;
+    int fd = directory < 0 ? -1 : openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    int result = -1;
+    char *filename = g_strdup_printf("%s.ini", id), *raw = NULL;
+    size_t size;
+    GKeyFile *record = g_key_file_new();
+    if (store < 0 || fd < 0 || fstat(directory, &cache) || fstat(fd, &object) ||
+        !S_ISREG(object.st_mode) || object.st_uid != geteuid() || object.st_nlink != 1 ||
+        (object.st_mode & 0222) || object.st_size <= 0 || flock(fd, LOCK_SH | LOCK_NB)) goto out;
+    if (!release) {
+        int tombstones = open_directory(gc, "tombstones", false);
+        struct stat marker;
+        bool blocked = tombstones < 0 ? errno != ENOENT :
+            !fstatat(tombstones, name, &marker, AT_SYMLINK_NOFOLLOW) || errno != ENOENT;
+        if (tombstones >= 0) close(tombstones);
+        if (blocked) goto out;
+    }
+    int status = read_file(store, filename, MANIFEST_LIMIT, &raw, &size);
+    if (status < 0 || (release && status)) goto out;
+    if (!status) {
+        if (memchr(raw, 0, size) || !g_key_file_load_from_data(record, raw, size, 0, NULL) ||
+            !hold_record_valid(record, id, name, &cache, &object)) goto out;
+        char *existing_reason = g_key_file_get_string(record, "hold", "reason", NULL);
+        char *state = g_key_file_get_string(record, "hold", "state", NULL);
+        bool matched = !g_strcmp0(existing_reason, reason) && (release || !g_strcmp0(state, "ACTIVE"));
+        g_free(existing_reason); g_free(state);
+        if (!matched) goto out;
+    } else {
+        g_key_file_set_integer(record, "hold", "version", 1);
+        g_key_file_set_string(record, "hold", "id", id);
+        g_key_file_set_string(record, "hold", "name", name);
+        g_key_file_set_string(record, "hold", "reason", reason);
+        g_key_file_set_uint64(record, "hold", "cache_device", cache.st_dev);
+        g_key_file_set_uint64(record, "hold", "cache_inode", cache.st_ino);
+        g_key_file_set_uint64(record, "hold", "object_device", object.st_dev);
+        g_key_file_set_uint64(record, "hold", "object_inode", object.st_ino);
+    }
+    struct stat after;
+    if (fstatat(directory, name, &after, AT_SYMLINK_NOFOLLOW) ||
+        !object_stat_equal(&object, &after)) goto out;
+    g_key_file_set_string(record, "hold", "state", release ? "RELEASED" : "ACTIVE");
+    result = write_record(store, filename, record);
+out:
+    g_free(raw); g_free(filename); g_key_file_unref(record);
+    if (fd >= 0) close(fd);
+    if (store >= 0) close(store);
+    if (holds >= 0) close(holds);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    close(latch);
+    return result ? fail(error, error_size, "explicit object hold rejected or incomplete") : 0;
+}
+
 int latcd_retirement_tombstone(const char *root, const char *source,
                                const char *name, int object_fd, const char *evidence,
                                char *error, size_t error_size)
@@ -583,7 +732,8 @@ int latcd_retirement_tombstone(const char *root, const char *source,
         g_hash_table_unref(references);
         if (!safe) goto out;
     }
-    if (fstat(object_fd, &after) || !object_stat_equal(&before, &after) ||
+    if (object_hold_status(directory, name, &before) ||
+        fstat(object_fd, &after) || !object_stat_equal(&before, &after) ||
         fstatat(directory, name, &path, AT_SYMLINK_NOFOLLOW) ||
         !object_stat_equal(&before, &path)) goto out;
     /* Never replace earlier intent: its identity is crash-recovery evidence. */
@@ -1015,6 +1165,10 @@ static int recover_tombstone(const char *root_path, int root, int store,
             if (!fstatat(root, name, &path, AT_SYMLINK_NOFOLLOW) || errno != ENOENT || fsync(root))
                 observation = "UNKNOWN";
         }
+    }
+    if (remove_object && !strcmp(observation, "MATCHED")) {
+        int held = object_hold_status(root, name, &after);
+        if (held) observation = held < 0 ? "UNKNOWN" : "BUSY";
     }
     if (remove_object && (!strcmp(observation, "MATCHED") || !strcmp(observation, "MISSING"))) {
         /* Persist/confirm intent before dropping S. Readers refuse this name;
