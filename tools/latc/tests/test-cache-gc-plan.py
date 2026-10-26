@@ -4,6 +4,7 @@
 import importlib.util
 import base64
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -79,6 +80,79 @@ class PlannerTest(unittest.TestCase):
             result[str(p.relative_to(self.root))] = (st.st_ino, st.st_size,
                 st.st_mtime_ns, st.st_ctime_ns, st.st_mode, st.st_nlink)
         return result
+
+    def task(self):
+        path = self.put('.tmp/input-ABC', b'compiler input')
+        record_id = str(uuid.uuid4())
+        record = (f'[task]\nversion=1\nid={record_id}\nstate=BOUND\nsource={SOURCE}\n'
+                  f'build_id={OTHER}\nenvironment_sha256={OTHER}\n')
+        for role, target in [('cache', self.root), ('temporary', path.parent),
+                             ('source', path)]:
+            st = target.stat()
+            record += (f'[{role}]\ndevice={st.st_dev}\ninode={st.st_ino}\n'
+                       f'size={st.st_size}\nmode={st.st_mode}\nuid={st.st_uid}\n'
+                       f'mtime_sec={st.st_mtime_ns // 10**9}\n'
+                       f'mtime_nsec={st.st_mtime_ns % 10**9}\n')
+            if role == 'source':
+                record += f'name={target.name}\ndirectory=temporary\n'
+        record += '[output_native]\nname=native-ABC\n[output_module]\nname=module-ABC\n'
+        return self.put(f'.gc/tasks/{record_id}.ini', record.encode())
+
+    def test_task_lease_and_references(self):
+        record = self.task()
+        with record.open('rb') as pin:
+            fcntl.flock(pin, fcntl.LOCK_SH)
+            plan = self.run_plan()
+            self.assertEqual(plan['task_count'], 1)
+            task = next(iter(plan['tasks'].values()))
+            self.assertEqual(task['lease_observation'], 'HELD_OBSERVED')
+            self.assertFalse(task['completion_verified'])
+            row = next(row for row in plan['entries'] if row['path'] == '.tmp/input-ABC')
+            self.assertEqual(len(row['task_references']), 1)
+        task = next(iter(self.run_plan()['tasks'].values()))
+        self.assertEqual(task['lease_observation'], 'NO_HOLDER_OBSERVED')
+        self.assertFalse(task['completion_verified'])
+
+    def test_task_bad_schema_and_path(self):
+        record = self.task()
+        original = record.read_bytes()
+        for bad in (original.replace(b'version=1', b'version=2'),
+                    original.replace(b'name=input-ABC', b'name=../input-ABC'),
+                    original + b'[unexpected]\nvalue=1\n',
+                    original.replace(b'uid=', b'uid=18446744073709551616', 1)):
+            self.put(str(record.relative_to(self.root)), bad)
+            plan = self.run_plan(success=False)
+            self.assertTrue(any(e['reason'] == 'invalid_task' for e in plan['errors']))
+        self.put(str(record.relative_to(self.root)), original)
+        record.chmod(0o600)
+        self.run_plan(success=False)
+
+    def test_task_changed_input_and_incomplete_write(self):
+        self.task()
+        self.put('.tmp/input-ABC', b'changed input size')
+        plan = self.run_plan(success=False)
+        self.assertTrue(any(e['reason'] == 'task_binding_changed' for e in plan['errors']))
+        self.put('.gc/tasks/.write-interrupted', b'incomplete')
+        plan = self.run_plan(success=False)
+        self.assertTrue(any(e['reason'] == 'invalid_task' for e in plan['errors']))
+
+    def test_task_cache_and_collected_bindings(self):
+        record = self.task()
+        original = record.read_bytes()
+        self.put('input-ABC', b'compiler input')
+        st = (self.root / 'input-ABC').stat()
+        bound = original.decode().split('[source]')[0] + (
+            f'[source]\nname=input-ABC\ndirectory=cache\ndevice={st.st_dev}\n'
+            f'inode={st.st_ino}\nsize={st.st_size}\nmode={st.st_mode}\nuid={st.st_uid}\n'
+            f'mtime_sec={st.st_mtime_ns // 10**9}\nmtime_nsec={st.st_mtime_ns % 10**9}\n'
+            '[output_native]\nname=native-ABC\n[output_module]\nname=module-ABC\n')
+        self.put(str(record.relative_to(self.root)), bound.encode())
+        plan = self.run_plan()
+        row = next(row for row in plan['entries'] if row['path'] == 'input-ABC')
+        self.assertEqual(len(row['task_references']), 1)
+        self.put(str(record.relative_to(self.root)),
+                 bound.replace('directory=cache', 'directory=collected').encode())
+        self.run_plan(success=False)
 
     def generation(self, digit, *, tbset=None):
         stem = SOURCE + "-" + digit * 64

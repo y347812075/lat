@@ -1170,6 +1170,164 @@ static int pin_compiler_inputs(const char *const paths[4], int pins[4],
     return 0;
 }
 
+static int open_task_directory(int parent, const char *name)
+{
+    if (mkdirat(parent, name, 0700) && errno != EEXIST) return -1;
+    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st;
+    if (fd < 0) return -1;
+    if (fstat(fd, &st) || st.st_uid != geteuid() || (st.st_mode & 0077) ||
+        fsync(parent)) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void task_object_identity(GKeyFile *record, const char *group,
+                                  const struct stat *st)
+{
+    g_key_file_set_uint64(record, group, "device", st->st_dev);
+    g_key_file_set_uint64(record, group, "inode", st->st_ino);
+    g_key_file_set_uint64(record, group, "size", st->st_size);
+    g_key_file_set_uint64(record, group, "mode", st->st_mode);
+    g_key_file_set_uint64(record, group, "uid", st->st_uid);
+    g_key_file_set_int64(record, group, "mtime_sec", st->st_mtim.tv_sec);
+    g_key_file_set_uint64(record, group, "mtime_nsec", st->st_mtim.tv_nsec);
+}
+
+/* The immutable record is also the lease inode. No completion or deletion claim. */
+static int record_compiler_task(const LatcdConfig *config,
+                                const char *const paths[6], const int pins[4],
+                                const uint8_t digest[32],
+                                const char *const environment[],
+                                char *error, size_t error_size)
+{
+    int root = -1, gc = -1, tasks = -1, temporary = -1, collected = -1, lease = -1;
+    GKeyFile *record = g_key_file_new();
+    char *id = g_uuid_string_random();
+    char *staging = g_strdup_printf(".write-%s", id);
+    char *name = g_strdup_printf("%s.ini", id);
+    char *tmp = g_build_filename(config->cache_dir, ".tmp", NULL);
+    char *tbsets = g_build_filename(config->cache_dir, ".tbsets", NULL);
+    char source_hex[65];
+    digest_hex(digest, source_hex);
+    root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (root < 0 || (gc = open_task_directory(root, ".gc")) < 0 ||
+        (tasks = open_task_directory(gc, "tasks")) < 0 ||
+        (temporary = openat(root, ".tmp", O_RDONLY | O_DIRECTORY |
+                            O_CLOEXEC | O_NOFOLLOW)) < 0) goto failed;
+    struct stat st;
+    if (fstat(root, &st)) goto failed;
+    task_object_identity(record, "cache", &st);
+    if (fstat(temporary, &st) || st.st_uid != geteuid() ||
+        (st.st_mode & 0077)) goto failed;
+    task_object_identity(record, "temporary", &st);
+    g_key_file_set_string(record, "task", "version", "1");
+    g_key_file_set_string(record, "task", "id", id);
+    g_key_file_set_string(record, "task", "state", "BOUND");
+    g_key_file_set_string(record, "task", "source", source_hex);
+    g_key_file_set_string(record, "task", "build_id", LATC_BUILD_ID);
+    GChecksum *configuration = g_checksum_new(G_CHECKSUM_SHA256);
+    for (unsigned i = 0; environment[i]; i++) {
+        g_checksum_update(configuration, (const guchar *)environment[i],
+                          strlen(environment[i]) + 1);
+    }
+    g_key_file_set_string(record, "task", "environment_sha256",
+                           g_checksum_get_string(configuration));
+    g_checksum_free(configuration);
+    static const char *roles[] = {"source", "tbset", "base_native",
+                                  "base_module", "output_native", "output_module"};
+    for (unsigned i = 0; i < 6; i++) {
+        if (!paths[i]) continue;
+        char *parent = g_path_get_dirname(paths[i]);
+        char *basename = g_path_get_basename(paths[i]);
+        bool in_tmp = !strcmp(parent, tmp);
+        bool in_collected = !strcmp(parent, tbsets);
+        if (i < 4 && in_collected && collected < 0) {
+            collected = openat(root, ".tbsets", O_RDONLY | O_DIRECTORY |
+                                O_CLOEXEC | O_NOFOLLOW);
+            if (collected >= 0 && !fstat(collected, &st) &&
+                st.st_uid == geteuid() && !(st.st_mode & 0077)) {
+                task_object_identity(record, "collected", &st);
+            } else {
+                if (collected >= 0) close(collected);
+                collected = -1;
+            }
+        }
+        bool valid = (in_tmp || (i < 4 && ((!strcmp(parent, config->cache_dir)) ||
+                      (in_collected && collected >= 0)))) &&
+                     basename[0] != '.' &&
+                     strspn(basename, "abcdefghijklmnopqrstuvwxyz"
+                         "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") == strlen(basename);
+        if (valid && i < 4) {
+            struct stat pinned;
+            valid = !fstat(pins[i], &pinned) &&
+                    !fstatat(in_tmp ? temporary : in_collected ? collected : root,
+                              basename, &st, AT_SYMLINK_NOFOLLOW) &&
+                    st.st_dev == pinned.st_dev && st.st_ino == pinned.st_ino;
+            if (valid) {
+                task_object_identity(record, roles[i], &pinned);
+                g_key_file_set_string(record, roles[i], "directory",
+                                       in_tmp ? "temporary" : in_collected ? "collected" : "cache");
+            }
+        } else if (valid) {
+            /* Output names are intents, not inode reservations. */
+            valid = fstatat(temporary, basename, &st, AT_SYMLINK_NOFOLLOW) &&
+                    errno == ENOENT;
+        }
+        if (valid) g_key_file_set_string(record, roles[i], "name", basename);
+        g_free(parent);
+        g_free(basename);
+        if (!valid) goto failed;
+    }
+    lease = openat(tasks, staging, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC |
+                   O_NOFOLLOW, 0600);
+    if (lease < 0 || flock(lease, LOCK_SH | LOCK_NB)) goto failed;
+    gsize length;
+    char *data = g_key_file_to_data(record, &length, NULL);
+    size_t done = 0;
+    while (done < length) {
+        ssize_t count = write(lease, data + done, length - done);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+        done += count;
+    }
+    g_free(data);
+    if (done != length || fchmod(lease, 0400) || fsync(lease) ||
+        linkat(tasks, staging, tasks, name, 0) ||
+        unlinkat(tasks, staging, 0) || fsync(tasks)) goto failed;
+    int readonly = openat(tasks, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat writer, reader;
+    if (readonly < 0 || fstat(lease, &writer) || fstat(readonly, &reader) ||
+        writer.st_dev != reader.st_dev || writer.st_ino != reader.st_ino ||
+        reader.st_nlink != 1 || flock(readonly, LOCK_SH | LOCK_NB)) {
+        if (readonly >= 0) close(readonly);
+        goto failed;
+    }
+    close(lease);
+    lease = readonly;
+    goto out;
+failed:
+    if (lease >= 0) close(lease);
+    lease = -1;
+    if (tasks >= 0) unlinkat(tasks, staging, 0);
+    fail(error, error_size, "cannot persist compiler task root");
+out:
+    if (collected >= 0) close(collected);
+    if (temporary >= 0) close(temporary);
+    if (tasks >= 0) close(tasks);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    g_free(tmp);
+    g_free(tbsets);
+    g_free(name);
+    g_free(staging);
+    g_free(id);
+    g_key_file_free(record);
+    return lease;
+}
+
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *source, const char *tbset,
                         bool static_tbset,
@@ -1268,12 +1426,18 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     const char *inputs[4] = {source, tbset, base_native, base_module};
     int input_pins[4] = {-1, -1, -1, -1};
     int pin_result = pin_compiler_inputs(inputs, input_pins, error, error_size);
+    const char *task_paths[6] = {source, tbset, base_native, base_module,
+                                output_native, output};
+    int task_lease = pin_result ? -1 : record_compiler_task(config, task_paths,
+        input_pins, digest, environment, error, error_size);
+    if (task_lease < 0) pin_result = -1;
     pid_t child = pin_result ? -1 : fork();
     if (child == 0) {
         /* Only this compiler inherits these OFDs; unrelated execs keep CLOEXEC. */
         for (unsigned i = 0; i < 4; i++) {
             if (input_pins[i] >= 0 && fcntl(input_pins[i], F_SETFD, 0)) _exit(126);
         }
+        if (fcntl(task_lease, F_SETFD, 0)) _exit(126);
         if (setpgid(0, 0)) {
             _exit(126);
         }
@@ -1304,6 +1468,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         _exit(127);
     }
     if (child < 0) {
+        if (task_lease >= 0) close(task_lease);
         close_compiler_inputs(input_pins);
         release_compile_space(worker_index);
         g_free(library_path);
@@ -1343,6 +1508,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         kill(-child, SIGKILL);
     }
     compiler_process_groups[worker_index] = 0;
+    close(task_lease);
     close_compiler_inputs(input_pins);
     release_compile_space(worker_index);
     g_free(library_path);

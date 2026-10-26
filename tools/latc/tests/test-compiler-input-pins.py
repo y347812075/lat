@@ -107,14 +107,37 @@ def run(prefix, guest, work):
                             pass
                 for path in inputs:
                     probes.append(os.open(path, os.O_RDONLY))
+                def task_plan(expected):
+                    result = subprocess.run([str(latcd), 'gc', '--plan', '--cache-dir',
+                        str(cache)], env=env, capture_output=True, text=True, timeout=10)
+                    assert result.returncode == 0, result.stdout + result.stderr
+                    plan = json.loads(result.stdout)
+                    tasks = [(path, task) for path, task in plan['tasks'].items()
+                             if task['lease_observation'] == expected]
+                    if expected == 'HELD_OBSERVED':
+                        assert len(tasks) == 1, plan
+                        path, task = tasks[0]
+                        assert set(obj['name'] for role, obj in task['objects'].items()
+                                   if role in ('source', 'tbset', 'base_native', 'base_module')) == {
+                                       Path(path).name for path in inputs}
+                        assert not task['completion_verified']
+                        assert task['objects']['output_native']['name']
+                        assert task['objects']['output_module']['name']
+                        return cache / path
+                    assert not any(task['lease_observation'] == 'HELD_OBSERVED'
+                                   for task in plan['tasks'].values()), plan
+                task_record = task_plan('HELD_OBSERVED')
+                probes.append(os.open(task_record, os.O_RDONLY))
                 assert_pinned()
                 daemon.kill()
                 assert daemon.wait(timeout=10) == -signal.SIGKILL
                 assert_pinned()
+                task_plan('HELD_OBSERVED')
                 channel.sendall(b'f')
                 child = json.loads(stream.readline())['child']
                 (directory / 'descendant.json').write_text(json.dumps(dict(child=child)))
                 assert_pinned()
+                task_plan('HELD_OBSERVED')
                 channel.sendall(b'x')
                 assert stream.read() == b''
                 # EOF precedes final kernel fd release by a small interval.
@@ -127,6 +150,9 @@ def run(prefix, guest, work):
                         except BlockingIOError:
                             assert time.monotonic() < deadline
                             time.sleep(.01)
+                for probe in probes:
+                    fcntl.flock(probe, fcntl.LOCK_UN)
+                task_plan('NO_HOLDER_OBSERVED')
             finally:
                 if compiler_pid is not None:
                     try:

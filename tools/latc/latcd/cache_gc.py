@@ -4,6 +4,7 @@
 import argparse
 import base64
 import configparser
+import fcntl
 import json
 import os
 import re
@@ -97,6 +98,8 @@ class Inventory:
         self.transactions = {}
         self.snapshots = {}
         self.tombstones = {}
+        self.tasks = {}
+        self.task_refs = {}
         self.frozen = set()
         self.freeze_all = False
         self.count = 0
@@ -137,6 +140,8 @@ class Inventory:
                         self.read_transaction(fd, name, st)
                     if prefix == ".gc/tombstones" and not name.startswith(".write-"):
                         self.read_tombstone(fd, name, st)
+                    if prefix == ".gc/tasks":
+                        self.read_task(fd, name, st)
                     if stat.S_ISDIR(st.st_mode):
                         child = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
                                         os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=fd)
@@ -150,6 +155,85 @@ class Inventory:
                     self.error(relative, "unreadable_or_changed", str(exc))
         if identity(os.fstat(fd)) != identity(before):
             self.error(prefix or ".", "concurrent_change", "directory changed during scan")
+
+    def read_task(self, directory, name, before):
+        relative = ".gc/tasks/" + name
+        try:
+            if (not name.endswith(".ini") or str(uuid.UUID(name[:-4])) != name[:-4] or
+                    not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
+                    before.st_nlink != 1 or before.st_mode & 0o222 or
+                    not 0 < before.st_size <= 65536):
+                raise ValueError("unsafe or incomplete task record")
+            fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW |
+                         os.O_NONBLOCK, dir_fd=directory)
+            try:
+                raw = os.read(fd, 65537)
+                if identity(os.fstat(fd)) != identity(before) or len(raw) != before.st_size:
+                    raise ValueError("task record changed during read")
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    observation = "NO_HOLDER_OBSERVED"
+                except BlockingIOError:
+                    observation = "HELD_OBSERVED"
+            finally:
+                os.close(fd)
+            parser = configparser.ConfigParser(interpolation=None, strict=True)
+            parser.read_string(raw.decode("ascii"))
+            inputs = {"source", "tbset", "base_native", "base_module"}
+            outputs = {"output_native", "output_module"}
+            required = {"task", "cache", "temporary", "source"} | outputs
+            if (parser.defaults() or not required <= set(parser.sections()) or
+                    set(parser.sections()) - required - inputs - {"collected"}):
+                raise ValueError("invalid task sections")
+            value = dict(parser["task"])
+            if (set(value) != {"version", "id", "state", "source", "build_id",
+                               "environment_sha256"} or value["version"] != "1" or
+                    value["id"] != name[:-4] or value["state"] != "BOUND" or
+                    any(not re.fullmatch(SHA, value[k]) for k in
+                        ("source", "build_id", "environment_sha256"))):
+                raise ValueError("invalid task identity/state")
+            objects = {}
+            numbers = {"device", "inode", "size", "mode", "uid", "mtime_sec", "mtime_nsec"}
+            for role in set(parser.sections()) - {"task"}:
+                obj = dict(parser[role])
+                fields = {"name"} if role in outputs else numbers
+                if role in inputs:
+                    fields = fields | {"name", "directory"}
+                    if obj.get("directory") not in {"temporary", "cache", "collected"}:
+                        raise ValueError("invalid task input directory")
+                    if obj["directory"] == "collected" and "collected" not in parser:
+                        raise ValueError("missing task input directory binding")
+                if set(obj) != fields:
+                    raise ValueError("invalid task object fields")
+                if "name" in obj and (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", obj["name"])):
+                    raise ValueError("invalid task basename")
+                for field in fields - {"name", "directory"}:
+                    pattern = r"-?[0-9]+" if field == "mtime_sec" else r"[0-9]+"
+                    if not re.fullmatch(pattern, obj[field]):
+                        raise ValueError("invalid task integer")
+                    obj[field] = int(obj[field])
+                    low, high = (-2**63, 2**63) if field == "mtime_sec" else (0, 2**64)
+                    if not low <= obj[field] < high:
+                        raise ValueError("task integer out of range")
+                if role not in outputs:
+                    directory_role = role in {"cache", "temporary", "collected"}
+                    if (obj["mtime_nsec"] >= 10**9 or obj["uid"] != os.geteuid() or
+                            not (stat.S_ISDIR(obj["mode"]) if directory_role else
+                                 stat.S_ISREG(obj["mode"])) or
+                            obj["mode"] & (0o077 if directory_role else 0o022)):
+                        raise ValueError("unsafe task object binding")
+                objects[role] = obj
+            self.tasks[relative] = dict(value, lease_observation=observation,
+                                        objects=objects, completion_verified=False)
+            for role, obj in objects.items():
+                if "name" in obj:
+                    target = {"cache": "", "temporary": ".tmp/", "collected": ".tbsets/"}[
+                        obj.get("directory", "temporary")] + obj["name"]
+                    self.task_refs.setdefault(target, []).append(
+                        {"task": relative, "role": role, "lease_observation": observation})
+        except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
+            self.freeze_all = True
+            self.error(relative, "invalid_task", str(exc))
 
     def read_tombstone(self, directory, name, before):
         relative = ".gc/tombstones/" + name
@@ -419,6 +503,8 @@ class Inventory:
             current = [ref for alias in aliases for ref in self.refs.get(alias["path"], [])]
             if current:
                 holds.add("current_reference")
+            if any(self.task_refs.get(alias["path"]) for alias in aliases):
+                holds.add("persistent_task_reference")
             if source + ".current" not in self.manifests:
                 holds.add("missing_current_root")
             if self.freeze_all or source in self.frozen or self.errors:
@@ -458,6 +544,30 @@ class Inventory:
         return output
 
     def report(self):
+        for relative, task in self.tasks.items():
+            for role, obj in task["objects"].items():
+                directories = {"cache": "", "temporary": ".tmp", "collected": ".tbsets"}
+                path = (directories[role] if role in directories else
+                        (directories[obj.get("directory", "temporary")] + "/").lstrip("/") + obj["name"])
+                if role in directories:
+                    observed = self.directories.get(path)
+                    matched = observed and (observed[0], observed[1], observed[2], observed[3]) == (
+                        obj["device"], obj["inode"], obj["mode"], obj["uid"])
+                elif role.startswith("output_"):
+                    continue  # Intent only: never claim an output inode is reserved.
+                else:
+                    row = self.entries.get(path)
+                    if row is None:
+                        if task["lease_observation"] == "HELD_OBSERVED":
+                            self.error(relative, "task_input_missing", path)
+                        continue  # A retained historical root may outlive normal cleanup.
+                    observed = row["_identity"]
+                    matched = (observed[0], observed[1], observed[2], observed[3],
+                               observed[5], observed[6]) == (obj["device"], obj["inode"],
+                        obj["mode"], obj["uid"], obj["size"], obj["mtime_sec"] * 10**9 + obj["mtime_nsec"])
+                if not matched:
+                    self.freeze_all = True
+                    self.error(relative, "task_binding_changed", path or ".")
         for relative in self.entries:
             if (relative.startswith(".gc/tombstones/") and
                     not relative.removeprefix(".gc/tombstones/").startswith(".write-")):
@@ -510,6 +620,8 @@ class Inventory:
                 category, reasons = "legacy_retired", ["legacy_reference_contract_unknown"]
             elif relative.startswith(".tmp/"):
                 category, reasons = "temporary", ["worker_liveness_unknown"]
+                if relative in self.task_refs:
+                    reasons.append("persistent_task_reference")
             elif relative.startswith(".tbsets/"):
                 category, reasons = "collected_keys", ["accepted_request_state"]
             elif relative.startswith(".identities/"):
@@ -531,6 +643,7 @@ class Inventory:
             result = {k: v for k, v in row.items() if not k.startswith("_")}
             result.update(category=category, reasons=reasons, references=referrers,
                           transaction_references=self.transaction_refs.get(relative, []),
+                          task_references=self.task_refs.get(relative, []),
                           delete_authorized=False)
             output.append(result)
             group = groups.setdefault(category, {"entries": 0, "logical_bytes": 0,
@@ -544,6 +657,7 @@ class Inventory:
                 "snapshot_atomic": False, "content_validated": False,
                 "liveness_verified": False, "manifest_count": len(self.manifests),
                 "transaction_count": len(self.transactions),
+                "task_count": len(self.tasks), "tasks": self.tasks,
                 "transactions": self.transactions,
                 "retirement_plan": {"grace_us": self.grace_us,
                                     "clock": ({"boot_id": self.clock[0], "boottime_us": self.clock[1]}
