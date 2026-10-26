@@ -793,6 +793,90 @@ static int object_task_status(int root, const char *name, const struct stat *obj
     return result;
 }
 
+static int object_transaction_status(int root, const char *name, const struct stat *object)
+{
+    int store = open_store(root, false);
+    if (store < 0) return errno == ENOENT ? 0 : -1;
+    DIR *directory = fdopendir(store);
+    if (!directory) { close(store); return -1; }
+    int result = 0;
+    unsigned visited = 0;
+    int64_t started = g_get_monotonic_time();
+    while (!result) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) { if (errno) result = -1; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        char *raw = NULL;
+        size_t size;
+        if (++visited > 128 || g_get_monotonic_time() - started >= 10000 ||
+            !name_valid(entry->d_name) || read_file(store, entry->d_name, RECORD_LIMIT, &raw, &size)) {
+            result = -1; break;
+        }
+        GKeyFile *record = g_key_file_new();
+        bool valid = !memchr(raw, 0, size) && g_key_file_load_from_data(record, raw, size, 0, NULL) &&
+            record_shape_valid(record);
+        char *source = g_key_file_get_string(record, "transaction", "source", NULL);
+        char *previous64 = g_key_file_get_string(record, "transaction", "previous", NULL);
+        char *next64 = g_key_file_get_string(record, "transaction", "next", NULL);
+        char *objects64 = g_key_file_get_string(record, "transaction", "objects", NULL);
+        char *state = g_key_file_get_string(record, "transaction", "state", NULL);
+        gsize previous_size = 0, next_size = 0, object_size = 0;
+        guchar *previous = previous64 ? decode_snapshot(previous64, &previous_size) : NULL;
+        guchar *next = next64 ? decode_snapshot(next64, &next_size) : NULL;
+        guchar *objects = objects64 ? g_base64_decode(objects64, &object_size) : NULL;
+        char *canonical = objects ? g_base64_encode(objects, object_size) : NULL;
+        valid = valid && source_valid(source) && previous && next && next_size &&
+            (record_string_is(record, "transaction", "version", "1") ||
+             record_string_is(record, "transaction", "version", "2")) && state &&
+            (!strcmp(state, "PREPARED") || !strcmp(state, "RETIRED") ||
+             !strcmp(state, "ABORTED") || !strcmp(state, "UNKNOWN"));
+        GHashTable *refs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+        valid = valid && (!previous_size || manifest_references(source, (char *)previous, previous_size, refs)) &&
+            manifest_references(source, (char *)next, next_size, refs);
+        bool referenced = valid && g_hash_table_contains(refs, name);
+        bool retired = record_string_is(record, "transaction", "state", "RETIRED");
+        bool bound = valid && objects && canonical && !strcmp(canonical, objects64) &&
+            !latcd_retirement_validate_binding(source, (char *)previous, previous_size,
+                (char *)next, next_size, (char *)objects, object_size);
+        /* Legacy/unproven records cannot erase a root. A fully bound RETIRED
+         * snapshot is history, not an indefinite hold on its former next set. */
+        if (referenced && retired) {
+            valid = bound && record_string_is(record, "transaction", "binding_status", "COMPLETE") &&
+                record_string_is(record, "transaction", "objects_status", "RECORDED");
+        }
+        if (bound) {
+            GKeyFile *evidence = g_key_file_new();
+            valid &= g_key_file_load_from_data(evidence, (char *)objects, object_size, 0, NULL);
+            int count = g_key_file_get_integer(evidence, "objects", "count", NULL);
+            for (int i = 0; valid && i < count; i++) {
+                char group[32];
+                snprintf(group, sizeof(group), "object%d", i);
+                char *candidate = g_key_file_get_string(evidence, group, "name", NULL);
+                uint64_t device, inode, bytes, allocated;
+                valid = record_uint64(evidence, group, "device", &device) &&
+                    record_uint64(evidence, group, "inode", &inode) &&
+                    record_uint64(evidence, group, "size", &bytes) &&
+                    record_uint64(evidence, group, "allocated", &allocated);
+                bool same_inode = valid && device == (uint64_t)object->st_dev && inode == (uint64_t)object->st_ino;
+                if (!g_strcmp0(candidate, name) || same_inode) {
+                    referenced = true;
+                    valid = valid && same_inode && bytes == (uint64_t)object->st_size &&
+                        allocated == (uint64_t)object->st_blocks * 512;
+                }
+                g_free(candidate);
+            }
+            g_key_file_unref(evidence);
+        }
+        result = !valid ? -1 : referenced && !retired ? 1 : 0;
+        g_hash_table_unref(refs); g_free(canonical); g_free(objects); g_free(next); g_free(previous);
+        g_free(state); g_free(objects64); g_free(next64); g_free(previous64); g_free(source);
+        g_key_file_unref(record); g_free(raw);
+    }
+    closedir(directory);
+    return result;
+}
+
 int latcd_retirement_hold(const char *root, const char *source, const char *name,
                            const char *id, const char *reason, bool release,
                            char *error, size_t error_size)
@@ -917,6 +1001,7 @@ int latcd_retirement_tombstone(const char *root, const char *source,
         if (!safe) goto out;
     }
     if (object_hold_status(directory, name, &before) || object_task_status(directory, name, &before) ||
+        object_transaction_status(directory, name, &before) ||
         fstat(object_fd, &after) || !object_stat_equal(&before, &after) ||
         fstatat(directory, name, &path, AT_SYMLINK_NOFOLLOW) ||
         !object_stat_equal(&before, &path)) goto out;
@@ -1353,6 +1438,7 @@ static int recover_tombstone(const char *root_path, int root, int store,
     if (remove_object && !strcmp(observation, "MATCHED")) {
         int held = object_hold_status(root, name, &after);
         if (!held) held = object_task_status(root, name, &after);
+        if (!held) held = object_transaction_status(root, name, &after);
         if (held) observation = held < 0 ? "UNKNOWN" : "BUSY";
     }
     if (remove_object && (!strcmp(observation, "MATCHED") || !strcmp(observation, "MISSING"))) {

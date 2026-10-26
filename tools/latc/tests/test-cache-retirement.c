@@ -1105,6 +1105,68 @@ static void test_explicit_holds(void)
     remove_root(root); g_free(root);
 }
 
+static void test_transaction_root_admission(unsigned mutation, bool executor)
+{
+    char *root = root_new(), error[256], *transaction = NULL;
+    char *names[6], *paths[6];
+    const char *suffixes[] = {".so", ".native", ".tbset"};
+    for (unsigned i = 0; i < 6; i++) {
+        names[i] = i < 3 ? g_strconcat(source, suffixes[i], NULL) :
+            g_strdup_printf("%s-%s%s", source, source, suffixes[i - 3]);
+        paths[i] = g_build_filename(root, names[i], NULL);
+        put(paths[i], "transaction root input\n");
+    }
+    char *previous = g_strdup_printf("{\"version\":2,\"module\":\"%s\",\"native\":\"%s\","
+        "\"tbset\":\"%s\",\"source_sha256\":\"%s\",\"codegen_id\":\"%s\",\"published_sequence\":1}",
+        names[0], names[1], names[2], source, source);
+    char *following = g_strdup_printf("{\"version\":2,\"module\":\"%s\",\"native\":\"%s\","
+        "\"tbset\":\"%s\",\"source_sha256\":\"%s\",\"codegen_id\":\"%s\",\"published_sequence\":2}",
+        names[3], names[4], names[5], source, source);
+    char *current = current_path(root);
+    const char *capture[] = {names[0]};
+    char *single = latcd_retirement_capture_objects(root, source, capture, 1);
+    int fd;
+    if (executor) {
+        fd = open(paths[0], O_RDONLY | O_CLOEXEC);
+        assert(fd >= 0 && !latcd_retirement_tombstone(root, source, names[0], fd, single, error, sizeof(error)));
+        close(fd);
+    }
+    put(current, previous);
+    char *evidence = latcd_retirement_capture_objects(root, source, (const char *const *)names, 6);
+    assert(evidence && !latcd_retirement_prepare(root, source, following, strlen(following), evidence,
+        &transaction, error, sizeof(error)));
+    put(current, following);
+    if (mutation != 1) assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+    char *record_path = g_build_filename(root, ".gc", "transactions", transaction, NULL);
+    GKeyFile *record = g_key_file_new();
+    assert(g_key_file_load_from_file(record, record_path, 0, NULL));
+    if (mutation == 2) g_key_file_set_string(record, "transaction", "state", "UNKNOWN");
+    if (mutation == 3) g_key_file_set_string(record, "transaction", "state", "ABORTED");
+    if (mutation == 4) g_key_file_set_string(record, "transaction", "binding_status", "UNPROVEN");
+    if (mutation == 5) g_key_file_set_string(record, "transaction", "objects_status", "MISMATCH");
+    if (mutation == 6) g_key_file_set_string(record, "transaction", "objects", "broken-base64");
+    if (mutation == 7) g_key_file_set_string(record, "transaction", "previous", "broken-base64");
+    if (mutation == 8) {
+        g_key_file_set_integer(record, "transaction", "version", 1);
+        g_key_file_remove_key(record, "transaction", "objects", NULL);
+    }
+    if (mutation == 9) g_key_file_set_string(record, "transaction", "unexpected", "value");
+    char *raw = g_key_file_to_data(record, NULL, NULL);
+    put(record_path, raw);
+    fd = open(paths[0], O_RDONLY | O_CLOEXEC);
+    assert(fd >= 0);
+    int result = executor ? latcd_tombstone_delete(root, names[0], error, sizeof(error)) :
+        latcd_retirement_tombstone(root, source, names[0], fd, single, error, sizeof(error));
+    close(fd);
+    assert((result == 0) == (mutation == 0));
+    if (!mutation && !executor) assert(!latcd_tombstone_delete(root, names[0], error, sizeof(error)));
+    assert((access(paths[0], F_OK) == 0) == (mutation != 0));
+    g_free(raw); g_key_file_unref(record); g_free(record_path); g_free(evidence);
+    g_free(single); g_free(current); g_free(previous); g_free(following); g_free(transaction);
+    for (unsigned i = 0; i < 6; i++) { g_free(paths[i]); g_free(names[i]); }
+    remove_root(root); g_free(root);
+}
+
 static void test_task_root_admission(bool copying, bool executor)
 {
     char *root = root_new(), error[256];
@@ -1233,6 +1295,10 @@ static void test_hold_crash(bool release, const char *point)
 int main(void)
 {
     test_explicit_holds();
+    for (unsigned mutation = 0; mutation < 10; mutation++) {
+        test_transaction_root_admission(mutation, false);
+        test_transaction_root_admission(mutation, true);
+    }
     for (unsigned copying = 0; copying < 2; copying++) {
         test_task_root_admission(copying, false);
         test_task_root_admission(copying, true);
