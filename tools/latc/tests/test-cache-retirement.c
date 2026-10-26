@@ -771,7 +771,7 @@ static void test_tombstone_delete(const char *point, bool crash, int mutation)
     remove_root(root); g_free(root);
 }
 
-static void test_deleted_transaction_recovery(int mutation)
+static void test_deleted_transaction_recovery(int mutation, const char *point, bool crash)
 {
     char *root = root_new(), error[256];
     char *current = current_path(root), *transaction = NULL;
@@ -802,7 +802,19 @@ static void test_deleted_transaction_recovery(int mutation)
         assert(single && fd >= 0 && !latcd_retirement_tombstone(root, source, names[i], fd,
             single, error, sizeof(error)));
         close(fd); g_free(single);
-        if (!i) assert(!latcd_tombstone_delete(root, names[i], error, sizeof(error)));
+        if (!i && (mutation == 18 || mutation == 19)) {
+            pid_t child = fork();
+            assert(child >= 0);
+            if (!child) {
+                assert(!setenv("LATCD_TEST_RETIREMENT_IO", mutation == 18 ?
+                    "crash:unlinked" : "crash:unlink-synced", 1));
+                latcd_tombstone_delete(root, names[i], error, sizeof(error));
+                _exit(127);
+            }
+            int status;
+            assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status) &&
+                   WTERMSIG(status) == SIGKILL);
+        } else if (!i) assert(!latcd_tombstone_delete(root, names[i], error, sizeof(error)));
     }
     char *marker = g_build_filename(root, ".gc", "tombstones", names[0], NULL);
     if (mutation >= 1 && mutation <= 9) {
@@ -822,13 +834,55 @@ static void test_deleted_transaction_recovery(int mutation)
     }
     if (mutation == 10) put(paths[0], "replacement must survive\n");
     if (mutation == 11) assert(!unlink(marker));
-    if (mutation == 12) put(current, previous);
-    if (mutation == 13) assert(!unlink(current));
-    if (mutation == 14) put(current, "broken current\n");
+    if (mutation == 12 || mutation == 21) put(current, previous);
+    if (mutation == 13 || mutation == 22) assert(!unlink(current));
+    if (mutation == 14 || mutation == 23) put(current, "broken current\n");
+    if ((mutation >= 15 && mutation <= 17) || mutation >= 20) {
+        GKeyFile *record = g_key_file_new();
+        assert(g_key_file_load_from_file(record, marker, 0, NULL));
+        g_key_file_remove_key(record, "tombstone", "deletion_status", NULL);
+        if (mutation == 15) g_key_file_remove_key(record, "tombstone", "recovery_status", NULL);
+        if (mutation == 16) g_key_file_set_string(record, "tombstone", "recovery_status", "MATCHED");
+        if (mutation == 17) g_key_file_set_string(record, "tombstone", "recovery_status", "BUSY");
+        char *raw = g_key_file_to_data(record, NULL, NULL);
+        put(marker, raw); g_free(raw); g_key_file_unref(record);
+    }
     unsigned recovered;
+    if (point) {
+        pid_t child = fork();
+        assert(child >= 0);
+        if (!child) {
+            char *fault = g_strdup_printf("%s:%s", crash ? "crash" : "error", point);
+            assert(!setenv("LATCD_TEST_RETIREMENT_IO", fault, 1));
+            int result = latcd_retirement_recover(root, &recovered, error, sizeof(error));
+            _exit(result ? 0 : 127);
+        }
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        assert(crash ? WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL :
+                       WIFEXITED(status) && !WEXITSTATUS(status));
+        assert_state(root, "RETIRED");
+    }
+    if (mutation == 20) {
+        int latch = lat_aot_v2_cache_source_lock(root, source, LOCK_EX, false, NULL, 0);
+        assert(latch >= 0);
+        assert(latcd_retirement_recover(root, &recovered, error, sizeof(error)) < 0);
+        assert_state(root, "RETIRED");
+        close(latch);
+    }
     for (int pass = 0; pass < 2; pass++) {
         assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)) && recovered == 1);
-        assert_state(root, mutation ? "UNKNOWN" : "RETIRED");
+        bool accepted = !mutation || mutation == 1 || mutation == 15 || mutation == 16 ||
+                        mutation == 18 || mutation == 19 || mutation == 20;
+        assert_state(root, accepted ? "RETIRED" : "UNKNOWN");
+        if (accepted) {
+            GKeyFile *record = g_key_file_new();
+            assert(g_key_file_load_from_file(record, marker, 0, NULL));
+            char *value = g_key_file_get_string(record, "tombstone", "deletion_status", NULL);
+            assert(!g_strcmp0(value, "UNLINKED"));
+            g_free(value); g_key_file_unref(record);
+            assert_tombstone_status(marker, "MISSING");
+        }
         assert((access(paths[0], F_OK) == 0) == (mutation == 10));
         assert(!access(paths[3], F_OK) && !access(paths[4], F_OK) && !access(paths[5], F_OK));
     }
@@ -1010,12 +1064,18 @@ int main(void)
         test_recovery_cursor(mutation, false);
         test_recovery_cursor(mutation, true);
     }
-    for (int mutation = 0; mutation < 15; mutation++) test_deleted_transaction_recovery(mutation);
+    for (int mutation = 0; mutation < 24; mutation++)
+        test_deleted_transaction_recovery(mutation, NULL, false);
     test_manifest_binding();
     test_tombstone();
     for (int mutation = 0; mutation < 11; mutation++) test_tombstone_recovery(mutation);
     const char *points[] = {"created", "partial-write", "written", "chmod",
         "file-synced", "closed", "renamed", "directory-synced"};
+    for (size_t i = 0; i < G_N_ELEMENTS(points); i++)
+        for (int crash = 0; crash < 2; crash++)
+            test_deleted_transaction_recovery(15, points[i], crash);
+    for (int crash = 0; crash < 2; crash++)
+        test_deleted_transaction_recovery(15, "missing-synced", crash);
     for (size_t i = 0; i < G_N_ELEMENTS(points); i++)
         for (int crash = 0; crash < 2; crash++)
             for (int finishing = 0; finishing < 2; finishing++)

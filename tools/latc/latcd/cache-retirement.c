@@ -616,8 +616,9 @@ out:
 static bool tombstone_shape(GKeyFile *record, const char *name,
                              char **source, uint64_t values[4], char **hash);
 
-static bool completed_removal(int root, const char *source, const char *name,
-                              const uint64_t expected[4], const char *digest)
+static int completed_removal(int root, const char *root_path, const char *source,
+                             const char *name, const uint64_t expected[4],
+                             const char *digest)
 {
     int gc = open_directory(root, ".gc", false);
     int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
@@ -632,7 +633,16 @@ static bool completed_removal(int root, const char *source, const char *name,
         !memcmp(values, expected, sizeof(values));
     char *deletion = g_key_file_get_string(record, "tombstone", "deletion_status", NULL);
     char *observation = g_key_file_get_string(record, "tombstone", "recovery_status", NULL);
-    valid = valid && !g_strcmp0(deletion, "UNLINKED") && !g_strcmp0(observation, "MISSING");
+    bool complete = !g_strcmp0(deletion, "UNLINKED") && !g_strcmp0(observation, "MISSING");
+    bool pending = !deletion && (!observation || !strcmp(observation, "MATCHED") ||
+                                !strcmp(observation, "MISSING"));
+    valid = valid && (complete || (root_path && pending));
+    int latch = -1, result = 0;
+    if (valid && !complete) {
+        latch = lat_aot_v2_cache_source_lock(root_path, source, LOCK_EX | LOCK_NB,
+                                             false, NULL, 0);
+        if (latch < 0) { result = -1; valid = false; }
+    }
     /* A receipt cannot erase a current reference, even if the file is absent. */
     char *current = g_strdup_printf("%s.current", source), *manifest = NULL;
     size_t manifest_size = 0;
@@ -642,15 +652,26 @@ static bool completed_removal(int root, const char *source, const char *name,
         !g_hash_table_contains(references, name);
     struct stat st;
     if (valid) valid = fstatat(root, name, &st, AT_SYMLINK_NOFOLLOW) && errno == ENOENT;
+    if (valid && !complete) {
+        /* Observation only: make the already-absent name durable. Never unlink
+         * here, and never infer physical block release from this receipt. */
+        if (fsync(root) || record_write_fault("missing-synced")) result = -1;
+        else {
+            g_key_file_set_string(record, "tombstone", "deletion_status", "UNLINKED");
+            g_key_file_set_string(record, "tombstone", "recovery_status", "MISSING");
+            result = write_record(store, name, record) ? -1 : 1;
+        }
+    } else if (valid) result = 1;
+    if (latch >= 0) close(latch);
     g_hash_table_unref(references);
     g_free(manifest); g_free(current); g_free(deletion); g_free(observation);
     g_free(raw); g_free(stored_source); g_free(hash); g_key_file_unref(record);
     if (store >= 0) close(store);
     if (gc >= 0) close(gc);
-    return valid;
+    return result;
 }
 
-static int verify_objects(int root, const char *source, const char *encoded,
+static int verify_objects(int root, const char *root_path, const char *source, const char *encoded,
                            bool content, bool allow_removed, LatcdRecoveryCursor *cursor)
 {
     if (!encoded) return -1;
@@ -697,8 +718,10 @@ static int verify_objects(int root, const char *source, const char *encoded,
         else {
             struct stat st;
             int status = fstatat(root, name, &st, AT_SYMLINK_NOFOLLOW);
-            if (status && errno == ENOENT && allow_removed &&
-                completed_removal(root, source, name, values, hash)) {
+            int removed = status && errno == ENOENT && allow_removed ?
+                completed_removal(root, root_path, source, name, values, hash) : 0;
+            if (removed < 0) result = -1;
+            else if (removed) {
                 /* Durable exact-object receipt replaces only missing content. */
             } else if (status || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
                 st.st_nlink != 1 || (st.st_mode & 0222) ||
@@ -766,12 +789,12 @@ static int recover_record(int root, int store, const char *name, bool content,
     }
     if (version == 2) {
         char *encoded = g_key_file_get_string(record, "transaction", "objects", NULL);
-        int object_result = verify_objects(root, source, encoded, content,
-                                           !strcmp(state, "RETIRED"), cursor);
         gsize object_size = 0;
         guchar *object_data = encoded ? g_base64_decode(encoded, &object_size) : NULL;
         bool bound = object_size && !latcd_retirement_validate_binding(source,
             (char *)old, old_size, (char *)next, new_size, (char *)object_data, object_size);
+        int object_result = verify_objects(root, cursor ? cursor->root_path : NULL,
+            source, encoded, content, bound && !strcmp(state, "RETIRED"), cursor);
         g_free(object_data);
         g_free(encoded);
         if (object_result == 3) { result = 1; goto snapshots_out; }

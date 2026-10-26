@@ -168,13 +168,17 @@ def run(prefix, guest, work):
                 path = cache / name
                 st = path.stat()
                 marker = tombstones / name
+                progress = ("recovery_status=MISSING\ndeletion_status=UNLINKED\n"
+                            if phase == "current-synced" else
+                            {"module": "", "native": "recovery_status=MATCHED\n",
+                             "tbset": "recovery_status=MISSING\n"}[role])
                 marker.write_text(f"[tombstone]\nversion=1\nsource={source}\nname={name}\n"
                     f"state=DELETING\ndevice={st.st_dev}\ninode={st.st_ino}\n"
                     f"size={st.st_size}\nallocated={st.st_blocks * 512}\n"
-                    f"sha256={hashlib.sha256(path.read_bytes()).hexdigest()}\n"
-                    "recovery_status=MISSING\ndeletion_status=UNLINKED\n")
+                    f"sha256={hashlib.sha256(path.read_bytes()).hexdigest()}\n" + progress)
                 marker.chmod(0o400)
-                # Test fixture simulates completed durable GC; no product GC call.
+                # Simulate absent paths with complete or interrupted receipts;
+                # startup may complete metadata, but never calls product unlink.
                 with marker.open("rb") as stream:
                     os.fsync(stream.fileno())
                 path.unlink()
@@ -188,6 +192,10 @@ def run(prefix, guest, work):
                     result = subprocess.run(arguments + ["--serve", "--idle-seconds", "1"],
                         env=env, stdout=log, stderr=log, timeout=30)
                 assert result.returncode == 0
+                parsed_marker = configparser.ConfigParser(interpolation=None, strict=True)
+                parsed_marker.read(marker)
+                assert parsed_marker["tombstone"]["deletion_status"] == "UNLINKED"
+                assert parsed_marker["tombstone"]["recovery_status"] == "MISSING"
                 for transaction in (cache / ".gc/transactions").glob("*.ini"):
                     parsed = configparser.ConfigParser(interpolation=None, strict=True)
                     parsed.read(transaction)

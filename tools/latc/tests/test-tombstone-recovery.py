@@ -86,7 +86,10 @@ def run(prefix, work):
         for attempt in range(2):
             with (directory / f"daemon-{attempt}.log").open("wb") as log:
                 result = subprocess.run(arguments, env=env, stdout=log, stderr=log, timeout=20)
-            assert result.returncode == (1 if case == "corrupt" else 0), case
+            assert result.returncode == (1 if case in ("corrupt", "symlink") else 0), case
+            if case == "symlink":
+                assert "capacity" in (directory / f"daemon-{attempt}.log").read_text()
+                assert not Path(arguments[arguments.index("--socket") + 1]).exists()
             assert before == {p.name: p.read_bytes() for p in cache.glob("*.current")}
             assert path.exists() == (case != "missing")
             if case != "corrupt":
