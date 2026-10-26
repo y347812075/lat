@@ -1,6 +1,10 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "internal-fd-registry.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -102,12 +106,33 @@ int lat_aot_v2_internal_fd_unregister_close_locked(int fd)
     return close(fd);
 }
 
-bool lat_aot_v2_internal_fd_is_protected(int fd)
+static bool fd_is_protected_locked(int fd)
 {
     if (fd < 0) return false;
-    lat_aot_v2_internal_fd_lock();
     size_t index = fd_lower_bound(fd);
-    bool protected = index < protected_count && protected_fds[index] == fd;
+    return index < protected_count && protected_fds[index] == fd;
+}
+
+bool lat_aot_v2_internal_fd_is_protected(int fd)
+{
+    lat_aot_v2_internal_fd_lock();
+    bool protected = fd_is_protected_locked(fd);
     lat_aot_v2_internal_fd_unlock();
     return protected;
+}
+
+int lat_aot_v2_internal_fd_dup_replace(int oldfd, int newfd, int flags, bool use_dup3)
+{
+    lat_aot_v2_internal_fd_lock();
+    int result;
+    if (fd_is_protected_locked(oldfd) || fd_is_protected_locked(newfd)) {
+        errno = EACCES;
+        result = -1;
+    } else {
+        result = use_dup3 ? dup3(oldfd, newfd, flags) : dup2(oldfd, newfd);
+    }
+    int saved = errno;
+    lat_aot_v2_internal_fd_unlock();
+    errno = saved;
+    return result;
 }

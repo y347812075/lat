@@ -18,4 +18,8 @@ int lat_aot_v2_internal_fd_unregister_close_locked(int fd);
 
 bool lat_aot_v2_internal_fd_is_protected(int fd);
 
+/* Serialize guest replacement with internal fd allocation/registration. Caller
+ * relocates source identity references first; no callback runs under this lock. */
+int lat_aot_v2_internal_fd_dup_replace(int oldfd, int newfd, int flags, bool use_dup3);
+
 #endif

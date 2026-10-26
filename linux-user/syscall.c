@@ -13531,14 +13531,8 @@ static abi_long guest_fd_dup_replace(CPUArchState *env, abi_long oldfd,
         }
     }
 #endif
-#ifdef CONFIG_DUP3
-    if (use_dup3) {
-        ret = get_errno(dup3(oldfd, newfd, host_flags));
-    } else
-#endif
-    {
-        ret = get_errno(dup2(oldfd, newfd));
-    }
+    ret = get_errno(latc_aot_v2_fd_dup_replace(oldfd, newfd,
+                                             host_flags, use_dup3));
     if (ret >= 0) {
         fd_trans_dup(oldfd, newfd);
     }

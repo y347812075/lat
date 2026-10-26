@@ -148,6 +148,71 @@ static int test_fork_inheritance(const char *root)
     return 0;
 }
 
+typedef struct DupAttempt {
+    int source;
+    int target;
+    int ready;
+    bool dup3;
+    int result;
+    int error;
+} DupAttempt;
+
+static void *attempt_dup(void *opaque)
+{
+    DupAttempt *attempt = opaque;
+    if (signal_byte(attempt->ready)) return (void *)1;
+    attempt->result = lat_aot_v2_internal_fd_dup_replace(
+        attempt->source, attempt->target, O_CLOEXEC, attempt->dup3);
+    attempt->error = errno;
+    return NULL;
+}
+
+static int test_dup_registration(bool dup3, bool protect_source)
+{
+    int source = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    int target = open("/dev/zero", O_RDONLY | O_CLOEXEC);
+    int ready[2];
+    if (source < 0 || target < 0 || pipe(ready)) return -1;
+    struct stat before, after;
+    if (fstat(target, &before)) return -1;
+    DupAttempt attempt = { .source = source, .target = target,
+                           .ready = ready[1], .dup3 = dup3 };
+    pthread_t worker;
+    /* Simulate an internal allocator completing registration while a guest
+     * replacement has started but cannot yet enter the shared lock. */
+    lat_aot_v2_internal_fd_lock();
+    if (pthread_create(&worker, NULL, attempt_dup, &attempt) || wait_byte(ready[0]) ||
+        lat_aot_v2_internal_fd_register_locked(protect_source ? source : target)) {
+        lat_aot_v2_internal_fd_unlock();
+        return -1;
+    }
+    lat_aot_v2_internal_fd_unlock();
+    void *thread_result;
+    if (pthread_join(worker, &thread_result) || thread_result || attempt.result != -1 ||
+        attempt.error != EACCES || fstat(target, &after) ||
+        before.st_dev != after.st_dev || before.st_ino != after.st_ino) return -1;
+    lat_aot_v2_internal_fd_lock();
+    int closed = lat_aot_v2_internal_fd_unregister_close_locked(protect_source ? source : target);
+    lat_aot_v2_internal_fd_unlock();
+    if (closed) return -1;
+    close(protect_source ? target : source);
+    close(ready[0]); close(ready[1]);
+
+    source = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    target = open("/dev/zero", O_RDONLY | O_CLOEXEC);
+    if (source < 0 || target < 0 ||
+        lat_aot_v2_internal_fd_dup_replace(source, target, O_CLOEXEC, dup3) != target ||
+        fstat(source, &before) || fstat(target, &after) ||
+        before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
+        !!(fcntl(target, F_GETFD) & FD_CLOEXEC) != dup3) return -1;
+    if (lat_aot_v2_internal_fd_dup_replace(source, source, 0, dup3) != (dup3 ? -1 : source) ||
+        (dup3 && errno != EINVAL)) return -1;
+    if (lat_aot_v2_internal_fd_dup_replace(-1, target, 0, dup3) != -1 || errno != EBADF)
+        return -1;
+    close(source); close(target);
+    return 0;
+}
+
 static void *hold_registry_lock(void *opaque)
 {
     (void)opaque;
@@ -329,6 +394,12 @@ int main(void)
         return 1;
     }
     chmod(root, 0700);
+    for (int dup3 = 0; dup3 < 2; dup3++)
+        for (int source = 0; source < 2; source++)
+            if (test_dup_registration(dup3, source)) {
+                fprintf(stderr, "atomic dup registration failed dup3=%d source=%d\n", dup3, source);
+                return 1;
+            }
     int result = test_unsafe_layout(root) || test_source_latch(root) ||
         test_guest_fd_registry(root) || test_atfork_registry() ||
         test_fork_inheritance(root) || test_exec_closes_latch(root) ||

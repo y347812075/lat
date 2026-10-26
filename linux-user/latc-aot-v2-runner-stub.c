@@ -107,6 +107,11 @@ int latc_aot_v2_relocate_source_fd(int fd)
     return 0;
 }
 
+int latc_aot_v2_fd_dup_replace(int oldfd, int newfd, int flags, bool use_dup3)
+{
+    return use_dup3 ? dup3(oldfd, newfd, flags) : dup2(oldfd, newfd);
+}
+
 void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
 {
     (void)guest_pc;

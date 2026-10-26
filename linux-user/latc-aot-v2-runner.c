@@ -346,6 +346,11 @@ bool latc_aot_v2_fd_is_protected(int host_fd)
     return protected;
 }
 
+int latc_aot_v2_fd_dup_replace(int oldfd, int newfd, int flags, bool use_dup3)
+{
+    return lat_aot_v2_internal_fd_dup_replace(oldfd, newfd, flags, use_dup3);
+}
+
 typedef struct LatAotV2KeyRetry {
     CPUState *cpu;
     target_ulong pc;
