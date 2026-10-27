@@ -172,6 +172,76 @@ static int test_guest_close(void)
     return result;
 }
 
+static bool protect_selected_fd(int fd, void *opaque)
+{
+    return fd == *(int *)opaque;
+}
+
+static int duplicate_three(int base, int fds[3])
+{
+    int source = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (source < 0) return -1;
+    fds[0] = fcntl(source, F_DUPFD_CLOEXEC, base);
+    fds[1] = fcntl(source, F_DUPFD_CLOEXEC, fds[0] + 1);
+    fds[2] = fcntl(source, F_DUPFD_CLOEXEC, fds[1] + 1);
+    close(source);
+    if (fds[0] < base || fds[1] != fds[0] + 1 || fds[2] != fds[1] + 1) {
+        for (unsigned i = 0; i < 3; i++) if (fds[i] >= 0) close(fds[i]);
+        return -1;
+    }
+    return 0;
+}
+
+static int test_guest_close_range(void)
+{
+    int fds[3] = {-1, -1, -1};
+    if (duplicate_three(200, fds)) return -1;
+    lat_aot_v2_internal_fd_lock();
+    int registered = lat_aot_v2_internal_fd_register_locked(fds[1]);
+    lat_aot_v2_internal_fd_unlock();
+    if (registered) return -1;
+    if (lat_aot_v2_internal_fd_close_range(fds[0], fds[2], false, NULL, NULL, NULL)) return -1;
+    errno = 0;
+    if (fcntl(fds[0], F_GETFD) != -1 || errno != EBADF ||
+        fcntl(fds[2], F_GETFD) != -1 || errno != EBADF ||
+        fcntl(fds[1], F_GETFD) < 0) return -1;
+    lat_aot_v2_internal_fd_lock();
+    if (lat_aot_v2_internal_fd_unregister_close_locked(fds[1])) return -1;
+    lat_aot_v2_internal_fd_unlock();
+
+    if (duplicate_three(210, fds) || fcntl(fds[1], F_SETFD, 0)) return -1;
+    lat_aot_v2_internal_fd_lock();
+    registered = lat_aot_v2_internal_fd_register_locked(fds[1]);
+    lat_aot_v2_internal_fd_unlock();
+    if (registered || lat_aot_v2_internal_fd_close_range(fds[0], fds[2], true, NULL, NULL, NULL))
+        return -1;
+    int ordinary_flags = fcntl(fds[0], F_GETFD);
+    int protected_flags = fcntl(fds[1], F_GETFD);
+    int last_flags = fcntl(fds[2], F_GETFD);
+    if (ordinary_flags < 0 || !(ordinary_flags & FD_CLOEXEC) ||
+        protected_flags != 0 || last_flags < 0 || !(last_flags & FD_CLOEXEC)) return -1;
+    lat_aot_v2_internal_fd_lock();
+    registered = lat_aot_v2_internal_fd_unregister_close_locked(fds[1]);
+    lat_aot_v2_internal_fd_unlock();
+    if (registered) return -1;
+    close(fds[0]);
+    close(fds[2]);
+
+    if (duplicate_three(220, fds)) return -1;
+    int selected = fds[1];
+    if (lat_aot_v2_internal_fd_close_range(fds[0], fds[2], false,
+                                           protect_selected_fd, NULL, &selected)) return -1;
+    errno = 0;
+    if (fcntl(fds[0], F_GETFD) != -1 || errno != EBADF ||
+        fcntl(fds[1], F_GETFD) < 0 || fcntl(fds[2], F_GETFD) != -1 || errno != EBADF)
+        return -1;
+    close(fds[1]);
+    errno = 0;
+    if (lat_aot_v2_internal_fd_close_range(5, 4, false, NULL, NULL, NULL) != -1 || errno != EINVAL)
+        return -1;
+    return 0;
+}
+
 static int test_source_latch(const char *root)
 {
     char error[256] = {0};
@@ -584,7 +654,7 @@ int main(void)
         test_guest_fd_registry(root) || test_atfork_registry() ||
         test_fork_inheritance(root) || test_exec_closes_latch(root) ||
         test_artifact_latch(root) || test_tombstones(root) || test_guest_snapshot(root) ||
-        test_guest_fcntl() || test_guest_close();
+        test_guest_fcntl() || test_guest_close() || test_guest_close_range();
     if (cleanup(root)) {
         fprintf(stderr, "cannot clean lifecycle test directory %s: %s\n",
                 root, strerror(errno));

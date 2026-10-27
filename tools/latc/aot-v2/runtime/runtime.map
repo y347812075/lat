@@ -78,7 +78,12 @@ LAT_AOT_RUNTIME_2.0 {
         lat_aot_v2_internal_fd_try_flock;
         lat_aot_v2_internal_fd_fcntl;
         lat_aot_v2_internal_fd_close_guest;
+        lat_aot_v2_internal_fd_close_range;
         lat_aot_v2_internal_fd_allocation_lock;
+        lat_aot_v2_internal_fd_lock;
+        lat_aot_v2_internal_fd_unlock;
+        lat_aot_v2_internal_fd_register_locked;
+        lat_aot_v2_internal_fd_unregister_close_locked;
         lat_aot_v2_context_apply_guest_slots;
         lat_aot_v2_context_apply_guest_table;
         lat_aot_v2_module_open;

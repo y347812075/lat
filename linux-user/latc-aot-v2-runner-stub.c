@@ -2,6 +2,8 @@
 
 #include "qemu.h"
 #include "latc-aot-v2-runner.h"
+#include <dirent.h>
+#include <limits.h>
 #include <sys/file.h>
 
 void latc_aot_v2_fork_start(void)
@@ -141,6 +143,54 @@ int latc_aot_v2_fd_fcntl(int fd, int command, int argument)
 int latc_aot_v2_fd_close_guest(int fd)
 {
     return close(fd);
+}
+
+int latc_aot_v2_fd_close_range(unsigned first, unsigned last, bool cloexec,
+                               LatcAotV2FdRangeProtected extra_protected,
+                               void *opaque)
+{
+#ifdef __NR_close_range
+    if (first > last) {
+        errno = EINVAL;
+        return -1;
+    }
+    DIR *directory = opendir("/proc/self/fd");
+    if (!directory) return -1;
+    int scan = dirfd(directory);
+    int result = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) {
+            if (errno) result = -1;
+            break;
+        }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        char *end = NULL;
+        errno = 0;
+        unsigned long parsed = strtoul(entry->d_name, &end, 10);
+        if (errno || !*entry->d_name || !end || *end || parsed > UINT_MAX ||
+            parsed < first || parsed > last || parsed == (unsigned long)scan ||
+            (extra_protected && extra_protected((int)parsed, opaque))) continue;
+        if (syscall(__NR_close_range, (unsigned)parsed, (unsigned)parsed,
+                    cloexec ? 4U : 0U) < 0 && errno != EBADF) {
+            result = -1;
+            break;
+        }
+    }
+    int saved = errno;
+    closedir(directory);
+    errno = saved;
+    return result;
+#else
+    (void)first;
+    (void)last;
+    (void)cloexec;
+    (void)extra_protected;
+    (void)opaque;
+    errno = ENOSYS;
+    return -1;
+#endif
 }
 
 void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)

@@ -393,6 +393,18 @@ void fd_trans_unregister(int fd)
     pthread_mutex_unlock(&target_fd_trans_mutex);
 }
 
+void fd_trans_unregister_range(unsigned first, unsigned last)
+{
+    if (first > last) return;
+    pthread_mutex_lock(&target_fd_trans_mutex);
+    if (first < target_fd_max) {
+        uint64_t end = MIN((uint64_t)last, (uint64_t)target_fd_max - 1);
+        memset(target_fd_trans + first, 0,
+               (size_t)(end - first + 1) * sizeof(*target_fd_trans));
+    }
+    pthread_mutex_unlock(&target_fd_trans_mutex);
+}
+
 void fd_trans_dup(int oldfd, int newfd)
 {
     TargetFdTrans *trans;

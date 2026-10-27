@@ -388,6 +388,65 @@ int latc_aot_v2_fd_close_guest(int fd)
     return lat_aot_v2_internal_fd_close_guest(fd);
 }
 
+static int create_internal_memfd(const char *name, unsigned flags)
+{
+    lat_aot_v2_internal_fd_allocation_lock();
+    int fd = memfd_create(name, flags);
+    if (fd >= 0 && lat_aot_v2_internal_fd_register_locked(fd)) {
+        int saved = errno;
+        close(fd);
+        fd = -1;
+        errno = saved;
+    }
+    lat_aot_v2_internal_fd_unlock();
+    return fd;
+}
+
+static void close_internal_fd(int fd)
+{
+    if (fd < 0) return;
+    lat_aot_v2_internal_fd_lock();
+    if (lat_aot_v2_internal_fd_unregister_close_locked(fd)) close(fd);
+    int saved = errno;
+    lat_aot_v2_internal_fd_unlock();
+    errno = saved;
+}
+
+typedef struct LatcAotV2RangeProtection {
+    LatcAotV2FdRangeProtected extra;
+    void *opaque;
+} LatcAotV2RangeProtection;
+
+static bool close_range_object_protected(int fd, void *opaque)
+{
+    LatcAotV2RangeProtection *protection = opaque;
+    struct stat st;
+    if (fstat(fd, &st)) return true;
+    pthread_mutex_lock(&protected_object_lock);
+    bool protected = protected_object_locked(&st);
+    pthread_mutex_unlock(&protected_object_lock);
+    return protected || (protection->extra &&
+                         protection->extra(fd, protection->opaque));
+}
+
+static int close_range_prepare_fd(int fd, void *opaque)
+{
+    (void)opaque;
+    return latc_aot_v2_relocate_source_fd(fd);
+}
+
+int latc_aot_v2_fd_close_range(unsigned first, unsigned last, bool cloexec,
+                               LatcAotV2FdRangeProtected extra_protected,
+                               void *opaque)
+{
+    LatcAotV2RangeProtection protection = {
+        .extra = extra_protected,
+        .opaque = opaque,
+    };
+    return lat_aot_v2_internal_fd_close_range(first, last, cloexec,
+        close_range_object_protected, close_range_prepare_fd, &protection);
+}
+
 typedef struct LatAotV2KeyRetry {
     CPUState *cpu;
     target_ulong pc;
@@ -1555,8 +1614,8 @@ static bool submit_runtime_tbsets(void)
                     (unsigned long long)target_rva, contains_target);
         }
         char error[256] = {0};
-        int output_fd = memfd_create("latc-tbset",
-                                     MFD_CLOEXEC | MFD_ALLOW_SEALING);
+        int output_fd = create_internal_memfd("latc-tbset",
+                                              MFD_CLOEXEC | MFD_ALLOW_SEALING);
         LatTbKeySet key_set = { .count = entries->len };
         memcpy(key_set.source_sha256, stats->source_sha256, 32);
         key_set.keys = g_new0(LatTbKey, key_set.count);
@@ -1579,14 +1638,12 @@ static bool submit_runtime_tbsets(void)
                      strerror(errno));
             failed = 1;
         }
-        if (failed && output_fd >= 0) {
-            close(output_fd);
-        }
+        if (failed && output_fd >= 0) close_internal_fd(output_fd);
         g_free(key_set.keys);
         int tbset_fd = failed ? -1 : output_fd;
         uint64_t request_id;
         if (!next_compiler_request_id(&request_id)) {
-            if (tbset_fd >= 0) close(tbset_fd);
+            if (tbset_fd >= 0) close_internal_fd(tbset_fd);
             g_array_free(entries, TRUE);
             continue;
         }
@@ -1635,7 +1692,7 @@ static bool submit_runtime_tbsets(void)
                         source, count);
             }
         }
-        if (tbset_fd >= 0) close(tbset_fd);
+        if (tbset_fd >= 0) close_internal_fd(tbset_fd);
         g_array_free(entries, TRUE);
     }
     pthread_mutex_unlock(&submission_lock);
@@ -3102,7 +3159,8 @@ static int prepare_key_journal_config(CPUArchState *env, char *error, size_t siz
     }
     gsize count;
     const void *data = g_bytes_get_data(bytes, &count);
-    int fd = memfd_create("latc-journal-config", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    int fd = create_internal_memfd("latc-journal-config",
+                                   MFD_CLOEXEC | MFD_ALLOW_SEALING);
     bool ok = fd >= 0;
     size_t done = 0;
     while (ok && done < count) {
@@ -3115,7 +3173,7 @@ static int prepare_key_journal_config(CPUArchState *env, char *error, size_t siz
         F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);
     g_bytes_unref(bytes);
     if (!ok) {
-        if (fd >= 0) close(fd);
+        close_internal_fd(fd);
         snprintf(error, size, "cannot seal journal configuration");
         return -1;
     }

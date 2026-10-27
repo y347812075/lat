@@ -31,6 +31,7 @@ TargetFdDataFunc fd_trans_host_to_target_data(int fd);
 TargetFdAddrFunc fd_trans_target_to_host_addr(int fd);
 void fd_trans_register(int fd, TargetFdTrans *trans);
 void fd_trans_unregister(int fd);
+void fd_trans_unregister_range(unsigned first, unsigned last);
 void fd_trans_dup(int oldfd, int newfd);
 
 extern TargetFdTrans target_packet_trans;

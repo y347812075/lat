@@ -10506,6 +10506,16 @@ static abi_long guest_exe_identity_relocate(CPUArchState *env, int fd)
     }
     return ret;
 }
+
+typedef struct CloseRangeProtection {
+    int identity_fd;
+} CloseRangeProtection;
+
+static bool close_range_identity_protected(int fd, void *opaque)
+{
+    CloseRangeProtection *protection = opaque;
+    return protection->identity_fd == fd;
+}
 #endif
 
 static abi_long do_fcntl(CPUArchState *env, int fd, int cmd, abi_ulong arg)
@@ -15490,6 +15500,47 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         latx_syscall_fd_end();
 #endif
         return ret;
+
+#if defined(TARGET_NR_close_range) && defined(TARGET_I386)
+    case TARGET_NR_close_range:
+        {
+            unsigned first = (unsigned)arg1;
+            unsigned last = (unsigned)arg2;
+            unsigned flags = (unsigned)arg3;
+            if (first > last) return -TARGET_EINVAL;
+            if (flags & ~(2U | 4U)) return -TARGET_EINVAL;
+            if (flags & 2U) return -TARGET_EOPNOTSUPP;
+            bool cloexec = flags & 4U;
+#ifdef CONFIG_LATX
+            latx_syscall_fd_begin();
+#endif
+            TaskState *ts = env_cpu(cpu_env)->opaque;
+            mmap_lock();
+            int identity = ts->info->prctl_mm_exe_fd;
+            mmap_unlock();
+            if (identity >= 0 && (unsigned)identity >= first &&
+                (unsigned)identity <= last) {
+                ret = guest_exe_identity_relocate(cpu_env, identity);
+                if (ret) {
+#ifdef CONFIG_LATX
+                    latx_syscall_fd_end();
+#endif
+                    return ret;
+                }
+            }
+            if (!cloexec) fd_trans_unregister_range(first, last);
+            mmap_lock();
+            int protected_identity = ts->info->prctl_mm_exe_fd;
+            mmap_unlock();
+            CloseRangeProtection protection = { .identity_fd = protected_identity };
+            ret = get_errno(latc_aot_v2_fd_close_range(first, last, cloexec,
+                close_range_identity_protected, &protection));
+#ifdef CONFIG_LATX
+            latx_syscall_fd_end();
+#endif
+            return ret;
+        }
+#endif
 
     case TARGET_NR_brk:
         return do_brk(arg1);

@@ -70,12 +70,19 @@ int latc_aot_v2_relocate_source_fd(int fd);
 bool latc_aot_v2_record_journal_epoch(const char *epoch);
 bool latc_aot_v2_path_is_protected(const char *host_path);
 bool latc_aot_v2_fd_is_protected(int host_fd);
+typedef bool (*LatcAotV2FdRangeProtected)(int fd, void *opaque);
 int latc_aot_v2_fd_dup_replace(int oldfd, int newfd, int flags, bool use_dup3);
 int latc_aot_v2_fd_snapshot_guest(int fd);
 void latc_aot_v2_fd_snapshot_close(int fd);
 int latc_aot_v2_fd_try_flock(int fd, int operation);
 int latc_aot_v2_fd_fcntl(int fd, int command, int argument);
 int latc_aot_v2_fd_close_guest(int fd);
+/* close_range close/CLOEXEC for guest descriptors, skipping AOT-owned and
+ * callback-protected descriptors. Unsupported sharing flags are rejected in
+ * the syscall wrapper before this entry. */
+int latc_aot_v2_fd_close_range(unsigned first, unsigned last, bool cloexec,
+                               LatcAotV2FdRangeProtected extra_protected,
+                               void *opaque);
 /* Record a file-backed JIT translation request without execution counters. */
 void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags);
 /* Opt-in journal integration. Check is memory-only under mmap_lock; a miss

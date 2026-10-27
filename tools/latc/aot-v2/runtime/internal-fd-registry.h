@@ -3,6 +3,9 @@
 
 #include <stdbool.h>
 
+typedef bool (*LatAotV2InternalFdRangeProtected)(int fd, void *opaque);
+typedef int (*LatAotV2InternalFdRangePrepare)(int fd, void *opaque);
+
 /* Protect runtime-owned fds from direct guest close/dup/fcntl operations. */
 void lat_aot_v2_internal_fd_lock(void);
 /* Wait for admitted guest closes before allocating any internal descriptor. */
@@ -35,5 +38,14 @@ int lat_aot_v2_internal_fd_try_flock(int fd, int operation);
 /* Only nonblocking descriptor flags/dup commands; record locks are excluded. */
 int lat_aot_v2_internal_fd_fcntl(int fd, int command, int argument);
 int lat_aot_v2_internal_fd_close_guest(int fd);
+
+/* Apply close_range close/CLOEXEC semantics to currently open guest descriptors.
+ * Registry-protected descriptors and extra_protected() descriptors are skipped.
+ * Callers reject unsupported close-on-exec sharing semantics before entry. */
+int lat_aot_v2_internal_fd_close_range(unsigned first, unsigned last,
+                                        bool cloexec,
+                                        LatAotV2InternalFdRangeProtected extra_protected,
+                                        LatAotV2InternalFdRangePrepare prepare,
+                                        void *opaque);
 
 #endif

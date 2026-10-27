@@ -3,11 +3,14 @@
 #endif
 #include "internal-fd-registry.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/file.h>
 #include <unistd.h>
 
@@ -155,6 +158,114 @@ int lat_aot_v2_internal_fd_close_guest(int fd)
     lat_aot_v2_internal_fd_unlock();
     errno = saved;
     return result;
+}
+
+static int add_range_fd(int **fds, size_t *count, size_t *capacity, int fd)
+{
+    if (*count == *capacity) {
+        size_t grown = *capacity ? *capacity * 2 : 16;
+        if (grown < *capacity || grown > SIZE_MAX / sizeof(**fds)) {
+            errno = ENOMEM;
+            return -1;
+        }
+        int *new_fds = realloc(*fds, grown * sizeof(**fds));
+        if (!new_fds) return -1;
+        *fds = new_fds;
+        *capacity = grown;
+    }
+    (*fds)[(*count)++] = fd;
+    return 0;
+}
+
+int lat_aot_v2_internal_fd_close_range(unsigned first, unsigned last, bool cloexec,
+                                        LatAotV2InternalFdRangeProtected extra_protected,
+                                        LatAotV2InternalFdRangePrepare prepare,
+                                        void *opaque)
+{
+    if (first > last) {
+        errno = EINVAL;
+        return -1;
+    }
+    int *targets = NULL;
+    size_t count = 0, capacity = 0;
+    DIR *directory = NULL;
+    lat_aot_v2_internal_fd_lock();
+    directory = opendir("/proc/self/fd");
+    if (!directory) goto failed_locked;
+    int scan_fd = dirfd(directory);
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) {
+            if (errno) goto failed_locked;
+            break;
+        }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        char *end = NULL;
+        errno = 0;
+        unsigned long parsed = strtoul(entry->d_name, &end, 10);
+        if (errno || !*entry->d_name || !end || *end || parsed > UINT_MAX ||
+            parsed < first || parsed > last || parsed == (unsigned long)scan_fd) continue;
+        int fd = (int)parsed;
+        if (fd_is_protected_locked(fd) ||
+            (extra_protected && extra_protected(fd, opaque))) continue;
+        if (add_range_fd(&targets, &count, &capacity, fd)) goto failed_locked;
+    }
+    closedir(directory);
+    directory = NULL;
+    lat_aot_v2_internal_fd_unlock();
+    int result = 0;
+    for (size_t i = 0; prepare && i < count; i++) {
+        if (prepare(targets[i], opaque)) {
+            result = -1;
+            break;
+        }
+    }
+    if (result) {
+        int saved = errno;
+        free(targets);
+        errno = saved;
+        return -1;
+    }
+    lat_aot_v2_internal_fd_lock();
+    size_t kept = 0, original_count = count;
+    for (size_t i = 0; i < original_count; i++) {
+        int fd = targets[i];
+        if (fd_is_protected_locked(fd) ||
+            (extra_protected && extra_protected(fd, opaque))) continue;
+        if (fcntl(fd, F_GETFD) < 0) {
+            if (errno == EBADF) continue;
+            goto failed_locked;
+        }
+        targets[kept++] = fd;
+    }
+    count = kept;
+    if (count > SIZE_MAX - guest_closes) {
+        errno = EOVERFLOW;
+        goto failed_locked;
+    }
+    guest_closes += count;
+    lat_aot_v2_internal_fd_unlock();
+    for (size_t i = 0; i < count; i++) {
+        if (cloexec) {
+            if (!fcntl(targets[i], F_SETFD, FD_CLOEXEC) || errno == EBADF) continue;
+        } else if (!close(targets[i]) || errno == EBADF) continue;
+        result = -1;
+        break;
+    }
+    int saved = errno;
+    lat_aot_v2_internal_fd_lock();
+    guest_closes -= count;
+    if (!guest_closes) pthread_cond_broadcast(&closes_idle);
+    lat_aot_v2_internal_fd_unlock();
+    free(targets);
+    errno = saved;
+    return result;
+failed_locked:
+    if (directory) closedir(directory);
+    lat_aot_v2_internal_fd_unlock();
+    free(targets);
+    return -1;
 }
 
 int lat_aot_v2_internal_fd_dup_replace(int oldfd, int newfd, int flags, bool use_dup3)
