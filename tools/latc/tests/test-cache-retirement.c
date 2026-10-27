@@ -1204,6 +1204,16 @@ static void test_recovery_cursor(int mutation, bool tombstones)
         assert(++steps < 100);
     } while (!progress.hashed_bytes);
     assert(result == 1 && progress.recovered == 0 && progress.hashed_bytes == 65536);
+    if (!tombstones) {
+        int roots = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error));
+        assert(roots >= 0);
+        prior = progress;
+        assert(latcd_recovery_step(cursor, 1, 65536, 100000, &progress,
+                                   error, sizeof(error)) < 0);
+        assert(progress.visited == prior.visited && progress.recovered == prior.recovered &&
+               progress.hashed_bytes == prior.hashed_bytes);
+        close(roots);
+    }
     int contender = open(paths[0], O_RDONLY | O_CLOEXEC);
     assert(contender >= 0 && flock(contender, LOCK_EX | LOCK_NB) && errno == EWOULDBLOCK);
     close(contender);
