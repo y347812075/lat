@@ -62,6 +62,8 @@
     {"source": "tools/latc/aot-v2/include/lat-key-journal.h", "target": "include/lat-key-journal.h"},
     {"source": "tools/latc/aot-v2/include/latc-build-id.h", "target": "include/latc-build-id.h"},
     {"source": "tools/latc/aot-v2/runtime/cache-lifecycle.h", "target": "include/cache-lifecycle.h"},
+    {"source": "tools/latc/aot-v2/runtime/cache-domain.c", "target": "linux-user/cache-domain.c"},
+    {"source": "tools/latc/aot-v2/runtime/cache-domain.h", "target": "include/cache-domain.h"},
     {"source": "tools/latc/aot-v2/runtime/internal-fd-registry.h", "target": "include/internal-fd-registry.h"},
     {"source": "tools/latc/aot-v2/runtime/registry.h", "target": "include/registry.h"},
     {"source": "tools/latc/aot-v2/runtime/module-loader.h", "target": "include/module-loader.h"},

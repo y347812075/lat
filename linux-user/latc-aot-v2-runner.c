@@ -19,6 +19,7 @@
 #include "latx-config.h"
 #include "guest-elf-map.h"
 #include "module-loader.h"
+#include "cache-domain.h"
 #include "cache-lifecycle.h"
 #include "internal-fd-registry.h"
 #include "qemu-def.h"
@@ -744,6 +745,17 @@ enum {
 static int register_discovered_module(const LatGuestElfInfoV2 *info,
                                       LatAotV2RuntimeInstance **instance,
                                       char *error, size_t error_size);
+static int validate_runner_cache_domain(const char *cache,
+                                        char *error, size_t error_size)
+{
+    lat_aot_v2_internal_fd_allocation_lock();
+    int result = lat_aot_v2_cache_domain_validate(cache, NULL,
+                                                 error, error_size);
+    int saved = errno;
+    lat_aot_v2_internal_fd_unlock();
+    errno = saved;
+    return result;
+}
 static void digest_hex(const uint8_t digest[32], char output[65]);
 
 static void recycle_retired_instances_locked(void);
@@ -2766,6 +2778,9 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
     if (!cache || !*cache) {
         return 0;
     }
+    if (validate_runner_cache_domain(cache, error, error_size) < 0) {
+        return -1;
+    }
     if (instance) {
         *instance = NULL;
     }
@@ -3355,6 +3370,12 @@ int latc_aot_v2_prepare(CPUArchState *env)
     int source_lock = -1;
     const char *cache = lat_aot_cache_path();
     if (cache && *cache) {
+        if (validate_runner_cache_domain(cache, error, sizeof(error)) < 0) {
+            fprintf(stderr, "latx: cannot validate AOT v2 cache domain: %s\n",
+                    error[0] ? error : strerror(errno));
+            g_free(module);
+            return strict ? -1 : 0;
+        }
         char source_hex[65];
         digest_hex(expected.source_sha256, source_hex);
         source_lock = lat_aot_v2_cache_source_lock(

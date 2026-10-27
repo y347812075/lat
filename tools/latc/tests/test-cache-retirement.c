@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "../latcd/cache-retirement.h"
+#include "../aot-v2/runtime/cache-domain.h"
 #include "../aot-v2/runtime/cache-lifecycle.h"
 
 #include <assert.h>
@@ -524,6 +525,9 @@ static void test_cache_domain(void)
 {
     char *root = root_new(), error[256], first[37] = {0}, second[37] = {0};
     assert(latcd_cache_domain_validate(root, first, error, sizeof(error)) == 0);
+    assert(!chmod(root, 0755));
+    assert(lat_aot_v2_cache_domain_validate(root, NULL, error, sizeof(error)) == 0);
+    assert(!chmod(root, 0700));
     assert(!latcd_cache_domain_init(root, first, error, sizeof(error)));
     char *lock = g_build_filename(root, ".gc", "domain.lock", NULL);
     struct stat lock_before;
@@ -538,6 +542,18 @@ static void test_cache_domain(void)
     char *marker = g_build_filename(root, ".gc", "domain.ini", NULL);
     char *raw = NULL;
     assert(g_file_get_contents(marker, &raw, NULL, NULL));
+    char *version = g_strdup(raw);
+    char *number = strstr(version, "version=1");
+    assert(number);
+    number[strlen("version=")] = '2';
+    put(marker, version);
+    assert(lat_aot_v2_cache_domain_validate(root, NULL, error, sizeof(error)) < 0);
+    assert(latcd_cache_domain_init(root, second, error, sizeof(error)) < 0);
+    g_free(version);
+    put(marker, raw);
+    assert(!chmod(root, 0755));
+    assert(lat_aot_v2_cache_domain_validate(root, NULL, error, sizeof(error)) < 0);
+    assert(!chmod(root, 0700));
     char *bad = g_strdup(raw);
     char *inode = strstr(bad, "cache_inode=");
     assert(inode);

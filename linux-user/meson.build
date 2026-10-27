@@ -11,6 +11,7 @@ linux_user_ss.add(files(
   'guest-elf-map.c',
   'latcd-client.c',
   'auto-config.c',
+  'cache-domain.c',
   'latcd-protocol.c',
   'tb-key-set.c',
   'translation-config.c',

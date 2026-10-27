@@ -674,6 +674,7 @@ if 'CONFIG_LATX' in config_host
       'tools/latc/aot-v2/common/tb-key-set.c',
       'tools/latc/aot-v2/common/key-journal.c',
       'tools/latc/aot-v2/common/translation-config.c',
+      'tools/latc/aot-v2/runtime/cache-domain.c',
       'tools/latc/aot-v2/runtime/cache-lifecycle.c',
       'tools/latc/aot-v2/runtime/internal-fd-registry.c',
       'tools/latc/aot-v2/compiler/module-inspect.c',
