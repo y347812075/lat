@@ -61,6 +61,95 @@ static int signal_byte(int fd)
     return count == 1 ? 0 : -1;
 }
 
+static _Thread_local bool pause_source_flock;
+static int flock_entered, flock_release;
+
+int __real_flock(int fd, int operation);
+int __wrap_flock(int fd, int operation)
+{
+    if (pause_source_flock) {
+        pause_source_flock = false;
+        if (signal_byte(flock_entered) || wait_byte(flock_release)) {
+            errno = EIO;
+            return -1;
+        }
+    }
+    return __real_flock(fd, operation);
+}
+
+typedef struct SourceLockAttempt {
+    const char *root;
+    int operation;
+    bool protected;
+    int fd;
+    int error;
+} SourceLockAttempt;
+
+static void *acquire_source_latch(void *opaque)
+{
+    SourceLockAttempt *attempt = opaque;
+    char error[256];
+    pause_source_flock = true;
+    attempt->fd = lat_aot_v2_cache_source_lock(attempt->root, source_hex,
+        attempt->operation, attempt->protected, error, sizeof(error));
+    attempt->error = errno;
+    return NULL;
+}
+
+static int test_rebound_source_latch(const char *root, unsigned kind,
+                                     int operation, bool protected)
+{
+    char target[4096], moved[4112];
+    int entered[2], release[2];
+    if (pipe(entered) || pipe(release)) return -1;
+    switch (kind) {
+    case 0:
+    case 4:
+        snprintf(target, sizeof(target), "%s/.gc/source-locks/%s.lock", root, source_hex);
+        break;
+    case 1: snprintf(target, sizeof(target), "%s/.gc/source-locks", root); break;
+    case 2: snprintf(target, sizeof(target), "%s/.gc", root); break;
+    default: snprintf(target, sizeof(target), "%s", root); break;
+    }
+    snprintf(moved, sizeof(moved), "%s.rebound", target);
+    flock_entered = entered[1]; flock_release = release[0];
+    SourceLockAttempt attempt = { .root = root, .operation = operation,
+                                 .protected = protected, .fd = -1 };
+    pthread_t reader;
+    if (pthread_create(&reader, NULL, acquire_source_latch, &attempt) ||
+        wait_byte(entered[0])) return -1;
+    int result = 0;
+    if (kind == 4) {
+        result = chmod(target, 0644);
+    } else if (rename(target, moved)) {
+        result = -1;
+    } else if (kind == 0) {
+        int replacement = open(target, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (replacement < 0) result = -1;
+        else close(replacement);
+    } else {
+        result = mkdir(target, 0700);
+    }
+    if (signal_byte(release[1]) || pthread_join(reader, NULL)) return -1;
+    if (kind == 4) {
+        if (chmod(target, 0600)) result = -1;
+    } else {
+        if ((kind == 0 ? unlink(target) : rmdir(target)) || rename(moved, target))
+            result = -1;
+    }
+    if (attempt.fd >= 0) {
+        fprintf(stderr, "source latch accepted rebound layout kind=%u\n", kind);
+        lat_aot_v2_cache_close_fd(attempt.fd, protected, NULL, 0);
+        result = -1;
+    } else if (attempt.error != ESTALE) {
+        fprintf(stderr, "source latch wrong rebound error kind=%u errno=%d\n",
+                kind, attempt.error);
+        result = -1;
+    }
+    for (unsigned i = 0; i < 2; i++) { close(entered[i]); close(release[i]); }
+    return result;
+}
+
 static atomic_int paused_close_fd = -1;
 static int close_entered, close_release;
 static _Thread_local int allocation_wait_ready = -1;
@@ -655,6 +744,11 @@ int main(void)
         test_fork_inheritance(root) || test_exec_closes_latch(root) ||
         test_artifact_latch(root) || test_tombstones(root) || test_guest_snapshot(root) ||
         test_guest_fcntl() || test_guest_close() || test_guest_close_range();
+    const int operations[] = { LOCK_SH, LOCK_EX, LOCK_SH | LOCK_NB, LOCK_EX | LOCK_NB };
+    for (unsigned protected = 0; !result && protected < 2; protected++)
+        for (size_t op = 0; !result && op < sizeof(operations) / sizeof(operations[0]); op++)
+            for (unsigned kind = 0; !result && kind < 5; kind++)
+                result = test_rebound_source_latch(root, kind, operations[op], protected);
     if (cleanup(root)) {
         fprintf(stderr, "cannot clean lifecycle test directory %s: %s\n",
                 root, strerror(errno));

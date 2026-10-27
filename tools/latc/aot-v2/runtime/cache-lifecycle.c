@@ -193,6 +193,33 @@ static int open_source_lock_file(int directory, const char *source_hex,
     return fd;
 }
 
+static bool directory_still_bound(int parent, const char *name, int fd)
+{
+    struct stat opened, named;
+    return !fstat(fd, &opened) &&
+        !fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) &&
+        S_ISDIR(opened.st_mode) && S_ISDIR(named.st_mode) &&
+        opened.st_dev == named.st_dev && opened.st_ino == named.st_ino &&
+        opened.st_uid == geteuid() && !(opened.st_mode & 0022);
+}
+
+static bool source_lock_still_bound(const char *path, int root, int gc,
+                                    int locks, const char *source, int fd)
+{
+    char name[80];
+    struct stat opened, named;
+    snprintf(name, sizeof(name), "%s.lock", source);
+    return directory_still_bound(AT_FDCWD, path, root) &&
+        directory_still_bound(root, ".gc", gc) &&
+        directory_still_bound(gc, "source-locks", locks) &&
+        !fstat(fd, &opened) &&
+        !fstatat(locks, name, &named, AT_SYMLINK_NOFOLLOW) &&
+        S_ISREG(opened.st_mode) && S_ISREG(named.st_mode) &&
+        opened.st_dev == named.st_dev && opened.st_ino == named.st_ino &&
+        opened.st_uid == geteuid() && opened.st_nlink == 1 &&
+        !(opened.st_mode & 0077);
+}
+
 int lat_aot_v2_cache_source_lock(const char *cache_dir,
                                  const char *source_hex, int operation,
                                  bool protect_from_guest,
@@ -204,6 +231,7 @@ int lat_aot_v2_cache_source_lock(const char *cache_dir,
         return fail(error, error_size, "invalid source latch arguments");
     }
     if (protect_from_guest) lat_aot_v2_internal_fd_allocation_lock();
+    int gc = -1, locks = -1;
     int root = open(cache_dir, O_RDONLY | O_DIRECTORY |
                     O_CLOEXEC | O_NOFOLLOW);
     if (root < 0) {
@@ -212,24 +240,26 @@ int lat_aot_v2_cache_source_lock(const char *cache_dir,
         goto error;
     }
     if (verify_private_directory(root, "cache domain", error, error_size)) {
-        close(root);
         goto error;
     }
-    int gc = open_private_subdirectory(root, ".gc", "cache",
+    gc = open_private_subdirectory(root, ".gc", "cache",
                                        error, error_size);
-    close(root);
     if (gc < 0) goto error;
-    int locks = open_private_subdirectory(gc, "source-locks", ".gc",
+    locks = open_private_subdirectory(gc, "source-locks", ".gc",
                                           error, error_size);
-    close(gc);
     if (locks < 0) goto error;
     int fd = open_source_lock_file(locks, source_hex, error, error_size);
-    close(locks);
     if (fd < 0) goto error;
     if (lat_aot_v2_cache_lock_fd(fd, operation, error, error_size)) {
         int saved = errno;
         close(fd);
         errno = saved;
+        goto error;
+    }
+    if (!source_lock_still_bound(cache_dir, root, gc, locks, source_hex, fd)) {
+        close(fd);
+        errno = ESTALE;
+        fail(error, error_size, "source latch binding changed while acquiring lock");
         goto error;
     }
     if (protect_from_guest && lat_aot_v2_internal_fd_register_locked(fd)) {
@@ -241,6 +271,9 @@ int lat_aot_v2_cache_source_lock(const char *cache_dir,
         goto error;
     }
     int saved = errno;
+    close(locks);
+    close(gc);
+    close(root);
     if (protect_from_guest) lat_aot_v2_internal_fd_unlock();
     errno = saved;
     return fd;
@@ -248,6 +281,9 @@ int lat_aot_v2_cache_source_lock(const char *cache_dir,
 error:
     {
         int saved = errno;
+        if (locks >= 0) close(locks);
+        if (gc >= 0) close(gc);
+        if (root >= 0) close(root);
         if (protect_from_guest) lat_aot_v2_internal_fd_unlock();
         errno = saved;
     }

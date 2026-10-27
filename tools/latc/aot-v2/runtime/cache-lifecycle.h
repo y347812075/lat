@@ -17,7 +17,9 @@ int lat_aot_v2_cache_lock_fd(int fd, int operation,
 int lat_aot_v2_cache_object_available(const char *path,
                                       char *error, size_t error_size);
 
-/* Use a stable per-source latch around manifest read and artifact-fd capture. */
+/* Use a stable per-source latch around manifest read and artifact-fd capture.
+ * Revalidate its path/directory bindings after locking; a rebound layout fails
+ * with ESTALE. This is not protection against uncooperative later namespace writes. */
 int lat_aot_v2_cache_source_lock(const char *cache_dir,
                                  const char *source_hex, int operation,
                                  bool protect_from_guest,

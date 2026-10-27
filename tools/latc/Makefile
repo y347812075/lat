@@ -610,7 +610,7 @@ $(BUILD)/tests/test-cache-lifecycle: tests/test-cache-lifecycle.c \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test-cache-lifecycle.c \
 	  aot-v2/runtime/cache-lifecycle.c aot-v2/runtime/internal-fd-registry.c -pthread \
-	  -Wl,--wrap=close -Wl,--wrap=pthread_cond_wait
+	  -Wl,--wrap=close -Wl,--wrap=pthread_cond_wait -Wl,--wrap=flock
 
 $(BUILD)/tests/test-guest-fd-table: tests/test-guest-fd-table.c \
 		aot-v2/common/guest-fd-table.c aot-v2/include/guest-fd-table.h
