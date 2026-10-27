@@ -19,6 +19,7 @@ typedef struct GuestFdBackend {
 
 struct GuestFdHandle {
     GuestFdBackend *backend;
+    GuestFdTable *table;
 };
 
 typedef struct GuestFdEntry {
@@ -33,6 +34,7 @@ struct GuestFdTable {
     GHashTable *entries;
     uint64_t next_generation;
     int max_guest_fd;
+    unsigned active_handles;
 };
 
 static gpointer guest_fd_key(int guest_fd)
@@ -134,7 +136,15 @@ GuestFdHandle *guest_fd_table_acquire(GuestFdTable *table, int guest_fd)
     pthread_mutex_lock(&table->mutex);
     GuestFdEntry *entry = lookup_locked(table, guest_fd);
     if (entry) {
+        if (table->active_handles == UINT_MAX) {
+            pthread_mutex_unlock(&table->mutex);
+            g_free(handle);
+            errno = EOVERFLOW;
+            return NULL;
+        }
         handle->backend = entry->backend;
+        handle->table = guest_fd_table_ref(table);
+        table->active_handles++;
         atomic_fetch_add_explicit(&entry->backend->refs, 1, memory_order_relaxed);
     }
     pthread_mutex_unlock(&table->mutex);
@@ -159,8 +169,14 @@ void guest_fd_handle_release(GuestFdHandle *handle)
 {
     if (!handle) return;
     int saved = errno;
+    GuestFdTable *table = handle->table;
+    pthread_mutex_lock(&table->mutex);
     release_backend(handle->backend);
+    g_assert(table->active_handles);
+    table->active_handles--;
+    pthread_mutex_unlock(&table->mutex);
     g_free(handle);
+    guest_fd_table_unref(table);
     errno = saved;
 }
 
@@ -519,6 +535,11 @@ int guest_fd_table_fork_start(GuestFdTable *table)
         return -1;
     }
     pthread_mutex_lock(&table->mutex);
+    if (table->active_handles) {
+        pthread_mutex_unlock(&table->mutex);
+        errno = EBUSY;
+        return -1;
+    }
     return 0;
 }
 

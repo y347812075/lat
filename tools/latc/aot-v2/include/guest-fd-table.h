@@ -37,7 +37,9 @@ GuestFdTable *guest_fd_table_copy(GuestFdTable *table);
  * A handle survives table close/replacement/destruction and is single-owner.
  * The returned fd must not be closed or replaced by the caller. release(NULL)
  * is harmless and preserves errno, including when the last reference closes.
- * Callers must quiesce handles before host fork/exec and still adapt per-table
+ * Each handle retains its table until release. fork_start rejects active
+ * handles rather than waiting on potentially blocking I/O. Callers must still
+ * quiesce all tables/handles before host fork/exec and adapt per-table
  * record locks; this API alone does not enable guest syscall virtualization. */
 GuestFdHandle *guest_fd_table_acquire(GuestFdTable *table, int guest_fd);
 int guest_fd_handle_host_fd(const GuestFdHandle *handle);
@@ -69,6 +71,10 @@ int guest_fd_table_get_cloexec(GuestFdTable *table, int guest_fd,
 
 /*
  * fork_start() quiesces table mutations and backend closes before host fork.
+ * Returns EBUSY without retaining the lock while this table has active handles;
+ * callers must cancel/drain operations and retry, not busy-spin. Every table
+ * whose backends can be inherited must be frozen; freezing one table does not
+ * cover handles or mutations of independently copied tables sharing backends.
  * Every successful start must be paired with fork_end() in both parent and
  * child. The forking thread survives in the child, so the inherited mutex
  * remains owned by it. close() holds this leaf mutex through the host close;

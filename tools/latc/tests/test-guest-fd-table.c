@@ -418,12 +418,85 @@ static void *run_fork_start(void *opaque)
     return NULL;
 }
 
+static void *run_handle_release(void *opaque)
+{
+    guest_fd_handle_release(opaque);
+    return NULL;
+}
+
+static void *run_probed_fork_start(void *opaque)
+{
+    probe_copy_close = true;
+    return run_fork_start(opaque);
+}
+
+static void test_handle_fork_gate(void)
+{
+    GuestFdTable *table = guest_fd_table_new();
+    int pipefd[2];
+    assert(table && !pipe2(pipefd, O_CLOEXEC));
+    assert(!guest_fd_table_import(table, 7, pipefd[1], false));
+    GuestFdHandle *handle = guest_fd_table_acquire(table, 7);
+    assert(handle);
+    errno = 0;
+    assert(guest_fd_table_fork_start(table) == -1 && errno == EBUSY);
+    assert(!guest_fd_table_close(table, 7));
+    assert(guest_fd_table_fork_start(table) == -1 && errno == EBUSY);
+    pthread_mutex_lock(&close_gate_mutex);
+    close_gate_fd = pipefd[1];
+    close_gate_enabled = true;
+    close_gate_entered = close_gate_release = false;
+    pthread_mutex_unlock(&close_gate_mutex);
+    pthread_t releaser, forker;
+    assert(!pthread_create(&releaser, NULL, run_handle_release, handle));
+    pthread_mutex_lock(&close_gate_mutex);
+    while (!close_gate_entered)
+        pthread_cond_wait(&close_gate_condition, &close_gate_mutex);
+    pthread_mutex_unlock(&close_gate_mutex);
+    pthread_mutex_lock(&copy_gate_mutex);
+    copy_close_blocked = false;
+    pthread_mutex_unlock(&copy_gate_mutex);
+    ForkJob job = { .table = table };
+    atomic_init(&job.done, false);
+    assert(!pthread_create(&forker, NULL, run_probed_fork_start, &job));
+    pthread_mutex_lock(&copy_gate_mutex);
+    while (!copy_close_blocked)
+        pthread_cond_wait(&copy_gate_condition, &copy_gate_mutex);
+    pthread_mutex_unlock(&copy_gate_mutex);
+    assert(!atomic_load_explicit(&job.done, memory_order_acquire));
+    pthread_mutex_lock(&close_gate_mutex);
+    close_gate_release = true;
+    pthread_cond_broadcast(&close_gate_condition);
+    pthread_mutex_unlock(&close_gate_mutex);
+    assert(!pthread_join(releaser, NULL) && !pthread_join(forker, NULL));
+    assert(!job.result);
+    pthread_mutex_lock(&close_gate_mutex);
+    close_gate_enabled = false;
+    close_gate_fd = -1;
+    pthread_mutex_unlock(&close_gate_mutex);
+    assert(!guest_fd_table_fork_start(table));
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        guest_fd_table_fork_end(table);
+        GuestFdHandle *absent = guest_fd_table_acquire(table, 7);
+        _exit(!absent && errno == EBADF ? 0 : 1);
+    }
+    guest_fd_table_fork_end(table);
+    int status;
+    assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
+    char byte;
+    assert(read(pipefd[0], &byte, 1) == 0 && !close(pipefd[0]));
+    guest_fd_table_unref(table);
+}
+
 int main(void)
 {
     test_copy();
     test_copy_preserves_record_locks();
     test_copy_close_serialization();
     test_handles();
+    test_handle_fork_gate();
     GuestFdTable *table = guest_fd_table_new();
     GuestFdTable *thread_ref;
     int pipefd[2];
