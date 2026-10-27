@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Exercise cache-domain identity, idempotence, planner and daemon validation."""
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+
+def run(prefix, guest, work):
+    work.mkdir(mode=0o700, parents=True, exist_ok=False)
+    cache, socket, stats = work / 'cache', work / 'latcd.sock', work / 'stats.json'
+    cache.mkdir(mode=0o700)
+    env = dict(os.environ, TMPDIR=str(Path.home() / 'tmp'),
+               LD_LIBRARY_PATH=str(prefix / 'lib'))
+    latcd = prefix / 'bin/latcd'
+
+    def gc(mode):
+        return subprocess.run([str(latcd), 'gc', mode, '--cache-dir', str(cache)],
+            env=env, capture_output=True, text=True, timeout=20)
+
+    legacy = gc('--domain-status')
+    assert legacy.returncode == 0 and legacy.stdout.strip() == 'domain=- status=legacy'
+    first = gc('--init-domain')
+    second = gc('--init-domain')
+    assert first.returncode == second.returncode == 0
+    assert first.stdout == second.stdout and first.stdout.startswith('domain=')
+    domain = first.stdout.split('=', 1)[1].split()[0]
+    lock = cache / '.gc/domain.lock'
+    assert lock.stat().st_nlink == 1 and lock.stat().st_size == 0
+    status = gc('--domain-status')
+    assert status.returncode == 0 and domain in status.stdout
+    plan = subprocess.run([str(latcd), 'gc', '--plan', '--cache-dir', str(cache)],
+        env=env, capture_output=True, text=True, timeout=20)
+    assert plan.returncode == 0
+    assert json.loads(plan.stdout)['cache_domain'] == {
+        'status': 'managed', 'id': domain, 'binding_observed': True}
+
+    command = [str(latcd), '--serve', '--socket', str(socket), '--cache-dir', str(cache),
+        '--latc', str(prefix / 'bin/latc'), '--runner', str(prefix / 'bin/latx-x86_64'),
+        '--runtime-dir', str(prefix / 'lib'), '--stats', str(stats)]
+    with (work / 'daemon.log').open('wb') as log:
+        daemon = subprocess.Popen(command, env=env, stdout=log, stderr=log)
+        try:
+            deadline = time.monotonic() + 30
+            while not stats.exists():
+                assert daemon.poll() is None and time.monotonic() < deadline
+                time.sleep(.01)
+            observed = json.loads(stats.read_bytes())
+            assert observed['cache_domain_managed'] and observed['cache_domain_id'] == domain
+        finally:
+            daemon.terminate()
+            assert daemon.wait(timeout=20) == 0
+
+    marker = cache / '.gc/domain.ini'
+    original = marker.read_bytes()
+    marker.chmod(0o600)
+    marker.write_bytes(original.replace(b'cache_inode=', b'cache_inode=9', 1))
+    marker.chmod(0o400)
+    assert gc('--domain-status').returncode != 0
+    bad_plan = subprocess.run([str(latcd), 'gc', '--plan', '--cache-dir', str(cache)],
+        env=env, capture_output=True, text=True, timeout=20)
+    assert bad_plan.returncode != 0
+    assert any(error['reason'] == 'cache_domain_binding_changed'
+               for error in json.loads(bad_plan.stdout)['errors'])
+    with (work / 'bad-daemon.log').open('wb') as log:
+        failed = subprocess.run(command, env=env, stdout=log, stderr=log, timeout=20)
+        assert failed.returncode != 0
+    marker.chmod(0o600)
+    marker.write_bytes(original)
+    marker.chmod(0o400)
+    assert gc('--domain-status').returncode == 0
+    lock.unlink()
+    assert gc('--domain-status').returncode != 0
+    print('test-cache-domain: legacy/idempotent/planner/daemon/invalid PASS')
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 4:
+        raise SystemExit('usage: test-cache-domain.py PREFIX X86_GUEST NEW_WORKDIR')
+    run(*(Path(value).resolve() for value in sys.argv[1:]))

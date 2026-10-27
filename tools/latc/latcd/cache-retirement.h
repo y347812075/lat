@@ -17,6 +17,16 @@ typedef struct LatcdRecoveryProgress {
     uint64_t hashed_bytes;
 } LatcdRecoveryProgress;
 
+/* Domain presence establishes stable participant identity only, not access or
+ * mount isolation. Returns 1 for a valid managed domain, 0 for a legacy root,
+ * and -1 for malformed/unsafe domain metadata. id is optional (size >= 37). */
+int latcd_cache_domain_validate(const char *root, char id[37],
+                                char *error, size_t error_size);
+/* Explicit, idempotent initialization. Returns a new CLOEXEC lock fd only for
+ * the duration of initialization; participants reopen the stable lock later. */
+int latcd_cache_domain_init(const char *root, char id[37],
+                            char *error, size_t error_size);
+
 /* Owner lease required throughout cursor lifetime. Each step has entry/hash-byte
  * and soft wall-time budgets; individual syscalls/fsync may exceed the latter.
  * Returns 1 for pending, 0 for complete, -1 on error. No removal is authorized. */

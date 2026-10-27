@@ -92,6 +92,8 @@ class Inventory:
         self.entries = {}
         self.directories = {}
         self.manifests = {}
+        self.domain = None
+        self.domain_binding_observed = False
         self.errors = []
         self.refs = {}
         self.transaction_refs = {}
@@ -148,6 +150,8 @@ class Inventory:
                         self.error(relative, "invalid_explicit_hold_directory", "expected object hold directory")
                     if not prefix and CURRENT.fullmatch(name):
                         self.read_manifest(fd, name, st)
+                    if prefix == ".gc" and name == "domain.ini":
+                        self.read_domain(fd, st)
                     if prefix == ".gc/transactions" and not name.startswith(".write-"):
                         self.read_transaction(fd, name, st)
                     if prefix == ".gc/tombstones" and not name.startswith(".write-"):
@@ -223,6 +227,42 @@ class Inventory:
         except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
             self.freeze_all = True
             self.error(relative, "invalid_explicit_hold", str(exc))
+
+    def read_domain(self, directory, before):
+        relative = ".gc/domain.ini"
+        try:
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
+                    before.st_nlink != 1 or before.st_mode & 0o222 or
+                    not 0 < before.st_size <= 4096):
+                raise ValueError("unsafe cache domain")
+            fd = os.open("domain.ini", os.O_RDONLY | os.O_CLOEXEC |
+                         os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            try:
+                raw = os.read(fd, 4097)
+                if identity(os.fstat(fd)) != identity(before) or len(raw) != before.st_size:
+                    raise ValueError("cache domain changed during read")
+            finally:
+                os.close(fd)
+            parser = configparser.ConfigParser(interpolation=None, strict=True)
+            parser.read_string(raw.decode("ascii"))
+            if parser.defaults() or parser.sections() != ["domain"]:
+                raise ValueError("invalid cache domain sections")
+            value = dict(parser["domain"])
+            numbers = {"cache_device", "cache_inode", "lock_device", "lock_inode",
+                       "created_boottime_us"}
+            if (set(value) != numbers | {"version", "id", "created_boot"} or
+                    value["version"] != "1" or
+                    str(uuid.UUID(value["id"])) != value["id"] or
+                    str(uuid.UUID(value["created_boot"])) != value["created_boot"]):
+                raise ValueError("invalid cache domain fields")
+            for key in numbers:
+                if not re.fullmatch(r"[0-9]+", value[key]) or int(value[key]) >= 2**64:
+                    raise ValueError("invalid cache domain integer")
+                value[key] = int(value[key])
+            self.domain = value
+        except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
+            self.freeze_all = True
+            self.error(relative, "invalid_cache_domain", str(exc))
 
     def read_compiler_budget(self, directory, name, before):
         relative = ".gc/compiler-budgets/" + name
@@ -844,6 +884,21 @@ class Inventory:
         return output
 
     def report(self):
+        domain_marker = self.entries.get(".gc/domain.ini")
+        domain_lock = self.entries.get(".gc/domain.lock")
+        cache = self.directories.get("")
+        if domain_marker or domain_lock:
+            lock_valid = bool(domain_lock and stat.S_ISREG(domain_lock["_mode"]) and
+                domain_lock["_uid"] == os.geteuid() and domain_lock["links"] == 1 and
+                not domain_lock["_mode"] & 0o077 and domain_lock["logical_bytes"] == 0)
+            self.domain_binding_observed = bool(self.domain and lock_valid and cache and
+                cache[:2] == (self.domain["cache_device"], self.domain["cache_inode"]) and
+                (domain_lock["device"], domain_lock["inode"]) ==
+                (self.domain["lock_device"], self.domain["lock_inode"]))
+            if not self.domain_binding_observed:
+                self.freeze_all = True
+                self.error(".gc/domain.ini", "cache_domain_binding_changed",
+                           "marker and lock must both exist and bind this cache")
         for relative, lease in self.mount_leases.items():
             cache = self.directories.get("")
             cache_matched = bool(cache and cache[:2] ==
@@ -1086,6 +1141,11 @@ class Inventory:
                 "delete_authorized": False, "complete": not self.errors,
                 "snapshot_atomic": False, "content_validated": False,
                 "liveness_verified": False, "manifest_count": len(self.manifests),
+                "cache_domain": ({"status": "managed", "id": self.domain["id"],
+                                  "binding_observed": self.domain_binding_observed}
+                                 if self.domain and self.domain_binding_observed else
+                                 {"status": "legacy"} if not domain_marker and not domain_lock else
+                                 {"status": "unknown", "binding_observed": False}),
                 "transaction_count": len(self.transactions),
                 "task_count": len(self.tasks), "tasks": self.tasks,
                 "copy_receipt_count": len(self.copy_receipts), "copy_receipts": self.copy_receipts,

@@ -111,6 +111,8 @@ static int persisted_manifest_valid(const LatcdConfig *config,
 static int cached_module_inspect(const char *path, const uint8_t digest[32],
                                  LatAotModuleInfoV2 *info);
 static _Atomic unsigned int active_precompiles;
+static char cache_domain_id[37];
+static bool cache_domain_managed;
 
 static uint32_t default_worker_count(void)
 {
@@ -3944,7 +3946,8 @@ static void write_stats_locked(LatcdService *service)
         ",\"retirement_oldest_due_wait_us\":%" PRIu64
         ",\"retirement_discovery_complete\":%s,\"automatic_deletion_enabled\":false"
         ",\"retirement_timer_wakeups\":%" PRIu64 ",\"retirement_publication_wakeups\":%" PRIu64
-        ",\"generation_capacity_ready\":%s}\n",
+        ",\"generation_capacity_ready\":%s,\"cache_domain_managed\":%s"
+        ",\"cache_domain_id\":\"%s\"}\n",
         service->requests, service->queued, service->deduplicated,
         service->cache_hits, service->compiled, service->failed,
         service->negative_hits, service->queue_full, service->queue->len,
@@ -3956,7 +3959,8 @@ static void write_stats_locked(LatcdService *service)
         retirement.candidates, retirement.due, retirement.next_deadline_us, retirement.oldest_due_wait_us,
         retirement.complete ? "true" : "false",
         timer_wakeups, publication_wakeups,
-        capacity_ready ? "true" : "false");
+        capacity_ready ? "true" : "false", cache_domain_managed ? "true" : "false",
+        cache_domain_managed ? cache_domain_id : "-");
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
         ssize_t written = write(fd, contents, length);
@@ -5880,20 +5884,25 @@ static void usage(const char *name)
             "  %s --precompile --socket PATH --x86-rootfs DIR"
             " [--latc PATH] [--jobs N] GUEST_ELF\n"
             "  %s gc --plan --cache-dir DIR\n"
+            "  %s gc --init-domain --cache-dir DIR\n"
+            "  %s gc --domain-status --cache-dir DIR\n"
             "  %s gc --hold-mount-lease --cache-dir DIR --lease-id UUID"
             " --scope CACHE|SOURCE|OBJECT [--source SHA256 --name OBJECT]\n"
             "  %s gc --release-mount-lease --cache-dir DIR --lease-id UUID\n"
             "  %s --build-id\n",
-            name, name, name, name, name, name, name, name, name, name);
+            name, name, name, name, name, name, name, name, name, name, name, name);
 }
 
 static int run_gc_plan(int argc, char **argv)
 {
     bool plan = false, hold = false, release = false;
+    bool init_domain = false, domain_status = false;
     const char *cache = NULL, *lease_id = NULL, *scope = NULL;
     const char *source = NULL, *name = NULL;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--plan") && !plan) plan = true;
+        else if (!strcmp(argv[i], "--init-domain") && !init_domain) init_domain = true;
+        else if (!strcmp(argv[i], "--domain-status") && !domain_status) domain_status = true;
         else if (!strcmp(argv[i], "--hold-mount-lease") && !hold) hold = true;
         else if (!strcmp(argv[i], "--release-mount-lease") && !release) release = true;
         else if (!strcmp(argv[i], "--cache-dir") && !cache && i + 1 < argc)
@@ -5908,8 +5917,30 @@ static int run_gc_plan(int argc, char **argv)
             name = argv[++i];
         else { usage(argv[0]); return 2; }
     }
-    if (plan + hold + release != 1 || !cache || !*cache) { usage(argv[0]); return 2; }
+    if (plan + hold + release + init_domain + domain_status != 1 ||
+        !cache || !*cache) { usage(argv[0]); return 2; }
     char error[256] = {0};
+    char domain_id[37] = {0};
+    if (init_domain) {
+        if (lease_id || scope || source || name) { usage(argv[0]); return 2; }
+        if (latcd_cache_domain_init(cache, domain_id, error, sizeof(error))) {
+            fprintf(stderr, "latcd: cache domain initialization failed: %s\n", error);
+            return 1;
+        }
+        printf("domain=%s status=managed\n", domain_id);
+        return 0;
+    }
+    if (domain_status) {
+        if (lease_id || scope || source || name) { usage(argv[0]); return 2; }
+        int managed = latcd_cache_domain_validate(cache, domain_id, error, sizeof(error));
+        if (managed < 0) {
+            fprintf(stderr, "latcd: cache domain validation failed: %s\n", error);
+            return 1;
+        }
+        if (managed) printf("domain=%s status=managed\n", domain_id);
+        else puts("domain=- status=legacy");
+        return 0;
+    }
     if (release) {
         if (!lease_id) { usage(argv[0]); return 2; }
         int roots = latcd_retirement_roots_lock(cache, LOCK_SH | LOCK_NB,
@@ -6188,6 +6219,18 @@ int main(int argc, char **argv)
         fprintf(stderr, "latcd: %s\n", error);
         return 1;
     }
+    int domain = latcd_cache_domain_validate(config.cache_dir, cache_domain_id,
+                                              error, sizeof(error));
+    if (domain < 0) {
+        fprintf(stderr, "latcd: %s\n", error);
+        close(cache_owner);
+        return 1;
+    }
+    cache_domain_managed = domain > 0;
+    if (cache_domain_managed)
+        fprintf(stderr, "latcd: managed cache domain=%s\n", cache_domain_id);
+    else
+        fprintf(stderr, "latcd: legacy cache domain (no managed marker)\n");
     struct sigaction recovery_action = { .sa_handler = signal_stop };
     sigemptyset(&recovery_action.sa_mask);
     sigaction(SIGINT, &recovery_action, NULL);

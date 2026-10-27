@@ -520,6 +520,45 @@ static void test_tombstone(void)
     remove_root(root); g_free(root);
 }
 
+static void test_cache_domain(void)
+{
+    char *root = root_new(), error[256], first[37] = {0}, second[37] = {0};
+    assert(latcd_cache_domain_validate(root, first, error, sizeof(error)) == 0);
+    assert(!latcd_cache_domain_init(root, first, error, sizeof(error)));
+    char *lock = g_build_filename(root, ".gc", "domain.lock", NULL);
+    struct stat lock_before;
+    assert(!stat(lock, &lock_before));
+    assert(!latcd_cache_domain_init(root, second, error, sizeof(error)));
+    struct stat lock_after;
+    assert(!stat(lock, &lock_after));
+    assert(!strcmp(first, second) && lock_before.st_ino == lock_after.st_ino);
+    assert(latcd_cache_domain_validate(root, second, error, sizeof(error)) == 1);
+    assert(!strcmp(first, second));
+
+    char *marker = g_build_filename(root, ".gc", "domain.ini", NULL);
+    char *raw = NULL;
+    assert(g_file_get_contents(marker, &raw, NULL, NULL));
+    char *bad = g_strdup(raw);
+    char *inode = strstr(bad, "cache_inode=");
+    assert(inode);
+    inode += strlen("cache_inode=");
+    char *end = strchr(inode, '\n');
+    assert(end && end > inode);
+    end[-1] = end[-1] == '9' ? '8' : end[-1] + 1;
+    put(marker, bad);
+    assert(latcd_cache_domain_validate(root, second, error, sizeof(error)) < 0);
+    g_free(bad);
+    put(marker, raw);
+    assert(latcd_cache_domain_validate(root, second, error, sizeof(error)) == 1);
+    assert(!chmod(lock, 0644));
+    assert(latcd_cache_domain_validate(root, second, error, sizeof(error)) < 0);
+    assert(!chmod(lock, 0600));
+    assert(!unlink(lock));
+    assert(latcd_cache_domain_validate(root, second, error, sizeof(error)) < 0);
+    g_free(raw); g_free(marker); g_free(lock);
+    remove_root(root); g_free(root);
+}
+
 static void test_other_current(unsigned mutation, bool executor)
 {
     char *root = root_new(), error[256];
@@ -1860,6 +1899,7 @@ int main(int argc, char **argv)
         test_deleted_transaction_recovery(mutation, NULL, false);
     test_manifest_binding();
     test_tombstone();
+    test_cache_domain();
     test_mount_lease_crash_persistence();
     for (int mutation = 0; mutation < 11; mutation++) test_tombstone_recovery(mutation);
     const char *points[] = {"created", "partial-write", "written", "chmod",

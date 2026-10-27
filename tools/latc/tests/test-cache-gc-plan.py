@@ -265,6 +265,34 @@ class PlannerTest(unittest.TestCase):
             if row['selection_status'] != 'removed':
                 self.assertIn('mount_lease_reference', row['holds'])
 
+    def test_cache_domain_plan(self):
+        plan = self.run_plan()
+        self.assertEqual(plan['cache_domain'], {'status': 'legacy'})
+        cache = self.root.stat()
+        lock = self.root / '.gc/domain.lock'
+        lock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lock.write_bytes(b'')
+        lock.chmod(0o600)
+        domain_id = str(uuid.uuid4())
+        boot = '00000000-0000-4000-8000-000000000000'
+        st = lock.stat()
+        record = (f'[domain]\nversion=1\nid={domain_id}\ncache_device={cache.st_dev}\n'
+                  f'cache_inode={cache.st_ino}\nlock_device={st.st_dev}\nlock_inode={st.st_ino}\n'
+                  f'created_boot={boot}\ncreated_boottime_us=1\n')
+        self.put('.gc/domain.ini', record.encode())
+        plan = self.run_plan()
+        self.assertEqual(plan['cache_domain'],
+                         {'status': 'managed', 'id': domain_id, 'binding_observed': True})
+        self.put('.gc/domain.ini', record.replace('lock_inode=', 'lock_inode=9', 1).encode())
+        plan = self.run_plan(success=False)
+        self.assertTrue(any(e['reason'] == 'cache_domain_binding_changed'
+                            for e in plan['errors']))
+        self.put('.gc/domain.ini', record.encode())
+        lock.unlink()
+        plan = self.run_plan(success=False)
+        self.assertTrue(any(e['reason'] == 'cache_domain_binding_changed'
+                            for e in plan['errors']))
+
     def test_task_lease_and_references(self):
         record = self.task()
         with record.open('rb') as pin:

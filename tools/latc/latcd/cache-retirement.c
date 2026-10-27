@@ -817,6 +817,167 @@ static bool record_uint64(GKeyFile *record, const char *group, const char *key,
     return valid;
 }
 
+static bool domain_record_parse(GKeyFile *record, const struct stat *cache,
+                                const struct stat *lock, char id[37])
+{
+    const char *fields[] = {"version", "id", "cache_device", "cache_inode",
+        "lock_device", "lock_inode", "created_boot", "created_boottime_us"};
+    gsize groups = 0;
+    char **names = g_key_file_get_groups(record, &groups);
+    bool valid = groups == 1 && !strcmp(names[0], "domain") &&
+        exact_keys(record, "domain", fields, G_N_ELEMENTS(fields));
+    g_strfreev(names);
+    char *stored_id = g_key_file_get_string(record, "domain", "id", NULL);
+    char *created_boot = g_key_file_get_string(record, "domain", "created_boot", NULL);
+    uint64_t cache_device, cache_inode, lock_device, lock_inode, created;
+    valid = valid && hold_id_valid(stored_id) &&
+        record_uint64(record, "domain", "cache_device", &cache_device) &&
+        cache_device == (uint64_t)cache->st_dev &&
+        record_uint64(record, "domain", "cache_inode", &cache_inode) &&
+        cache_inode == (uint64_t)cache->st_ino &&
+        record_uint64(record, "domain", "lock_device", &lock_device) &&
+        lock_device == (uint64_t)lock->st_dev &&
+        record_uint64(record, "domain", "lock_inode", &lock_inode) &&
+        lock_inode == (uint64_t)lock->st_ino && hold_id_valid(created_boot) &&
+        record_uint64(record, "domain", "created_boottime_us", &created);
+    if (valid && id) memcpy(id, stored_id, 37);
+    g_free(stored_id);
+    g_free(created_boot);
+    return valid;
+}
+
+static int domain_validate_open(int gc, const struct stat *cache,
+                                char id[37], char *error, size_t error_size)
+{
+    char *raw = NULL;
+    size_t size = 0;
+    int status = read_file(gc, "domain.ini", MANIFEST_LIMIT, &raw, &size);
+    int lock = openat(gc, "domain.lock",
+                      O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    int lock_error = errno;
+    if (status == 1 && lock < 0 && lock_error == ENOENT) {
+        g_free(raw);
+        return 0;
+    }
+    struct stat lock_status;
+    bool valid = status == 0 && lock >= 0 && !memchr(raw, 0, size) &&
+        !fstat(lock, &lock_status) && S_ISREG(lock_status.st_mode) &&
+        lock_status.st_uid == geteuid() && lock_status.st_nlink == 1 &&
+        !(lock_status.st_mode & 0077) && !lock_status.st_size;
+    GKeyFile *record = g_key_file_new();
+    valid = valid && g_key_file_load_from_data(record, raw, size, 0, NULL) &&
+        domain_record_parse(record, cache, &lock_status, id);
+    g_key_file_unref(record);
+    if (lock >= 0) close(lock);
+    g_free(raw);
+    if (!valid) return fail(error, error_size,
+        "cache domain metadata is incomplete, malformed or rebound");
+    return 1;
+}
+
+int latcd_cache_domain_validate(const char *root, char id[37],
+                                char *error, size_t error_size)
+{
+    if (!root || !*root) return fail(error, error_size, "invalid cache domain root");
+    if (id) id[0] = 0;
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (directory < 0) return fail(error, error_size, "cannot open cache domain root");
+    struct stat cache;
+    int gc = -1, result = -1;
+    if (fstat(directory, &cache) || !S_ISDIR(cache.st_mode) ||
+        cache.st_uid != geteuid() || (cache.st_mode & 0077)) goto out;
+    gc = open_directory(directory, ".gc", false);
+    if (gc < 0) {
+        if (errno == ENOENT) result = 0;
+        goto out;
+    }
+    result = domain_validate_open(gc, &cache, id, error, error_size);
+out:
+    if (gc >= 0) close(gc);
+    close(directory);
+    return result;
+}
+
+int latcd_cache_domain_init(const char *root, char id[37],
+                            char *error, size_t error_size)
+{
+    if (!root || !*root || !id) return fail(error, error_size, "invalid cache domain root");
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (directory < 0) return fail(error, error_size, "cannot open cache domain root");
+    struct stat cache, lock_status;
+    int gc = -1, lock = -1, result = -1;
+    if (fstat(directory, &cache) || !S_ISDIR(cache.st_mode) ||
+        cache.st_uid != geteuid() || (cache.st_mode & 0077)) goto out;
+    gc = open_directory(directory, ".gc", true);
+    if (gc < 0) goto out;
+    lock = openat(gc, "domain.lock",
+                  O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    bool created = lock >= 0;
+    if (lock < 0 && errno == EEXIST)
+        lock = openat(gc, "domain.lock", O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    if (lock < 0 || (created && fchmod(lock, 0600)) ||
+        flock(lock, LOCK_EX | LOCK_NB) ||
+        fstat(lock, &lock_status) || !S_ISREG(lock_status.st_mode) ||
+        lock_status.st_uid != geteuid() || lock_status.st_nlink != 1 ||
+        (lock_status.st_mode & 0077) || lock_status.st_size) goto out;
+    char *raw = NULL;
+    size_t size = 0;
+    int status = read_file(gc, "domain.ini", MANIFEST_LIMIT, &raw, &size);
+    if (status < 0) { g_free(raw); goto out; }
+    if (!status) {
+        GKeyFile *record = g_key_file_new();
+        bool valid = !memchr(raw, 0, size) &&
+            g_key_file_load_from_data(record, raw, size, 0, NULL) &&
+            domain_record_parse(record, &cache, &lock_status, id);
+        g_key_file_unref(record);
+        g_free(raw);
+        if (!valid) goto out;
+        result = 0;
+        goto out;
+    }
+    g_free(raw);
+    char *new_id = g_uuid_string_random();
+    char *boot = NULL;
+    struct timespec now;
+    uint64_t now_us;
+    if (!new_id || clock_gettime(CLOCK_BOOTTIME, &now) || now.tv_sec < 0 ||
+        (uint64_t)now.tv_sec > UINT64_MAX / 1000000 ||
+        !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL)) {
+        g_free(new_id);
+        g_free(boot);
+        goto out;
+    }
+    g_strchomp(boot);
+    now_us = (uint64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+    GKeyFile *record = g_key_file_new();
+    g_key_file_set_integer(record, "domain", "version", 1);
+    g_key_file_set_string(record, "domain", "id", new_id);
+    g_key_file_set_uint64(record, "domain", "cache_device", cache.st_dev);
+    g_key_file_set_uint64(record, "domain", "cache_inode", cache.st_ino);
+    g_key_file_set_uint64(record, "domain", "lock_device", lock_status.st_dev);
+    g_key_file_set_uint64(record, "domain", "lock_inode", lock_status.st_ino);
+    g_key_file_set_string(record, "domain", "created_boot", boot);
+    g_key_file_set_uint64(record, "domain", "created_boottime_us", now_us);
+    if (!hold_id_valid(boot) || write_record(gc, "domain.ini", record)) {
+        g_key_file_unref(record);
+        g_free(new_id);
+        g_free(boot);
+        goto out;
+    }
+    g_key_file_unref(record);
+    memcpy(id, new_id, 37);
+    g_free(new_id);
+    g_free(boot);
+    result = 0;
+out:
+    if (lock >= 0) close(lock);
+    if (gc >= 0) close(gc);
+    close(directory);
+    if (result) return fail(error, error_size,
+        "cache domain initialization rejected or incomplete");
+    return 0;
+}
+
 static bool task_identity_valid(GKeyFile *record, const char *group)
 {
     const char *numbers[] = {"device", "inode", "size", "mode", "uid", "mtime_nsec"};
