@@ -2239,12 +2239,9 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         queue->epoch++;
         int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (root < 0) goto out;
-        int store = open_store(root, false), saved = errno;
+        int store = open_store(root, true);
         close(root);
-        if (store < 0) {
-            if (saved == ENOENT) { result = 0; goto sweep_complete; }
-            goto out;
-        }
+        if (store < 0) goto out;
         queue->cursor = fdopendir(store);
         if (!queue->cursor) { close(store); goto out; }
         queue->discovery_watch = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
@@ -2278,7 +2275,6 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         g_free(raw);
         if (!valid) { result = -1; break; }
     }
-sweep_complete:
     if (!result && queue->cursor) {
         struct stat held, path;
         int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);

@@ -133,6 +133,7 @@ typedef struct LatcdRetirementQueueStats {
 
 /* Single I/O worker owns this diagnostic queue under the management lease.
  * Bounded transaction discovery only, not liveness verification/admission.
+ * Creates the private transaction store if absent before monitored discovery.
  * Retains original enqueue time across sweeps; fully object-bound UNLINKED /
  * MISSING receipts remove completed names only after absence is rechecked.
  * No deletion or timer handoff; missing alone never completes a candidate. */

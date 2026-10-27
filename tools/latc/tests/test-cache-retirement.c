@@ -2406,6 +2406,42 @@ static void test_deletion_report(const char *parent, bool isolated)
     }
 }
 
+static void test_queue_empty_store(void)
+{
+    char *root = root_new(), error[256];
+    char *store = g_build_filename(root, ".gc", "transactions", NULL);
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 0);
+    LatcdRetirementQueueStats stats;
+    int result;
+    do {
+        result = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+        assert(result >= 0);
+    } while (result);
+    assert(stats.complete && !stats.candidates && g_file_test(store, G_FILE_TEST_IS_DIR));
+    LatcdRetirementAttempt attempt;
+    assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));
+
+    /* Mutation during a later scan invalidates the empty snapshot. */
+    result = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+    assert(result == 1 && !stats.complete);
+    char *entry = g_build_filename(store, "invalid.ini", NULL);
+    put(entry, "invalid\n");
+    do {
+        result = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+    } while (result > 0);
+    assert(result < 0 && !stats.complete);
+    assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));
+    assert(!unlink(entry));
+    do {
+        result = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+        assert(result >= 0);
+    } while (result);
+    assert(stats.complete && !stats.candidates);
+    latcd_retirement_queue_free(queue);
+    g_free(entry); g_free(store);
+    remove_root(root); g_free(root);
+}
+
 static void test_queue_overflow_fixture(void)
 {
     char *root = root_new(), error[256];
@@ -2456,6 +2492,7 @@ int main(int argc, char **argv)
         return 0;
     }
     assert(argc == 1);
+    test_queue_empty_store();
     test_queue_overflow_fixture();
     test_deletion_report(NULL, false);
     test_roots_latch();
