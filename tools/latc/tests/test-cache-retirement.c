@@ -2406,6 +2406,48 @@ static void test_deletion_report(const char *parent, bool isolated)
     }
 }
 
+static void test_queue_overflow_fixture(void)
+{
+    char *root = root_new(), error[256];
+    const char *suffix[] = {".so", ".native", ".tbset"};
+    for (unsigned i = 1; i <= 44; i++) {
+        char *src = g_strdup_printf("%064x", i);
+        char *names[6], *paths[6], *transaction = NULL;
+        for (unsigned j = 0; j < 6; j++) {
+            names[j] = j < 3 ? g_strconcat(src, suffix[j], NULL) :
+                g_strdup_printf("%s-%s%s", src, src, suffix[j - 3]);
+            paths[j] = g_build_filename(root, names[j], NULL);
+            put(paths[j], "fixture\n");
+        }
+        char *previous = g_strdup_printf("{\"version\":2,\"module\":\"%s\",\"native\":\"%s\","
+            "\"tbset\":\"%s\",\"source_sha256\":\"%s\",\"codegen_id\":\"%s\",\"published_sequence\":1}",
+            names[0], names[1], names[2], src, src);
+        char *next_manifest = g_strdup_printf("{\"version\":2,\"module\":\"%s\",\"native\":\"%s\","
+            "\"tbset\":\"%s\",\"source_sha256\":\"%s\",\"codegen_id\":\"%s\",\"published_sequence\":2}",
+            names[3], names[4], names[5], src, src);
+        char *current = g_strdup_printf("%s/%s.current", root, src);
+        put(current, previous);
+        char *evidence = latcd_retirement_capture_objects(root, src, (const char *const *)names, 6);
+        assert(evidence && !latcd_retirement_prepare(root, src, next_manifest, strlen(next_manifest),
+            evidence, &transaction, error, sizeof(error)));
+        put(current, next_manifest);
+        assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+        for (unsigned j = 0; j < 6; j++) { g_free(names[j]); g_free(paths[j]); }
+        g_free(transaction); g_free(evidence); g_free(current); g_free(previous);
+        g_free(next_manifest); g_free(src);
+    }
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 0);
+    LatcdRetirementQueueStats stats;
+    int result;
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0 && !stats.complete && stats.candidates == 128);
+    LatcdRetirementAttempt attempt;
+    assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));
+    latcd_retirement_queue_free(queue);
+    remove_root(root); g_free(root);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && !strcmp(argv[1], "--space-root")) {
@@ -2414,6 +2456,7 @@ int main(int argc, char **argv)
         return 0;
     }
     assert(argc == 1);
+    test_queue_overflow_fixture();
     test_deletion_report(NULL, false);
     test_roots_latch();
     for (unsigned mutation = 0; mutation < 6; mutation++) {
