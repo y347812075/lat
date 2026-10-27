@@ -619,7 +619,7 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
     check_changes(capacity);
     /* Recovery may need to finish a committed transaction even with the normal
      * index closed. It is still charged, but cannot open new admission. */
-    bool fits = (!state || capacity->ready) && capacity_fits(capacity, bytes, metadata_limit);
+    bool fits = capacity->ready && capacity_fits(capacity, bytes, metadata_limit);
     bool updating = g_hash_table_contains(capacity->state_expected, key);
     if (updating) fits = false;
     if (!state && !fits && !updating && old && bytes <= UINT64_MAX - capacity->metadata_reserved) {

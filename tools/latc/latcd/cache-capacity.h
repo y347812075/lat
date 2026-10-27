@@ -78,7 +78,8 @@ int latcd_cache_capacity_metadata_begin(int directory, const char *name, uint64_
 /* replaced: rename/link installed the new record. leftover: temporary removal
  * or anonymous-file close could not be proved; charge its full reservation.
  * Caller serializes replacement of the same record. Installed metadata gets a
- * fresh inode watch; unexpected events close ordinary admission. No scan here. */
+ * fresh inode watch; unexpected events close ordinary admission. When closed,
+ * only existing nonempty metadata can reserve for recovery completion. No scan here. */
 void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
     bool replaced, bool leftover);
 /* Ordinary persistent state has no committed-transaction over-limit exception.

@@ -96,9 +96,12 @@ static void test_metadata(void)
     assert(capacity.metadata_committed == 4);
     latcd_cache_capacity_metadata_bind(&capacity, 100);
     assert(latcd_cache_capacity_metadata_begin(directory, "../escape", 1, &first) < 0);
+    assert(latcd_cache_capacity_metadata_begin(directory, "new-while-closed", 1, &first) < 0);
     int outside = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     assert(outside >= 0 && latcd_cache_capacity_metadata_begin(outside, "bad", 1, &first) < 0);
     close(outside);
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    latcd_cache_capacity_metadata_bind(&capacity, 100);
     assert(!latcd_cache_capacity_metadata_begin(directory, "partial", 6, &first));
     latcd_cache_capacity_metadata_finish(&first, false, true);
     assert(capacity.metadata_committed == 10 && !capacity.ready);
