@@ -631,9 +631,12 @@ class Inventory:
             value = dict(parser["transaction"])
             required = {"version", "source", "state", "previous", "next"}
             optional = {"prepared_boot", "prepared_boottime_us", "retired_boot", "retired_boottime_us",
-                        "objects", "objects_status", "binding_status"}
+                        "objects", "objects_status", "binding_status", "retirement_clock_reason"}
             if not required <= value.keys() or value.keys() - required - optional:
                 raise ValueError("unsupported transaction fields")
+            if ("retirement_clock_reason" in value and
+                    value["retirement_clock_reason"] not in {"BOOT_CHANGED", "CLOCK_MISSING"}):
+                raise ValueError("invalid retirement clock reason")
             source, state = value["source"], value["state"]
             if (value["version"] not in {"1", "2"} or not re.fullmatch(SHA, source) or
                     state not in {"PREPARED", "RETIRED", "ABORTED", "UNKNOWN"}):

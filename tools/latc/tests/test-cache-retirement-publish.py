@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 
+from tb_key_set import read_key_set
+
 
 def run(prefix, guest, work):
     work.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -25,6 +27,8 @@ def run(prefix, guest, work):
     full_tbset = work / "full.tbset"
     subprocess.run([str(prefix / "bin/latc"), "emit-static-tbset", str(guest),
                     "-o", str(full_tbset)], check=True, env=env)
+    assert set(read_key_set(tbset)[2]) < set(read_key_set(full_tbset)[2]), (
+        "replacement scenarios require additional static keys; use x86-cache-retirement fixture")
     phases = ("prepared", "current", "current-synced", "retired")
     for phase, initial in [(phase, initial) for initial in (False, True) for phase in phases]:
         label = phase + ("-replacement" if initial else "-first")
@@ -116,6 +120,48 @@ def run(prefix, guest, work):
         assert after["objects_status"] == "RECORDED"
         assert after["binding_status"] == "COMPLETE"
         assert after["state"] == ("ABORTED" if phase == "prepared" else "RETIRED")
+        if phase == "retired":
+            parsed = configparser.ConfigParser(interpolation=None, strict=True)
+            parsed.read(records[0])
+            reason = "BOOT_CHANGED" if initial else "CLOCK_MISSING"
+            if initial:
+                actual_boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+                old_boot = ("22345678-1234-4234-8234-123456789abc" if
+                            actual_boot != "22345678-1234-4234-8234-123456789abc" else
+                            "32345678-1234-4234-8234-123456789abc")
+                parsed["transaction"]["retired_boot"] = old_boot
+                parsed["transaction"]["retired_boottime_us"] = "1"
+            else:
+                del parsed["transaction"]["retired_boot"]
+                del parsed["transaction"]["retired_boottime_us"]
+            temporary = records[0].with_suffix(".new")
+            with temporary.open("w") as stream:
+                parsed.write(stream)
+                stream.flush()
+                os.fchmod(stream.fileno(), 0o400)
+                os.fsync(stream.fileno())
+            temporary.replace(records[0])
+            with (directory / "clock-recovery.log").open("wb") as log:
+                recovered = subprocess.run(arguments + ["--serve", "--idle-seconds", "1"],
+                    env=env, stdout=log, stderr=log, timeout=30)
+            assert recovered.returncode == 0
+            after = record()
+            assert after["retirement_clock_reason"] == reason
+            assert after["retired_boot"] == Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            assert int(after["retired_boottime_us"]) > 1
+            before_plan = records[0].read_bytes()
+            planned = subprocess.run([str(latcd), "gc", "--plan", "--cache-dir", str(cache)],
+                                     env=env, capture_output=True, timeout=30)
+            (directory / "clock-plan.json").write_bytes(planned.stdout)
+            (directory / "clock-plan.stderr").write_bytes(planned.stderr)
+            assert planned.returncode == 0, planned.stderr + planned.stdout
+            report = json.loads(planned.stdout)
+            relative = str(records[0].relative_to(cache))
+            assert report["transactions"][relative]["retirement_clock_reason"] == reason
+            assert not report["delete_authorized"] and records[0].read_bytes() == before_plan
+            for candidate in report["retirement_plan"]["candidates"]:
+                if relative in candidate["retirement_transactions"]:
+                    assert candidate["remaining_grace_us"] > 0 and not candidate["delete_authorized"]
         if phase == "prepared":
             assert current_before == old_manifest
             assert (manifest.read_bytes() if manifest.exists() else None) == old_manifest

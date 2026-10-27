@@ -496,7 +496,8 @@ class PlannerTest(unittest.TestCase):
                 self.put(manifest[role], (digit + role).encode())
         return manifest
 
-    def transaction(self, previous, following, stamp=1000000, state="RETIRED", boot=BOOT):
+    def transaction(self, previous, following, stamp=1000000, state="RETIRED", boot=BOOT,
+                    clock_reason=None):
         names = sorted({manifest[role] for manifest in (previous, following) if manifest
                         for role in ("module", "native", "tbset") if manifest[role]})
         evidence = f"[objects]\ncount={len(names)}\n"
@@ -514,6 +515,8 @@ class PlannerTest(unittest.TestCase):
                   "binding_status=COMPLETE\n")
         if stamp is not None:
             record += f"retired_boot={boot}\nretired_boottime_us={stamp}\n"
+        if clock_reason is not None:
+            record += f"retirement_clock_reason={clock_reason}\n"
         path = ".gc/transactions/" + str(uuid.uuid4()) + ".ini"
         self.put(path, record.encode())
         return path
@@ -533,6 +536,32 @@ class PlannerTest(unittest.TestCase):
         self.assertTrue(all(not row["delete_authorized"]
                             for row in plan["retirement_plan"]["candidates"]))
         return plan, {row["name"]: row for row in plan["retirement_plan"]["candidates"]}
+
+    def test_retirement_clock_reason_is_diagnostic_only(self):
+        old = self.generation("1")
+        for reason in ("BOOT_CHANGED", "CLOCK_MISSING"):
+            with self.subTest(reason=reason):
+                path = self.transaction(old, self.manifest, clock_reason=reason)
+                plan, rows = self.selected(now=600999999)
+                self.assertTrue(plan["complete"], plan["errors"])
+                self.assertEqual(plan["transactions"][path]["retirement_clock_reason"], reason)
+                self.assertEqual(rows[old["module"]]["selection_status"], "grace")
+                self.assertEqual(rows[old["module"]]["remaining_grace_us"], 1)
+                plan, rows = self.selected()
+                self.assertEqual(rows[old["module"]]["selection_status"], "due")
+                plan, rows = self.selected(boot="22345678-1234-4234-8234-123456789abc")
+                self.assertIn("reboot_recovery_required", rows[old["module"]]["holds"])
+                (self.root / path).unlink()
+                path = self.transaction(old, self.manifest, stamp=None, clock_reason=reason)
+                plan, rows = self.selected()
+                self.assertTrue(plan["complete"], plan["errors"])
+                self.assertIn("missing_retirement_clock", rows[old["module"]]["holds"])
+                (self.root / path).unlink()
+        for reason in ("", "UNKNOWN_REASON", "boot_changed"):
+            with self.subTest(invalid=reason):
+                path = self.transaction(old, self.manifest, clock_reason=reason)
+                self.run_plan(success=False)
+                (self.root / path).unlink()
 
     def test_shared_objects_and_independent_deadlines(self):
         old = self.generation("1")
