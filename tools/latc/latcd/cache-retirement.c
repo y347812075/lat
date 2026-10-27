@@ -2062,6 +2062,7 @@ struct LatcdRetirementQueue {
     char *root;
     uint64_t grace, epoch;
     unsigned visited;
+    bool aggregating;
     DIR *cursor;
     int discovery_watch;
     struct stat discovery_store;
@@ -2204,6 +2205,7 @@ static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t si
         if (removed) continue;
         RetirementCandidate *candidate = g_hash_table_lookup(queue->candidates, key);
         if (!candidate) {
+            if (queue->aggregating) continue;
             if (g_hash_table_size(queue->candidates) >= 128) { valid = false; break; }
             candidate = g_new0(RetirementCandidate, 1);
             candidate->enqueued = now;
@@ -2236,6 +2238,7 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
     if (!queue->cursor) {
         queue->complete = false;
         queue->visited = 0;
+        queue->aggregating = false;
         queue->epoch++;
         int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (root < 0) goto out;
@@ -2285,6 +2288,13 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         if (store >= 0) close(store);
         if (root >= 0) close(root);
     }
+    if (!result && !queue->aggregating) {
+        rewinddir(queue->cursor);
+        queue->aggregating = true;
+        queue->visited = 0;
+        queue->epoch++;
+        result = 1;
+    }
     if (!result) {
         GHashTableIter iterator;
         gpointer value;
@@ -2311,6 +2321,7 @@ out:
     g_hash_table_iter_init(&iterator, queue->candidates);
     while (g_hash_table_iter_next(&iterator, NULL, &value)) {
         RetirementCandidate *candidate = value;
+        if (!queue->complete) continue;
         uint64_t attempt = MAX(candidate->deadline, candidate->retry_at);
         if (attempt > now && (!stats->next_attempt_us || attempt < stats->next_attempt_us))
             stats->next_attempt_us = attempt;

@@ -1397,6 +1397,9 @@ static LatcdRetirementQueueStats sweep_queue(LatcdRetirementQueue *queue)
         pending = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
         if (pending < 0) fprintf(stderr, "consumer queue scan: %s\n", error);
         assert(pending >= 0);
+        if (pending) assert(!stats.complete && !stats.due && !stats.ready &&
+                            !stats.deferred && !stats.next_deadline_us &&
+                            !stats.next_attempt_us && !stats.oldest_due_wait_us);
     } while (pending);
     return stats;
 }
@@ -2470,6 +2473,19 @@ static void test_queue_empty_store(void)
         assert(result >= 0);
     } while (result);
     assert(stats.complete && !stats.candidates);
+
+    /* The end of the first pass yields before the aggregation pass. */
+    do {
+        result = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+        assert(result == 1 && !stats.complete);
+    } while (stats.visited);
+    put(entry, "invalid\n");
+    assert(!unlink(entry));
+    do {
+        result = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+    } while (result > 0);
+    assert(result < 0 && !stats.complete);
+    assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));
     latcd_retirement_queue_free(queue);
     g_free(entry); g_free(store);
     remove_root(root); g_free(root);
