@@ -19,6 +19,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <sys/inotify.h>
 #include <sys/statvfs.h>
 #include <time.h>
 #include <unistd.h>
@@ -2062,6 +2063,7 @@ struct LatcdRetirementQueue {
     uint64_t grace, epoch;
     unsigned visited;
     DIR *cursor;
+    int discovery_watch;
     struct stat discovery_store;
     GHashTable *candidates;
     bool complete;
@@ -2075,6 +2077,7 @@ struct LatcdRetirementQueue {
 LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grace_us)
 {
     LatcdRetirementQueue *queue = g_new0(LatcdRetirementQueue, 1);
+    queue->discovery_watch = -1;
     queue->root = g_strdup(root);
     queue->grace = grace_us;
     queue->candidates = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
@@ -2085,9 +2088,25 @@ void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
 {
     if (!queue) return;
     if (queue->cursor) closedir(queue->cursor);
+    if (queue->discovery_watch >= 0) close(queue->discovery_watch);
     latcd_recovery_close(queue->execution);
     g_hash_table_unref(queue->candidates);
     g_free(queue->root); g_free(queue);
+}
+
+static int queue_watch_fd(int notify, int fd, uint32_t mask)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+    return inotify_add_watch(notify, path, mask) < 0 ? -1 : 0;
+}
+
+static bool queue_watch_clean(int notify)
+{
+    char buffer[4096];
+    ssize_t count;
+    do { count = read(notify, buffer, sizeof(buffer)); } while (count < 0 && errno == EINTR);
+    return count < 0 && errno == EAGAIN;
 }
 
 /* Completed namespace removal only, never physical-space or domain admission.
@@ -2228,6 +2247,10 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         }
         queue->cursor = fdopendir(store);
         if (!queue->cursor) { close(store); goto out; }
+        queue->discovery_watch = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        if (queue->discovery_watch < 0 || queue_watch_fd(queue->discovery_watch,
+            dirfd(queue->cursor), IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO |
+            IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR)) goto out;
         if (fstat(dirfd(queue->cursor), &queue->discovery_store)) goto out;
     }
     int64_t started = g_get_monotonic_time();
@@ -2240,7 +2263,16 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         char *raw = NULL;
         size_t size;
-        bool valid = ++queue->visited <= 100000 && name_valid(entry->d_name) &&
+        int record_fd = openat(dirfd(queue->cursor), entry->d_name,
+                               O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        struct stat watched, path;
+        bool watched_ok = record_fd >= 0 && !fstat(record_fd, &watched) &&
+            !queue_watch_fd(queue->discovery_watch, record_fd,
+                IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF) &&
+            !fstatat(dirfd(queue->cursor), entry->d_name, &path, AT_SYMLINK_NOFOLLOW) &&
+            object_stat_equal(&watched, &path);
+        if (record_fd >= 0) close(record_fd);
+        bool valid = watched_ok && ++queue->visited <= 100000 && name_valid(entry->d_name) &&
             !read_file(dirfd(queue->cursor), entry->d_name, RECORD_LIMIT, &raw, &size) &&
             queue_record(queue, raw, size, boot, now);
         g_free(raw);
@@ -2253,7 +2285,7 @@ sweep_complete:
         int store = root < 0 ? -1 : open_store(root, false);
         if (store < 0 || fstat(dirfd(queue->cursor), &held) || fstat(store, &path) ||
             !object_stat_equal(&queue->discovery_store, &held) ||
-            !object_stat_equal(&held, &path)) result = -1;
+            !object_stat_equal(&held, &path) || !queue_watch_clean(queue->discovery_watch)) result = -1;
         if (store >= 0) close(store);
         if (root >= 0) close(root);
     }
@@ -2271,6 +2303,10 @@ sweep_complete:
     }
 out:
     if (result <= 0 && queue->cursor) { closedir(queue->cursor); queue->cursor = NULL; }
+    if (result <= 0 && queue->discovery_watch >= 0) {
+        close(queue->discovery_watch);
+        queue->discovery_watch = -1;
+    }
     if (result < 0) queue->complete = false;
     stats->complete = queue->complete;
     stats->candidates = g_hash_table_size(queue->candidates);

@@ -1759,6 +1759,23 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         assert(!changed_result && changed_stats.complete && changed_stats.candidates == 3);
         latcd_retirement_queue_free(changed);
         g_free(transaction_dir); g_free(saved_dir);
+        changed = latcd_retirement_queue_new(root, 0);
+        do {
+            changed_result = latcd_retirement_queue_step(changed, 1, 10000,
+                &changed_stats, error, sizeof(error));
+            assert(changed_result > 0);
+        } while (changed_stats.candidates == 0);
+        assert(!chmod(record_path, 0600));
+        int writer = open(record_path, O_WRONLY | O_CLOEXEC);
+        assert(writer >= 0 && pwrite(writer, raw, strlen(raw), 0) == (ssize_t)strlen(raw));
+        assert(!close(writer) && !chmod(record_path, 0400));
+        do {
+            changed_result = latcd_retirement_queue_step(changed, 1, 10000,
+                &changed_stats, error, sizeof(error));
+        } while (changed_result > 0);
+        assert(changed_result < 0 && !changed_stats.complete);
+        assert(!latcd_retirement_queue_take(changed, UINT64_MAX, &rejected));
+        latcd_retirement_queue_free(changed);
         LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 0);
         LatcdRetirementQueueStats stats;
         int queued;
