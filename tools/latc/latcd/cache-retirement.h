@@ -27,7 +27,9 @@ int latcd_cache_domain_validate(const char *root, char id[37],
 int latcd_cache_domain_init(const char *root, char id[37],
                             char *error, size_t error_size);
 
-/* Owner lease required throughout cursor lifetime. Each step has entry/hash-byte
+/* Owner lease required throughout cursor lifetime. Transaction steps acquire
+ * roots SH nonblocking and return an error if it is busy or unsafe; the cursor
+ * may be retried. The lock is not held across yields. Each step has entry/hash-byte
  * and soft wall-time budgets; individual syscalls/fsync may exceed the latter.
  * Returns 1 for pending, 0 for complete, -1 on error. No removal is authorized. */
 LatcdRecoveryCursor *latcd_recovery_open(const char *root, bool tombstones,

@@ -2821,6 +2821,12 @@ int latcd_recovery_step(LatcdRecoveryCursor *cursor, unsigned entries,
     *progress = cursor->progress;
     if (cursor->failed) return fail(error, error_size, "recovery cursor previously failed");
     if (cursor->done) return 0;
+    int roots = -1;
+    if (!cursor->tombstones) {
+        roots = latcd_retirement_roots_lock(cursor->root_path, LOCK_SH | LOCK_NB,
+                                            error, error_size);
+        if (roots < 0) return -1;
+    }
     cursor->bytes_left = hash_bytes;
     cursor->deadline = g_get_monotonic_time() + time_us;
     cursor->yielded = false;
@@ -2856,8 +2862,10 @@ int latcd_recovery_step(LatcdRecoveryCursor *cursor, unsigned entries,
         recovery_hash_clear(cursor);
     }
     *progress = cursor->progress;
+    if (roots >= 0) close(roots);
     return cursor->done ? 0 : 1;
 invalid:
+    if (roots >= 0) close(roots);
     cursor->failed = true;
     recovery_hash_clear(cursor);
     *progress = cursor->progress;

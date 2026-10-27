@@ -725,13 +725,25 @@ static void test_roots_latch(void)
     assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
                                      &transaction, error, sizeof(error)));
     put(current, next);
+    LatcdRecoveryCursor *recovery = latcd_recovery_open(root, false, error, sizeof(error));
+    assert(recovery);
     assert(latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error)) < 0);
     assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
     assert(latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error)) < 0);
     close(first);
     exclusive = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error));
     assert(exclusive >= 0);
+    LatcdRecoveryProgress progress;
+    assert(latcd_recovery_step(recovery, 1, 1024, 10000, &progress, error, sizeof(error)) < 0);
+    assert(!progress.visited && !progress.recovered);
     close(exclusive);
+    int step;
+    do {
+        step = latcd_recovery_step(recovery, 1, 1024, 10000, &progress, error, sizeof(error));
+        assert(step >= 0);
+    } while (step);
+    assert(progress.recovered == 1);
+    latcd_recovery_close(recovery);
     g_free(current); g_free(transaction);
     remove_root(root); g_free(root);
     root = root_new();
