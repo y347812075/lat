@@ -716,6 +716,25 @@ static void test_roots_latch(void)
     assert(exclusive >= 0);
     assert(latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error)) < 0);
     close(exclusive);
+    /* A publisher retains SH through transaction completion; a future round
+     * cutoff must not be sampled while that publisher is in flight. */
+    char *transaction = NULL, *current = current_path(root);
+    put(current, old);
+    first = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error));
+    assert(first >= 0);
+    assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
+                                     &transaction, error, sizeof(error)));
+    put(current, next);
+    assert(latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+    assert(latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error)) < 0);
+    close(first);
+    exclusive = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error));
+    assert(exclusive >= 0);
+    close(exclusive);
+    g_free(current); g_free(transaction);
+    remove_root(root); g_free(root);
+    root = root_new();
     char *name = g_strconcat(source, ".native", NULL);
     char *object = g_build_filename(root, name, NULL);
     put(object, "roots contention\n");
