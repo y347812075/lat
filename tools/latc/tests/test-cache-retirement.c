@@ -1197,9 +1197,49 @@ static void test_due_without_retirement(void)
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     assert(fd >= 0 && evidence && !latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
     close(fd);
+    char *lease_id = g_uuid_string_random();
+    int lease = latcd_retirement_mount_lease(root, lease_id, "OBJECT",
+                                             source, name, error, sizeof(error));
+    assert(lease >= 0);
+    assert(latcd_tombstone_delete_due(root, name, 0, error, sizeof(error)) != 0);
+    assert(!access(path, F_OK));
+    assert(!latcd_retirement_mount_release(root, lease_id, lease, error, sizeof(error)));
+    close(lease);
+    assert(!latcd_tombstone_delete(root, name, error, sizeof(error)));
+    assert(access(path, F_OK) != 0);
+    g_free(lease_id); g_free(evidence); g_free(path); g_free(name);
+    remove_root(root); g_free(root);
+}
+
+static void test_mount_lease_crash_persistence(void)
+{
+    char *root = root_new(), error[256];
+    char *name = g_strconcat(source, ".native", NULL);
+    char *path = g_build_filename(root, name, NULL);
+    put(path, "crash-persistent mount lease\n");
+    const char *capture[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, capture, 1);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(fd >= 0 && evidence && !latcd_retirement_tombstone(
+        root, source, name, fd, evidence, error, sizeof(error)));
+    close(fd);
+    char *lease_id = g_uuid_string_random();
+    int lease = latcd_retirement_mount_lease(root, lease_id, "CACHE",
+                                             NULL, NULL, error, sizeof(error));
+    assert(lease >= 0);
+    close(lease); /* Mount participant died without explicit release. */
     assert(latcd_tombstone_delete_due(root, name, 0, error, sizeof(error)));
     assert(!access(path, F_OK));
-    g_free(evidence); g_free(path); g_free(name); remove_root(root); g_free(root);
+    int release_latch = latcd_retirement_roots_lock(
+        root, LOCK_SH | LOCK_NB, error, sizeof(error));
+    assert(release_latch >= 0);
+    assert(!latcd_retirement_mount_release(
+        root, lease_id, release_latch, error, sizeof(error)));
+    close(release_latch);
+    assert(!latcd_tombstone_delete(root, name, error, sizeof(error)));
+    assert(access(path, F_OK) != 0);
+    g_free(lease_id); g_free(evidence); g_free(path); g_free(name);
+    remove_root(root); g_free(root);
 }
 
 static void test_transaction_root_admission(unsigned mutation, bool executor)
@@ -1820,6 +1860,7 @@ int main(int argc, char **argv)
         test_deleted_transaction_recovery(mutation, NULL, false);
     test_manifest_binding();
     test_tombstone();
+    test_mount_lease_crash_persistence();
     for (int mutation = 0; mutation < 11; mutation++) test_tombstone_recovery(mutation);
     const char *points[] = {"created", "partial-write", "written", "chmod",
         "file-synced", "closed", "renamed", "directory-synced"};

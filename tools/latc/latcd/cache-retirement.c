@@ -632,6 +632,128 @@ static bool hold_record_valid(GKeyFile *record, const char *id, const char *name
     return valid;
 }
 
+static bool record_string_is(GKeyFile *record, const char *group,
+                             const char *key, const char *expected);
+static bool record_uint64(GKeyFile *record, const char *group,
+                          const char *key, uint64_t *value);
+
+typedef struct MountLeaseRecord {
+    char *scope;
+    char *source;
+    char *name;
+    char *state;
+    uint64_t object_device;
+    uint64_t object_inode;
+} MountLeaseRecord;
+
+static void mount_lease_clear(MountLeaseRecord *lease)
+{
+    g_free(lease->scope);
+    g_free(lease->source);
+    g_free(lease->name);
+    g_free(lease->state);
+    memset(lease, 0, sizeof(*lease));
+}
+
+static bool mount_lease_parse(GKeyFile *record, const char *id,
+                              const struct stat *cache, MountLeaseRecord *lease)
+{
+    const char *fields[] = {"version", "id", "scope", "state", "cache_device",
+        "cache_inode", "source", "name", "object_device", "object_inode"};
+    gsize groups = 0;
+    char **names = g_key_file_get_groups(record, &groups);
+    bool valid = groups == 1 && !strcmp(names[0], "mount") &&
+        exact_keys(record, "mount", fields, G_N_ELEMENTS(fields));
+    g_strfreev(names);
+    valid = valid && record_string_is(record, "mount", "version", "1") &&
+        record_string_is(record, "mount", "id", id);
+    uint64_t cache_device, cache_inode;
+    valid = valid &&
+        record_uint64(record, "mount", "cache_device", &cache_device) &&
+        cache_device == (uint64_t)cache->st_dev &&
+        record_uint64(record, "mount", "cache_inode", &cache_inode) &&
+        cache_inode == (uint64_t)cache->st_ino;
+    lease->scope = g_key_file_get_string(record, "mount", "scope", NULL);
+    lease->source = g_key_file_get_string(record, "mount", "source", NULL);
+    lease->name = g_key_file_get_string(record, "mount", "name", NULL);
+    lease->state = g_key_file_get_string(record, "mount", "state", NULL);
+    valid = valid && lease->scope && lease->source && lease->name && lease->state &&
+        (!strcmp(lease->state, "ACTIVE") || !strcmp(lease->state, "RELEASED")) &&
+        record_uint64(record, "mount", "object_device", &lease->object_device) &&
+        record_uint64(record, "mount", "object_inode", &lease->object_inode);
+    if (!valid) {
+        mount_lease_clear(lease);
+        return false;
+    }
+    if (!strcmp(lease->scope, "CACHE")) {
+        valid = valid && !*lease->source && !*lease->name &&
+            !lease->object_device && !lease->object_inode;
+    } else if (!strcmp(lease->scope, "SOURCE")) {
+        valid = valid && source_valid(lease->source) && !*lease->name &&
+            !lease->object_device && !lease->object_inode;
+    } else if (!strcmp(lease->scope, "OBJECT")) {
+        valid = valid && source_valid(lease->source) &&
+            object_name_valid(lease->source, lease->name) &&
+            lease->object_device && lease->object_inode;
+    } else valid = false;
+    if (!valid) mount_lease_clear(lease);
+    return valid;
+}
+
+/* Called with retirement roots EX (or while a participant still holds SH).
+ * One malformed or excessive record freezes the object. */
+static int mount_lease_status(int root, int gc, const char *source,
+                              const char *name, const struct stat *object)
+{
+    int store = open_directory(gc, "mount-leases", false);
+    int saved = errno;
+    if (store < 0) return saved == ENOENT ? 0 : -1;
+    struct stat cache;
+    if (fstat(root, &cache)) { close(store); return -1; }
+    DIR *directory = fdopendir(store);
+    if (!directory) { close(store); return -1; }
+    int result = 0;
+    unsigned visited = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) { if (errno) result = -1; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (++visited > 128 || strlen(entry->d_name) != 40 ||
+            strcmp(entry->d_name + 36, ".ini")) { result = -1; break; }
+        char id[37];
+        memcpy(id, entry->d_name, 36);
+        id[36] = 0;
+        char *raw = NULL;
+        size_t size;
+        GKeyFile *record = g_key_file_new();
+        MountLeaseRecord lease = {0};
+        bool valid = hold_id_valid(id) &&
+            !read_file(dirfd(directory), entry->d_name, MANIFEST_LIMIT, &raw, &size) &&
+            !memchr(raw, 0, size) &&
+            g_key_file_load_from_data(record, raw, size, 0, NULL) &&
+            mount_lease_parse(record, id, &cache, &lease);
+        if (!valid) result = -1;
+        else if (!strcmp(lease.state, "ACTIVE")) {
+            if (!strcmp(lease.scope, "CACHE")) result = 1;
+            else if (!strcmp(lease.scope, "SOURCE") && !strcmp(lease.source, source))
+                result = 1;
+            else if (!strcmp(lease.scope, "OBJECT") && !strcmp(lease.source, source) &&
+                     !strcmp(lease.name, name)) {
+                if (lease.object_device != (uint64_t)object->st_dev ||
+                    lease.object_inode != (uint64_t)object->st_ino) result = -1;
+                else result = 1;
+            }
+        }
+        mount_lease_clear(&lease);
+        g_free(raw);
+        g_key_file_unref(record);
+        if (result) break;
+    }
+    closedir(directory);
+    return result;
+}
+
 /* Called under source EX. Any unreadable or partial hold freezes the object.
  * Bounded work: overflow retains rather than doing a long scan under S. */
 static int object_hold_status(int root, const char *name, const struct stat *object)
@@ -862,7 +984,8 @@ static int object_transaction_status(int root, const char *name, const struct st
                                       const uint64_t *grace_us)
 {
     int store = open_store(root, false);
-    if (store < 0) return errno == ENOENT && !grace_us ? 0 : -1;
+    if (store < 0)
+        return errno == ENOENT && (!grace_us || !*grace_us) ? 0 : -1;
     DIR *directory = fdopendir(store);
     if (!directory) { close(store); return -1; }
     int result = 0;
@@ -1044,6 +1167,142 @@ out:
     return result ? fail(error, error_size, "explicit object hold rejected or incomplete") : 0;
 }
 
+static bool mount_lease_fd_valid(const char *root, int gc, int lease_fd)
+{
+    int lock = openat(gc, "reference-roots.lock",
+                      O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    struct stat held, path, cache;
+    bool valid = lease_fd >= 0 && lock >= 0 && !fstat(lease_fd, &held) &&
+        !fstat(lock, &path) && object_stat_equal(&held, &path) &&
+        S_ISREG(held.st_mode) && held.st_uid == geteuid() && held.st_nlink == 1 &&
+        !(held.st_mode & 0077) && !held.st_size && !fstatat(gc, "reference-roots.lock",
+        &path, AT_SYMLINK_NOFOLLOW) && object_stat_equal(&held, &path) &&
+        !flock(lease_fd, LOCK_SH | LOCK_NB);
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    valid = valid && directory >= 0 && !fstat(directory, &cache);
+    if (directory >= 0) close(directory);
+    if (lock >= 0) close(lock);
+    return valid;
+}
+
+int latcd_retirement_mount_lease(const char *root, const char *id, const char *scope,
+                                 const char *source, const char *name,
+                                 char *error, size_t error_size)
+{
+    bool cache_scope = !g_strcmp0(scope, "CACHE");
+    bool source_scope = !g_strcmp0(scope, "SOURCE");
+    bool object_scope = !g_strcmp0(scope, "OBJECT");
+    if (!root || !hold_id_valid(id) || (!cache_scope && !source_scope && !object_scope) ||
+        ((source_scope || object_scope) && !source_valid(source)) ||
+        (object_scope && !object_name_valid(source, name)) ||
+        ((cache_scope || source_scope) && name && *name))
+        return fail(error, error_size, "invalid mount lease");
+    int roots = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, error_size);
+    if (roots < 0) return -1;
+    int directory = -1, gc = -1, store = -1, object_fd = -1, result = -1;
+    struct stat cache, object = {0};
+    GKeyFile *record = g_key_file_new();
+    char *filename = g_strdup_printf("%s.ini", id);
+    char *raw = NULL;
+    size_t size = 0;
+    directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    gc = directory < 0 ? -1 : open_directory(directory, ".gc", true);
+    store = gc < 0 ? -1 : open_directory(gc, "mount-leases", true);
+    if (store < 0 || fstat(directory, &cache)) goto out;
+    const char *record_source = cache_scope ? "" : source;
+    const char *record_name = object_scope ? name : "";
+    if (object_scope) {
+        object_fd = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (object_fd < 0 || fstat(object_fd, &object) || !S_ISREG(object.st_mode) ||
+            object.st_uid != geteuid() || object.st_nlink != 1 ||
+            (object.st_mode & 0222) || object.st_size <= 0 ||
+            flock(object_fd, LOCK_SH | LOCK_NB)) goto out;
+    }
+    int status = read_file(store, filename, MANIFEST_LIMIT, &raw, &size);
+    if (status < 0) goto out;
+    if (!status) {
+        MountLeaseRecord lease = {0};
+        bool valid = !memchr(raw, 0, size) &&
+            g_key_file_load_from_data(record, raw, size, 0, NULL) &&
+            mount_lease_parse(record, id, &cache, &lease) &&
+            !strcmp(lease.state, "ACTIVE") && !strcmp(lease.scope, scope) &&
+            !strcmp(lease.source, record_source) && !strcmp(lease.name, record_name) &&
+            (!object_scope || (lease.object_device == (uint64_t)object.st_dev &&
+                               lease.object_inode == (uint64_t)object.st_ino));
+        mount_lease_clear(&lease);
+        if (!valid) goto out;
+    } else {
+        g_key_file_set_integer(record, "mount", "version", 1);
+        g_key_file_set_string(record, "mount", "id", id);
+        g_key_file_set_string(record, "mount", "scope", scope);
+        g_key_file_set_string(record, "mount", "state", "ACTIVE");
+        g_key_file_set_uint64(record, "mount", "cache_device", cache.st_dev);
+        g_key_file_set_uint64(record, "mount", "cache_inode", cache.st_ino);
+        g_key_file_set_string(record, "mount", "source", record_source);
+        g_key_file_set_string(record, "mount", "name", record_name);
+        g_key_file_set_uint64(record, "mount", "object_device", object.st_dev);
+        g_key_file_set_uint64(record, "mount", "object_inode", object.st_ino);
+        if (write_record(store, filename, record)) goto out;
+    }
+    result = roots;
+    roots = -1;
+out:
+    if (roots >= 0) close(roots);
+    if (object_fd >= 0) close(object_fd);
+    if (store >= 0) close(store);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    g_free(raw);
+    g_free(filename);
+    g_key_file_unref(record);
+    return result >= 0 ? result : fail(error, error_size,
+        "mount lease rejected or incomplete");
+}
+
+int latcd_retirement_mount_release(const char *root, const char *id, int lease_fd,
+                                   char *error, size_t error_size)
+{
+    if (!root || !hold_id_valid(id) || lease_fd < 0)
+        return fail(error, error_size, "invalid mount lease release");
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
+    int store = gc < 0 ? -1 : open_directory(gc, "mount-leases", false);
+    struct stat cache, object = {0};
+    int object_fd = -1, result = -1;
+    char *filename = g_strdup_printf("%s.ini", id), *raw = NULL;
+    size_t size = 0;
+    GKeyFile *record = g_key_file_new();
+    MountLeaseRecord lease = {0};
+    if (store < 0 || fstat(directory, &cache) || !mount_lease_fd_valid(root, gc, lease_fd) ||
+        read_file(store, filename, MANIFEST_LIMIT, &raw, &size) ||
+        memchr(raw, 0, size) ||
+        !g_key_file_load_from_data(record, raw, size, 0, NULL) ||
+        !mount_lease_parse(record, id, &cache, &lease)) goto out;
+    if (!strcmp(lease.scope, "OBJECT")) {
+        object_fd = openat(directory, lease.name,
+                           O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (object_fd < 0 || fstat(object_fd, &object) ||
+            lease.object_device != (uint64_t)object.st_dev ||
+            lease.object_inode != (uint64_t)object.st_ino) goto out;
+    }
+    if (!strcmp(lease.state, "ACTIVE")) {
+        g_key_file_set_string(record, "mount", "state", "RELEASED");
+        if (write_record(store, filename, record)) goto out;
+    }
+    result = 0;
+out:
+    mount_lease_clear(&lease);
+    if (object_fd >= 0) close(object_fd);
+    if (store >= 0) close(store);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    g_free(raw);
+    g_free(filename);
+    g_key_file_unref(record);
+    return result ? fail(error, error_size,
+        "mount lease release rejected or incomplete") : 0;
+}
+
 int latcd_retirement_tombstone(const char *root, const char *source,
                                const char *name, int object_fd, const char *evidence,
                                char *error, size_t error_size)
@@ -1105,6 +1364,7 @@ int latcd_retirement_tombstone(const char *root, const char *source,
     if (object_current_status(directory, name) ||
         object_hold_status(directory, name, &before) || object_task_status(directory, name, &before) ||
         object_transaction_status(directory, name, &before, NULL) ||
+        mount_lease_status(directory, gc, source, name, &before) ||
         fstat(object_fd, &after) || !object_stat_equal(&before, &after) ||
         fstatat(directory, name, &path, AT_SYMLINK_NOFOLLOW) ||
         !object_stat_equal(&before, &path)) goto out;
@@ -1467,7 +1727,7 @@ static int recover_tombstone(const char *root_path, int root, int store,
     size_t size;
     uint64_t values[4] = {0};
     GKeyFile *record = g_key_file_new();
-    int result = -1, object = -1, latch = -1, roots = -1;
+    int result = -1, object = -1, latch = -1, roots = -1, gc = -1;
     if (read_file(store, name, RECORD_LIMIT, &raw, &size) || memchr(raw, 0, size) ||
         !g_key_file_load_from_data(record, raw, size, 0, NULL) ||
         !tombstone_shape(record, name, &source, values, &hash)) goto out;
@@ -1517,6 +1777,11 @@ static int recover_tombstone(const char *root_path, int root, int store,
             root_path, LOCK_EX | LOCK_NB, NULL, 0)) < 0)) {
         observation = !strcmp(observation, "UNKNOWN") || errno != EWOULDBLOCK ? "UNKNOWN" : "BUSY";
     } else {
+        gc = open_directory(root, ".gc", false);
+        int mounted = gc < 0 ? -1 : mount_lease_status(
+            root, gc, source, name, &before);
+        if (mounted > 0) observation = "BUSY";
+        else if (mounted < 0) observation = "UNKNOWN";
         char *current = g_strdup_printf("%s.current", source), *manifest = NULL;
         size_t manifest_size = 0;
         int status = read_file(root, current, MANIFEST_LIMIT, &manifest, &manifest_size);
@@ -1583,6 +1848,7 @@ static int recover_tombstone(const char *root_path, int root, int store,
     if (report && !result && remove_object) report->receipt_durable = true;
     g_free(prior);
 out:
+    if (gc >= 0) close(gc);
     if (object >= 0) close(object);
     if (latch >= 0) close(latch);
     if (roots >= 0) close(roots);

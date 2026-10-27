@@ -5880,21 +5880,78 @@ static void usage(const char *name)
             "  %s --precompile --socket PATH --x86-rootfs DIR"
             " [--latc PATH] [--jobs N] GUEST_ELF\n"
             "  %s gc --plan --cache-dir DIR\n"
+            "  %s gc --hold-mount-lease --cache-dir DIR --lease-id UUID"
+            " --scope CACHE|SOURCE|OBJECT [--source SHA256 --name OBJECT]\n"
+            "  %s gc --release-mount-lease --cache-dir DIR --lease-id UUID\n"
             "  %s --build-id\n",
-            name, name, name, name, name, name, name, name);
+            name, name, name, name, name, name, name, name, name, name);
 }
 
 static int run_gc_plan(int argc, char **argv)
 {
-    bool plan = false;
-    const char *cache = NULL;
+    bool plan = false, hold = false, release = false;
+    const char *cache = NULL, *lease_id = NULL, *scope = NULL;
+    const char *source = NULL, *name = NULL;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--plan") && !plan) plan = true;
+        else if (!strcmp(argv[i], "--hold-mount-lease") && !hold) hold = true;
+        else if (!strcmp(argv[i], "--release-mount-lease") && !release) release = true;
         else if (!strcmp(argv[i], "--cache-dir") && !cache && i + 1 < argc)
             cache = argv[++i];
+        else if (!strcmp(argv[i], "--lease-id") && !lease_id && i + 1 < argc)
+            lease_id = argv[++i];
+        else if (!strcmp(argv[i], "--scope") && !scope && i + 1 < argc)
+            scope = argv[++i];
+        else if (!strcmp(argv[i], "--source") && !source && i + 1 < argc)
+            source = argv[++i];
+        else if (!strcmp(argv[i], "--name") && !name && i + 1 < argc)
+            name = argv[++i];
         else { usage(argv[0]); return 2; }
     }
-    if (!plan || !cache || !*cache) { usage(argv[0]); return 2; }
+    if (plan + hold + release != 1 || !cache || !*cache) { usage(argv[0]); return 2; }
+    char error[256] = {0};
+    if (release) {
+        if (!lease_id) { usage(argv[0]); return 2; }
+        int roots = latcd_retirement_roots_lock(cache, LOCK_SH | LOCK_NB,
+                                                error, sizeof(error));
+        int result = roots < 0 ? -1 : latcd_retirement_mount_release(
+            cache, lease_id, roots, error, sizeof(error));
+        if (roots >= 0) close(roots);
+        if (result) {
+            fprintf(stderr, "latcd: mount lease release failed: %s\n", error);
+            return 1;
+        }
+        return 0;
+    }
+    if (hold) {
+        if (!lease_id || !scope) { usage(argv[0]); return 2; }
+        sigset_t signals;
+        sigemptyset(&signals);
+        sigaddset(&signals, SIGINT);
+        sigaddset(&signals, SIGTERM);
+        if (pthread_sigmask(SIG_BLOCK, &signals, NULL)) return 1;
+        int lease = latcd_retirement_mount_lease(cache, lease_id, scope,
+                                                  source, name, error, sizeof(error));
+        if (lease < 0) {
+            fprintf(stderr, "latcd: mount lease acquisition failed: %s\n", error);
+            return 1;
+        }
+        printf("mount_lease=%s scope=%s state=ACTIVE\n", lease_id, scope);
+        fflush(stdout);
+        int signal_number;
+        if (sigwait(&signals, &signal_number)) {
+            close(lease);
+            return 1;
+        }
+        int result = latcd_retirement_mount_release(cache, lease_id, lease,
+                                                     error, sizeof(error));
+        close(lease);
+        if (result) {
+            fprintf(stderr, "latcd: mount lease release failed: %s\n", error);
+            return 1;
+        }
+        return 0;
+    }
     GError *gerror = NULL;
     char *executable = g_file_read_link("/proc/self/exe", &gerror);
     if (!executable) {

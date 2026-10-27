@@ -233,6 +233,38 @@ class PlannerTest(unittest.TestCase):
         hold.chmod(0o600)
         self.run_plan(success=False)
 
+    def test_mount_lease_binding_and_release(self):
+        old = self.generation('1')
+        self.transaction(old, self.manifest)
+        obj = self.root / old['module']
+        cache, st = self.root.stat(), obj.stat()
+        lease_id = str(uuid.uuid4())
+        record = (f'[mount]\nversion=1\nid={lease_id}\nscope=OBJECT\nstate=ACTIVE\n'
+                  f'cache_device={cache.st_dev}\ncache_inode={cache.st_ino}\n'
+                  f'source={SOURCE}\nname={obj.name}\nobject_device={st.st_dev}\n'
+                  f'object_inode={st.st_ino}\n')
+        path = f'.gc/mount-leases/{lease_id}.ini'
+        self.put(path, record.encode())
+        plan, rows = self.selected()
+        self.assertEqual(plan['mount_lease_count'], 1)
+        self.assertTrue(plan['mount_leases'][path]['binding_observed'])
+        self.assertIn('mount_lease_reference', rows[obj.name]['holds'])
+        self.put(path, record.replace('state=ACTIVE', 'state=RELEASED').encode())
+        _, rows = self.selected()
+        self.assertNotIn('mount_lease_reference', rows[obj.name]['holds'])
+        self.put(path, record.replace(f'object_inode={st.st_ino}', 'object_inode=0').encode())
+        plan = self.run_plan(success=False)
+        self.assertTrue(any(e['reason'] == 'invalid_mount_lease' for e in plan['errors']))
+        cache_record = record.replace('scope=OBJECT', 'scope=CACHE').replace(
+            f'source={SOURCE}\nname={obj.name}\nobject_device={st.st_dev}\nobject_inode={st.st_ino}',
+            'source=\nname=\nobject_device=0\nobject_inode=0')
+        self.put(path, cache_record.encode())
+        plan, rows = self.selected()
+        self.assertEqual(plan['mount_lease_count'], 1)
+        for name, row in rows.items():
+            if row['selection_status'] != 'removed':
+                self.assertIn('mount_lease_reference', row['holds'])
+
     def test_task_lease_and_references(self):
         record = self.task()
         with record.open('rb') as pin:

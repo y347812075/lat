@@ -108,6 +108,7 @@ class Inventory:
         self.compiler_budgets = {}
         self.explicit_holds = {}
         self.hold_refs = {}
+        self.mount_leases = {}
         self.frozen = set()
         self.freeze_all = False
         self.count = 0
@@ -157,6 +158,12 @@ class Inventory:
                         self.read_compiler_budget(fd, name, st)
                     if prefix.startswith(".gc/holds/"):
                         self.read_explicit_hold(fd, prefix, name, st)
+                    if prefix == ".gc/mount-leases":
+                        if name.startswith(".write-"):
+                            self.freeze_all = True
+                            self.error(relative, "invalid_mount_lease", "partial named record")
+                        else:
+                            self.read_mount_lease(fd, name, st)
                     if prefix == ".gc/copy-receipts":
                         self.read_copy_receipt(fd, name, st)
                     if prefix == ".gc/copy-handoffs":
@@ -253,6 +260,58 @@ class Inventory:
         except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
             self.freeze_all = True
             self.error(relative, "invalid_compiler_budget", str(exc))
+
+    def read_mount_lease(self, directory, name, before):
+        relative = ".gc/mount-leases/" + name
+        try:
+            if (not name.endswith(".ini") or str(uuid.UUID(name[:-4])) != name[:-4] or
+                    not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
+                    before.st_nlink != 1 or before.st_mode & 0o222 or
+                    not 0 < before.st_size <= 4096):
+                raise ValueError("unsafe mount lease")
+            fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW |
+                         os.O_NONBLOCK, dir_fd=directory)
+            try:
+                raw = os.read(fd, 4097)
+                if identity(os.fstat(fd)) != identity(before) or len(raw) != before.st_size:
+                    raise ValueError("mount lease changed during read")
+            finally:
+                os.close(fd)
+            parser = configparser.ConfigParser(interpolation=None, strict=True)
+            parser.read_string(raw.decode("ascii"))
+            if parser.defaults() or parser.sections() != ["mount"]:
+                raise ValueError("invalid mount lease sections")
+            value = dict(parser["mount"])
+            numbers = {"cache_device", "cache_inode", "object_device", "object_inode"}
+            if (set(value) != numbers | {"version", "id", "scope", "state", "source", "name"} or
+                    value["version"] != "1" or value["id"] != name[:-4] or
+                    value["scope"] not in {"CACHE", "SOURCE", "OBJECT"} or
+                    value["state"] not in {"ACTIVE", "RELEASED"}):
+                raise ValueError("invalid mount lease fields")
+            for key in numbers:
+                if not re.fullmatch(r"[0-9]+", value[key]) or int(value[key]) >= 2**64:
+                    raise ValueError("invalid mount lease integer")
+                value[key] = int(value[key])
+            cache = self.directories.get("")
+            if not cache or cache[:2] != (value["cache_device"], value["cache_inode"]):
+                raise ValueError("mount lease cache binding changed")
+            if value["scope"] == "CACHE":
+                valid_scope = value["source"] == value["name"] == "" and \
+                    value["object_device"] == value["object_inode"] == 0
+            elif value["scope"] == "SOURCE":
+                valid_scope = bool(re.fullmatch(SHA, value["source"])) and \
+                    value["name"] == "" and value["object_device"] == value["object_inode"] == 0
+            else:
+                valid_scope = bool(re.fullmatch(SHA, value["source"])) and \
+                    bool(GENERATED.fullmatch(value["name"])) and \
+                    GENERATED.fullmatch(value["name"])[1] == value["source"] and \
+                    value["object_device"] and value["object_inode"]
+            if not valid_scope:
+                raise ValueError("invalid mount lease scope")
+            self.mount_leases[relative] = dict(value, binding_observed=False)
+        except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
+            self.freeze_all = True
+            self.error(relative, "invalid_mount_lease", str(exc))
 
     def compiler_budget_report(self):
         bound_bytes = outstanding_bytes = unknown_tasks = 0
@@ -738,6 +797,14 @@ class Inventory:
                 holds.add("persistent_task_reference")
             if any(self.hold_refs.get(alias["path"]) for alias in aliases) or name in self.hold_refs:
                 holds.add("explicit_retention_reference")
+            for lease in self.mount_leases.values():
+                if lease["state"] != "ACTIVE" or not lease["binding_observed"]:
+                    continue
+                if (lease["scope"] == "CACHE" or
+                        (lease["scope"] == "SOURCE" and lease["source"] == source) or
+                        (lease["scope"] == "OBJECT" and lease["source"] == source and
+                         lease["name"] == name)):
+                    holds.add("mount_lease_reference")
             if source + ".current" not in self.manifests:
                 holds.add("missing_current_root")
             if self.freeze_all or source in self.frozen or self.errors:
@@ -777,6 +844,19 @@ class Inventory:
         return output
 
     def report(self):
+        for relative, lease in self.mount_leases.items():
+            cache = self.directories.get("")
+            cache_matched = bool(cache and cache[:2] ==
+                                 (lease["cache_device"], lease["cache_inode"]))
+            row = self.entries.get(lease["name"]) if lease["scope"] == "OBJECT" else None
+            object_matched = lease["scope"] != "OBJECT" or bool(
+                row and (row["device"], row["inode"]) ==
+                (lease["object_device"], lease["object_inode"]))
+            lease["binding_observed"] = cache_matched and object_matched
+            if not cache_matched or (not object_matched and
+                    (lease["state"] == "ACTIVE" or row is not None)):
+                self.freeze_all = True
+                self.error(relative, "mount_lease_binding_changed", lease["scope"])
         for relative, hold in self.explicit_holds.items():
             cache = self.directories.get("")
             row = self.entries.get(hold["name"])
@@ -1019,6 +1099,8 @@ class Inventory:
                 "compiler_budget_summary": compiler_budget_summary,
                 "explicit_hold_count": len(self.explicit_holds),
                 "explicit_holds": self.explicit_holds,
+                "mount_lease_count": len(self.mount_leases),
+                "mount_leases": self.mount_leases,
                 "transactions": self.transactions,
                 "retirement_plan": {"grace_us": self.grace_us,
                                     "clock": ({"boot_id": self.clock[0], "boottime_us": self.clock[1]}

@@ -35,6 +35,16 @@ int latcd_retirement_hold(const char *root, const char *source, const char *name
                            const char *id, const char *reason, bool release,
                            char *error, size_t error_size);
 
+/* Controlled mount participants acquire roots SH before exposing a mount and
+ * keep the returned CLOEXEC fd open for the mount lifetime. The durable ACTIVE
+ * record remains a hold after participant death until exact release. Scopes are
+ * CACHE, SOURCE, or OBJECT; non-participant mounts are outside this contract. */
+int latcd_retirement_mount_lease(const char *root, const char *id, const char *scope,
+                                 const char *source, const char *name,
+                                 char *error, size_t error_size);
+int latcd_retirement_mount_release(const char *root, const char *id, int lease_fd,
+                                   char *error, size_t error_size);
+
 /* Capture at most six immutable objects outside the daemon metadata lock.
  * Returned structured evidence is owned by the caller; NULL means unproven. */
 char *latcd_retirement_capture_objects(const char *root, const char *source,
