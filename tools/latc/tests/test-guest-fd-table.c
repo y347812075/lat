@@ -8,10 +8,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <poll.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -24,6 +27,157 @@ static bool close_gate_release;
 static int close_gate_fd = -1;
 
 int __real_close(int fd);
+int __real_fcntl(int fd, int command, ...);
+int __real_pthread_mutex_lock(pthread_mutex_t *mutex);
+
+static pthread_mutex_t copy_gate_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t copy_gate_condition = PTHREAD_COND_INITIALIZER;
+static bool copy_gate_enabled;
+static bool copy_gate_entered;
+static bool copy_gate_release;
+static bool copy_close_blocked;
+static _Thread_local bool probe_copy_close;
+
+int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex)
+{
+    if (probe_copy_close && mutex != &copy_gate_mutex) {
+        probe_copy_close = false;
+        int result = pthread_mutex_trylock(mutex);
+        assert(result == EBUSY);
+        assert(!__real_pthread_mutex_lock(&copy_gate_mutex));
+        copy_close_blocked = true;
+        pthread_cond_broadcast(&copy_gate_condition);
+        pthread_mutex_unlock(&copy_gate_mutex);
+    }
+    return __real_pthread_mutex_lock(mutex);
+}
+
+static int copy_fail_after = -1;
+static int copy_backends[8];
+static size_t copy_backend_count;
+static bool copy_track_backends;
+
+int __wrap_fcntl(int fd, int command, ...)
+{
+    if (command == F_GETFD) {
+        return __real_fcntl(fd, command);
+    }
+    assert(command == F_SETFD || command == F_DUPFD_CLOEXEC);
+    va_list arguments;
+    va_start(arguments, command);
+    int argument = va_arg(arguments, int);
+    va_end(arguments);
+    if (command == F_DUPFD_CLOEXEC) {
+        pthread_mutex_lock(&copy_gate_mutex);
+        if (copy_gate_enabled) {
+            copy_gate_entered = true;
+            pthread_cond_broadcast(&copy_gate_condition);
+            while (!copy_gate_release) {
+                pthread_cond_wait(&copy_gate_condition, &copy_gate_mutex);
+            }
+        }
+        pthread_mutex_unlock(&copy_gate_mutex);
+    }
+    if (command == F_DUPFD_CLOEXEC && copy_fail_after >= 0) {
+        if (!copy_fail_after--) {
+            errno = EMFILE;
+            return -1;
+        }
+    }
+    int result = __real_fcntl(fd, command, argument);
+    if (command == F_DUPFD_CLOEXEC && copy_track_backends && result >= 0) {
+        assert(copy_backend_count < sizeof(copy_backends) /
+                                    sizeof(copy_backends[0]));
+        copy_backends[copy_backend_count++] = result;
+    }
+    return result;
+}
+
+static void test_copy(void)
+{
+    GuestFdTable *source = guest_fd_table_new();
+    GuestFdTable *shared;
+    GuestFdTable *copy;
+    char path[4096];
+    const char *home = getenv("HOME");
+    int writer, duplicate, lowest;
+    bool cloexec;
+
+    assert(source);
+    assert(home);
+    assert(snprintf(path, sizeof(path), "%s/tmp/guest-fd-copy-XXXXXX",
+                    home) < (int)sizeof(path));
+    writer = mkstemp(path);
+    assert(writer >= 0);
+    assert(!unlink(path));
+    assert(write(writer, "abc", 3) == 3);
+    assert(lseek(writer, 0, SEEK_SET) == 0);
+    assert(!guest_fd_table_import(source, 7, writer, false));
+    assert(!guest_fd_table_dup_min(source, 7, 23, true, &duplicate));
+    assert(duplicate == 23);
+
+    /* A shared-table reference must see mutations; a copied table must not. */
+    shared = guest_fd_table_ref(source);
+    copy_track_backends = true;
+    copy_backend_count = 0;
+    copy = guest_fd_table_copy(source);
+    copy_track_backends = false;
+    assert(copy && copy != source && copy_backend_count == 2);
+    for (size_t i = 0; i < copy_backend_count; i++) {
+        assert(fcntl(copy_backends[i], F_GETFD) & FD_CLOEXEC);
+        assert(copy_backends[i] != writer);
+    }
+    assert(!guest_fd_table_get_cloexec(copy, 7, &cloexec) && !cloexec);
+    assert(!guest_fd_table_get_cloexec(copy, 23, &cloexec) && cloexec);
+    assert(!guest_fd_table_set_cloexec(shared, 7, true));
+    assert(!guest_fd_table_get_cloexec(source, 7, &cloexec) && cloexec);
+    assert(!guest_fd_table_get_cloexec(copy, 7, &cloexec) && !cloexec);
+    char byte;
+    assert(read(copy_backends[0], &byte, 1) == 1 && byte == 'a');
+    assert(lseek(writer, 0, SEEK_CUR) == 1);
+    assert(!guest_fd_table_close(shared, 23));
+    errno = 0;
+    assert(guest_fd_table_get_cloexec(source, 23, &cloexec) == -1 &&
+           errno == EBADF);
+    assert(!guest_fd_table_get_cloexec(copy, 23, &cloexec) && cloexec);
+    assert(!guest_fd_table_close(copy, 7));
+    assert(fcntl(writer, F_GETFD) >= 0);
+    assert(!guest_fd_table_dup_min(copy, 23, 0, false, &lowest) && lowest == 0);
+    guest_fd_table_unref(copy);
+    for (size_t i = 0; i < copy_backend_count; i++) {
+        errno = 0;
+        assert(fcntl(copy_backends[i], F_GETFD) == -1 && errno == EBADF);
+    }
+
+    assert(!guest_fd_table_dup_min(source, 7, 23, true, &duplicate));
+    for (int failure = 0; failure < 2; failure++) {
+        copy_track_backends = true;
+        copy_backend_count = 0;
+        copy_fail_after = failure;
+        errno = 0;
+        assert(!guest_fd_table_copy(source) && errno == EMFILE);
+        copy_fail_after = -1;
+        copy_track_backends = false;
+        assert(copy_backend_count == (size_t)failure);
+        for (size_t i = 0; i < copy_backend_count; i++) {
+            errno = 0;
+            assert(fcntl(copy_backends[i], F_GETFD) == -1 && errno == EBADF);
+        }
+        assert(fcntl(writer, F_GETFD) >= 0);
+        assert(!guest_fd_table_get_cloexec(source, 7, &cloexec) && cloexec);
+        assert(!guest_fd_table_get_cloexec(source, 23, &cloexec) && cloexec);
+    }
+    guest_fd_table_unref(shared);
+    guest_fd_table_unref(source);
+    source = guest_fd_table_new();
+    assert(source);
+    copy = guest_fd_table_copy(source);
+    assert(copy && copy != source);
+    guest_fd_table_unref(copy);
+    guest_fd_table_unref(source);
+    errno = 0;
+    assert(!guest_fd_table_copy(NULL) && errno == EINVAL);
+}
 
 int __wrap_close(int fd)
 {
@@ -51,6 +205,79 @@ typedef struct ForkJob {
     int result;
 } ForkJob;
 
+typedef struct CopyJob {
+    GuestFdTable *table;
+    GuestFdTable *copy;
+} CopyJob;
+
+static void *run_copy(void *opaque)
+{
+    CopyJob *job = opaque;
+
+    job->copy = guest_fd_table_copy(job->table);
+    return NULL;
+}
+
+static void *run_copy_close(void *opaque)
+{
+    CloseJob *job = opaque;
+
+    probe_copy_close = true;
+    job->result = guest_fd_table_close(job->table, job->guest_fd);
+    return NULL;
+}
+
+static void test_copy_close_serialization(void)
+{
+    GuestFdTable *source = guest_fd_table_new();
+    CopyJob copy = { .table = source };
+    CloseJob closer = { .table = source, .guest_fd = 17 };
+    pthread_t copy_thread, close_thread;
+    int pipefd[2];
+    bool cloexec;
+    char byte;
+
+    assert(source && !pipe2(pipefd, O_CLOEXEC));
+    assert(!guest_fd_table_import(source, 17, pipefd[1], false));
+    pthread_mutex_lock(&copy_gate_mutex);
+    copy_gate_enabled = true;
+    copy_gate_entered = copy_gate_release = copy_close_blocked = false;
+    pthread_mutex_unlock(&copy_gate_mutex);
+    assert(!pthread_create(&copy_thread, NULL, run_copy, &copy));
+    pthread_mutex_lock(&copy_gate_mutex);
+    while (!copy_gate_entered) {
+        pthread_cond_wait(&copy_gate_condition, &copy_gate_mutex);
+    }
+    pthread_mutex_unlock(&copy_gate_mutex);
+    assert(!pthread_create(&close_thread, NULL, run_copy_close, &closer));
+    pthread_mutex_lock(&copy_gate_mutex);
+    while (!copy_close_blocked) {
+        pthread_cond_wait(&copy_gate_condition, &copy_gate_mutex);
+    }
+    copy_gate_release = true;
+    pthread_cond_broadcast(&copy_gate_condition);
+    pthread_mutex_unlock(&copy_gate_mutex);
+    assert(!pthread_join(copy_thread, NULL));
+    assert(!pthread_join(close_thread, NULL));
+    assert(copy.copy && !closer.result);
+    pthread_mutex_lock(&copy_gate_mutex);
+    copy_gate_enabled = false;
+    pthread_mutex_unlock(&copy_gate_mutex);
+    errno = 0;
+    assert(guest_fd_table_get_cloexec(source, 17, &cloexec) == -1 &&
+           errno == EBADF);
+    assert(!guest_fd_table_get_cloexec(copy.copy, 17, &cloexec) && !cloexec);
+    /* Source close cannot release the copied pipe writer. */
+    struct pollfd reader = { .fd = pipefd[0], .events = POLLIN };
+    assert(poll(&reader, 1, 0) == 0);
+    assert(!guest_fd_table_close(copy.copy, 17));
+    assert(poll(&reader, 1, 0) == 1 && (reader.revents & POLLHUP));
+    assert(read(pipefd[0], &byte, 1) == 0);
+    assert(!close(pipefd[0]));
+    guest_fd_table_unref(copy.copy);
+    guest_fd_table_unref(source);
+}
+
 static void *run_close(void *opaque)
 {
     CloseJob *job = opaque;
@@ -73,6 +300,8 @@ static void *run_fork_start(void *opaque)
 
 int main(void)
 {
+    test_copy();
+    test_copy_close_serialization();
     GuestFdTable *table = guest_fd_table_new();
     GuestFdTable *thread_ref;
     int pipefd[2];

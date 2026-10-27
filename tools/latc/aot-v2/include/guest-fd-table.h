@@ -21,6 +21,16 @@ GuestFdTable *guest_fd_table_ref(GuestFdTable *table);
 void guest_fd_table_unref(GuestFdTable *table);
 
 /*
+ * Snapshot guest numbering and logical CLOEXEC under the source-table lock.
+ * Backends are duplicated with host CLOEXEC: OFDs remain shared, but subsequent
+ * descriptor mutations are independent. Failure leaves the source unchanged.
+ * This does not unshare the host fd table or integrate guest syscall handling.
+ * Duplicating/closing backends also has POSIX record-lock side effects; adapters
+ * must resolve those semantics before using this for guest unshare/clone.
+ */
+GuestFdTable *guest_fd_table_copy(GuestFdTable *table);
+
+/*
  * Import or adopt a host descriptor. Both consume host_fd on success and leave
  * ownership with the caller on failure. The backend is marked FD_CLOEXEC;
  * cloexec is the guest-visible state. adopt() returns the lowest unused guest

@@ -154,6 +154,50 @@ void guest_fd_table_unref(GuestFdTable *table)
     g_free(table);
 }
 
+GuestFdTable *guest_fd_table_copy(GuestFdTable *table)
+{
+    GuestFdTable *copy;
+    GHashTableIter iter;
+    gpointer key, value;
+
+    if (!table) {
+        errno = EINVAL;
+        return NULL;
+    }
+    copy = guest_fd_table_new();
+    if (!copy) {
+        return NULL;
+    }
+    pthread_mutex_lock(&table->mutex);
+    g_hash_table_iter_init(&iter, table->entries);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        const GuestFdEntry *source = value;
+        GuestFdEntry *entry = alloc_entry(-1, source->cloexec);
+
+        if (!entry) {
+            goto failed;
+        }
+        entry->host_fd = fcntl(source->host_fd, F_DUPFD_CLOEXEC, 0);
+        if (entry->host_fd < 0) {
+            g_free(entry);
+            goto failed;
+        }
+        insert_locked(copy, GPOINTER_TO_INT(key) - 1, entry);
+    }
+    pthread_mutex_unlock(&table->mutex);
+    return copy;
+
+failed:
+    {
+        int saved = errno;
+
+        pthread_mutex_unlock(&table->mutex);
+        guest_fd_table_unref(copy);
+        errno = saved;
+        return NULL;
+    }
+}
+
 int guest_fd_table_import(GuestFdTable *table, int guest_fd, int host_fd,
                           bool cloexec)
 {
