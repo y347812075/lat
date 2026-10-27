@@ -5892,22 +5892,31 @@ static void usage(const char *name)
             "  %s gc --hold-mount-lease --cache-dir DIR --lease-id UUID"
             " --scope CACHE|SOURCE|OBJECT [--source SHA256 --name OBJECT]\n"
             "  %s gc --release-mount-lease --cache-dir DIR --lease-id UUID\n"
+            "  %s gc --hold-object --cache-dir DIR --source SHA256 --name OBJECT"
+            " --hold-id UUID --reason ROLLBACK|MIGRATION|EXTERNAL\n"
+            "  %s gc --release-object-hold --cache-dir DIR --source SHA256 --name OBJECT"
+            " --hold-id UUID --reason ROLLBACK|MIGRATION|EXTERNAL\n"
             "  %s --build-id\n",
-            name, name, name, name, name, name, name, name, name, name, name, name);
+            name, name, name, name, name, name, name, name, name, name, name, name,
+            name, name);
 }
 
 static int run_gc_plan(int argc, char **argv)
 {
     bool plan = false, hold = false, release = false;
     bool init_domain = false, domain_status = false;
+    bool hold_object = false, release_object = false;
     const char *cache = NULL, *lease_id = NULL, *scope = NULL;
     const char *source = NULL, *name = NULL;
+    const char *hold_id = NULL, *reason = NULL;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--plan") && !plan) plan = true;
         else if (!strcmp(argv[i], "--init-domain") && !init_domain) init_domain = true;
         else if (!strcmp(argv[i], "--domain-status") && !domain_status) domain_status = true;
         else if (!strcmp(argv[i], "--hold-mount-lease") && !hold) hold = true;
         else if (!strcmp(argv[i], "--release-mount-lease") && !release) release = true;
+        else if (!strcmp(argv[i], "--hold-object") && !hold_object) hold_object = true;
+        else if (!strcmp(argv[i], "--release-object-hold") && !release_object) release_object = true;
         else if (!strcmp(argv[i], "--cache-dir") && !cache && i + 1 < argc)
             cache = argv[++i];
         else if (!strcmp(argv[i], "--lease-id") && !lease_id && i + 1 < argc)
@@ -5918,12 +5927,46 @@ static int run_gc_plan(int argc, char **argv)
             source = argv[++i];
         else if (!strcmp(argv[i], "--name") && !name && i + 1 < argc)
             name = argv[++i];
+        else if (!strcmp(argv[i], "--hold-id") && !hold_id && i + 1 < argc)
+            hold_id = argv[++i];
+        else if (!strcmp(argv[i], "--reason") && !reason && i + 1 < argc)
+            reason = argv[++i];
         else { usage(argv[0]); return 2; }
     }
-    if (plan + hold + release + init_domain + domain_status != 1 ||
+    if (plan + hold + release + init_domain + domain_status + hold_object + release_object != 1 ||
         !cache || !*cache) { usage(argv[0]); return 2; }
+    if (!(hold_object || release_object) && (hold_id || reason)) {
+        usage(argv[0]); return 2;
+    }
     char error[256] = {0};
     char domain_id[37] = {0};
+    if (hold_object || release_object) {
+        if (!source || !name || !hold_id || !reason || lease_id || scope) {
+            usage(argv[0]); return 2;
+        }
+        struct stat status;
+        if (lstat(cache, &status) || !S_ISDIR(status.st_mode) ||
+            status.st_uid != geteuid() || (status.st_mode & 0077)) {
+            fprintf(stderr, "latcd: object hold requires an existing private cache directory\n");
+            return 1;
+        }
+        LatcdConfig owner_config = { .cache_dir = cache, .socket_path = "gc-object-hold" };
+        int owner = acquire_cache_owner(&owner_config, error, sizeof(error));
+        if (owner < 0) {
+            fprintf(stderr, "latcd: object hold owner acquisition failed: %s\n", error);
+            return 1;
+        }
+        int result = latcd_retirement_hold(cache, source, name, hold_id, reason,
+                                            release_object, error, sizeof(error));
+        close(owner);
+        if (result) {
+            fprintf(stderr, "latcd: object hold update failed: %s\n", error);
+            return 1;
+        }
+        printf("object_hold=%s state=%s reason=%s name=%s\n", hold_id,
+               release_object ? "RELEASED" : "ACTIVE", reason, name);
+        return 0;
+    }
     if (init_domain) {
         if (lease_id || scope || source || name) { usage(argv[0]); return 2; }
         if (latcd_cache_domain_init(cache, domain_id, error, sizeof(error))) {

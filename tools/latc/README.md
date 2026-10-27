@@ -881,6 +881,28 @@ changing inventory exits nonzero while still emitting the report. Directory
 modes, hardlink aliases, lifecycle pins, and mount references still have to be
 admitted by the later reclamation batches.
 
+An offline cache owner can retain a specific immutable object for rollback,
+configuration migration, or external use. Stop the daemon first; the command
+requires its exclusive management lease and a pre-existing private cache root:
+
+```sh
+build/latcd/latcd gc --hold-object --cache-dir "$CACHE" \
+  --source "$SOURCE_SHA256" --name "$OBJECT_NAME" \
+  --hold-id "$HOLD_UUID" --reason ROLLBACK
+build/latcd/latcd gc --release-object-hold --cache-dir "$CACHE" \
+  --source "$SOURCE_SHA256" --name "$OBJECT_NAME" \
+  --hold-id "$HOLD_UUID" --reason ROLLBACK
+```
+
+Reasons are exactly `ROLLBACK`, `MIGRATION`, or `EXTERNAL`. Use the same source,
+object, UUID, and reason to release a hold. Multiple holders use distinct UUIDs;
+each must release its own hold. Holds have no automatic expiry, and released
+records remain as evidence. A released UUID cannot be reactivated; use a new
+UUID for a new hold. `gc --plan` reports the inode-bound records. These commands
+do not delete files, authenticate cache contents, admit non-participant mounts,
+or enable automatic GC. A multi-object migration must hold every required
+object before starting the migration; this interface is not a group transaction.
+
 Generation capacity is inventoried once before service admission, outside
 `cache_lock`. The index counts logical bytes of legal top-level generation
 objects (including legacy unversioned names) and `.superseded` objects, deduped
