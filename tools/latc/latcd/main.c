@@ -1971,9 +1971,9 @@ static void *compiler_input_recovery_worker(void *opaque)
             pthread_mutex_unlock(&retirement_queue_lock);
             if (timer >= 0) {
                 struct itimerspec deadline = {0};
-                if (retirement_safe && stats.complete && stats.next_deadline_us) {
-                    deadline.it_value.tv_sec = stats.next_deadline_us / 1000000;
-                    deadline.it_value.tv_nsec = (stats.next_deadline_us % 1000000) * 1000;
+                if (retirement_safe && stats.complete && stats.next_attempt_us) {
+                    deadline.it_value.tv_sec = stats.next_attempt_us / 1000000;
+                    deadline.it_value.tv_nsec = (stats.next_attempt_us % 1000000) * 1000;
                 }
                 if (timerfd_settime(timer, TFD_TIMER_ABSTIME, &deadline, NULL)) {
                     fprintf(stderr, "latcd: retirement timer arm failed; periodic discovery only: %s\n", strerror(errno));
@@ -3945,6 +3945,8 @@ static void write_stats_locked(LatcdService *service)
         ",\"retirement_next_deadline_boottime_us\":%" PRIu64
         ",\"retirement_oldest_due_wait_us\":%" PRIu64
         ",\"retirement_discovery_complete\":%s,\"automatic_deletion_enabled\":false"
+        ",\"retirement_ready_candidates\":%u,\"retirement_deferred_candidates\":%u"
+        ",\"retirement_next_attempt_boottime_us\":%" PRIu64
         ",\"retirement_timer_wakeups\":%" PRIu64 ",\"retirement_publication_wakeups\":%" PRIu64
         ",\"generation_capacity_ready\":%s,\"cache_domain_managed\":%s"
         ",\"cache_domain_id\":\"%s\"}\n",
@@ -3958,6 +3960,7 @@ static void write_stats_locked(LatcdService *service)
         publication_bytes, transient_bytes, recovered_bytes, journal_bytes, unknown_budgets, budget_recovery,
         retirement.candidates, retirement.due, retirement.next_deadline_us, retirement.oldest_due_wait_us,
         retirement.complete ? "true" : "false",
+        retirement.ready, retirement.deferred, retirement.next_attempt_us,
         timer_wakeups, publication_wakeups,
         capacity_ready ? "true" : "false", cache_domain_managed ? "true" : "false",
         cache_domain_managed ? cache_domain_id : "-");

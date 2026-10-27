@@ -125,7 +125,9 @@ int latcd_tombstone_delete_due_report(const char *root, const char *name, uint64
 typedef struct LatcdRetirementQueue LatcdRetirementQueue;
 typedef struct LatcdRetirementQueueStats {
     unsigned candidates, due, visited;
+    unsigned ready, deferred;
     uint64_t next_deadline_us, oldest_due_wait_us;
+    uint64_t next_attempt_us;
     bool complete;
 } LatcdRetirementQueueStats;
 
@@ -148,7 +150,7 @@ typedef struct LatcdRetirementAttempt {
 /* Single executor, one outstanding attempt. now_us is BOOTTIME used only for
  * scheduling, never deletion admission. Returns 1 selected, 0 no ready work,
  * -1 invalid use. Rotates sources and then least-recently-attempted objects.
- * Deferral preserves original age and uses bounded exponential busy backoff.
+ * Deferral preserves original age and uses 60s..3600s exponential busy backoff.
  * A stale completion token cannot change another attempt. No unlink occurs. */
 int latcd_retirement_queue_take(LatcdRetirementQueue *queue, uint64_t now_us,
                                 LatcdRetirementAttempt *attempt);

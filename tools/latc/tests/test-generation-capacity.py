@@ -86,6 +86,8 @@ def run(prefix, guest, work):
                     assert observed['retirement_publication_wakeups'], observed
                     assert not observed['retirement_due_candidates'], observed
                     assert observed['retirement_next_deadline_boottime_us'], observed
+                    assert observed['retirement_next_attempt_boottime_us'] == observed['retirement_next_deadline_boottime_us'], observed
+                    assert not observed['retirement_ready_candidates'] and not observed['retirement_deferred_candidates'], observed
                     break
                 assert daemon.poll() is None and time.monotonic() < deadline, observed
                 time.sleep(.05)
@@ -142,6 +144,8 @@ def run(prefix, guest, work):
                 assert not observed['requests'] and not observed['automatic_deletion_enabled'], observed
                 if observed['retirement_timer_wakeups'] and observed['retirement_due_candidates']:
                     assert observed['retirement_discovery_complete'], observed
+                    assert observed['retirement_ready_candidates'] == observed['retirement_due_candidates'], observed
+                    assert not observed['retirement_deferred_candidates'], observed
                     break
                 assert daemon.poll() is None and time.monotonic() < deadline, observed
                 time.sleep(.05)

@@ -1457,17 +1457,71 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         assert(!unlink(checkpoint));
         g_free(good_checkpoint); g_free(bad_checkpoint); g_key_file_unref(saved); g_free(checkpoint);
         LatcdRetirementAttempt attempts[3], invalid;
+        /* Persist retry deadlines without resetting the original enqueue age. */
+        restored = latcd_retirement_queue_new(root, 0);
+        do {
+            queued = latcd_retirement_queue_step(restored, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(!clock_gettime(CLOCK_BOOTTIME, &clock));
+        actual_now = (uint64_t)clock.tv_sec * 1000000 + clock.tv_nsec / 1000;
         for (unsigned i = 0; i < 3; i++) {
-            assert(latcd_retirement_queue_take(queue, UINT64_MAX - 10000000, &attempts[i]) == 1);
-            assert(latcd_retirement_queue_take(queue, UINT64_MAX - 10000000, &invalid) < 0);
+            assert(latcd_retirement_queue_take(restored, actual_now, &invalid) == 1);
+            assert(!latcd_retirement_queue_defer(restored, &invalid, actual_now, true));
+        }
+        assert(!latcd_retirement_queue_take(restored, actual_now + 59999999, &invalid));
+        do {
+            queued = latcd_retirement_queue_step(restored, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.due == 3 && stats.deferred == 3 && !stats.ready);
+        assert(!stats.next_deadline_us && stats.next_attempt_us == actual_now + 60000000);
+        assert(!latcd_retirement_queue_checkpoint(restored, error, sizeof(error)));
+        latcd_retirement_queue_free(restored);
+        restored = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_restore(restored, error, sizeof(error)));
+        do {
+            queued = latcd_retirement_queue_step(restored, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.deferred == 3 && stats.next_attempt_us == actual_now + 60000000);
+        assert(latcd_retirement_queue_take(restored, actual_now + 60000000, &invalid) == 1);
+        assert(!latcd_retirement_queue_defer(restored, &invalid, actual_now + 60000000, true));
+        for (unsigned i = 0; i < 24; i++) {
+            assert(latcd_retirement_queue_take(restored, actual_now + UINT64_C(3600000000), &invalid) == 1);
+            assert(!latcd_retirement_queue_defer(restored, &invalid, actual_now, true));
+        }
+        assert(!latcd_retirement_queue_checkpoint(restored, error, sizeof(error)));
+        do {
+            queued = latcd_retirement_queue_step(restored, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.deferred == 3 && stats.next_attempt_us == actual_now + UINT64_C(3600000000));
+        latcd_retirement_queue_free(restored);
+        restored = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_restore(restored, error, sizeof(error)));
+        do {
+            queued = latcd_retirement_queue_step(restored, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.deferred == 3 && stats.next_attempt_us == actual_now + UINT64_C(3600000000));
+        assert(!latcd_retirement_queue_take(restored, actual_now + UINT64_C(3599999999), &invalid));
+        assert(latcd_retirement_queue_take(restored, actual_now + UINT64_C(3600000000), &invalid) == 1);
+        assert(!latcd_retirement_queue_defer(restored, &invalid, actual_now, false));
+        assert(latcd_retirement_queue_take(restored, actual_now + 100000, &invalid) == 1);
+        latcd_retirement_queue_free(restored);
+        const uint64_t before_retry = UINT64_MAX - UINT64_C(10000000000);
+        for (unsigned i = 0; i < 3; i++) {
+            assert(latcd_retirement_queue_take(queue, before_retry, &attempts[i]) == 1);
+            assert(latcd_retirement_queue_take(queue, before_retry, &invalid) < 0);
             invalid = attempts[i]; invalid.sequence++;
             assert(latcd_retirement_queue_defer(queue, &invalid, 0, true) < 0);
             for (unsigned j = 0; j < i; j++) assert(strcmp(attempts[j].name, attempts[i].name));
-            assert(!latcd_retirement_queue_defer(queue, &attempts[i], UINT64_MAX - 10000000, true));
+            assert(!latcd_retirement_queue_defer(queue, &attempts[i], before_retry, true));
             assert(latcd_retirement_queue_defer(queue, &attempts[i], 0, true) < 0);
         }
-        assert(!latcd_retirement_queue_take(queue, UINT64_MAX - 10000000, &invalid));
-        assert(latcd_retirement_queue_take(queue, UINT64_MAX - 9800000, &invalid) == 1);
+        assert(!latcd_retirement_queue_take(queue, before_retry + 59999999, &invalid));
+        assert(latcd_retirement_queue_take(queue, before_retry + 60000000, &invalid) == 1);
         assert(!strcmp(invalid.name, attempts[0].name));
         assert(!latcd_retirement_queue_defer(queue, &invalid, UINT64_MAX, true));
         const char *other_source = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

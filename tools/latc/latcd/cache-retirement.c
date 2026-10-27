@@ -2018,6 +2018,9 @@ typedef struct RetirementCandidate {
     unsigned busy_count;
 } RetirementCandidate;
 
+#define RETIREMENT_BUSY_MIN_US UINT64_C(60000000)
+#define RETIREMENT_BUSY_MAX_US UINT64_C(3600000000)
+
 struct LatcdRetirementQueue {
     char *root;
     uint64_t grace, epoch;
@@ -2231,8 +2234,13 @@ out:
     g_hash_table_iter_init(&iterator, queue->candidates);
     while (g_hash_table_iter_next(&iterator, NULL, &value)) {
         RetirementCandidate *candidate = value;
+        uint64_t attempt = MAX(candidate->deadline, candidate->retry_at);
+        if (attempt > now && (!stats->next_attempt_us || attempt < stats->next_attempt_us))
+            stats->next_attempt_us = attempt;
         if (candidate->deadline <= now) {
             stats->due++;
+            if (candidate->retry_at > now) stats->deferred++;
+            else stats->ready++;
             uint64_t ready = MAX(candidate->deadline, candidate->enqueued);
             if (ready <= now) stats->oldest_due_wait_us = MAX(stats->oldest_due_wait_us, now - ready);
         } else if (!stats->next_deadline_us || candidate->deadline < stats->next_deadline_us)
@@ -2291,7 +2299,8 @@ int latcd_retirement_queue_defer(LatcdRetirementQueue *queue,
     RetirementCandidate *candidate = g_hash_table_lookup(queue->candidates, attempt->name);
     if (!candidate) return -1;
     candidate->busy_count = busy ? MIN(candidate->busy_count + 1, 7u) : 0;
-    uint64_t delay = busy ? MIN(UINT64_C(100000) << (candidate->busy_count - 1), UINT64_C(5000000)) : 100000;
+    uint64_t delay = busy ? MIN(RETIREMENT_BUSY_MIN_US << (candidate->busy_count - 1),
+                                RETIREMENT_BUSY_MAX_US) : 100000;
     candidate->retry_at = delay > UINT64_MAX - now_us ? UINT64_MAX : now_us + delay;
     memset(&queue->active, 0, sizeof(queue->active));
     return 0;
@@ -2404,7 +2413,7 @@ int latcd_retirement_queue_restore(LatcdRetirementQueue *queue,
             record_uint64(record, name, "retry_at", &retry) &&
             record_uint64(record, name, "busy_count", &busy) && busy <= 7;
         if (compatible) valid = valid && enqueued <= now &&
-            (retry <= now || retry - now <= UINT64_C(5000000));
+            (retry <= now || retry - now <= RETIREMENT_BUSY_MAX_US);
         if (valid && compatible) {
             RetirementCandidate *candidate = g_new0(RetirementCandidate, 1);
             candidate->enqueued = enqueued;
