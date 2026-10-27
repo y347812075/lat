@@ -1986,6 +1986,7 @@ static int recover_compiler_inputs(const LatcdConfig *config,
 typedef struct LatcdTaskRecovery {
     const LatcdConfig *config;
     atomic_bool stopping;
+    bool idle_exit;
 } LatcdTaskRecovery;
 
 static void *compiler_input_recovery_worker(void *opaque)
@@ -2076,6 +2077,23 @@ static void *compiler_input_recovery_worker(void *opaque)
     }
     if (cursor) closedir(cursor);
     if (timer >= 0) close(timer);
+    /* Explicit stop may reach this thread before a publisher finishes. The
+     * main thread requests the final handoff only after joining publishers. */
+    while (!atomic_load(&work->stopping)) poll(NULL, 0, 50);
+    if (retirement_safe) {
+        LatcdRetirementQueueStats stats;
+        latcd_retirement_queue_step(retirement, 32, 10000, &stats,
+                                    retirement_error, sizeof(retirement_error));
+        if (latcd_retirement_queue_handoff(retirement, work->idle_exit ? "IDLE" : "STOP",
+                                           retirement_error, sizeof(retirement_error)))
+            fprintf(stderr, "latcd: retirement exit handoff failed: %s; no unattended GC guarantee\n",
+                    retirement_error);
+        else
+            fprintf(stderr, "latcd: retirement exit handoff persisted (%s); pending rescan; no unattended GC guarantee\n",
+                    work->idle_exit ? "IDLE" : "STOP");
+    } else {
+        fprintf(stderr, "latcd: retirement exit handoff unavailable; no unattended GC guarantee\n");
+    }
     latcd_retirement_queue_free(retirement);
     return NULL;
 }
@@ -5636,6 +5654,7 @@ static int run_service(const LatcdConfig *config)
             if (config->idle_seconds &&
                 g_get_monotonic_time() - last_activity >=
                 (int64_t)config->idle_seconds * G_USEC_PER_SEC) {
+                task_recovery.idle_exit = true;
                 break;
             }
             continue;
@@ -5815,9 +5834,6 @@ static int run_service(const LatcdConfig *config)
         }
         close(client);
     }
-    atomic_store(&task_recovery.stopping, true);
-    retirement_notify();
-    if (recovery_started) pthread_join(recovery_thread, NULL);
     for (nfds_t i = 1; i < channel_count; i++) {
         close(channels[i].fd);
     }
@@ -5847,6 +5863,9 @@ static int run_service(const LatcdConfig *config)
     for (uint32_t i = 0; i < config->workers; i++) {
         pthread_join(service.workers[i], NULL);
     }
+    atomic_store(&task_recovery.stopping, true);
+    retirement_notify();
+    if (recovery_started) pthread_join(recovery_thread, NULL);
     atomic_store(&retirement_notify_fd, -1);
     if (retirement_event >= 0) close(retirement_event);
     pthread_mutex_lock(&service.lock);

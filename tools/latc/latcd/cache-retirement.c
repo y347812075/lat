@@ -2449,10 +2449,11 @@ int latcd_retirement_queue_cancel(LatcdRetirementQueue *queue,
     return latcd_retirement_queue_defer(queue, &queue->active, now, true);
 }
 
-int latcd_retirement_queue_checkpoint(LatcdRetirementQueue *queue,
-                                      char *error, size_t error_size)
+static int queue_checkpoint(LatcdRetirementQueue *queue, bool partial,
+                             char *error, size_t error_size)
 {
-    if (!queue || !queue->complete || queue->cursor || queue->execution)
+    if (!queue || (!partial && (!queue->complete || queue->cursor)) ||
+        queue->execution || *queue->active.name)
         return fail(error, error_size, "cannot checkpoint incomplete retirement discovery");
     int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int gc = root < 0 ? -1 : open_directory(root, ".gc", true);
@@ -2493,6 +2494,63 @@ out:
     if (gc >= 0) close(gc);
     if (root >= 0) close(root);
     return result ? fail(error, error_size, "cannot persist retirement scheduler") : 0;
+}
+
+int latcd_retirement_queue_checkpoint(LatcdRetirementQueue *queue,
+                                      char *error, size_t error_size)
+{
+    return queue_checkpoint(queue, false, error, error_size);
+}
+
+int latcd_retirement_queue_handoff(LatcdRetirementQueue *queue, const char *reason,
+                                   char *error, size_t error_size)
+{
+    if (!queue || !reason || (strcmp(reason, "IDLE") && strcmp(reason, "STOP")))
+        return fail(error, error_size, "invalid retirement handoff");
+    char *boot = NULL;
+    uint64_t now;
+    if (retirement_clock(&boot, &now))
+        return fail(error, error_size, "cannot timestamp retirement handoff");
+    int result = -1, root = -1, gc = -1;
+    GKeyFile *record = g_key_file_new();
+    struct stat cache;
+    if (latcd_retirement_queue_cancel(queue, error, error_size) ||
+        (*queue->active.name && latcd_retirement_queue_defer(queue, &queue->active, now, true)) ||
+        queue_checkpoint(queue, true, error, error_size)) goto out;
+    root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    gc = root < 0 ? -1 : open_directory(root, ".gc", false);
+    if (gc < 0 || fstat(root, &cache)) goto out;
+    g_key_file_set_integer(record, "handoff", "version", 1);
+    g_key_file_set_string(record, "handoff", "boot", boot);
+    g_key_file_set_uint64(record, "handoff", "cache_device", cache.st_dev);
+    g_key_file_set_uint64(record, "handoff", "cache_inode", cache.st_ino);
+    g_key_file_set_uint64(record, "handoff", "recorded_boottime_us", now);
+    g_key_file_set_uint64(record, "handoff", "grace_us", queue->grace);
+    g_key_file_set_string(record, "handoff", "reason", reason);
+    g_key_file_set_string(record, "handoff", "state", "PENDING_RESCAN");
+    g_key_file_set_boolean(record, "handoff", "discovery_complete", queue->complete);
+    g_key_file_set_boolean(record, "handoff", "unattended_gc_guaranteed", false);
+    g_key_file_set_boolean(record, "handoff", "automatic_deletion_enabled", false);
+    g_key_file_set_uint64(record, "handoff", "known_candidates", g_hash_table_size(queue->candidates));
+    uint64_t deferred = 0;
+    GHashTableIter iterator;
+    gpointer value;
+    g_hash_table_iter_init(&iterator, queue->candidates);
+    while (g_hash_table_iter_next(&iterator, NULL, &value))
+        if (((RetirementCandidate *)value)->retry_at > now) deferred++;
+    g_key_file_set_uint64(record, "handoff", "known_deferred", deferred);
+    char *previous = NULL;
+    size_t size;
+    int status = read_file(gc, "retirement-handoff.ini", RECORD_LIMIT, &previous, &size);
+    g_free(previous);
+    if (status < 0) goto out;
+    result = write_record(gc, "retirement-handoff.ini", record);
+out:
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    g_key_file_unref(record);
+    g_free(boot);
+    return result ? fail(error, error_size, "cannot persist retirement exit handoff") : 0;
 }
 
 int latcd_retirement_queue_restore(LatcdRetirementQueue *queue,

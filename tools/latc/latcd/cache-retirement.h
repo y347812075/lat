@@ -191,4 +191,10 @@ int latcd_retirement_queue_checkpoint(LatcdRetirementQueue *queue,
 int latcd_retirement_queue_restore(LatcdRetirementQueue *queue,
                                    char *error, size_t error_size);
 
+/* Single worker, after all publishers stop. Saves scheduling hints even for
+ * partial discovery, then a cache/boot-bound exit record. A fresh sweep and
+ * admission checks remain mandatory. reason is IDLE or STOP; no timer promise. */
+int latcd_retirement_queue_handoff(LatcdRetirementQueue *queue, const char *reason,
+                                   char *error, size_t error_size);
+
 #endif
