@@ -25,6 +25,41 @@ static bool generated_name(const char *name)
     return !strcmp(suffix, ".so") || !strcmp(suffix, ".native") || !strcmp(suffix, ".tbset");
 }
 
+static bool watched_name_expected(LatcdCacheCapacity *capacity, int watch)
+{
+    GHashTable *names = capacity->file_watches ?
+        g_hash_table_lookup(capacity->file_watches, GINT_TO_POINTER(watch)) : NULL;
+    if (!names || !capacity->expected_names) return false;
+    GHashTableIter iterator;
+    gpointer name;
+    g_hash_table_iter_init(&iterator, names);
+    while (g_hash_table_iter_next(&iterator, &name, NULL))
+        if (g_hash_table_contains(capacity->expected_names, name)) return true;
+    return false;
+}
+
+static int watch_generation_file(LatcdCacheCapacity *capacity, int parent,
+                                 const char *name)
+{
+    int file = openat(parent, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (file < 0) return errno == ENOENT ? 1 : -1;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", file);
+    int watch = inotify_add_watch(capacity->watch_fd, path,
+        IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF);
+    if (watch >= 0) {
+        GHashTable *names = g_hash_table_lookup(capacity->file_watches,
+                                                 GINT_TO_POINTER(watch));
+        if (!names) {
+            names = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+            g_hash_table_insert(capacity->file_watches, GINT_TO_POINTER(watch), names);
+        }
+        g_hash_table_add(names, g_strdup(name));
+    }
+    close(file);
+    return watch < 0 ? -1 : 0;
+}
+
 static void check_changes(LatcdCacheCapacity *capacity)
 {
     if (capacity->watch_fd < 0) return;
@@ -38,7 +73,8 @@ static void check_changes(LatcdCacheCapacity *capacity)
             struct inotify_event *event = (void *)(buffer.bytes + offset);
             if (event->mask & (IN_Q_OVERFLOW | IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED))
                 capacity->ready = false;
-            if (event->wd != capacity->root_watch && event->mask != IN_Q_OVERFLOW)
+            if (event->wd != capacity->root_watch && event->mask != IN_Q_OVERFLOW &&
+                (!(event->mask & IN_ATTRIB) || !watched_name_expected(capacity, event->wd)))
                 capacity->ready = false;
             if (event->len && (!strcmp(event->name, ".superseded") || generated_name(event->name)) &&
                 (!capacity->expected_names || !g_hash_table_contains(capacity->expected_names, event->name)))
@@ -59,7 +95,7 @@ static int scan_directory(int fd, unsigned depth, GHashTable *inodes, LatcdCache
         char path[64];
         snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
         if (inotify_add_watch(capacity->watch_fd, path, IN_CREATE | IN_DELETE | IN_MOVED_FROM |
-            IN_MOVED_TO | IN_MODIFY | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR) < 0) {
+            IN_MOVED_TO | IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR) < 0) {
             close(fd); return -1;
         }
     }
@@ -83,6 +119,9 @@ static int scan_directory(int fd, unsigned depth, GHashTable *inodes, LatcdCache
                 result = -1; break;
             }
         } else if (S_ISREG(st.st_mode) && st.st_size >= 0 && st.st_uid == geteuid()) {
+            /* A directory watch reports child events but cannot reliably observe
+             * an external hardlink changing attributes on the child inode. */
+            if (watch_generation_file(capacity, fd, name)) { result = -1; break; }
             char *key = g_strdup_printf("%llu:%llu", (unsigned long long)st.st_dev,
                                        (unsigned long long)st.st_ino);
             if (!g_hash_table_contains(inodes, key)) {
@@ -111,16 +150,20 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
     if (busy) return -1;
     latcd_cache_capacity_close(capacity);
     capacity->watch_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    capacity->root_fd = open(root, O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     capacity->expected_names = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    capacity->file_watches = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
+                                                   (GDestroyNotify)g_hash_table_unref);
     int watch = capacity->watch_fd < 0 ? -1 : inotify_add_watch(capacity->watch_fd, root,
-        IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY |
+        IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY | IN_ATTRIB |
         IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR | IN_DONT_FOLLOW);
     int fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     GHashTable *inodes = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     uint64_t total = 0;
     unsigned visited = 0;
     capacity->root_watch = watch;
-    int result = fd < 0 ? -1 : scan_directory(fd, 0, inodes, capacity, &visited, &total);
+    int result = fd < 0 || capacity->root_fd < 0 ? -1 :
+        scan_directory(fd, 0, inodes, capacity, &visited, &total);
     if (watch < 0) result = -1;
     g_hash_table_unref(inodes);
     pthread_mutex_lock(&capacity->lock);
@@ -192,16 +235,36 @@ void latcd_cache_capacity_complete(LatcdCacheCapacity *capacity, const char *con
 {
     pthread_mutex_lock(&capacity->lock);
     check_changes(capacity);
-    for (size_t i = 0; i < count; i++) g_hash_table_remove(capacity->expected_names, names[i]);
+    bool valid = capacity->ready && capacity->root_fd >= 0 && capacity->expected_names;
+    for (size_t i = 0; valid && i < count; i++) {
+        int watched = watch_generation_file(capacity, capacity->root_fd, names[i]);
+        valid = watched >= 0;
+    }
+    if (valid) for (size_t i = 0; i < count; i++)
+        g_hash_table_remove(capacity->expected_names, names[i]);
+    else capacity->ready = false;
     pthread_mutex_unlock(&capacity->lock);
+}
+
+int latcd_cache_capacity_poll(LatcdCacheCapacity *capacity)
+{
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
+    int ready = capacity->ready;
+    pthread_mutex_unlock(&capacity->lock);
+    return ready;
 }
 
 void latcd_cache_capacity_close(LatcdCacheCapacity *capacity)
 {
     if (capacity->watch_fd >= 0) close(capacity->watch_fd);
     capacity->watch_fd = -1;
+    if (capacity->root_fd >= 0) close(capacity->root_fd);
+    capacity->root_fd = -1;
     if (capacity->expected_names) g_hash_table_unref(capacity->expected_names);
     capacity->expected_names = NULL;
+    if (capacity->file_watches) g_hash_table_unref(capacity->file_watches);
+    capacity->file_watches = NULL;
     if (capacity->recovered_tasks) g_hash_table_unref(capacity->recovered_tasks);
     capacity->recovered_tasks = NULL;
     capacity->recovered_reserved = 0;

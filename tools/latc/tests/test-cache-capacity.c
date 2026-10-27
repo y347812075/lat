@@ -69,6 +69,28 @@ int main(void)
     assert(latcd_cache_capacity_reserve(&capacity, 0, UINT64_MAX, NULL, 0));
     assert(!unlink(legacy_change)); g_free(legacy_change);
     assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    /* Attribute-only changes must invalidate inventory without a content or
+     * directory-entry event, including a hardlink outside the watched root. */
+    assert(!chmod(module, 0600));
+    assert(latcd_cache_capacity_reserve(&capacity, 0, UINT64_MAX, NULL, 0));
+    assert(!chmod(module, 0400));
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    char *outside = g_dir_make_tmp("capacity-alias-XXXXXX", NULL);
+    assert(outside);
+    char *external_alias = g_build_filename(outside, "alias", NULL);
+    assert(!link(module, external_alias));
+    assert(latcd_cache_capacity_reserve(&capacity, 0, UINT64_MAX, NULL, 0));
+    assert(!unlink(external_alias) && !rmdir(outside));
+    g_free(external_alias); g_free(outside);
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    struct timespec stamp[2] = {{.tv_nsec = UTIME_NOW}, {.tv_sec = 1}};
+    assert(!utimensat(AT_FDCWD, native, stamp, 0));
+    assert(latcd_cache_capacity_reserve(&capacity, 0, UINT64_MAX, NULL, 0));
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    assert(!chmod(old, 0600));
+    assert(latcd_cache_capacity_reserve(&capacity, 0, UINT64_MAX, NULL, 0));
+    assert(!chmod(old, 0400));
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
     assert(capacity.committed == 15 && !capacity.reserved);
     assert(!latcd_cache_capacity_reserve(&capacity, 4, 20, NULL, 0));
     assert(!latcd_cache_capacity_journal(&capacity, 4, 4, true));

@@ -3201,7 +3201,6 @@ static int publish_covered_tbset(const LatcdConfig *config,
                 sync_error);
     }
     capacity_retained = true;
-    utimensat(AT_FDCWD, module_path, NULL, AT_SYMLINK_NOFOLLOW);
     snprintf(error, sizeof(error), "published covered TB set: %s",
              module_path);
     current_manifest_clear(&manifest);
@@ -3418,7 +3417,6 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
                     "latcd: committed cache-hit manifest sync failed: %s\n",
                     sync_error);
         }
-        utimensat(AT_FDCWD, final_module, NULL, AT_SYMLINK_NOFOLLOW);
         pthread_mutex_unlock(&cache_lock);
         snprintf(error, sizeof(error), "cache hit: %s", final_module);
         status = LATCD_STATUS_OK;
@@ -3911,6 +3909,7 @@ static void write_stats_locked(LatcdService *service)
     char *temporary = g_strdup_printf("%s.tmp.%ld",
         service->config->stats_path, (long)getpid());
     char contents[2048];
+    bool capacity_ready = latcd_cache_capacity_poll(&generation_capacity);
     pthread_mutex_lock(&generation_capacity.lock);
     uint64_t generation_bytes = generation_capacity.committed;
     uint64_t publication_bytes = generation_capacity.reserved;
@@ -3919,7 +3918,6 @@ static void write_stats_locked(LatcdService *service)
     uint64_t journal_bytes = generation_capacity.journal_reserved;
     unsigned unknown_budgets = generation_capacity.unknown_tasks ?
         g_hash_table_size(generation_capacity.unknown_tasks) : 0;
-    bool capacity_ready = generation_capacity.ready;
     int budget_recovery = atomic_load(&compiler_budget_recovery_state);
     pthread_mutex_unlock(&generation_capacity.lock);
     pthread_mutex_lock(&retirement_queue_lock);

@@ -17,11 +17,14 @@ typedef struct LatcdCacheCapacity {
     void *unknown_tasks;
     bool ready;
     int watch_fd;
+    int root_fd;
     int root_watch;
     void *expected_names;
+    void *file_watches;
 } LatcdCacheCapacity;
 
-#define LATCD_CACHE_CAPACITY_INIT { .lock = PTHREAD_MUTEX_INITIALIZER, .watch_fd = -1 }
+#define LATCD_CACHE_CAPACITY_INIT { .lock = PTHREAD_MUTEX_INITIALIZER, \
+    .watch_fd = -1, .root_fd = -1 }
 
 /* Startup only, under the owner lease, before publishers start. Counts immutable
  * generation objects and legacy superseded objects; not all cache state. */
@@ -51,6 +54,8 @@ int latcd_cache_capacity_expect(LatcdCacheCapacity *capacity, const char *const 
                                 size_t count, char *error, size_t error_size);
 void latcd_cache_capacity_complete(LatcdCacheCapacity *capacity, const char *const *names,
                                    size_t count);
+/* Drain pending namespace/attribute events and report current admission state. */
+int latcd_cache_capacity_poll(LatcdCacheCapacity *capacity);
 void latcd_cache_capacity_close(LatcdCacheCapacity *capacity);
 
 #endif

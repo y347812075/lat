@@ -516,13 +516,19 @@ static void test_incremental_retention(const char *compiler, unsigned mode)
         .max_cache_bytes = UINT64_C(1073741824),
         .address_space_limit = RLIM_INFINITY, .file_size_limit = RLIM_INFINITY};
     char error[256];
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory,
+        error, sizeof(error)), ==, 0);
     LatAotModuleInfoV2 info;
     g_assert_cmpint(lat_aot_v2_module_inspect_file(old, &info, error, sizeof(error)), ==, 0);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
         input_name, &info, 1, true, error, sizeof(error)), ==, 0);
     pthread_mutex_unlock(&cache_lock);
-    if (mode == 3) g_assert_cmpint(g_unlink(native), ==, 0);
+    if (mode == 3) {
+        g_assert_cmpint(g_unlink(native), ==, 0);
+        g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory,
+            error, sizeof(error)), ==, 0);
+    }
     g_assert_cmpint(persisted_manifest_valid(&config, hex, digest), ==, mode != 3);
     char *manifest = g_strdup_printf("%s/%s.current", directory, hex);
     gchar *before, *after;
@@ -1269,6 +1275,8 @@ int main(int argc, char **argv)
     g_assert_true(g_file_get_contents(manifest, &before, NULL, NULL));
     char *trigger = g_build_filename(directory, "failpoint", NULL);
     g_assert_true(g_file_set_contents(trigger, "1", 1, NULL));
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory,
+        error, sizeof(error)), ==, 0);
     setenv("LATCD_TEST_FAIL_BEFORE_MANIFEST", trigger, 1);
     setenv("LATCD_COMPILE_TMPDIR", g_get_tmp_dir(), 1);
     memset(&response, 0, sizeof(response));
@@ -1300,6 +1308,10 @@ int main(int argc, char **argv)
     daemon_fixture(new_path, keys, 3);
     g_assert_true(g_file_set_contents(hit_native, "native", 6, NULL));
     g_assert_true(g_file_set_contents(hit_tbset, input_data, input_size, NULL));
+    /* Direct fixture construction bypasses daemon publication events. Rebuild
+     * the real capacity inventory before exercising the publication path. */
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory,
+        error, sizeof(error)), ==, 0);
     g_assert_cmpint(publish_snapshot(&config, 0, new_path, input, input,
         false, digest, 4, &response), ==, -1);
     g_assert_cmpint(response.status, ==, LATCD_STATUS_INVALID_MODULE);
@@ -1312,6 +1324,8 @@ int main(int argc, char **argv)
     g_unlink(hit);
     g_unlink(hit_native);
     g_unlink(hit_tbset);
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory,
+        error, sizeof(error)), ==, 0);
     g_free(hit_name);
     g_free(hit);
     g_free(hit_native);
