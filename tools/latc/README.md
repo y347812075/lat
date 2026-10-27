@@ -921,8 +921,17 @@ participate in the same cache byte limit. Failed cleanup retains a conservative
 charge and closes admission. Finishing an existing record may exceed the limit
 to preserve already-committed transactions; ordinary new compile admission then
 stays closed. This is logical regular-file accounting, not a filesystem quota:
-directory blocks, manifest/key/source state outside `.gc`, uncontrolled external
+directory blocks, uncontrolled external
 changes, and pre-inventory recovery peak space are not covered by this counter.
+
+Current manifests and regular files beneath `.tbsets`/`.identities` are accounted
+separately as `persistent_state_bytes`, with `persistent_state_reserved_bytes`
+covering new-file coexistence during owned writes. They share the same byte
+limit; ordinary state replacements do not get the lifecycle completion
+over-limit exception. Failed writes retain the previous state, and uncertain
+cleanup closes admission with a conservative charge. Startup rejects aliased
+or unsafe state. This does not yet monitor external modifications to these
+state files or account for their directory blocks and all recovery peaks.
 
 Inotify detects unexpected root generation or legacy-subtree changes and queue
 overflow, invalidating subsequent capacity admission until startup inventory.

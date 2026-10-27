@@ -970,6 +970,93 @@ static void test_compile_space(void)
     g_assert_cmpuint(n, ==, UINT64_MAX - 1);
 }
 
+static void test_persistent_state_capacity(void)
+{
+    char *directory = g_dir_make_tmp("latcd-state-capacity-XXXXXX", NULL);
+    char *temporary = g_build_filename(directory, ".tmp", NULL);
+    g_assert_cmpint(g_mkdir(temporary, 0700), ==, 0);
+    uint8_t digest[32];
+    memset(digest, 0x11, sizeof(digest));
+    char hex[65], error[256] = {0};
+    digest_hex(digest, hex);
+    char *module_name = g_strconcat(hex, ".so", NULL);
+    char *native_name = g_strconcat(hex, ".native", NULL);
+    char *module = g_build_filename(directory, module_name, NULL);
+    char *native = g_build_filename(directory, native_name, NULL);
+    char *manifest = g_strconcat(directory, "/", hex, ".current", NULL);
+    char *input = g_build_filename(directory, "incoming", NULL);
+    LatAotTbV2 tbs[] = {{.guest_rva = 0x100, .flags = 3}};
+    daemon_fixture(module, tbs, 1);
+    g_assert_true(g_file_set_contents(native, "native", 6, NULL));
+    g_assert_cmpint(g_chmod(native, 0444), ==, 0);
+    LatTbKey keys[] = {{.guest_rva = 0x100, .flags = 3},
+                      {.guest_rva = 0x200, .flags = 3}};
+    LatTbKeySet set = {.keys = keys, .count = 1, .sequence = 1};
+    memcpy(set.source_sha256, digest, 32);
+    int fd = open(input, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(lat_tb_key_set_write_fd(fd, &set, error, sizeof(error)), ==, 0);
+    LatcdConfig config = {.cache_dir = directory, .max_cache_bytes = UINT64_C(1073741824)};
+    char *canonical = NULL;
+    g_assert_cmpint(merge_tbset(&config, digest, input, &canonical, NULL, error, sizeof(error)), ==, 0);
+    LatAotModuleInfoV2 info;
+    g_assert_cmpint(lat_aot_v2_module_inspect_file(module, &info, error, sizeof(error)), ==, 0);
+    pthread_mutex_lock(&cache_lock);
+    g_assert_cmpint(publish_current_index(&config, hex, module_name, native_name,
+        "", &info, 1, true, error, sizeof(error)), ==, 0);
+    pthread_mutex_unlock(&cache_lock);
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory, error, sizeof(error)), ==, 0);
+    uint64_t initial = generation_capacity.state_committed;
+    uint64_t exact = initial + generation_capacity.committed + generation_capacity.metadata_committed;
+    latcd_cache_capacity_metadata_bind(&generation_capacity, exact);
+    gchar *before, *after, *key_before, *key_after;
+    gsize key_before_size, key_after_size;
+    g_assert_true(g_file_get_contents(manifest, &before, NULL, NULL));
+    g_assert_true(g_file_get_contents(canonical, &key_before, &key_before_size, NULL));
+    pthread_mutex_lock(&cache_lock);
+    g_assert_cmpint(publish_current_index(&config, hex, module_name, native_name,
+        "", &info, 2, true, error, sizeof(error)), ==, -1);
+    pthread_mutex_unlock(&cache_lock);
+    g_assert_nonnull(strstr(error, "capacity:"));
+    g_assert_true(g_file_get_contents(manifest, &after, NULL, NULL));
+    g_assert_cmpstr(before, ==, after);
+    g_free(after);
+    set.count = 2;
+    g_assert_cmpint(lat_tb_key_set_write_fd(fd, &set, error, sizeof(error)), ==, 0);
+    char *next = NULL;
+    g_assert_cmpint(merge_tbset(&config, digest, input, &next, NULL, error, sizeof(error)), ==, -1);
+    g_assert_nonnull(strstr(error, "capacity:"));
+    g_assert_null(next);
+    g_assert_true(g_file_get_contents(canonical, &key_after, &key_after_size, NULL));
+    g_assert_cmpmem(key_before, key_before_size, key_after, key_after_size);
+    g_free(key_after);
+    struct stat identity;
+    g_assert_cmpint(fstat(fd, &identity), ==, 0);
+    publish_source_identity(&config, &identity, digest); /* Optional index can skip ENOSPC. */
+    g_assert_cmpuint(generation_capacity.state_committed, ==, initial);
+    g_assert_cmpuint(generation_capacity.state_reserved, ==, 0);
+    g_assert_true(generation_capacity.ready);
+    latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
+    g_assert_cmpint(merge_tbset(&config, digest, input, &next, NULL, error, sizeof(error)), ==, 0);
+    g_free(next);
+    publish_source_identity(&config, &identity, digest);
+    pthread_mutex_lock(&cache_lock);
+    g_assert_cmpint(publish_current_index(&config, hex, module_name, native_name,
+        "", &info, 2, true, error, sizeof(error)), ==, 0);
+    pthread_mutex_unlock(&cache_lock);
+    g_assert_cmpuint(generation_capacity.state_committed, ==, initial + sizeof(LatTbKey) + 65);
+    g_assert_cmpuint(generation_capacity.state_reserved, ==, 0);
+    uint64_t final = generation_capacity.state_committed;
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory, error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(generation_capacity.state_committed, ==, final);
+    latcd_cache_capacity_close(&generation_capacity);
+    close(fd);
+    g_free(before); g_free(key_before); g_free(canonical);
+    remove_fixture_tree(directory);
+    g_free(directory); g_free(temporary); g_free(module_name); g_free(native_name);
+    g_free(module); g_free(native); g_free(manifest); g_free(input);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && (!strcmp(argv[1], "build-id") ||
@@ -978,6 +1065,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc == 1) {
+        test_persistent_state_capacity();
         test_copy_root_recovery();
         test_compiler_input_recovery();
         test_task_record_persistence();

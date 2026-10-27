@@ -996,14 +996,15 @@ orphan=$cache/0000000000000000000000000000000000000000000000000000000000000000-1
 truncate -s 268429312 "$orphan"
 cp "$guest" "$work/capacity-b.elf"
 printf z >>"$work/capacity-b.elf"
-submit_source "$socket" "$work/capacity-b.elf" "$phase/b.client"
-set +e
-"$latcd" --flush-source --socket "$socket" "$work/capacity-b.elf" \
-  >"$phase/b-flush.client"
-capacity_status=$?
-set -e
-test "$capacity_status" -ne 0
-wait_stats 's["failed"] == 1 and s["active_jobs"] == 0'
+if submit_source "$socket" "$work/capacity-b.elf" "$phase/b.client"; then
+    echo "unsafe capacity admission unexpectedly accepted" >&2
+    exit 1
+fi
+grep -q '^accepted_sequence=0$' "$phase/b.client"
+grep -q 'capacity:' "$phase/b.client"
+"$latcd" --flush-source --socket "$socket" "$guest" >"$phase/a-reflush.client"
+grep -q '^status=0$' "$phase/a-reflush.client"
+wait_stats 's["failed"] == 0 and s["active_jobs"] == 0 and not s["generation_capacity_ready"]'
 python3 - "$cache" "$guest" "$phase/published.json" <<'PY'
 import hashlib
 import json

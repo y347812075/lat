@@ -50,17 +50,27 @@ def run(prefix, guest, work):
         raise AssertionError("worker statistics did not settle")
 
     def metadata_settled():
+        def state_bytes():
+            paths = list(cache.glob('*.current'))
+            for directory in ('.tbsets', '.identities'):
+                paths.extend(path for path in (cache / directory).rglob('*') if path.is_file())
+            return sum(path.stat().st_size for path in paths)
+
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             before = sum(path.stat().st_size for path in (cache / '.gc').rglob('*') if path.is_file())
+            state_before = state_bytes()
             value = json.loads(stats.read_bytes())
             after = sum(path.stat().st_size for path in (cache / '.gc').rglob('*') if path.is_file())
             if (before == after == value['lifecycle_metadata_bytes'] and
-                    not value['lifecycle_metadata_reserved_bytes']):
+                    not value['lifecycle_metadata_reserved_bytes'] and
+                    state_before == state_bytes() == value['persistent_state_bytes'] and
+                    not value['persistent_state_reserved_bytes']):
                 assert before > 0
+                assert state_before > 0
                 return value
             time.sleep(.02)
-        raise AssertionError((before, after, value))
+        raise AssertionError((before, after, state_before, state_bytes(), value))
 
     source = hashlib.sha256(guest.read_bytes()).hexdigest()
     current = cache / (source + ".current")
@@ -173,11 +183,26 @@ def run(prefix, guest, work):
             second_keys = work / "second.tbset"
             subprocess.run([sys.executable, str(Path(__file__).with_name("make-tbset.py")),
                             str(second), str(second_keys)], env=env, check=True)
-            client("external-change", second_keys, second, False)
-            rejected = settled(0, 1)
+            result = subprocess.run([str(latcd), '--submit', '--socket', str(socket),
+                                     '--tbset', str(second_keys), str(second)], env=env,
+                                    capture_output=True, timeout=30)
+            (work / 'external-change-submit.log').write_bytes(result.stdout + result.stderr)
+            assert result.returncode != 0 and b'capacity:' in result.stdout
+            assert b'accepted_sequence=0\n' in result.stdout
+            result = subprocess.run([str(latcd), '--flush-source', '--socket', str(socket),
+                                     str(guest)], env=env, capture_output=True, timeout=30)
+            (work / 'external-change-old-flush.log').write_bytes(result.stdout + result.stderr)
+            assert result.returncode == 0, result.stdout
+            deadline = time.monotonic() + 10
+            while True:
+                rejected = settled(0, 0)
+                if not rejected['generation_capacity_ready']:
+                    break
+                assert daemon.poll() is None and time.monotonic() < deadline, rejected
+                time.sleep(.02)
             assert not rejected["generation_capacity_ready"]
             assert current.read_bytes() == updated and orphan.read_bytes() == b"external generation"
-            assert b"capacity:" in (work / "daemon.log").read_bytes()
+            assert not rejected['persistent_state_reserved_bytes']
         finally:
             if daemon.poll() is None:
                 daemon.send_signal(signal.SIGTERM)

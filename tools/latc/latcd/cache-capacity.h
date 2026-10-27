@@ -15,6 +15,8 @@ typedef struct LatcdCacheCapacity {
     uint64_t journal_reserved;
     uint64_t metadata_committed;
     uint64_t metadata_reserved;
+    uint64_t state_committed;
+    uint64_t state_reserved;
     void *recovered_tasks;
     void *unknown_tasks;
     bool ready;
@@ -30,7 +32,8 @@ typedef struct LatcdCacheCapacity {
 
 /* Startup only, under the owner lease, before publishers start. Counts immutable
  * generation/legacy superseded objects plus .gc regular-file metadata separately;
- * not all cache state. Unsafe/aliased metadata closes admission. */
+ * and current/.tbsets/.identities state separately. Not all cache state.
+ * Unsafe/aliased metadata or state closes admission. */
 int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
                               char *error, size_t error_size);
 int latcd_cache_capacity_reserve(LatcdCacheCapacity *capacity, uint64_t bytes,
@@ -59,6 +62,7 @@ void latcd_cache_capacity_metadata_bind(LatcdCacheCapacity *capacity, uint64_t l
 typedef struct LatcdMetadataReservation {
     LatcdCacheCapacity *capacity;
     uint64_t bytes, previous;
+    bool state;
 } LatcdMetadataReservation;
 int latcd_cache_capacity_metadata_begin(int directory, const char *name, uint64_t bytes,
     LatcdMetadataReservation *reservation);
@@ -67,6 +71,11 @@ int latcd_cache_capacity_metadata_begin(int directory, const char *name, uint64_
  * Caller serializes replacement of the same record. No filesystem scan here. */
 void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
     bool replaced, bool leftover);
+/* Ordinary persistent state has no committed-transaction over-limit exception.
+ * Allowed directories: root (only SHA.current), .tbsets, .identities.
+ * Caller serializes same-record replacement through finish. Uses metadata bind. */
+int latcd_cache_capacity_state_begin(int directory, const char *name, uint64_t bytes,
+    LatcdMetadataReservation *reservation);
 /* Bracket owned root namespace writes; unexpected changes invalidate admission.
  * Names stay registered through cleanup, including while cache_lock is dropped. */
 int latcd_cache_capacity_expect(LatcdCacheCapacity *capacity, const char *const *names,

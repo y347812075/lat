@@ -849,6 +849,12 @@ static void publish_source_identity(const LatcdConfig *config,
         (unsigned long)status->st_ctim.tv_nsec);
     char *final = g_build_filename(directory, name, NULL);
     char *temporary = g_strdup_printf("%s.tmp.%ld", final, (long)getpid());
+    pthread_mutex_lock(&cache_lock);
+    int directory_fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    LatcdMetadataReservation reservation = {0};
+    if (directory_fd < 0 || latcd_cache_capacity_state_begin(
+            directory_fd, name, 65, &reservation)) goto identity_done;
+    bool installed = false, leftover = false;
     int fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
                   O_NOFOLLOW, 0600);
     if (fd >= 0) {
@@ -860,15 +866,20 @@ static void publish_source_identity(const LatcdConfig *config,
         }
         text[64] = '\n';
         if (write(fd, text, sizeof(text)) == sizeof(text) && !fsync(fd)) {
-            close(fd);
+            if (close(fd)) leftover = true;
             fd = -1;
-            if (!rename(temporary, final)) {
+            if (!leftover && !rename(temporary, final)) {
+                installed = true;
                 sync_directory(directory, error, sizeof(error));
             }
         }
-        if (fd >= 0) close(fd);
-        unlink(temporary);
+        if (fd >= 0 && close(fd)) leftover = true;
+        if (unlink(temporary) && errno != ENOENT) leftover = true;
     }
+    latcd_cache_capacity_metadata_finish(&reservation, installed, leftover);
+identity_done:
+    if (directory_fd >= 0) close(directory_fd);
+    pthread_mutex_unlock(&cache_lock);
     g_free(temporary);
     g_free(final);
     g_free(name);
@@ -990,7 +1001,6 @@ static int merge_tbset(const LatcdConfig *config, const uint8_t digest[32],
     }
     char *name = g_strdup_printf("%s.tbset", source_hex);
     char *final = g_build_filename(directory, name, NULL);
-    g_free(name);
     LatTbKeySet incoming_set = {0};
     LatTbKeySet existing = {0};
     LatTbKeySet merged = {0};
@@ -1037,12 +1047,23 @@ static int merge_tbset(const LatcdConfig *config, const uint8_t digest[32],
                                       error, error_size);
     }
     char *temporary = NULL;
+    LatcdMetadataReservation reservation = {0};
+    bool installed = false, leftover = false;
     if (!result) {
         bool content_changed = merged.count != original_count;
         merged.sequence = content_changed ? original_sequence + 1 :
                                             original_sequence;
         if (changed) *changed = content_changed;
         if (!content_changed) goto merged_done;
+        int directory_fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (merged.count > (UINT64_MAX - sizeof(LatTbKeyFileHeader)) / sizeof(LatTbKey) ||
+            directory_fd < 0 || latcd_cache_capacity_state_begin(directory_fd, name,
+                sizeof(LatTbKeyFileHeader) + merged.count * sizeof(LatTbKey), &reservation)) {
+            result = fail(error, error_size, "capacity: cannot reserve canonical TB set: %s",
+                          strerror(errno));
+        }
+        if (directory_fd >= 0) close(directory_fd);
+        if (result) goto merged_done;
         temporary = g_build_filename(directory, "tbset-XXXXXX", NULL);
         int fd = g_mkstemp_full(temporary, O_RDWR | O_CLOEXEC, 0600);
         if (fd < 0) {
@@ -1050,10 +1071,11 @@ static int merge_tbset(const LatcdConfig *config, const uint8_t digest[32],
         } else {
             if (lat_tb_key_set_write_fd(fd, &merged, error, error_size) ||
                 fsync(fd)) result = -1;
-            if (close(fd)) result = -1;
+            if (close(fd)) { result = -1; leftover = true; }
             if (!result && rename(temporary, final)) {
                 result = -1;
             } else if (!result) {
+                installed = true;
                 result = sync_directory(directory, error, error_size);
             }
             if (result && !error[0]) {
@@ -1063,13 +1085,15 @@ static int merge_tbset(const LatcdConfig *config, const uint8_t digest[32],
         }
     }
 merged_done:
-    if (result && temporary) unlink(temporary);
+    if (result && temporary && unlink(temporary) && errno != ENOENT) leftover = true;
+    latcd_cache_capacity_metadata_finish(&reservation, installed, leftover);
     pthread_mutex_unlock(&cache_lock);
     lat_tb_key_set_destroy(&incoming_set);
     lat_tb_key_set_destroy(&existing);
     lat_tb_key_set_destroy(&merged);
     g_free(temporary);
     g_free(directory);
+    g_free(name);
     if (result) {
         g_free(final);
         return -1;
@@ -2954,16 +2978,32 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         published_sequence);
     g_free(module_sha256);
     g_free(native_sha256);
-    ssize_t written = write(fd, contents->str, contents->len);
+    char *final_name = g_strdup_printf("%s.current", hex);
+    int directory_fd = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    LatcdMetadataReservation reservation = {0};
     int result = 0;
-    if (written != (ssize_t)contents->len || fchmod(fd, 0444) || fsync(fd)) {
-        result = fail(error, error_size, "cannot write current index: %s",
+    bool installed = false, leftover = false;
+    if (directory_fd < 0 || latcd_cache_capacity_state_begin(
+            directory_fd, final_name, contents->len, &reservation)) {
+        result = fail(error, error_size, "capacity: cannot reserve current index: %s",
                       strerror(errno));
     }
+    if (directory_fd >= 0) close(directory_fd);
+    g_free(final_name);
+    if (!result) {
+        ssize_t written = write(fd, contents->str, contents->len);
+        if (written != (ssize_t)contents->len || fchmod(fd, 0444) || fsync(fd)) {
+            result = fail(error, error_size, "cannot write current index: %s",
+                          strerror(errno));
+        }
+    }
     char *transaction = NULL;
-    if (close(fd) && !result) {
-        result = fail(error, error_size, "cannot close current index: %s",
-                      strerror(errno));
+    if (close(fd)) {
+        leftover = true;
+        if (!result) {
+            result = fail(error, error_size, "cannot close current index: %s",
+                          strerror(errno));
+        }
     }
     char *final = g_strdup_printf("%s/%s.current", config->cache_dir, hex);
     if (!result && latcd_retirement_prepare(config->cache_dir, hex,
@@ -2978,16 +3018,19 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         if (rename(temporary, final)) {
             result = fail(error, error_size, "cannot publish current index: %s",
                           strerror(errno));
-        } else if (crash && !strcmp(crash, "current")) {
-            raise(SIGKILL);
-        } else if (!sync_directory(config->cache_dir, error, error_size) &&
+        } else {
+            installed = true;
+            if (crash && !strcmp(crash, "current")) raise(SIGKILL);
+            if (!sync_directory(config->cache_dir, error, error_size) &&
                    crash && !strcmp(crash, "current-synced")) {
-            raise(SIGKILL);
+                raise(SIGKILL);
+            }
         }
     }
     if (result) {
-        unlink(temporary);
+        if (unlink(temporary) && errno != ENOENT) leftover = true;
     }
+    latcd_cache_capacity_metadata_finish(&reservation, installed, leftover);
     if (transaction) {
         char retirement_error[256] = {0};
         if (latcd_retirement_finish(config->cache_dir, transaction,
@@ -3808,7 +3851,8 @@ static int process_request(const LatcdConfig *config, int source_fd,
     if (tbset && !static_tbset &&
         merge_tbset(config, response->source_sha256, tbset,
                                &canonical, NULL, error, sizeof(error))) {
-        response->status = LATCD_STATUS_BAD_REQUEST;
+        response->status = g_str_has_prefix(error, "capacity:") ?
+            LATCD_STATUS_QUEUE_FULL : LATCD_STATUS_BAD_REQUEST;
         goto out;
     }
     result = publish_snapshot(config, 0, snapshot,
@@ -3928,6 +3972,8 @@ static void write_stats_locked(LatcdService *service)
     uint64_t journal_bytes = generation_capacity.journal_reserved;
     uint64_t metadata_bytes = generation_capacity.metadata_committed;
     uint64_t metadata_reserved = generation_capacity.metadata_reserved;
+    uint64_t state_bytes = generation_capacity.state_committed;
+    uint64_t state_reserved = generation_capacity.state_reserved;
     unsigned unknown_budgets = generation_capacity.unknown_tasks ?
         g_hash_table_size(generation_capacity.unknown_tasks) : 0;
     int budget_recovery = atomic_load(&compiler_budget_recovery_state);
@@ -3950,6 +3996,7 @@ static void write_stats_locked(LatcdService *service)
         ",\"recovered_compiler_reserved_bytes\":%" PRIu64
         ",\"journal_reserved_bytes\":%" PRIu64
         ",\"lifecycle_metadata_bytes\":%" PRIu64 ",\"lifecycle_metadata_reserved_bytes\":%" PRIu64
+        ",\"persistent_state_bytes\":%" PRIu64 ",\"persistent_state_reserved_bytes\":%" PRIu64
         ",\"unknown_compiler_budget_tasks\":%u"
         ",\"compiler_budget_recovery_state\":%d"
         ",\"retirement_candidates\":%u,\"retirement_due_candidates\":%u"
@@ -3969,7 +4016,7 @@ static void write_stats_locked(LatcdService *service)
         g_hash_table_size(service->running_sources), service->config->workers,
         service->config->max_cache_bytes, (long)getpid(), generation_bytes,
         publication_bytes, transient_bytes, recovered_bytes, journal_bytes,
-        metadata_bytes, metadata_reserved, unknown_budgets, budget_recovery,
+        metadata_bytes, metadata_reserved, state_bytes, state_reserved, unknown_budgets, budget_recovery,
         retirement.candidates, retirement.due, retirement.next_deadline_us, retirement.oldest_due_wait_us,
         retirement.complete ? "true" : "false",
         retirement.ready, retirement.deferred, retirement.next_attempt_us,
@@ -4532,7 +4579,8 @@ static int service_queue_request(LatcdService *service, int source_fd,
         if (merge_tbset(service->config, response->source_sha256, tbset,
                         &canonical, &tbset_changed,
                         error, sizeof(error))) {
-            response->status = LATCD_STATUS_BAD_REQUEST;
+            response->status = g_str_has_prefix(error, "capacity:") ?
+                LATCD_STATUS_QUEUE_FULL : LATCD_STATUS_BAD_REQUEST;
             g_strlcpy(response->message, error, sizeof(response->message));
             unlink(snapshot);
             unlink(tbset);

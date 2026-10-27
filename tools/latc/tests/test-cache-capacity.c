@@ -121,8 +121,71 @@ static void test_metadata(void)
     g_free(root); g_free(gc); g_free(store); g_free(record);
 }
 
+static void test_state(void)
+{
+    char *root = g_dir_make_tmp("capacity-state-XXXXXX", NULL);
+    char *keys = g_build_filename(root, ".tbsets", NULL);
+    char *identities = g_build_filename(root, ".identities", NULL);
+    char *hex = g_strnfill(64, 'a');
+    char *name = g_strconcat(hex, ".current", NULL);
+    char *manifest = g_build_filename(root, name, NULL);
+    char *key = g_build_filename(keys, "keys", NULL);
+    char *identity = g_build_filename(identities, "digest", NULL);
+    assert(root && !mkdir(keys, 0700) && !mkdir(identities, 0700));
+    put(manifest, "12345"); put(key, "123"); put(identity, "12");
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    assert(capacity.state_committed == 10 && !capacity.committed && !capacity.metadata_committed);
+    assert(latcd_cache_capacity_reserve(&capacity, 1, 10, NULL, 0) < 0);
+    latcd_cache_capacity_metadata_bind(&capacity, 14);
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int keys_fd = open(keys, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    LatcdMetadataReservation first, second;
+    assert(directory >= 0 && keys_fd >= 0);
+    assert(latcd_cache_capacity_state_begin(directory, "other", 1, &first) < 0);
+    assert(latcd_cache_capacity_state_begin(directory, name, 5, &first) < 0);
+    assert(capacity.ready && !capacity.state_reserved && capacity.state_committed == 10);
+    assert(!latcd_cache_capacity_state_begin(directory, name, 4, &first));
+    assert(capacity.state_reserved == 4);
+    assert(latcd_cache_capacity_state_begin(keys_fd, "next", 1, &second) < 0);
+    assert(latcd_cache_capacity_scan(&capacity, root, NULL, 0) < 0);
+    latcd_cache_capacity_metadata_finish(&first, true, false);
+    put(manifest, "1234");
+    assert(capacity.state_committed == 9 && !capacity.state_reserved);
+    assert(!latcd_cache_capacity_state_begin(keys_fd, "next", 5, &first));
+    latcd_cache_capacity_metadata_finish(&first, false, false);
+    assert(capacity.state_committed == 9 && !capacity.state_reserved);
+    latcd_cache_capacity_metadata_bind(&capacity, 9);
+    assert(latcd_cache_capacity_state_begin(directory, name, 1, &first) < 0);
+    assert(capacity.ready && capacity.state_committed == 9);
+    latcd_cache_capacity_metadata_bind(&capacity, 20);
+    assert(!latcd_cache_capacity_state_begin(keys_fd, "partial", 6, &first));
+    latcd_cache_capacity_metadata_finish(&first, false, true);
+    assert(capacity.state_committed == 15 && !capacity.ready);
+    assert(latcd_cache_capacity_state_begin(keys_fd, "blocked", 1, &first) < 0);
+    latcd_cache_capacity_close(&capacity);
+    assert(!capacity.state_committed && !capacity.state_reserved);
+    char *alias = g_build_filename(keys, "alias", NULL);
+    assert(!link(manifest, alias));
+    assert(latcd_cache_capacity_scan(&capacity, root, NULL, 0) < 0);
+    assert(!unlink(alias));
+    assert(!symlink("digest", alias));
+    assert(latcd_cache_capacity_scan(&capacity, root, NULL, 0) < 0);
+    assert(!unlink(alias));
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    assert(capacity.state_committed == 9);
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    close(directory); close(keys_fd);
+    assert(!unlink(manifest) && !unlink(key) && !unlink(identity));
+    assert(!rmdir(keys) && !rmdir(identities) && !rmdir(root));
+    g_free(root); g_free(keys); g_free(identities); g_free(hex); g_free(name);
+    g_free(manifest); g_free(key); g_free(identity); g_free(alias);
+}
+
 int main(void)
 {
+    test_state();
     test_metadata();
     for (unsigned mutation = 0; mutation < 3; mutation++) test_external_writer(mutation);
     char *root = g_dir_make_tmp("cache-capacity-XXXXXX", NULL), error[256];
