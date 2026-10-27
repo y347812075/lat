@@ -42,21 +42,34 @@ static int watch_state_directory(LatcdCacheCapacity *capacity, int fd, const cha
     return 0;
 }
 
+static bool same_file_snapshot(const struct stat *a, const struct stat *b)
+{
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+        a->st_mode == b->st_mode && a->st_uid == b->st_uid &&
+        a->st_nlink == b->st_nlink && a->st_size == b->st_size &&
+        a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
+        a->st_ctim.tv_sec == b->st_ctim.tv_sec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+}
+
 static int watch_state_file(LatcdCacheCapacity *capacity, int parent, const char *name,
-                            const char *key)
+                            const char *key, const struct stat *expected)
 {
     int fd = openat(parent, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return errno == ENOENT ? 1 : -1;
-    struct stat st;
+    struct stat st, after, path_st;
     int watch = -1;
-    if (!fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_uid == geteuid() && st.st_nlink == 1) {
+    if (!fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_uid == geteuid() && st.st_nlink == 1 &&
+        (!expected || same_file_snapshot(expected, &st))) {
         char path[64];
         snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
         watch = inotify_add_watch(capacity->watch_fd, path,
             IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF);
     }
+    bool stable = watch >= 0 && !fstat(fd, &after) &&
+        !fstatat(parent, name, &path_st, AT_SYMLINK_NOFOLLOW) &&
+        same_file_snapshot(&st, &after) && same_file_snapshot(&after, &path_st);
     close(fd);
-    if (watch < 0) return -1;
+    if (!stable) return -1;
     g_hash_table_insert(capacity->state_files, GINT_TO_POINTER(watch), g_strdup(key));
     return 0;
 }
@@ -268,7 +281,7 @@ static int scan_metadata(int fd, unsigned depth, unsigned *visited, uint64_t *to
         } else if (S_ISREG(st.st_mode) && st.st_uid == geteuid() && st.st_nlink == 1 &&
                    st.st_size >= 0 && (uint64_t)st.st_size <= UINT64_MAX - *total) {
             char *key = metadata_record_key(fd, entry->d_name);
-            int watched = key ? watch_state_file(capacity, fd, entry->d_name, key) : -1;
+            int watched = key ? watch_state_file(capacity, fd, entry->d_name, key, &st) : -1;
             g_free(key);
             if (watched) { result = -1; break; }
             *total += st.st_size;
@@ -307,7 +320,7 @@ static int scan_state_store(int fd, const char *prefix, unsigned depth,
             if (child < 0 || scan_state_store(child, key, depth + 1, visited, total, capacity)) result = -1;
         } else if (S_ISREG(st.st_mode) && st.st_uid == geteuid() && st.st_nlink == 1 &&
                    st.st_size >= 0 && (uint64_t)st.st_size <= UINT64_MAX - *total &&
-                   !watch_state_file(capacity, fd, entry->d_name, key)) {
+                   !watch_state_file(capacity, fd, entry->d_name, key, &st)) {
             *total += st.st_size;
         } else result = -1;
         g_free(key);
@@ -344,7 +357,7 @@ static int scan_state(int fd, unsigned *visited, uint64_t *total, LatcdCacheCapa
             if (child < 0 || scan_state_store(child, name, 0, visited, total, capacity)) { result = -1; break; }
         } else if (S_ISREG(st.st_mode) && st.st_uid == geteuid() && st.st_nlink == 1 &&
                    st.st_size >= 0 && (uint64_t)st.st_size <= UINT64_MAX - *total &&
-                   !watch_state_file(capacity, fd, name, name)) {
+                   !watch_state_file(capacity, fd, name, name, &st)) {
             *total += st.st_size;
         } else { result = -1; break; }
     }
@@ -684,7 +697,7 @@ void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
             g_hash_table_iter_remove(&iterator);
         }
         char *basename = g_path_get_basename(reservation->name);
-        int watched = watch_state_file(capacity, reservation->directory, basename, reservation->name);
+        int watched = watch_state_file(capacity, reservation->directory, basename, reservation->name, NULL);
         if (watched < 0 || (replaced && watched))
             capacity->ready = false;
         g_free(basename);

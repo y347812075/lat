@@ -121,9 +121,14 @@ $(BUILD)/tests/test-cache-capacity: tests/test-cache-capacity.c $(BUILD)/latcd/c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 
+$(BUILD)/tests/test-capacity-watch-race: tests/test-capacity-watch-race.c latcd/cache-capacity.c latcd/cache-capacity.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $< $(LDLIBS) -pthread
+
 .PHONY: test-cache-capacity
-test-cache-capacity: $(BUILD)/tests/test-cache-capacity
+test-cache-capacity: $(BUILD)/tests/test-cache-capacity $(BUILD)/tests/test-capacity-watch-race
 	$(BUILD)/tests/test-cache-capacity
+	$(BUILD)/tests/test-capacity-watch-race
 
 test: test-cache-capacity
 
