@@ -327,6 +327,7 @@ static void test_copy_close_serialization(void)
         pthread_cond_wait(&copy_gate_condition, &copy_gate_mutex);
     }
     pthread_mutex_unlock(&copy_gate_mutex);
+    assert(guest_fd_tables_fork_start() == -1 && errno == EBUSY);
     assert(!pthread_create(&close_thread, NULL, run_copy_close, &closer));
     pthread_mutex_lock(&copy_gate_mutex);
     while (!copy_close_blocked) {
@@ -490,6 +491,59 @@ static void test_handle_fork_gate(void)
     guest_fd_table_unref(table);
 }
 
+static void test_all_tables_fork_gate(void)
+{
+    assert(!guest_fd_tables_fork_start());
+    guest_fd_tables_fork_end();
+    GuestFdTable *source = guest_fd_table_new();
+    int pipefd[2];
+    assert(source && !pipe2(pipefd, O_CLOEXEC));
+    assert(!guest_fd_table_import(source, 7, pipefd[1], false));
+    GuestFdTable *copy = guest_fd_table_copy(source);
+    GuestFdTable *independent = guest_fd_table_new();
+    assert(copy && independent);
+    GuestFdHandle *handle = guest_fd_table_acquire(copy, 7);
+    assert(handle && guest_fd_tables_fork_start() == -1 && errno == EBUSY);
+    /* Rollback must release locks already acquired on newer tables. */
+    assert(!guest_fd_table_fork_start(independent));
+    guest_fd_table_fork_end(independent);
+    guest_fd_handle_release(handle);
+    assert(!guest_fd_table_fork_start(source));
+    assert(guest_fd_tables_fork_start() == -1 && errno == EBUSY);
+    guest_fd_table_fork_end(source);
+    assert(!guest_fd_table_fork_start(independent));
+    guest_fd_table_fork_end(independent);
+    assert(!guest_fd_tables_fork_start());
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        guest_fd_tables_fork_end();
+        if (guest_fd_table_close(source, 7) || guest_fd_table_close(copy, 7)) _exit(1);
+        guest_fd_table_unref(source);
+        guest_fd_table_unref(copy);
+        guest_fd_table_unref(independent);
+        GuestFdTable *fresh = guest_fd_table_new();
+        if (!fresh || guest_fd_tables_fork_start()) _exit(2);
+        guest_fd_tables_fork_end();
+        guest_fd_table_unref(fresh);
+        _exit(0);
+    }
+    guest_fd_tables_fork_end();
+    int status;
+    assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
+    handle = guest_fd_table_acquire(source, 7);
+    assert(handle && write(guest_fd_handle_host_fd(handle), "p", 1) == 1);
+    guest_fd_handle_release(handle);
+    char byte;
+    assert(read(pipefd[0], &byte, 1) == 1 && byte == 'p');
+    guest_fd_table_unref(source);
+    guest_fd_table_unref(copy);
+    guest_fd_table_unref(independent);
+    assert(read(pipefd[0], &byte, 1) == 0 && !close(pipefd[0]));
+    assert(!guest_fd_tables_fork_start());
+    guest_fd_tables_fork_end();
+}
+
 int main(void)
 {
     test_copy();
@@ -497,6 +551,7 @@ int main(void)
     test_copy_close_serialization();
     test_handles();
     test_handle_fork_gate();
+    test_all_tables_fork_gate();
     GuestFdTable *table = guest_fd_table_new();
     GuestFdTable *thread_ref;
     int pipefd[2];

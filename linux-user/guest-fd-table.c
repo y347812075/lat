@@ -35,7 +35,20 @@ struct GuestFdTable {
     uint64_t next_generation;
     int max_guest_fd;
     unsigned active_handles;
+    GuestFdTable *next;
 };
+
+static pthread_mutex_t tables_mutex = PTHREAD_MUTEX_INITIALIZER;
+static GuestFdTable *tables;
+static void unref_table_locked(GuestFdTable *table);
+
+static void register_table(GuestFdTable *table)
+{
+    pthread_mutex_lock(&tables_mutex);
+    table->next = tables;
+    tables = table;
+    pthread_mutex_unlock(&tables_mutex);
+}
 
 static gpointer guest_fd_key(int guest_fd)
 {
@@ -171,12 +184,14 @@ void guest_fd_handle_release(GuestFdHandle *handle)
     int saved = errno;
     GuestFdTable *table = handle->table;
     pthread_mutex_lock(&table->mutex);
+    pthread_mutex_lock(&tables_mutex);
     release_backend(handle->backend);
     g_assert(table->active_handles);
     table->active_handles--;
     pthread_mutex_unlock(&table->mutex);
     g_free(handle);
-    guest_fd_table_unref(table);
+    unref_table_locked(table);
+    pthread_mutex_unlock(&tables_mutex);
     errno = saved;
 }
 
@@ -195,7 +210,7 @@ static void insert_locked(GuestFdTable *table, int guest_fd,
     }
 }
 
-GuestFdTable *guest_fd_table_new(void)
+static GuestFdTable *new_table(void)
 {
     GuestFdTable *table = g_try_new0(GuestFdTable, 1);
 
@@ -216,6 +231,13 @@ GuestFdTable *guest_fd_table_new(void)
     return table;
 }
 
+GuestFdTable *guest_fd_table_new(void)
+{
+    GuestFdTable *table = new_table();
+    if (table) register_table(table);
+    return table;
+}
+
 GuestFdTable *guest_fd_table_ref(GuestFdTable *table)
 {
     if (!table) {
@@ -225,15 +247,17 @@ GuestFdTable *guest_fd_table_ref(GuestFdTable *table)
     return table;
 }
 
-void guest_fd_table_unref(GuestFdTable *table)
+static void unref_table_locked(GuestFdTable *table)
 {
     GHashTableIter iter;
     gpointer value;
 
-    if (!table || atomic_fetch_sub_explicit(&table->refs, 1,
-                                             memory_order_acq_rel) != 1) {
+    if (atomic_fetch_sub_explicit(&table->refs, 1, memory_order_acq_rel) != 1) {
         return;
     }
+    GuestFdTable **slot = &tables;
+    while (*slot && *slot != table) slot = &(*slot)->next;
+    if (*slot) *slot = table->next;
 
     g_hash_table_iter_init(&iter, table->entries);
     while (g_hash_table_iter_next(&iter, NULL, &value)) {
@@ -246,6 +270,14 @@ void guest_fd_table_unref(GuestFdTable *table)
     g_free(table);
 }
 
+void guest_fd_table_unref(GuestFdTable *table)
+{
+    if (!table) return;
+    pthread_mutex_lock(&tables_mutex);
+    unref_table_locked(table);
+    pthread_mutex_unlock(&tables_mutex);
+}
+
 GuestFdTable *guest_fd_table_copy(GuestFdTable *table)
 {
     GuestFdTable *copy;
@@ -256,7 +288,7 @@ GuestFdTable *guest_fd_table_copy(GuestFdTable *table)
         errno = EINVAL;
         return NULL;
     }
-    copy = guest_fd_table_new();
+    copy = new_table();
     if (!copy) {
         return NULL;
     }
@@ -275,6 +307,7 @@ GuestFdTable *guest_fd_table_copy(GuestFdTable *table)
         atomic_fetch_add_explicit(&entry->backend->refs, 1, memory_order_relaxed);
         insert_locked(copy, GPOINTER_TO_INT(key) - 1, entry);
     }
+    register_table(copy);
     pthread_mutex_unlock(&table->mutex);
     return copy;
 
@@ -282,8 +315,8 @@ failed:
     {
         int saved = errno;
 
-        pthread_mutex_unlock(&table->mutex);
         guest_fd_table_unref(copy);
+        pthread_mutex_unlock(&table->mutex);
         errno = saved;
         return NULL;
     }
@@ -548,4 +581,35 @@ void guest_fd_table_fork_end(GuestFdTable *table)
     if (table) {
         pthread_mutex_unlock(&table->mutex);
     }
+}
+
+int guest_fd_tables_fork_start(void)
+{
+    if (pthread_mutex_trylock(&tables_mutex)) {
+        errno = EBUSY;
+        return -1;
+    }
+    GuestFdTable *table;
+    for (table = tables; table; table = table->next) {
+        if (pthread_mutex_trylock(&table->mutex)) break;
+        if (table->active_handles) {
+            pthread_mutex_unlock(&table->mutex);
+            break;
+        }
+    }
+    if (table) {
+        for (GuestFdTable *held = tables; held != table; held = held->next)
+            pthread_mutex_unlock(&held->mutex);
+        pthread_mutex_unlock(&tables_mutex);
+        errno = EBUSY;
+        return -1;
+    }
+    return 0;
+}
+
+void guest_fd_tables_fork_end(void)
+{
+    for (GuestFdTable *table = tables; table; table = table->next)
+        pthread_mutex_unlock(&table->mutex);
+    pthread_mutex_unlock(&tables_mutex);
 }

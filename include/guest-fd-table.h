@@ -83,4 +83,17 @@ int guest_fd_table_get_cloexec(GuestFdTable *table, int guest_fd,
 int guest_fd_table_fork_start(GuestFdTable *table);
 void guest_fd_table_fork_end(GuestFdTable *table);
 
+/* Process-wide alternative: freeze every registered live table plus creation,
+ * completed-copy publication and destruction. Nonblocking acquisition returns
+ * EBUSY and releases all locks if any table/registry is busy or has handles.
+ * Retry only after caller quiesces operations; never combine with per-table
+ * fork_start, and never create/unref/use tables inside a successful bracket.
+ * Pair success with fork_end in parent and child (or on failed host fork).
+ * Copies under construction are unpublished and excluded; their source stays
+ * locked until registration or rollback completes, so fork cannot inherit
+ * unregistered backend references. Handle release is covered through unref.
+ * This does not itself wire guest clone/unshare/exec or record-lock ownership. */
+int guest_fd_tables_fork_start(void);
+void guest_fd_tables_fork_end(void);
+
 #endif
