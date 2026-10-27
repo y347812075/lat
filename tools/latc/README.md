@@ -930,8 +930,16 @@ covering new-file coexistence during owned writes. They share the same byte
 limit; ordinary state replacements do not get the lifecycle completion
 over-limit exception. Failed writes retain the previous state, and uncertain
 cleanup closes admission with a conservative charge. Startup rejects aliased
-or unsafe state. This does not yet monitor external modifications to these
-state files or account for their directory blocks and all recovery peaks.
+or unsafe state. Directory and inode inotify watches detect unexpected state
+writes, truncation, attribute changes and namespace replacement. Owned writers
+register only their exact final and staging names through event draining, and
+replacement inodes are watched before registrations are removed. New empty
+state directories are watched before owned writes begin. Unrelated changes
+close admission, including while another record is being replaced. This does
+not account for directory blocks or all recovery peaks; inotify is change
+detection, not an enforceable access boundary, and cannot prove absence of
+mmap writes or external races during expected-name writes. `.gc` external
+metadata changes are not yet monitored by this state watch set.
 
 Inotify detects unexpected root generation or legacy-subtree changes and queue
 overflow, invalidating subsequent capacity admission until startup inventory.

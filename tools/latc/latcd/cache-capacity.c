@@ -16,6 +16,42 @@
 static LatcdCacheCapacity *metadata_capacity;
 static uint64_t metadata_limit;
 
+static bool state_store_name(const char *name)
+{
+    return !strcmp(name, ".tbsets") || !strcmp(name, ".identities");
+}
+
+static int watch_state_directory(LatcdCacheCapacity *capacity, int fd, const char *prefix)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+    int watch = inotify_add_watch(capacity->watch_fd, path,
+        IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY | IN_ATTRIB |
+        IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR);
+    if (watch < 0) return -1;
+    g_hash_table_insert(capacity->state_directories, GINT_TO_POINTER(watch), g_strdup(prefix));
+    return 0;
+}
+
+static int watch_state_file(LatcdCacheCapacity *capacity, int parent, const char *name,
+                            const char *key)
+{
+    int fd = openat(parent, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return errno == ENOENT ? 1 : -1;
+    struct stat st;
+    int watch = -1;
+    if (!fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_uid == geteuid() && st.st_nlink == 1) {
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+        watch = inotify_add_watch(capacity->watch_fd, path,
+            IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF);
+    }
+    close(fd);
+    if (watch < 0) return -1;
+    g_hash_table_insert(capacity->state_files, GINT_TO_POINTER(watch), g_strdup(key));
+    return 0;
+}
+
 static bool current_name(const char *name)
 {
     return strlen(name) == 72 && strspn(name, "0123456789abcdef") == 64 &&
@@ -32,6 +68,26 @@ static bool generated_name(const char *name)
         suffix += 64;
     }
     return !strcmp(suffix, ".so") || !strcmp(suffix, ".native") || !strcmp(suffix, ".tbset");
+}
+
+static bool watch_new_state_store(LatcdCacheCapacity *capacity, const char *name)
+{
+    int fd = openat(capacity->root_fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    struct stat st;
+    bool valid = !fstat(fd, &st) && st.st_uid == geteuid() && !(st.st_mode & 0077) &&
+        !watch_state_directory(capacity, fd, name);
+    DIR *directory = fdopendir(fd);
+    if (!directory) { close(fd); return false; }
+    unsigned visited = 0;
+    while (valid) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) { if (errno) valid = false; break; }
+        if (++visited > 2 || (strcmp(entry->d_name, ".") && strcmp(entry->d_name, ".."))) valid = false;
+    }
+    closedir(directory);
+    return valid;
 }
 
 static bool watched_name_expected(LatcdCacheCapacity *capacity, int watch)
@@ -80,15 +136,46 @@ static void check_changes(LatcdCacheCapacity *capacity)
         if (size <= 0) { capacity->ready = false; return; }
         for (size_t offset = 0; offset < (size_t)size;) {
             struct inotify_event *event = (void *)(buffer.bytes + offset);
+            offset += sizeof(*event) + event->len;
+            gpointer watch = GINT_TO_POINTER(event->wd);
+            if (g_hash_table_contains(capacity->state_ignored, watch) &&
+                (event->mask & IN_IGNORED)) {
+                g_hash_table_remove(capacity->state_ignored, watch);
+                continue;
+            }
+            const char *prefix = g_hash_table_lookup(capacity->state_directories, watch);
+            const char *file = g_hash_table_lookup(capacity->state_files, watch);
+            if (prefix || file) {
+                char *key = prefix && event->len ? g_build_filename(prefix, event->name, NULL) : NULL;
+                const char *expected = key ? key : file;
+                if ((prefix && event->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED)) ||
+                    event->mask & IN_Q_OVERFLOW ||
+                    !expected || !g_hash_table_contains(capacity->state_expected, expected))
+                    capacity->ready = false;
+                if (file && event->mask & IN_IGNORED) g_hash_table_remove(capacity->state_files, watch);
+                g_free(key);
+                continue;
+            }
             if (event->mask & (IN_Q_OVERFLOW | IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED))
                 capacity->ready = false;
+            if (event->wd == capacity->root_watch && !event->len && (event->mask & IN_ATTRIB)) {
+                struct stat st;
+                if (fstat(capacity->root_fd, &st) || st.st_uid != geteuid() ||
+                    (st.st_mode & 0077)) capacity->ready = false;
+            }
             if (event->wd != capacity->root_watch && event->mask != IN_Q_OVERFLOW &&
                 (!(event->mask & (IN_MODIFY | IN_ATTRIB)) || !watched_name_expected(capacity, event->wd)))
                 capacity->ready = false;
+            if (event->wd == capacity->root_watch && event->len &&
+                (current_name(event->name) || state_store_name(event->name))) {
+                bool created_empty = state_store_name(event->name) &&
+                    event->mask == (IN_CREATE | IN_ISDIR) && watch_new_state_store(capacity, event->name);
+                if (!created_empty && !g_hash_table_contains(capacity->state_expected, event->name))
+                    capacity->ready = false;
+            }
             if (event->len && (!strcmp(event->name, ".superseded") || generated_name(event->name)) &&
                 (!capacity->expected_names || !g_hash_table_contains(capacity->expected_names, event->name)))
                 capacity->ready = false;
-            offset += sizeof(*event) + event->len;
         }
     }
     capacity->ready = false;
@@ -181,7 +268,46 @@ static int scan_metadata(int fd, unsigned depth, unsigned *visited, uint64_t *to
     return result;
 }
 
-static int scan_state(int fd, unsigned *visited, uint64_t *total)
+static int scan_state_store(int fd, const char *prefix, unsigned depth,
+                            unsigned *visited, uint64_t *total, LatcdCacheCapacity *capacity)
+{
+    struct stat before, after;
+    if (depth > 8 || fstat(fd, &before) || !S_ISDIR(before.st_mode) ||
+        before.st_uid != geteuid() || (before.st_mode & 0077) ||
+        watch_state_directory(capacity, fd, prefix)) { close(fd); return -1; }
+    DIR *directory = fdopendir(fd);
+    if (!directory) { close(fd); return -1; }
+    int result = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) { if (errno) result = -1; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        struct stat st;
+        if (++*visited > 100000 || fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW)) {
+            result = -1; break;
+        }
+        char *key = g_build_filename(prefix, entry->d_name, NULL);
+        if (S_ISDIR(st.st_mode)) {
+            int child = openat(fd, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            if (child < 0 || scan_state_store(child, key, depth + 1, visited, total, capacity)) result = -1;
+        } else if (S_ISREG(st.st_mode) && st.st_uid == geteuid() && st.st_nlink == 1 &&
+                   st.st_size >= 0 && (uint64_t)st.st_size <= UINT64_MAX - *total &&
+                   !watch_state_file(capacity, fd, entry->d_name, key)) {
+            *total += st.st_size;
+        } else result = -1;
+        g_free(key);
+        if (result) break;
+    }
+    if (fstat(fd, &after) || before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec || before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec || before.st_ctim.tv_nsec != after.st_ctim.tv_nsec)
+        result = -1;
+    closedir(directory);
+    return result;
+}
+
+static int scan_state(int fd, unsigned *visited, uint64_t *total, LatcdCacheCapacity *capacity)
 {
     struct stat before, after;
     if (fstat(fd, &before)) { close(fd); return -1; }
@@ -193,7 +319,7 @@ static int scan_state(int fd, unsigned *visited, uint64_t *total)
         struct dirent *entry = readdir(directory);
         if (!entry) { if (errno) result = -1; break; }
         const char *name = entry->d_name;
-        bool store = !strcmp(name, ".tbsets") || !strcmp(name, ".identities");
+        bool store = state_store_name(name);
         if (!store && !current_name(name)) continue;
         struct stat st;
         if (++*visited > 100000 || fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW)) {
@@ -201,9 +327,10 @@ static int scan_state(int fd, unsigned *visited, uint64_t *total)
         }
         if (store) {
             int child = openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-            if (child < 0 || scan_metadata(child, 0, visited, total)) { result = -1; break; }
+            if (child < 0 || scan_state_store(child, name, 0, visited, total, capacity)) { result = -1; break; }
         } else if (S_ISREG(st.st_mode) && st.st_uid == geteuid() && st.st_nlink == 1 &&
-                   st.st_size >= 0 && (uint64_t)st.st_size <= UINT64_MAX - *total) {
+                   st.st_size >= 0 && (uint64_t)st.st_size <= UINT64_MAX - *total &&
+                   !watch_state_file(capacity, fd, name, name)) {
             *total += st.st_size;
         } else { result = -1; break; }
     }
@@ -231,6 +358,10 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
     capacity->expected_names = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     capacity->file_watches = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                                    (GDestroyNotify)g_hash_table_unref);
+    capacity->state_directories = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
+    capacity->state_files = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
+    capacity->state_expected = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    capacity->state_ignored = g_hash_table_new(g_direct_hash, g_direct_equal);
     int watch = capacity->watch_fd < 0 ? -1 : inotify_add_watch(capacity->watch_fd, root,
         IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY | IN_ATTRIB |
         IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR | IN_DONT_FOLLOW);
@@ -248,7 +379,7 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
     } else if (errno != ENOENT) result = -1;
     uint64_t state = 0;
     int state_fd = openat(capacity->root_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (state_fd < 0 || scan_state(state_fd, &visited, &state)) result = -1;
+    if (state_fd < 0 || scan_state(state_fd, &visited, &state, capacity)) result = -1;
     if (watch < 0) result = -1;
     g_hash_table_unref(inodes);
     pthread_mutex_lock(&capacity->lock);
@@ -364,6 +495,14 @@ void latcd_cache_capacity_close(LatcdCacheCapacity *capacity)
     capacity->expected_names = NULL;
     if (capacity->file_watches) g_hash_table_unref(capacity->file_watches);
     capacity->file_watches = NULL;
+    if (capacity->state_directories) g_hash_table_unref(capacity->state_directories);
+    capacity->state_directories = NULL;
+    if (capacity->state_files) g_hash_table_unref(capacity->state_files);
+    capacity->state_files = NULL;
+    if (capacity->state_expected) g_hash_table_unref(capacity->state_expected);
+    capacity->state_expected = NULL;
+    if (capacity->state_ignored) g_hash_table_unref(capacity->state_ignored);
+    capacity->state_ignored = NULL;
     if (capacity->recovered_tasks) g_hash_table_unref(capacity->recovered_tasks);
     capacity->recovered_tasks = NULL;
     capacity->recovered_reserved = 0;
@@ -401,22 +540,22 @@ static bool metadata_directory_matches(LatcdCacheCapacity *capacity, int directo
     return matched;
 }
 
-static bool state_directory_matches(LatcdCacheCapacity *capacity, int directory,
-                                    const char *name)
+static char *state_record_key(LatcdCacheCapacity *capacity, int directory,
+                              const char *name)
 {
     struct stat actual, expected;
     if (fstat(directory, &actual) || !S_ISDIR(actual.st_mode) ||
         actual.st_uid != geteuid() || (actual.st_mode & 0077) ||
-        fstat(capacity->root_fd, &expected)) return false;
+        fstat(capacity->root_fd, &expected)) return NULL;
     if (actual.st_dev == expected.st_dev && actual.st_ino == expected.st_ino)
-        return current_name(name);
+        return current_name(name) ? g_strdup(name) : NULL;
     const char *stores[] = {".tbsets", ".identities"};
     for (unsigned i = 0; i < G_N_ELEMENTS(stores); i++) {
         if (!fstatat(capacity->root_fd, stores[i], &expected, AT_SYMLINK_NOFOLLOW) &&
             S_ISDIR(expected.st_mode) && actual.st_dev == expected.st_dev &&
-            actual.st_ino == expected.st_ino) return true;
+            actual.st_ino == expected.st_ino) return g_build_filename(stores[i], name, NULL);
     }
-    return false;
+    return NULL;
 }
 
 static int record_begin(int directory, const char *name, uint64_t bytes,
@@ -427,19 +566,33 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
     if (!capacity) return 0;
     struct stat previous;
     uint64_t old = 0;
-    if (!name || !*name || strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, "..") ||
-        !(state ? state_directory_matches(capacity, directory, name) :
-                  metadata_directory_matches(capacity, directory))) { errno = EINVAL; return -1; }
+    if (!name || !*name || strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, "..")) {
+        errno = EINVAL; return -1;
+    }
+    char *key = state ? state_record_key(capacity, directory, name) : NULL;
+    if (state ? !key : !metadata_directory_matches(capacity, directory)) {
+        errno = EINVAL; return -1;
+    }
+    int owned_directory = state ? fcntl(directory, F_DUPFD_CLOEXEC, 0) : -1;
+    if (state && owned_directory < 0) { g_free(key); return -1; }
     if (!fstatat(directory, name, &previous, AT_SYMLINK_NOFOLLOW)) {
         if (!S_ISREG(previous.st_mode) || previous.st_uid != geteuid() ||
-            previous.st_nlink != 1 || previous.st_size < 0) { errno = EINVAL; return -1; }
+            previous.st_nlink != 1 || previous.st_size < 0) {
+            if (owned_directory >= 0) close(owned_directory);
+            g_free(key); errno = EINVAL; return -1;
+        }
         old = previous.st_size;
-    } else if (errno != ENOENT) return -1;
+    } else if (errno != ENOENT) {
+        int saved = errno;
+        if (owned_directory >= 0) close(owned_directory);
+        g_free(key); errno = saved; return -1;
+    }
     pthread_mutex_lock(&capacity->lock);
     check_changes(capacity);
     /* Recovery may need to finish a committed transaction even with the normal
      * index closed. It is still charged, but cannot open new admission. */
     bool fits = (!state || capacity->ready) && capacity_fits(capacity, bytes, metadata_limit);
+    if (state && g_hash_table_contains(capacity->state_expected, key)) fits = false;
     if (!state && !fits && old && bytes <= UINT64_MAX - capacity->metadata_reserved) {
         /* Existing transaction completion cannot be blocked after current has
          * committed. Preserve the charge and close ordinary admission. */
@@ -449,10 +602,16 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
     if (fits) {
         if (state) capacity->state_reserved += bytes;
         else capacity->metadata_reserved += bytes;
-        *reservation = (LatcdMetadataReservation){capacity, bytes, old, state};
+        *reservation = (LatcdMetadataReservation){.capacity = capacity, .bytes = bytes,
+            .previous = old, .state = state, .directory = owned_directory, .name = key};
+        if (state) g_hash_table_add(capacity->state_expected, g_strdup(key));
     }
     pthread_mutex_unlock(&capacity->lock);
-    if (!fits) errno = ENOSPC;
+    if (!fits) {
+        if (owned_directory >= 0) close(owned_directory);
+        g_free(key);
+        errno = ENOSPC;
+    }
     return fits ? 0 : -1;
 }
 
@@ -468,12 +627,54 @@ int latcd_cache_capacity_state_begin(int directory, const char *name, uint64_t b
     return record_begin(directory, name, bytes, reservation, true);
 }
 
+int latcd_cache_capacity_state_stage(LatcdMetadataReservation *reservation, const char *name)
+{
+    LatcdCacheCapacity *capacity = reservation->capacity;
+    if (!capacity) return 0;
+    if (!reservation->state || reservation->staging || !name || !*name ||
+        strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, "..")) { errno = EINVAL; return -1; }
+    char *parent = g_path_get_dirname(reservation->name);
+    char *key = !strcmp(parent, ".") ? g_strdup(name) : g_build_filename(parent, name, NULL);
+    g_free(parent);
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
+    bool valid = capacity->ready && !g_hash_table_contains(capacity->state_expected, key);
+    if (valid) {
+        reservation->staging = key;
+        g_hash_table_add(capacity->state_expected, g_strdup(key));
+    }
+    pthread_mutex_unlock(&capacity->lock);
+    if (!valid) { g_free(key); errno = EBUSY; }
+    return valid ? 0 : -1;
+}
+
 void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
     bool replaced, bool leftover)
 {
     LatcdCacheCapacity *capacity = reservation->capacity;
     if (!capacity) return;
     pthread_mutex_lock(&capacity->lock);
+    if (reservation->state) {
+        /* Drain old-inode retirement events while the exact target is expected,
+         * then remove its watch before installing the replacement watch. */
+        check_changes(capacity);
+        GHashTableIter iterator;
+        gpointer watch, key;
+        g_hash_table_iter_init(&iterator, capacity->state_files);
+        while (g_hash_table_iter_next(&iterator, &watch, &key)) {
+            if (strcmp(key, reservation->name)) continue;
+            if (!inotify_rm_watch(capacity->watch_fd, GPOINTER_TO_INT(watch)))
+                g_hash_table_add(capacity->state_ignored, watch);
+            g_hash_table_iter_remove(&iterator);
+        }
+        char *basename = g_path_get_basename(reservation->name);
+        if (watch_state_file(capacity, reservation->directory, basename, reservation->name) < 0)
+            capacity->ready = false;
+        g_free(basename);
+        check_changes(capacity);
+        g_hash_table_remove(capacity->state_expected, reservation->name);
+        if (reservation->staging) g_hash_table_remove(capacity->state_expected, reservation->staging);
+    }
     uint64_t *reserved = reservation->state ? &capacity->state_reserved : &capacity->metadata_reserved;
     uint64_t *committed = reservation->state ? &capacity->state_committed : &capacity->metadata_committed;
     if (reservation->bytes > *reserved ||
@@ -487,6 +688,9 @@ void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
         if (leftover) capacity->ready = false;
     }
     pthread_mutex_unlock(&capacity->lock);
+    if (reservation->state) close(reservation->directory);
+    g_free(reservation->name);
+    g_free(reservation->staging);
     *reservation = (LatcdMetadataReservation){0};
 }
 

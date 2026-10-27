@@ -149,8 +149,8 @@ static void test_state(void)
     assert(capacity.state_reserved == 4);
     assert(latcd_cache_capacity_state_begin(keys_fd, "next", 1, &second) < 0);
     assert(latcd_cache_capacity_scan(&capacity, root, NULL, 0) < 0);
-    latcd_cache_capacity_metadata_finish(&first, true, false);
     put(manifest, "1234");
+    latcd_cache_capacity_metadata_finish(&first, true, false);
     assert(capacity.state_committed == 9 && !capacity.state_reserved);
     assert(!latcd_cache_capacity_state_begin(keys_fd, "next", 5, &first));
     latcd_cache_capacity_metadata_finish(&first, false, false);
@@ -183,8 +183,82 @@ static void test_state(void)
     g_free(manifest); g_free(key); g_free(identity); g_free(alias);
 }
 
+static void test_state_changes(unsigned store, unsigned mutation)
+{
+    char *root = g_dir_make_tmp("capacity-state-change-XXXXXX", NULL);
+    char *outside = g_dir_make_tmp("capacity-state-outside-XXXXXX", NULL);
+    char *hex = g_strnfill(64, 'c');
+    char *name = store ? g_strdup("record") : g_strconcat(hex, ".current", NULL);
+    char *directory = store ? g_build_filename(root, store == 1 ? ".tbsets" : ".identities", NULL) : g_strdup(root);
+    if (store) assert(!mkdir(directory, 0700));
+    char *path = g_build_filename(directory, name, NULL);
+    char *staging = g_build_filename(directory, "owned-staging", NULL);
+    char *other_name = store ? g_strdup("external") : g_strnfill(64, 'd');
+    char *other = store ? g_build_filename(directory, other_name, NULL) :
+        g_strdup_printf("%s/%s.current", directory, other_name);
+    g_free(other_name);
+    char *alias = g_build_filename(outside, "alias", NULL);
+    char *moved = g_build_filename(outside, "moved", NULL);
+    put(path, "initial");
+    assert(!chmod(path, 0600));
+    int writer = open(path, O_RDWR | O_CLOEXEC);
+    assert(writer >= 0 && !chmod(path, 0400));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    assert(capacity.state_committed == 7 && latcd_cache_capacity_poll(&capacity));
+    latcd_cache_capacity_metadata_bind(&capacity, 100);
+    int fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(fd >= 0);
+    LatcdMetadataReservation reservation;
+    if (mutation >= 8) {
+        assert(!latcd_cache_capacity_state_begin(fd, name, 8, &reservation));
+        assert(!latcd_cache_capacity_state_stage(&reservation, "owned-staging"));
+        assert(latcd_cache_capacity_state_stage(&reservation, "second-staging") < 0);
+        int staged = open(staging, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0400);
+        assert(staged >= 0 && write(staged, "new-data", 8) == 8 && !close(staged));
+        assert(!rename(staging, path));
+        if (mutation == 9) put(other, "unregistered");
+        latcd_cache_capacity_metadata_finish(&reservation, true, false);
+        assert(capacity.state_committed == 8 && !capacity.state_reserved);
+        if (mutation == 8) {
+            if (!capacity.ready) fprintf(stderr, "owned state invalid: store=%u\n", store);
+            assert(latcd_cache_capacity_poll(&capacity));
+            int new_writer = open(path, O_RDONLY | O_CLOEXEC);
+            assert(new_writer >= 0 && !close(new_writer));
+            assert(!chmod(path, 0600)); /* Replacement inode remains watched. */
+        }
+    } else if (mutation == 0) assert(pwrite(writer, "changed", 7, 0) == 7);
+    else if (mutation == 1) assert(!ftruncate(writer, 4096));
+    else if (mutation == 2) assert(!chmod(path, 0600));
+    else if (mutation == 3) assert(!link(path, alias));
+    else if (mutation == 4) assert(!unlink(path));
+    else if (mutation == 5) assert(!rename(path, moved));
+    else if (mutation == 6) {
+        put(other, "replacement");
+        assert(!rename(other, path));
+    } else {
+        if (store) put(other, "new-record");
+        else assert(!chmod(root, 0755));
+    }
+    int ready = latcd_cache_capacity_poll(&capacity);
+    if (ready) fprintf(stderr, "state change missed: store=%u mutation=%u\n", store, mutation);
+    assert(!ready);
+    assert(latcd_cache_capacity_reserve(&capacity, 0, UINT64_MAX, NULL, 0) < 0);
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    close(fd); close(writer);
+    unlink(path); unlink(staging); unlink(other); unlink(alias); unlink(moved);
+    if (store) assert(!rmdir(directory));
+    assert(!rmdir(root) && !rmdir(outside));
+    g_free(root); g_free(outside); g_free(hex); g_free(name); g_free(directory);
+    g_free(path); g_free(staging); g_free(other); g_free(alias); g_free(moved);
+}
+
 int main(void)
 {
+    for (unsigned store = 0; store < 3; store++)
+        for (unsigned mutation = 0; mutation < 10; mutation++)
+            test_state_changes(store, mutation);
     test_state();
     test_metadata();
     for (unsigned mutation = 0; mutation < 3; mutation++) test_external_writer(mutation);

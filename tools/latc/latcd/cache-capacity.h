@@ -25,6 +25,10 @@ typedef struct LatcdCacheCapacity {
     int root_watch;
     void *expected_names;
     void *file_watches;
+    void *state_directories;
+    void *state_files;
+    void *state_expected;
+    void *state_ignored;
 } LatcdCacheCapacity;
 
 #define LATCD_CACHE_CAPACITY_INIT { .lock = PTHREAD_MUTEX_INITIALIZER, \
@@ -56,13 +60,16 @@ int latcd_cache_capacity_journal(LatcdCacheCapacity *capacity, uint64_t total,
                                 uint64_t reservation, bool valid);
 /* Bind after startup inventory, before service threads. Unbound writers are
  * bootstrap/offline operations and get inventoried at the next startup.
- * Only lifecycle .gc regular-file bytes are covered, not directory blocks or
- * external writers. close() unbinds after all service threads have stopped. */
+ * Covers lifecycle .gc and persistent state regular-file writers, not directory
+ * blocks or external writer charges. close() unbinds after service threads stop. */
 void latcd_cache_capacity_metadata_bind(LatcdCacheCapacity *capacity, uint64_t limit);
 typedef struct LatcdMetadataReservation {
     LatcdCacheCapacity *capacity;
     uint64_t bytes, previous;
     bool state;
+    int directory;
+    char *name;
+    char *staging;
 } LatcdMetadataReservation;
 int latcd_cache_capacity_metadata_begin(int directory, const char *name, uint64_t bytes,
     LatcdMetadataReservation *reservation);
@@ -76,6 +83,10 @@ void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
  * Caller serializes same-record replacement through finish. Uses metadata bind. */
 int latcd_cache_capacity_state_begin(int directory, const char *name, uint64_t bytes,
     LatcdMetadataReservation *reservation);
+/* Register a direct-child staging name before its creation. No-op unbound.
+ * The final target and staging name stay expected until finish drains events. */
+int latcd_cache_capacity_state_stage(LatcdMetadataReservation *reservation,
+                                    const char *name);
 /* Bracket owned root namespace writes; unexpected changes invalidate admission.
  * Names stay registered through cleanup, including while cache_lock is dropped. */
 int latcd_cache_capacity_expect(LatcdCacheCapacity *capacity, const char *const *names,

@@ -518,6 +518,7 @@ static void test_incremental_retention(const char *compiler, unsigned mode)
     char error[256];
     g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory,
         error, sizeof(error)), ==, 0);
+    latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
     LatAotModuleInfoV2 info;
     g_assert_cmpint(lat_aot_v2_module_inspect_file(old, &info, error, sizeof(error)), ==, 0);
     pthread_mutex_lock(&cache_lock);
@@ -528,6 +529,7 @@ static void test_incremental_retention(const char *compiler, unsigned mode)
         g_assert_cmpint(g_unlink(native), ==, 0);
         g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory,
             error, sizeof(error)), ==, 0);
+        latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
     }
     g_assert_cmpint(persisted_manifest_valid(&config, hex, digest), ==, mode != 3);
     char *manifest = g_strdup_printf("%s/%s.current", directory, hex);
@@ -1365,6 +1367,7 @@ int main(int argc, char **argv)
     g_assert_true(g_file_set_contents(trigger, "1", 1, NULL));
     g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory,
         error, sizeof(error)), ==, 0);
+    latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
     setenv("LATCD_TEST_FAIL_BEFORE_MANIFEST", trigger, 1);
     setenv("LATCD_COMPILE_TMPDIR", g_get_tmp_dir(), 1);
     memset(&response, 0, sizeof(response));
@@ -1400,6 +1403,7 @@ int main(int argc, char **argv)
      * the real capacity inventory before exercising the publication path. */
     g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory,
         error, sizeof(error)), ==, 0);
+    latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
     g_assert_cmpint(publish_snapshot(&config, 0, new_path, input, input,
         false, digest, 4, &response), ==, -1);
     g_assert_cmpint(response.status, ==, LATCD_STATUS_INVALID_MODULE);
@@ -1414,6 +1418,7 @@ int main(int argc, char **argv)
     g_unlink(hit_tbset);
     g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory,
         error, sizeof(error)), ==, 0);
+    latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
     g_free(hit_name);
     g_free(hit);
     g_free(hit_native);
@@ -1442,6 +1447,11 @@ int main(int argc, char **argv)
     g_assert_cmpint(stat(committed_module, &committed_status), ==, 0);
     g_assert_cmpuint(committed_status.st_nlink, ==, 1);
     g_assert_true(cached_module_inspect(committed_module, digest, &info));
+    /* The child committed outside this process's writer registrations. Model
+     * restarted startup, rather than reusing the parent's stale inventory. */
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory,
+        error, sizeof(error)), ==, 0);
+    latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
     g_assert_cmpint(publish_snapshot(&config, 0, new_path, NULL, NULL,
         false, digest, 6, &response), ==, 0);
     LatcdCurrentManifest restarted = {0};

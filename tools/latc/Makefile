@@ -1456,6 +1456,7 @@ clean:
 	rm -rf $(BUILD)
 
 -include $(CFG_OBJ:.o=.d) $(BUILD)/compiler/latc.d \
+	$(wildcard $(BUILD)/latcd/*.d) \
 	$(BUILD)/compiler/tbset.d $(BUILD)/format/bundle.d \
 	$(BUILD)/native/format/native-tu-plan.d \
 	$(BUILD)/native/format/native-tu-audit.d \

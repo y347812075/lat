@@ -573,7 +573,7 @@ static int ensure_private_directory(const char *path, char *error,
         return fail(error, error_size, "%s is not a user-owned directory",
                     path);
     }
-    if (chmod(path, 0700)) {
+    if ((status.st_mode & 07777) != 0700 && chmod(path, 0700)) {
         return fail(error, error_size, "cannot protect %s: %s", path,
                     strerror(errno));
     }
@@ -854,6 +854,13 @@ static void publish_source_identity(const LatcdConfig *config,
     LatcdMetadataReservation reservation = {0};
     if (directory_fd < 0 || latcd_cache_capacity_state_begin(
             directory_fd, name, 65, &reservation)) goto identity_done;
+    char *staging_name = g_path_get_basename(temporary);
+    int staging_result = latcd_cache_capacity_state_stage(&reservation, staging_name);
+    g_free(staging_name);
+    if (staging_result) {
+        latcd_cache_capacity_metadata_finish(&reservation, false, false);
+        goto identity_done;
+    }
     bool installed = false, leftover = false;
     int fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
                   O_NOFOLLOW, 0600);
@@ -1064,8 +1071,17 @@ static int merge_tbset(const LatcdConfig *config, const uint8_t digest[32],
         }
         if (directory_fd >= 0) close(directory_fd);
         if (result) goto merged_done;
-        temporary = g_build_filename(directory, "tbset-XXXXXX", NULL);
-        int fd = g_mkstemp_full(temporary, O_RDWR | O_CLOEXEC, 0600);
+        char *id = g_uuid_string_random();
+        char *staging = g_strconcat("tbset-", id, NULL);
+        g_free(id);
+        temporary = g_build_filename(directory, staging, NULL);
+        int staged = latcd_cache_capacity_state_stage(&reservation, staging);
+        g_free(staging);
+        if (staged) {
+            result = fail(error, error_size, "capacity: cannot register canonical TB staging");
+            goto merged_done;
+        }
+        int fd = open(temporary, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (fd < 0) {
             result = fail(error, error_size, "cannot create canonical TB set");
         } else {
