@@ -158,6 +158,17 @@ int latcd_retirement_queue_defer(LatcdRetirementQueue *queue,
                                  const LatcdRetirementAttempt *attempt,
                                  uint64_t now_us, bool busy);
 
+/* Internal single-candidate consumer; SAME external owner/domain/access/mount/
+ * full-reference-graph guarantees as tombstone_delete_due_report are required.
+ * Selection never authorizes deletion. Hash outside S, then recheck grace and
+ * roots under S before intent; executor rechecks independently. Existing intent
+ * is resumed, never overwritten. Returns 1 completed, 0 no ready candidate,
+ * -1 deferred/error. Attempt is released on every selected path. Completion
+ * remains queued until a later sweep verifies bound receipt plus absence.
+ * Caller checkpoints after completion/deferral; no CLI/daemon caller enabled. */
+int latcd_retirement_queue_execute_one(LatcdRetirementQueue *queue,
+    LatcdRetirementDeletionReport *report, char *error, size_t error_size);
+
 /* Owner lease and single queue worker required. Strict cache/boot/grace-bound
  * scheduler checkpoint; never restores discovery completeness or deadlines.
  * Restore before the first sweep. A reboot starts fresh scheduling ages.

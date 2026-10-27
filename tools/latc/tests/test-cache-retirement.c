@@ -1374,6 +1374,148 @@ static void test_mount_lease_crash_persistence(void)
     remove_root(root); g_free(root);
 }
 
+static LatcdRetirementQueueStats sweep_queue(LatcdRetirementQueue *queue)
+{
+    LatcdRetirementQueueStats stats;
+    char error[256];
+    int pending;
+    do {
+        pending = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+        if (pending < 0) fprintf(stderr, "consumer queue scan: %s\n", error);
+        assert(pending >= 0);
+    } while (pending);
+    return stats;
+}
+
+static void test_queue_consumer(unsigned mutation)
+{
+    char *root = root_new(), error[256], *transaction = NULL;
+    char *original_record = NULL;
+    char *names[6], *paths[6];
+    const char *suffixes[] = {".so", ".native", ".tbset"};
+    for (unsigned i = 0; i < 6; i++) {
+        names[i] = i < 3 ? g_strconcat(source, suffixes[i], NULL) :
+            g_strdup_printf("%s-%s%s", source, source, suffixes[i - 3]);
+        paths[i] = g_build_filename(root, names[i], NULL);
+        put(paths[i], "consumer immutable object\n");
+    }
+    char *previous = g_strdup_printf("{\"version\":2,\"module\":\"%s\",\"native\":\"%s\","
+        "\"tbset\":\"%s\",\"source_sha256\":\"%s\",\"codegen_id\":\"%s\",\"published_sequence\":1}",
+        names[0], names[1], names[2], source, source);
+    char *following = g_strdup_printf("{\"version\":2,\"module\":\"%s\",\"native\":\"%s\","
+        "\"tbset\":\"%s\",\"source_sha256\":\"%s\",\"codegen_id\":\"%s\",\"published_sequence\":2}",
+        names[3], names[4], names[5], source, source);
+    char *current = current_path(root);
+    put(current, previous);
+    char *evidence = latcd_retirement_capture_objects(root, source, (const char *const *)names, 6);
+    assert(evidence && !latcd_retirement_prepare(root, source, following, strlen(following),
+                                               evidence, &transaction, error, sizeof(error)));
+    put(current, following);
+    assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 0);
+    LatcdRetirementQueueStats stats = sweep_queue(queue);
+    assert(stats.complete && stats.ready == 3);
+    int pins[3] = {-1, -1, -1}, gate = -1;
+    if (mutation == 1) for (unsigned i = 0; i < 3; i++) {
+        pins[i] = open(paths[i], O_RDONLY | O_CLOEXEC);
+        assert(pins[i] >= 0 && !flock(pins[i], LOCK_SH | LOCK_NB));
+    }
+    if (mutation == 2) {
+        gate = lat_aot_v2_cache_source_lock(root, source, LOCK_SH | LOCK_NB,
+                                           false, error, sizeof(error));
+        assert(gate >= 0);
+    }
+    if (mutation == 3) put(current, previous);
+    if (mutation == 4) {
+        char *path = single_record(root);
+        GKeyFile *record = g_key_file_new();
+        assert(g_key_file_load_from_file(record, path, 0, NULL));
+        original_record = g_key_file_to_data(record, NULL, NULL);
+        g_key_file_set_uint64(record, "transaction", "retired_boottime_us", UINT64_MAX);
+        char *raw = g_key_file_to_data(record, NULL, NULL);
+        put(path, raw);
+        g_free(raw); g_key_file_unref(record); g_free(path);
+    }
+    if (mutation == 5) {
+        gate = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error));
+        assert(gate >= 0);
+    }
+    if (mutation == 6) {
+        /* Existing intent is resumed, not overwritten with fresh evidence. */
+        const char *single[] = {names[0]};
+        char *captured = latcd_retirement_capture_objects(root, source, single, 1);
+        int fd = open(paths[0], O_RDONLY | O_CLOEXEC);
+        assert(fd >= 0 && captured && !latcd_retirement_tombstone(root, source,
+            names[0], fd, captured, error, sizeof(error)));
+        close(fd); g_free(captured);
+    }
+    bool rejecting = mutation >= 1 && mutation <= 5;
+    unsigned completed = 0;
+    if (mutation == 7) assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:unlinked", 1));
+    for (unsigned i = 0; i < 3; i++) {
+        LatcdRetirementDeletionReport report;
+        int result = latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error));
+        if (rejecting || mutation == 7) {
+            assert(result < 0 && !report.receipt_durable);
+            if (mutation != 7) assert(!report.object_unlinked);
+            else assert(report.object_unlinked);
+        } else {
+            assert(result == 1 && report.object_unlinked && report.namespace_durable &&
+                   report.receipt_durable && report.logical_bytes > 0);
+            completed++;
+        }
+    }
+    assert(!unsetenv("LATCD_TEST_RETIREMENT_IO"));
+    if (rejecting) {
+        if (mutation == 4) {
+            int pending;
+            do {
+                pending = latcd_retirement_queue_step(queue, 1, 10000, &stats,
+                                                       error, sizeof(error));
+            } while (pending > 0);
+            assert(pending < 0 && !stats.complete);
+            assert(latcd_retirement_queue_checkpoint(queue, error, sizeof(error)) < 0);
+            LatcdRetirementDeletionReport report;
+            assert(!latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error)));
+            char *path = single_record(root);
+            put(path, original_record);
+            g_free(path);
+        }
+        stats = sweep_queue(queue);
+        assert(!stats.ready && stats.deferred == 3);
+        assert(!latcd_retirement_queue_checkpoint(queue, error, sizeof(error)));
+        LatcdRetirementDeletionReport report;
+        assert(!latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error)));
+        for (unsigned i = 0; i < 6; i++) assert(!access(paths[i], F_OK));
+    } else if (mutation != 7) {
+        stats = sweep_queue(queue);
+        assert(completed == 3 && !stats.candidates);
+    }
+    latcd_retirement_queue_free(queue);
+    if (mutation == 7) {
+        unsigned recovered;
+        assert(!latcd_tombstone_recover(root, &recovered, error, sizeof(error)));
+        queue = latcd_retirement_queue_new(root, 0);
+        stats = sweep_queue(queue);
+        assert(stats.ready == 3);
+        for (unsigned i = 0; i < 3; i++) {
+            LatcdRetirementDeletionReport report;
+            assert(latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error)) == 1);
+            assert(!report.object_unlinked && report.namespace_durable && report.receipt_durable);
+        }
+        stats = sweep_queue(queue);
+        assert(!stats.candidates);
+        latcd_retirement_queue_free(queue);
+    }
+    for (unsigned i = 3; i < 6; i++) assert(!access(paths[i], F_OK));
+    for (unsigned i = 0; i < 3; i++) if (pins[i] >= 0) close(pins[i]);
+    if (gate >= 0) close(gate);
+    g_free(original_record);
+    g_free(previous); g_free(following); g_free(current); g_free(evidence); g_free(transaction);
+    for (unsigned i = 0; i < 6; i++) { g_free(names[i]); g_free(paths[i]); }
+    remove_root(root); g_free(root);
+}
+
 static void test_transaction_root_admission(unsigned mutation, bool executor)
 {
     char *root = root_new(), error[256], *transaction = NULL;
@@ -2035,6 +2177,7 @@ int main(int argc, char **argv)
     }
     test_unknown_and_corrupt();
     test_reboot();
+    for (unsigned mutation = 0; mutation < 8; mutation++) test_queue_consumer(mutation);
     for (unsigned phase = 0; phase < 3; phase++)
         for (unsigned fault = 1; fault <= 8; fault++) test_clock_failure(phase, fault);
     for (int mutation = 0; mutation < 7; mutation++) test_object_identity(mutation);

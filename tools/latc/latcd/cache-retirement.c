@@ -2310,6 +2310,67 @@ int latcd_retirement_queue_defer(LatcdRetirementQueue *queue,
     return 0;
 }
 
+int latcd_retirement_queue_execute_one(LatcdRetirementQueue *queue,
+    LatcdRetirementDeletionReport *report, char *error, size_t error_size)
+{
+    if (report) memset(report, 0, sizeof(*report));
+    if (!queue) return fail(error, error_size, "invalid retirement consumer queue");
+    char *boot = NULL;
+    uint64_t now;
+    if (retirement_clock(&boot, &now))
+        return fail(error, error_size, "cannot read retirement consumer clock");
+    g_free(boot);
+    LatcdRetirementAttempt attempt;
+    int selected = latcd_retirement_queue_take(queue, now, &attempt);
+    if (selected <= 0) return selected;
+    char source[65];
+    memcpy(source, attempt.name, 64); source[64] = 0;
+    int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = root < 0 ? -1 : open_directory(root, ".gc", false);
+    int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
+    int object = -1, latch = -1, result = -1;
+    char *evidence = NULL;
+    struct stat status;
+    bool existing = false;
+    if (root < 0 || gc < 0) goto out;
+    if (store >= 0) {
+        if (!fstatat(store, attempt.name, &status, AT_SYMLINK_NOFOLLOW)) existing = true;
+        else if (errno != ENOENT) goto out;
+    } else if (errno != ENOENT) goto out;
+    if (!existing) {
+        object = openat(root, attempt.name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (object < 0 || flock(object, LOCK_SH | LOCK_NB)) goto out;
+        const char *names[] = {attempt.name};
+        evidence = capture_objects(root, source, names, 1);
+        if (!evidence) goto out;
+        latch = lat_aot_v2_cache_source_lock(queue->root, source, LOCK_EX | LOCK_NB,
+                                             false, error, error_size);
+        if (latch < 0 || fstat(object, &status) ||
+            object_transaction_status(root, attempt.name, &status, &queue->grace) ||
+            latcd_retirement_tombstone(queue->root, source, attempt.name, object,
+                                       evidence, error, error_size)) goto out;
+    }
+    if (object >= 0) { close(object); object = -1; }
+    if (latch >= 0) { close(latch); latch = -1; }
+    result = latcd_tombstone_delete_due_report(queue->root, attempt.name, queue->grace,
+                                               report, error, error_size);
+out:
+    if (object >= 0) close(object);
+    if (latch >= 0) close(latch);
+    if (store >= 0) close(store);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    g_free(evidence);
+    /* A failed clock must not turn a busy candidate into an immediate retry. */
+    boot = NULL;
+    uint64_t completed;
+    if (!retirement_clock(&boot, &completed)) now = completed;
+    g_free(boot);
+    if (latcd_retirement_queue_defer(queue, &attempt, now, result != 0))
+        return fail(error, error_size, "cannot defer retirement consumer attempt");
+    return result ? fail(error, error_size, "retirement consumer deferred or rejected") : 1;
+}
+
 int latcd_retirement_queue_checkpoint(LatcdRetirementQueue *queue,
                                       char *error, size_t error_size)
 {
