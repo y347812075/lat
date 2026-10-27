@@ -10541,6 +10541,20 @@ static bool close_range_identity_protected(int fd, void *opaque)
 }
 #endif
 
+static int guest_fd_fcntl_lock(int fd, int cmd, struct flock64 *lock)
+{
+    /* Blocking lock waits need a stable guest fd reference, not a global
+     * allocation barrier. Keep them outside the short-call borrow protocol. */
+    if (cmd == F_SETLKW || cmd == F_OFD_SETLKW
+#ifdef F_SETLKW64
+        || cmd == F_SETLKW64
+#endif
+       ) {
+        return safe_fcntl(fd, cmd, lock);
+    }
+    return GUEST_FD_HOST_CALL(fd, safe_fcntl(fd, cmd, lock));
+}
+
 static abi_long do_fcntl(CPUArchState *env, int fd, int cmd, abi_ulong arg)
 {
     struct flock64 fl64;
@@ -10592,7 +10606,7 @@ static abi_long do_fcntl(CPUArchState *env, int fd, int cmd, abi_ulong arg)
         if (ret) {
             return ret;
         }
-        ret = get_errno(safe_fcntl(fd, host_cmd, &fl64));
+        ret = get_errno(guest_fd_fcntl_lock(fd, host_cmd, &fl64));
         if (ret == 0) {
             ret = copy_to_user_flock(arg, &fl64);
         }
@@ -10604,7 +10618,7 @@ static abi_long do_fcntl(CPUArchState *env, int fd, int cmd, abi_ulong arg)
         if (ret) {
             return ret;
         }
-        ret = get_errno(safe_fcntl(fd, host_cmd, &fl64));
+        ret = get_errno(guest_fd_fcntl_lock(fd, host_cmd, &fl64));
         break;
 
     case TARGET_F_GETLK64:
@@ -10613,7 +10627,7 @@ static abi_long do_fcntl(CPUArchState *env, int fd, int cmd, abi_ulong arg)
         if (ret) {
             return ret;
         }
-        ret = get_errno(safe_fcntl(fd, host_cmd, &fl64));
+        ret = get_errno(guest_fd_fcntl_lock(fd, host_cmd, &fl64));
         if (ret == 0) {
             ret = copy_to_user_flock64(arg, &fl64);
         }
@@ -10626,25 +10640,25 @@ static abi_long do_fcntl(CPUArchState *env, int fd, int cmd, abi_ulong arg)
         if (ret) {
             return ret;
         }
-        ret = get_errno(safe_fcntl(fd, host_cmd, &fl64));
+        ret = get_errno(guest_fd_fcntl_lock(fd, host_cmd, &fl64));
         break;
 
     case TARGET_F_GETFL:
-        ret = get_errno(safe_fcntl(fd, host_cmd, arg));
+        ret = get_errno(GUEST_FD_HOST_CALL(fd, safe_fcntl(fd, host_cmd, arg)));
         if (ret >= 0) {
             ret = host_to_target_bitmask(ret, fcntl_flags_tbl);
         }
         break;
 
     case TARGET_F_SETFL:
-        ret = get_errno(safe_fcntl(fd, host_cmd,
+        ret = get_errno(GUEST_FD_HOST_CALL(fd, safe_fcntl(fd, host_cmd,
                                    target_to_host_bitmask(arg,
-                                                          fcntl_flags_tbl)));
+                                                          fcntl_flags_tbl))));
         break;
 
 #ifdef F_GETOWN_EX
     case TARGET_F_GETOWN_EX:
-        ret = get_errno(safe_fcntl(fd, host_cmd, &fox));
+        ret = get_errno(GUEST_FD_HOST_CALL(fd, safe_fcntl(fd, host_cmd, &fox)));
         if (ret >= 0) {
             if (!lock_user_struct(VERIFY_WRITE, target_fox, arg, 0))
                 return -TARGET_EFAULT;
@@ -10662,26 +10676,31 @@ static abi_long do_fcntl(CPUArchState *env, int fd, int cmd, abi_ulong arg)
         fox.type = tswap32(target_fox->type);
         fox.pid = tswap32(target_fox->pid);
         unlock_user_struct(target_fox, arg, 0);
-        ret = get_errno(safe_fcntl(fd, host_cmd, &fox));
+        ret = get_errno(GUEST_FD_HOST_CALL(fd, safe_fcntl(fd, host_cmd, &fox)));
         break;
 #endif
 
     case TARGET_F_SETSIG:
-        ret = get_errno(safe_fcntl(fd, host_cmd, target_to_host_signal(arg)));
+        ret = get_errno(GUEST_FD_HOST_CALL(fd,
+                        safe_fcntl(fd, host_cmd, target_to_host_signal(arg))));
         break;
 
     case TARGET_F_GETSIG:
-        ret = host_to_target_signal(get_errno(safe_fcntl(fd, host_cmd, arg)));
+        ret = host_to_target_signal(get_errno(GUEST_FD_HOST_CALL(fd,
+                                                safe_fcntl(fd, host_cmd, arg))));
         break;
 
     case TARGET_F_SETOWN:
     case TARGET_F_GETOWN:
-    case TARGET_F_SETLEASE:
     case TARGET_F_GETLEASE:
     case TARGET_F_SETPIPE_SZ:
     case TARGET_F_GETPIPE_SZ:
     case TARGET_F_ADD_SEALS:
     case TARGET_F_GET_SEALS:
+        ret = get_errno(GUEST_FD_HOST_CALL(fd, safe_fcntl(fd, host_cmd, arg)));
+        break;
+
+    case TARGET_F_SETLEASE:
         ret = get_errno(safe_fcntl(fd, host_cmd, arg));
         break;
 
@@ -20554,6 +20573,10 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
         from_flock64_fn *copyfrom = copy_from_user_flock64;
         to_flock64_fn *copyto = copy_to_user_flock64;
 
+        if (latc_aot_v2_fd_is_protected(arg1)) {
+            return -TARGET_EACCES;
+        }
+
 #ifdef TARGET_ARM
         if (!((CPUARMState *)cpu_env)->eabi) {
             copyfrom = copy_from_user_oabi_flock64;
@@ -20572,7 +20595,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
             if (ret) {
                 break;
             }
-            ret = get_errno(safe_fcntl(arg1, cmd, &fl));
+            ret = get_errno(guest_fd_fcntl_lock(arg1, cmd, &fl));
             if (ret == 0) {
                 ret = copyto(arg3, &fl);
             }
@@ -20584,7 +20607,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
             if (ret) {
                 break;
             }
-            ret = get_errno(safe_fcntl(arg1, cmd, &fl));
+            ret = get_errno(guest_fd_fcntl_lock(arg1, cmd, &fl));
 	    break;
         default:
             ret = do_fcntl(cpu_env, arg1, arg2, arg3);

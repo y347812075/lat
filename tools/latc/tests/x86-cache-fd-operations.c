@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <stdint.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -25,6 +26,15 @@ int main(void)
     if (transfer(1, "READY\n", 6, 1)) return 1;
     while (!transfer(0, request, sizeof(request), 0)) {
         memset(buffer, 0, sizeof(buffer));
+        if (request[0] == 72) {
+            struct flock lock = { .l_type = F_RDLCK, .l_whence = SEEK_SET };
+            memcpy(buffer, &lock, sizeof(lock));
+            if (request[3] == -4) {
+                lock.l_type = F_UNLCK;
+                memcpy(buffer, &lock, sizeof(lock));
+                request[3] = -1;
+            }
+        }
         for (int i = 2; i < 7; i++) {
             if (request[i] == -1) request[i] = (intptr_t)buffer;
             else if (request[i] == -2) request[i] = (intptr_t)attribute;

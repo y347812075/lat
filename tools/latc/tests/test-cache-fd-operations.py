@@ -80,13 +80,43 @@ def run(prefix, module, guest, work):
                      ('fgetxattr-after-set', 193, [-2, 0, 0], 0),
                      ('fremovexattr', 199, [-2], 0),
                      ('fadvise-invalid', 221, [0, 0, 0x7fffffff], -errno.EINVAL),
-                     ('ftruncate-invalid', 77, [-3], -errno.EINVAL)]
+                     ('ftruncate-invalid', 77, [-3], -errno.EINVAL),
+                     ('fcntl-getfl', 72, [3, 0], 2),
+                     ('fcntl-setfl-append', 72, [4, 0x402], 0),
+                     ('fcntl-getfl-append', 72, [3, 0], 0x402),
+                     ('fcntl-setfl-reset', 72, [4, 2], 0),
+                     ('fcntl-getlk', 72, [5, -1], 0),
+                     ('fcntl-setlk', 72, [6, -1], 0),
+                     ('fcntl-unlock', 72, [6, -4], 0),
+                     ('fcntl-ofd-getlk', 72, [36, -1], 0),
+                     ('fcntl-ofd-setlk', 72, [37, -1], 0),
+                     ('fcntl-ofd-unlock', 72, [37, -4], 0),
+                     ('fcntl-getsig', 72, [11, 0], 0),
+                     ('fcntl-setsig', 72, [10, 0], 0),
+                     ('fcntl-getown', 72, [9, 0], 0),
+                     ('fcntl-setown', 72, [8, 0], 0),
+                     ('fcntl-getown-ex', 72, [16, -1], 0),
+                     ('fcntl-setown-ex', 72, [15, -1], 0),
+                     ('fcntl-getlease', 72, [1025, 0], 2),
+                     ('fcntl-getpipe-invalid', 72, [1032, 0], -errno.EBADF),
+                     ('fcntl-setpipe-invalid', 72, [1031, 4096], -errno.EBADF),
+                     ('fcntl-getseals-invalid', 72, [1034, 0], -errno.EINVAL),
+                     ('fcntl-addseals-invalid', 72, [1033, 0], -errno.EINVAL)]
             for name, nr, arguments, expected in cases:
                 protected = operation(nr, inherited_number, arguments)
                 normal = operation(nr, directory if name == 'fchdir' else ordinary, arguments)
                 evidence.append(dict(name=name, protected=protected, ordinary=normal))
                 assert protected == -errno.EACCES, evidence[-1]
                 assert normal == expected, evidence[-1]
+                if name in ('fcntl-setlk', 'fcntl-ofd-setlk'):
+                    try:
+                        fcntl.lockf(ordinary, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        raise AssertionError('guest record lock was not retained')
+                    except BlockingIOError:
+                        pass
+                elif name in ('fcntl-unlock', 'fcntl-ofd-unlock'):
+                    fcntl.lockf(ordinary, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.lockf(ordinary, fcntl.LOCK_UN)
                 try:
                     fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     raise AssertionError('guest operation released module lifetime pin')
