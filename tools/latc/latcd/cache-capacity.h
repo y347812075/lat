@@ -37,7 +37,9 @@ typedef struct LatcdCacheCapacity {
 /* Startup only, under the owner lease, before publishers start. Counts immutable
  * generation/legacy superseded objects plus .gc regular-file metadata separately;
  * and current/.tbsets/.identities state separately. Not all cache state.
- * Unsafe/aliased metadata or state closes admission. */
+ * Unsafe/aliased metadata or state closes admission. Existing .gc file inodes
+ * and records installed through metadata_begin/finish are watched for writes
+ * and replacement. This is not full .gc namespace or directory-block accounting. */
 int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
                               char *error, size_t error_size);
 int latcd_cache_capacity_reserve(LatcdCacheCapacity *capacity, uint64_t bytes,
@@ -75,7 +77,8 @@ int latcd_cache_capacity_metadata_begin(int directory, const char *name, uint64_
     LatcdMetadataReservation *reservation);
 /* replaced: rename/link installed the new record. leftover: temporary removal
  * or anonymous-file close could not be proved; charge its full reservation.
- * Caller serializes replacement of the same record. No filesystem scan here. */
+ * Caller serializes replacement of the same record. Installed metadata gets a
+ * fresh inode watch; unexpected events close ordinary admission. No scan here. */
 void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
     bool replaced, bool leftover);
 /* Ordinary persistent state has no committed-transaction over-limit exception.

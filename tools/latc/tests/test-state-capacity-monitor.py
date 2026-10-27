@@ -21,7 +21,7 @@ def run(prefix, guest, work):
     subprocess.run([sys.executable, str(Path(__file__).with_name('make-tbset.py')),
                     str(guest), str(keys)], env=env, check=True)
 
-    for kind in ('current', 'tbsets', 'identities'):
+    for kind in ('current', 'tbsets', 'identities', 'gc'):
         case = work / kind
         case.mkdir(mode=0o700)
         cache, socket, stats = case / 'cache', case / 'socket', case / 'stats.json'
@@ -50,7 +50,10 @@ def run(prefix, guest, work):
                 assert value['generation_capacity_ready'], value
                 manifest = cache / (source + '.current')
                 original = manifest.read_bytes()
-                target = manifest if kind == 'current' else next((cache / ('.' + kind)).iterdir())
+                if kind == 'gc':
+                    target = next((cache / '.gc/transactions').glob('*.ini'))
+                else:
+                    target = manifest if kind == 'current' else next((cache / ('.' + kind)).iterdir())
                 # Keep format, size and permissions unchanged: inode modification
                 # events must detect this even without namespace replacement.
                 mode = target.stat().st_mode & 0o777

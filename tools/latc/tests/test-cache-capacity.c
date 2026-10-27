@@ -85,14 +85,14 @@ static void test_metadata(void)
     latcd_cache_capacity_metadata_finish(&first, false, false);
     assert(!capacity.metadata_reserved && capacity.metadata_committed == 5);
     assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 3, &first));
+    put(record, "123");
     latcd_cache_capacity_metadata_finish(&first, true, false);
     assert(capacity.metadata_committed == 3 && !capacity.metadata_reserved);
-    put(record, "123");
     latcd_cache_capacity_metadata_bind(&capacity, 3);
     assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 4, &first));
     assert(!capacity.ready && capacity.metadata_reserved == 4);
-    latcd_cache_capacity_metadata_finish(&first, true, false);
     put(record, "1234");
+    latcd_cache_capacity_metadata_finish(&first, true, false);
     assert(capacity.metadata_committed == 4);
     latcd_cache_capacity_metadata_bind(&capacity, 100);
     assert(latcd_cache_capacity_metadata_begin(directory, "../escape", 1, &first) < 0);
@@ -119,6 +119,79 @@ static void test_metadata(void)
     assert(!unlink(record) && !rmdir(store) && !rmdir(gc) && !rmdir(root));
     assert(!pthread_mutex_destroy(&capacity.lock));
     g_free(root); g_free(gc); g_free(store); g_free(record);
+}
+
+static void test_metadata_changes(unsigned mutation)
+{
+    char *root = g_dir_make_tmp("capacity-gc-change-XXXXXX", NULL);
+    char *outside = g_dir_make_tmp("capacity-gc-writer-XXXXXX", NULL);
+    char *directory = g_build_filename(root, ".gc", "transactions", NULL);
+    char *path = g_build_filename(directory, "record.ini", NULL);
+    char *alias = g_build_filename(outside, "alias", NULL);
+    char *staging = g_build_filename(directory, "staging", NULL);
+    assert(root && outside && !g_mkdir_with_parents(directory, 0700));
+    put(path, "initial");
+    assert(!chmod(path, 0600));
+    int writer = open(path, O_RDWR | O_CLOEXEC);
+    assert(writer >= 0 && !chmod(path, 0400));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    assert(capacity.metadata_committed == 7 && latcd_cache_capacity_poll(&capacity));
+    latcd_cache_capacity_metadata_bind(&capacity, 100);
+    int fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(fd >= 0);
+    if (mutation >= 7) {
+        LatcdMetadataReservation reservation, duplicate;
+        assert(!latcd_cache_capacity_metadata_begin(fd, "record.ini", 8, &reservation));
+        assert(latcd_cache_capacity_metadata_begin(fd, "record.ini", 1, &duplicate) < 0);
+        put(staging, "new-data");
+        assert(!rename(staging, path));
+        latcd_cache_capacity_metadata_finish(&reservation, true, false);
+        assert(capacity.metadata_committed == 8 && !capacity.metadata_reserved);
+        assert(latcd_cache_capacity_poll(&capacity));
+        if (mutation == 7) assert(!chmod(path, 0600));
+        else assert(!link(path, alias));
+    } else if (mutation == 0) assert(pwrite(writer, "changed", 7, 0) == 7);
+    else if (mutation == 1) assert(!ftruncate(writer, 4096));
+    else if (mutation == 2) assert(!chmod(path, 0600));
+    else if (mutation == 3) assert(!link(path, alias));
+    else if (mutation == 4) assert(!unlink(path));
+    else if (mutation == 5) assert(!rename(path, alias));
+    else {
+        put(staging, "replacement");
+        assert(!rename(staging, path));
+    }
+    assert(!latcd_cache_capacity_poll(&capacity));
+    assert(latcd_cache_capacity_reserve(&capacity, 0, UINT64_MAX, NULL, 0) < 0);
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    close(fd); close(writer);
+    unlink(path); unlink(alias); unlink(staging);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    assert(!rmdir(directory) && !rmdir(gc) && !rmdir(root) && !rmdir(outside));
+    g_free(root); g_free(outside); g_free(directory); g_free(path);
+    g_free(alias); g_free(staging); g_free(gc);
+}
+
+static void test_metadata_missing_after_install(void)
+{
+    char *root = g_dir_make_tmp("capacity-gc-missing-XXXXXX", NULL);
+    char *directory = g_build_filename(root, ".gc", NULL);
+    assert(root && !mkdir(directory, 0700));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    latcd_cache_capacity_metadata_bind(&capacity, 100);
+    int fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    LatcdMetadataReservation reservation;
+    assert(fd >= 0 && !latcd_cache_capacity_metadata_begin(fd, "missing", 5, &reservation));
+    latcd_cache_capacity_metadata_finish(&reservation, true, false);
+    assert(!latcd_cache_capacity_poll(&capacity));
+    assert(latcd_cache_capacity_reserve(&capacity, 0, UINT64_MAX, NULL, 0) < 0);
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    close(fd);
+    assert(!rmdir(directory) && !rmdir(root));
+    g_free(directory); g_free(root);
 }
 
 static void test_state(void)
@@ -256,6 +329,9 @@ static void test_state_changes(unsigned store, unsigned mutation)
 
 int main(void)
 {
+    test_metadata_missing_after_install();
+    for (unsigned mutation = 0; mutation < 9; mutation++)
+        test_metadata_changes(mutation);
     for (unsigned store = 0; store < 3; store++)
         for (unsigned mutation = 0; mutation < 10; mutation++)
             test_state_changes(store, mutation);

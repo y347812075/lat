@@ -21,6 +21,15 @@ static bool state_store_name(const char *name)
     return !strcmp(name, ".tbsets") || !strcmp(name, ".identities");
 }
 
+static char *metadata_record_key(int directory, const char *name)
+{
+    struct stat st;
+    if (fstat(directory, &st) || !S_ISDIR(st.st_mode) ||
+        st.st_uid != geteuid() || (st.st_mode & 0077)) return NULL;
+    return g_strdup_printf("@gc/%llu:%llu/%s", (unsigned long long)st.st_dev,
+                           (unsigned long long)st.st_ino, name);
+}
+
 static int watch_state_directory(LatcdCacheCapacity *capacity, int fd, const char *prefix)
 {
     char path[64];
@@ -235,7 +244,8 @@ static int scan_directory(int fd, unsigned depth, GHashTable *inodes, LatcdCache
     return result;
 }
 
-static int scan_metadata(int fd, unsigned depth, unsigned *visited, uint64_t *total)
+static int scan_metadata(int fd, unsigned depth, unsigned *visited, uint64_t *total,
+                         LatcdCacheCapacity *capacity)
 {
     struct stat before, after;
     if (depth > 8 || fstat(fd, &before) || !S_ISDIR(before.st_mode) ||
@@ -254,9 +264,13 @@ static int scan_metadata(int fd, unsigned depth, unsigned *visited, uint64_t *to
         }
         if (S_ISDIR(st.st_mode)) {
             int child = openat(fd, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-            if (child < 0 || scan_metadata(child, depth + 1, visited, total)) { result = -1; break; }
+            if (child < 0 || scan_metadata(child, depth + 1, visited, total, capacity)) { result = -1; break; }
         } else if (S_ISREG(st.st_mode) && st.st_uid == geteuid() && st.st_nlink == 1 &&
                    st.st_size >= 0 && (uint64_t)st.st_size <= UINT64_MAX - *total) {
+            char *key = metadata_record_key(fd, entry->d_name);
+            int watched = key ? watch_state_file(capacity, fd, entry->d_name, key) : -1;
+            g_free(key);
+            if (watched) { result = -1; break; }
             *total += st.st_size;
         } else { result = -1; break; }
     }
@@ -375,7 +389,7 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
     uint64_t metadata = 0;
     int gc = openat(capacity->root_fd, ".gc", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (gc >= 0) {
-        if (scan_metadata(gc, 0, &visited, &metadata)) result = -1;
+        if (scan_metadata(gc, 0, &visited, &metadata, capacity)) result = -1;
     } else if (errno != ENOENT) result = -1;
     uint64_t state = 0;
     int state_fd = openat(capacity->root_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -569,12 +583,13 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
     if (!name || !*name || strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, "..")) {
         errno = EINVAL; return -1;
     }
-    char *key = state ? state_record_key(capacity, directory, name) : NULL;
-    if (state ? !key : !metadata_directory_matches(capacity, directory)) {
+    char *key = state ? state_record_key(capacity, directory, name) :
+        metadata_directory_matches(capacity, directory) ? metadata_record_key(directory, name) : NULL;
+    if (!key) {
         errno = EINVAL; return -1;
     }
-    int owned_directory = state ? fcntl(directory, F_DUPFD_CLOEXEC, 0) : -1;
-    if (state && owned_directory < 0) { g_free(key); return -1; }
+    int owned_directory = fcntl(directory, F_DUPFD_CLOEXEC, 0);
+    if (owned_directory < 0) { g_free(key); return -1; }
     if (!fstatat(directory, name, &previous, AT_SYMLINK_NOFOLLOW)) {
         if (!S_ISREG(previous.st_mode) || previous.st_uid != geteuid() ||
             previous.st_nlink != 1 || previous.st_size < 0) {
@@ -592,8 +607,9 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
     /* Recovery may need to finish a committed transaction even with the normal
      * index closed. It is still charged, but cannot open new admission. */
     bool fits = (!state || capacity->ready) && capacity_fits(capacity, bytes, metadata_limit);
-    if (state && g_hash_table_contains(capacity->state_expected, key)) fits = false;
-    if (!state && !fits && old && bytes <= UINT64_MAX - capacity->metadata_reserved) {
+    bool updating = g_hash_table_contains(capacity->state_expected, key);
+    if (updating) fits = false;
+    if (!state && !fits && !updating && old && bytes <= UINT64_MAX - capacity->metadata_reserved) {
         /* Existing transaction completion cannot be blocked after current has
          * committed. Preserve the charge and close ordinary admission. */
         capacity->ready = false;
@@ -604,7 +620,7 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
         else capacity->metadata_reserved += bytes;
         *reservation = (LatcdMetadataReservation){.capacity = capacity, .bytes = bytes,
             .previous = old, .state = state, .directory = owned_directory, .name = key};
-        if (state) g_hash_table_add(capacity->state_expected, g_strdup(key));
+        g_hash_table_add(capacity->state_expected, g_strdup(key));
     }
     pthread_mutex_unlock(&capacity->lock);
     if (!fits) {
@@ -654,7 +670,7 @@ void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
     LatcdCacheCapacity *capacity = reservation->capacity;
     if (!capacity) return;
     pthread_mutex_lock(&capacity->lock);
-    if (reservation->state) {
+    {
         /* Drain old-inode retirement events while the exact target is expected,
          * then remove its watch before installing the replacement watch. */
         check_changes(capacity);
@@ -668,7 +684,8 @@ void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
             g_hash_table_iter_remove(&iterator);
         }
         char *basename = g_path_get_basename(reservation->name);
-        if (watch_state_file(capacity, reservation->directory, basename, reservation->name) < 0)
+        int watched = watch_state_file(capacity, reservation->directory, basename, reservation->name);
+        if (watched < 0 || (replaced && watched))
             capacity->ready = false;
         g_free(basename);
         check_changes(capacity);
@@ -688,7 +705,7 @@ void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
         if (leftover) capacity->ready = false;
     }
     pthread_mutex_unlock(&capacity->lock);
-    if (reservation->state) close(reservation->directory);
+    close(reservation->directory);
     g_free(reservation->name);
     g_free(reservation->staging);
     *reservation = (LatcdMetadataReservation){0};
