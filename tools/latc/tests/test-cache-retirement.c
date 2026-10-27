@@ -18,6 +18,41 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+static unsigned clock_fault;
+int __real_clock_gettime(clockid_t id, struct timespec *value);
+gboolean __real_g_file_get_contents(const gchar *name, gchar **contents,
+                                   gsize *length, GError **error);
+
+int __wrap_clock_gettime(clockid_t id, struct timespec *value)
+{
+    if (id == CLOCK_BOOTTIME && clock_fault && clock_fault <= 5) {
+        if (clock_fault == 1) { errno = EIO; return -1; }
+        *value = (struct timespec){ .tv_sec = 1 };
+        if (clock_fault == 2) value->tv_sec = -1;
+        if (clock_fault == 3) value->tv_sec = INT64_MAX;
+        if (clock_fault == 4) value->tv_nsec = -1;
+        if (clock_fault == 5) value->tv_nsec = 1000000000;
+        return 0;
+    }
+    return __real_clock_gettime(id, value);
+}
+
+gboolean __wrap_g_file_get_contents(const gchar *name, gchar **contents,
+                                   gsize *length, GError **error)
+{
+    if (clock_fault >= 6 && !strcmp(name, "/proc/sys/kernel/random/boot_id")) {
+        if (clock_fault == 6) return FALSE;
+        const char raw[] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\0hidden";
+        size_t size = clock_fault == 7 ? 3 : sizeof(raw) - 1;
+        *contents = g_malloc(size + 1);
+        memcpy(*contents, raw, size);
+        (*contents)[size] = 0;
+        if (length) *length = size;
+        return TRUE;
+    }
+    return __real_g_file_get_contents(name, contents, length, error);
+}
+
 static const char source[] =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 static const char old[] = "old manifest\n";
@@ -177,6 +212,48 @@ static void test_reboot(void)
     g_free(current);
     g_free(transaction);
     g_free(root);
+}
+
+static void test_clock_failure(unsigned phase, unsigned fault)
+{
+    char *root = root_new(), *transaction = NULL, error[256];
+    char *current = current_path(root), *path = NULL, *before = NULL;
+    if (phase) {
+        assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
+                                         &transaction, error, sizeof(error)));
+        put(current, next);
+        path = single_record(root);
+        if (phase == 2) {
+            assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+            GKeyFile *record = g_key_file_new();
+            assert(g_key_file_load_from_file(record, path, 0, NULL));
+            g_key_file_set_string(record, "transaction", "retired_boot",
+                                   "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+            char *data = g_key_file_to_data(record, NULL, NULL);
+            put(path, data);
+            g_free(data); g_key_file_unref(record);
+        }
+        assert(g_file_get_contents(path, &before, NULL, NULL));
+    }
+    clock_fault = fault;
+    unsigned recovered;
+    int result = phase == 0 ? latcd_retirement_prepare(root, source, next, strlen(next),
+        NULL, &transaction, error, sizeof(error)) : phase == 1 ?
+        latcd_retirement_finish(root, transaction, error, sizeof(error)) :
+        latcd_retirement_recover(root, &recovered, error, sizeof(error));
+    clock_fault = 0;
+    if (result >= 0) fprintf(stderr, "clock fault accepted phase=%u fault=%u\n", phase, fault);
+    assert(result < 0);
+    if (!phase) assert(!transaction);
+    else {
+        char *after;
+        assert(g_file_get_contents(path, &after, NULL, NULL) && !strcmp(before, after));
+        g_free(after);
+        assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)));
+        assert_state(root, "RETIRED");
+    }
+    remove_root(root);
+    g_free(before); g_free(path); g_free(current); g_free(transaction); g_free(root);
 }
 
 static void test_record_write_fault(const char *point, bool crash,
@@ -1958,6 +2035,8 @@ int main(int argc, char **argv)
     }
     test_unknown_and_corrupt();
     test_reboot();
+    for (unsigned phase = 0; phase < 3; phase++)
+        for (unsigned fault = 1; fault <= 8; fault++) test_clock_failure(phase, fault);
     for (int mutation = 0; mutation < 7; mutation++) test_object_identity(mutation);
     test_legacy_and_schema();
     test_recovery_entry_budget();

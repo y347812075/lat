@@ -313,23 +313,42 @@ out:
     return result;
 }
 
-static void set_clock(GKeyFile *record, const char *prefix)
+static int retirement_clock(char **boot, uint64_t *stamp)
 {
     struct timespec now;
-    gchar *boot = NULL;
-    gsize size;
+    gsize size = 0;
+    *boot = NULL;
+    if (clock_gettime(CLOCK_BOOTTIME, &now) ||
+        !g_file_get_contents("/proc/sys/kernel/random/boot_id", boot, &size, NULL))
+        goto failed;
+    if (now.tv_sec < 0 || now.tv_nsec < 0 || now.tv_nsec >= 1000000000 ||
+        (uint64_t)now.tv_sec > (UINT64_MAX - (uint64_t)now.tv_nsec / 1000) / 1000000 ||
+        (size != 36 && size != 37) || memchr(*boot, 0, size) ||
+        (size == 37 && (*boot)[36] != '\n')) goto failed;
+    (*boot)[36] = 0;
+    if (!g_uuid_string_is_valid(*boot)) goto failed;
+    *stamp = (uint64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+    return 0;
+failed:
+    g_free(*boot);
+    *boot = NULL;
+    errno = EIO;
+    return -1;
+}
+
+static int set_clock(GKeyFile *record, const char *prefix)
+{
+    char *boot = NULL;
+    uint64_t stamp;
+    if (retirement_clock(&boot, &stamp)) return -1;
     char *boot_key = g_strdup_printf("%s_boot", prefix);
     char *time_key = g_strdup_printf("%s_boottime_us", prefix);
-    if (!clock_gettime(CLOCK_BOOTTIME, &now) &&
-        g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, &size, NULL)) {
-        g_strchomp(boot);
-        g_key_file_set_string(record, "transaction", boot_key, boot);
-        g_key_file_set_uint64(record, "transaction", time_key,
-                             (uint64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000);
-    }
+    g_key_file_set_string(record, "transaction", boot_key, boot);
+    g_key_file_set_uint64(record, "transaction", time_key, stamp);
     g_free(boot);
     g_free(boot_key);
     g_free(time_key);
+    return 0;
 }
 
 int latcd_retirement_prepare(const char *root, const char *source,
@@ -359,11 +378,11 @@ int latcd_retirement_prepare(const char *root, const char *source,
     g_key_file_set_string(record, "transaction", "state", "PREPARED");
     g_key_file_set_string(record, "transaction", "previous", old64);
     g_key_file_set_string(record, "transaction", "next", new64);
-    set_clock(record, "prepared");
+    int clock_status = set_clock(record, "prepared");
     char *uuid = g_uuid_string_random();
     char *name = g_strdup_printf("%s.ini", uuid);
     g_free(uuid);
-    result = write_record(store, name, record);
+    result = clock_status ? -1 : write_record(store, name, record);
     if (!result) *transaction = g_strdup(name);
     g_free(name);
     g_free(old64);
@@ -858,17 +877,12 @@ int latcd_cache_domain_init(const char *root, char id[37],
     if (errno != ENOENT) goto out;
     char *new_id = g_uuid_string_random();
     char *boot = NULL;
-    struct timespec now;
     uint64_t now_us;
-    if (!new_id || clock_gettime(CLOCK_BOOTTIME, &now) || now.tv_sec < 0 ||
-        (uint64_t)now.tv_sec > UINT64_MAX / 1000000 ||
-        !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL)) {
+    if (!new_id || retirement_clock(&boot, &now_us)) {
         g_free(new_id);
         g_free(boot);
         goto out;
     }
-    g_strchomp(boot);
-    now_us = (uint64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
     GKeyFile *record = g_key_file_new();
     g_key_file_set_integer(record, "domain", "version", 1);
     g_key_file_set_string(record, "domain", "id", new_id);
@@ -1075,18 +1089,10 @@ static int object_transaction_status(int root, const char *name, const struct st
     unsigned visited = 0;
     int64_t started = g_get_monotonic_time();
     char *boot = NULL;
-    struct timespec now;
     uint64_t now_us = 0, latest_deadline = 0;
     bool retirement_observed = false;
     if (grace_us) {
-        if (clock_gettime(CLOCK_BOOTTIME, &now) || now.tv_sec < 0 ||
-            (uint64_t)now.tv_sec > UINT64_MAX / 1000000 ||
-            !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL)) result = -1;
-        if (!result) {
-            g_strchomp(boot);
-            if (!hold_id_valid(boot)) result = -1;
-            now_us = (uint64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
-        }
+        if (retirement_clock(&boot, &now_us)) result = -1;
     }
     while (!result) {
         errno = 0;
@@ -1681,10 +1687,11 @@ static int recover_record(int root, int store, const char *name, bool content,
         if (!strcmp(state, "RETIRED")) {
             char *old_boot = g_key_file_get_string(record, "transaction", "retired_boot", NULL);
             char *boot = NULL;
-            if (g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL)) {
-                g_strchomp(boot);
+            uint64_t stamp;
+            if (!retirement_clock(&boot, &stamp)) {
                 if (g_strcmp0(boot, old_boot)) {
-                    set_clock(record, "retired");
+                    g_key_file_set_string(record, "transaction", "retired_boot", boot);
+                    g_key_file_set_uint64(record, "transaction", "retired_boottime_us", stamp);
                     result = write_record(store, name, record);
                 }
             } else result = -1;
@@ -1702,7 +1709,10 @@ static int recover_record(int root, int store, const char *name, bool content,
         current_size == new_size && !memcmp(contents, next, new_size)) {
         /* Restamp on recovery: never infer elapsed grace from wall time. */
         outcome = "RETIRED";
-        set_clock(record, "retired");
+        if (set_clock(record, "retired")) {
+            g_free(contents); g_free(current);
+            goto snapshots_out;
+        }
     } else if ((status == 1 && !old_size) ||
                (!status && old_size && old_size <= MANIFEST_LIMIT &&
                 current_size == old_size && !memcmp(contents, old, old_size))) {
@@ -2172,14 +2182,8 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
     memset(stats, 0, sizeof(*stats));
     int result = -1;
     char *boot = NULL;
-    struct timespec clock;
     uint64_t now = 0;
-    if (clock_gettime(CLOCK_BOOTTIME, &clock) || clock.tv_sec < 0 ||
-        (uint64_t)clock.tv_sec > UINT64_MAX / 1000000 ||
-        !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL)) goto out;
-    g_strchomp(boot);
-    if (!hold_id_valid(boot)) goto out;
-    now = (uint64_t)clock.tv_sec * 1000000 + clock.tv_nsec / 1000;
+    if (retirement_clock(&boot, &now)) goto out;
     if (!queue->cursor) {
         queue->complete = false;
         queue->visited = 0;
@@ -2306,18 +2310,6 @@ int latcd_retirement_queue_defer(LatcdRetirementQueue *queue,
     return 0;
 }
 
-static int queue_clock(char **boot, uint64_t *now)
-{
-    struct timespec clock;
-    if (clock_gettime(CLOCK_BOOTTIME, &clock) || clock.tv_sec < 0 ||
-        (uint64_t)clock.tv_sec > UINT64_MAX / 1000000 ||
-        !g_file_get_contents("/proc/sys/kernel/random/boot_id", boot, NULL, NULL)) return -1;
-    g_strchomp(*boot);
-    if (!hold_id_valid(*boot)) return -1;
-    *now = (uint64_t)clock.tv_sec * 1000000 + clock.tv_nsec / 1000;
-    return 0;
-}
-
 int latcd_retirement_queue_checkpoint(LatcdRetirementQueue *queue,
                                       char *error, size_t error_size)
 {
@@ -2330,7 +2322,7 @@ int latcd_retirement_queue_checkpoint(LatcdRetirementQueue *queue,
     char *boot = NULL;
     uint64_t now;
     int result = -1;
-    if (gc < 0 || fstat(root, &cache) || queue_clock(&boot, &now)) goto out;
+    if (gc < 0 || fstat(root, &cache) || retirement_clock(&boot, &now)) goto out;
     g_key_file_set_integer(record, "queue", "version", 1);
     g_key_file_set_string(record, "queue", "boot", boot);
     g_key_file_set_uint64(record, "queue", "cache_device", cache.st_dev);
@@ -2382,7 +2374,7 @@ int latcd_retirement_queue_restore(LatcdRetirementQueue *queue,
     if (gc < 0) { if (errno == ENOENT) result = 0; goto out; }
     int status = read_file(gc, "retirement-scheduler.ini", RECORD_LIMIT, &raw, &size);
     if (status) { if (status == 1) result = 0; goto out; }
-    if (fstat(root, &cache) || queue_clock(&boot, &now) || memchr(raw, 0, size) ||
+    if (fstat(root, &cache) || retirement_clock(&boot, &now) || memchr(raw, 0, size) ||
         !g_key_file_load_from_data(record, raw, size, 0, NULL)) goto out;
     const char *keys[] = {"version", "boot", "cache_device", "cache_inode", "grace_us", "sequence", "last_source"};
     uint64_t device, inode, grace, sequence;

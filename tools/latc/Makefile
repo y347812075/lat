@@ -133,7 +133,8 @@ $(BUILD)/tests/test-cache-retirement: tests/test-cache-retirement.c \
 		$(BUILD)/aot-v2/runtime/cache-lifecycle.o \
 		$(BUILD)/aot-v2/runtime/internal-fd-registry.o
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread \
+	  -Wl,--wrap=clock_gettime -Wl,--wrap=g_file_get_contents
 
 .PHONY: test-cache-retirement
 test-cache-retirement: $(BUILD)/tests/test-cache-retirement
