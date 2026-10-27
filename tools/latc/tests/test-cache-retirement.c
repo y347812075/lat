@@ -1736,6 +1736,29 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
     char *raw = g_key_file_to_data(record, NULL, NULL);
     put(record_path, raw);
     if (!mutation) {
+        LatcdRetirementQueue *changed = latcd_retirement_queue_new(root, 0);
+        LatcdRetirementQueueStats changed_stats;
+        assert(latcd_retirement_queue_step(changed, 1, 10000, &changed_stats,
+                                           error, sizeof(error)) == 1);
+        char *transaction_dir = g_build_filename(root, ".gc", "transactions", NULL);
+        char *saved_dir = g_build_filename(root, ".gc", "transactions-saved", NULL);
+        assert(!rename(transaction_dir, saved_dir) && !mkdir(transaction_dir, 0700));
+        int changed_result;
+        do {
+            changed_result = latcd_retirement_queue_step(changed, 1, 10000,
+                &changed_stats, error, sizeof(error));
+        } while (changed_result > 0);
+        assert(changed_result < 0 && !changed_stats.complete);
+        LatcdRetirementAttempt rejected;
+        assert(!latcd_retirement_queue_take(changed, UINT64_MAX, &rejected));
+        assert(!rmdir(transaction_dir) && !rename(saved_dir, transaction_dir));
+        do {
+            changed_result = latcd_retirement_queue_step(changed, 1, 10000,
+                &changed_stats, error, sizeof(error));
+        } while (changed_result > 0);
+        assert(!changed_result && changed_stats.complete && changed_stats.candidates == 3);
+        latcd_retirement_queue_free(changed);
+        g_free(transaction_dir); g_free(saved_dir);
         LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 0);
         LatcdRetirementQueueStats stats;
         int queued;

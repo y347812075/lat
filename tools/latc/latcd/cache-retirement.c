@@ -2062,6 +2062,7 @@ struct LatcdRetirementQueue {
     uint64_t grace, epoch;
     unsigned visited;
     DIR *cursor;
+    struct stat discovery_store;
     GHashTable *candidates;
     bool complete;
     char last_source[65];
@@ -2227,6 +2228,7 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         }
         queue->cursor = fdopendir(store);
         if (!queue->cursor) { close(store); goto out; }
+        if (fstat(dirfd(queue->cursor), &queue->discovery_store)) goto out;
     }
     int64_t started = g_get_monotonic_time();
     result = 1;
@@ -2245,6 +2247,16 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         if (!valid) { result = -1; break; }
     }
 sweep_complete:
+    if (!result && queue->cursor) {
+        struct stat held, path;
+        int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int store = root < 0 ? -1 : open_store(root, false);
+        if (store < 0 || fstat(dirfd(queue->cursor), &held) || fstat(store, &path) ||
+            !object_stat_equal(&queue->discovery_store, &held) ||
+            !object_stat_equal(&held, &path)) result = -1;
+        if (store >= 0) close(store);
+        if (root >= 0) close(root);
+    }
     if (!result) {
         GHashTableIter iterator;
         gpointer value;
