@@ -169,6 +169,19 @@ int latcd_retirement_queue_defer(LatcdRetirementQueue *queue,
 int latcd_retirement_queue_execute_one(LatcdRetirementQueue *queue,
     LatcdRetirementDeletionReport *report, char *error, size_t error_size);
 
+/* Same admission contract as execute_one. Adds per-step hash byte and soft
+ * time budgets, returning 2 when yielded with an outstanding attempt. Hashed
+ * bytes reports this step only. No S/roots lock survives a yield; only the SH
+ * hashing pin may remain. Single worker must finish/cancel before checkpoint.
+ * Filesystem calls and existing metadata checks are not hard-time bounded. */
+int latcd_retirement_queue_execute_step(LatcdRetirementQueue *queue,
+    uint64_t hash_bytes, uint64_t time_us, uint64_t *hashed_bytes,
+    LatcdRetirementDeletionReport *report, char *error, size_t error_size);
+/* Releases resumable state/pin and busy-defers its attempt; no unlink. Queue
+ * destruction also releases pins. Persistent intent is never rolled back. */
+int latcd_retirement_queue_cancel(LatcdRetirementQueue *queue,
+                                  char *error, size_t error_size);
+
 /* Owner lease and single queue worker required. Strict cache/boot/grace-bound
  * scheduler checkpoint; never restores discovery completeness or deadlines.
  * Restore before the first sweep. A reboot starts fresh scheduling ages.

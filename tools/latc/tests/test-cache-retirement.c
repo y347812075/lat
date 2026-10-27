@@ -19,9 +19,17 @@
 #include <unistd.h>
 
 static unsigned clock_fault;
+static int64_t monotonic_tick;
 int __real_clock_gettime(clockid_t id, struct timespec *value);
+gint64 __real_g_get_monotonic_time(void);
 gboolean __real_g_file_get_contents(const gchar *name, gchar **contents,
                                    gsize *length, GError **error);
+
+gint64 __wrap_g_get_monotonic_time(void)
+{
+    if (monotonic_tick) return monotonic_tick += 2000000;
+    return __real_g_get_monotonic_time();
+}
 
 int __wrap_clock_gettime(clockid_t id, struct timespec *value)
 {
@@ -1387,7 +1395,7 @@ static LatcdRetirementQueueStats sweep_queue(LatcdRetirementQueue *queue)
     return stats;
 }
 
-static void test_queue_consumer(unsigned mutation)
+static void test_queue_consumer(unsigned mutation, bool bounded)
 {
     char *root = root_new(), error[256], *transaction = NULL;
     char *original_record = NULL;
@@ -1398,6 +1406,11 @@ static void test_queue_consumer(unsigned mutation)
             g_strdup_printf("%s-%s%s", source, source, suffixes[i - 3]);
         paths[i] = g_build_filename(root, names[i], NULL);
         put(paths[i], "consumer immutable object\n");
+        if (mutation == 14 && i < 3) {
+            char *large = g_strnfill(131073, 'x');
+            put(paths[i], large);
+            g_free(large);
+        }
     }
     char *previous = g_strdup_printf("{\"version\":2,\"module\":\"%s\",\"native\":\"%s\","
         "\"tbset\":\"%s\",\"source_sha256\":\"%s\",\"codegen_id\":\"%s\",\"published_sequence\":1}",
@@ -1416,6 +1429,81 @@ static void test_queue_consumer(unsigned mutation)
     LatcdRetirementQueueStats stats = sweep_queue(queue);
     assert(stats.complete && stats.ready == 3);
     int pins[3] = {-1, -1, -1}, gate = -1;
+    if (bounded) {
+        LatcdRetirementDeletionReport report;
+        uint64_t hashed = UINT64_MAX;
+        assert(latcd_retirement_queue_execute_step(queue, 0, 1000000, &hashed,
+            &report, error, sizeof(error)) < 0 && !hashed);
+        assert(latcd_retirement_queue_execute_step(queue, 3, 0, &hashed,
+            &report, error, sizeof(error)) < 0 && !hashed);
+        assert(latcd_retirement_queue_execute_step(queue, 3, UINT64_MAX, &hashed,
+            &report, error, sizeof(error)) < 0 && !hashed);
+    }
+    if (mutation == 13) {
+        LatcdRetirementDeletionReport report;
+        uint64_t hashed = UINT64_MAX;
+        monotonic_tick = __real_g_get_monotonic_time();
+        assert(latcd_retirement_queue_execute_step(queue, 65536, 1000000, &hashed,
+            &report, error, sizeof(error)) == 2 && !hashed && !report.object_unlinked);
+        monotonic_tick = 0;
+        assert(!latcd_retirement_queue_cancel(queue, error, sizeof(error)));
+        goto cleanup;
+    }
+    if (mutation >= 8 && mutation < 13) {
+        LatcdRetirementDeletionReport report;
+        uint64_t hashed;
+        assert(latcd_retirement_queue_execute_step(queue, 3, 1000000, &hashed,
+            &report, error, sizeof(error)) == 2 && hashed == 3);
+        assert(!report.object_unlinked && !report.receipt_durable);
+        assert(latcd_retirement_queue_checkpoint(queue, error, sizeof(error)) < 0);
+        int source_gate = lat_aot_v2_cache_source_lock(root, source, LOCK_EX | LOCK_NB,
+                                                       false, error, sizeof(error));
+        int roots_gate = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB,
+                                                     error, sizeof(error));
+        assert(source_gate >= 0 && roots_gate >= 0);
+        close(roots_gate); close(source_gate);
+        unsigned pinned = 3;
+        for (unsigned i = 0; i < 3; i++) {
+            int fd = open(paths[i], O_RDONLY | O_CLOEXEC);
+            assert(fd >= 0);
+            if (flock(fd, LOCK_EX | LOCK_NB)) {
+                assert(errno == EWOULDBLOCK && pinned == 3);
+                pinned = i;
+            }
+            close(fd);
+        }
+        assert(pinned < 3);
+        if (mutation == 8) {
+            assert(!latcd_retirement_queue_cancel(queue, error, sizeof(error)));
+            assert(!latcd_retirement_queue_cancel(queue, error, sizeof(error)));
+            assert(!latcd_retirement_queue_checkpoint(queue, error, sizeof(error)));
+        } else if (mutation == 9) {
+            latcd_retirement_queue_free(queue);
+            queue = latcd_retirement_queue_new(root, 0);
+            stats = sweep_queue(queue);
+            assert(stats.ready == 3);
+        } else {
+            if (mutation == 10) put(paths[pinned], "replacement immutable object\n");
+            if (mutation == 11) put(current, previous);
+            if (mutation == 12) clock_fault = 1;
+            int result;
+            unsigned steps = 0;
+            do {
+                result = latcd_retirement_queue_execute_step(queue, 3, 1000000, &hashed,
+                    &report, error, sizeof(error));
+                assert(hashed <= 3 && !report.object_unlinked && ++steps < 100);
+            } while (result == 2);
+            clock_fault = 0;
+            assert(result < 0);
+        }
+        for (unsigned i = 0; i < 6; i++) {
+            assert(!access(paths[i], F_OK));
+            int fd = open(paths[i], O_RDONLY | O_CLOEXEC);
+            assert(fd >= 0 && !flock(fd, LOCK_EX | LOCK_NB));
+            close(fd);
+        }
+        goto cleanup;
+    }
     if (mutation == 1) for (unsigned i = 0; i < 3; i++) {
         pins[i] = open(paths[i], O_RDONLY | O_CLOEXEC);
         assert(pins[i] >= 0 && !flock(pins[i], LOCK_SH | LOCK_NB));
@@ -1454,7 +1542,20 @@ static void test_queue_consumer(unsigned mutation)
     if (mutation == 7) assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:unlinked", 1));
     for (unsigned i = 0; i < 3; i++) {
         LatcdRetirementDeletionReport report;
-        int result = latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error));
+        int result;
+        unsigned steps = 0;
+        uint64_t total_hashed = 0;
+        uint64_t budget = mutation == 14 ? 65536 : 3;
+        do {
+            uint64_t hashed;
+            result = bounded ? latcd_retirement_queue_execute_step(queue, budget, 1000000,
+                &hashed, &report, error, sizeof(error)) :
+                latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error));
+            if (bounded) { assert(hashed <= budget); total_hashed += hashed; }
+            if (result == 2) assert(!report.object_unlinked && !report.receipt_durable);
+            assert(++steps < 100);
+        } while (result == 2);
+        if (mutation == 14) assert(total_hashed == 131073 && steps >= 3);
         if (rejecting || mutation == 7) {
             assert(result < 0 && !report.receipt_durable);
             if (mutation != 7) assert(!report.object_unlinked);
@@ -1491,8 +1592,8 @@ static void test_queue_consumer(unsigned mutation)
         stats = sweep_queue(queue);
         assert(completed == 3 && !stats.candidates);
     }
-    latcd_retirement_queue_free(queue);
     if (mutation == 7) {
+        latcd_retirement_queue_free(queue);
         unsigned recovered;
         assert(!latcd_tombstone_recover(root, &recovered, error, sizeof(error)));
         queue = latcd_retirement_queue_new(root, 0);
@@ -1505,8 +1606,9 @@ static void test_queue_consumer(unsigned mutation)
         }
         stats = sweep_queue(queue);
         assert(!stats.candidates);
-        latcd_retirement_queue_free(queue);
     }
+cleanup:
+    latcd_retirement_queue_free(queue);
     for (unsigned i = 3; i < 6; i++) assert(!access(paths[i], F_OK));
     for (unsigned i = 0; i < 3; i++) if (pins[i] >= 0) close(pins[i]);
     if (gate >= 0) close(gate);
@@ -2177,7 +2279,8 @@ int main(int argc, char **argv)
     }
     test_unknown_and_corrupt();
     test_reboot();
-    for (unsigned mutation = 0; mutation < 8; mutation++) test_queue_consumer(mutation);
+    for (unsigned mutation = 0; mutation < 8; mutation++) test_queue_consumer(mutation, false);
+    for (unsigned mutation = 0; mutation < 15; mutation++) test_queue_consumer(mutation, true);
     for (unsigned phase = 0; phase < 3; phase++)
         for (unsigned fault = 1; fault <= 8; fault++) test_clock_failure(phase, fault);
     for (int mutation = 0; mutation < 7; mutation++) test_object_identity(mutation);

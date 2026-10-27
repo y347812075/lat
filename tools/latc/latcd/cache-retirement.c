@@ -1974,7 +1974,8 @@ static bool filesystem_available(int fd, uint64_t *bytes)
     return true;
 }
 
-static int tombstone_delete(const char *root, const char *name, const uint64_t *grace_us,
+static int tombstone_delete_cursor(const char *root, const char *name, const uint64_t *grace_us,
+                             LatcdRecoveryCursor *cursor,
                              LatcdRetirementDeletionReport *report,
                              char *error, size_t error_size)
 {
@@ -1990,13 +1991,21 @@ static int tombstone_delete(const char *root, const char *name, const uint64_t *
     int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
     if (report && directory >= 0)
         report->filesystem_before_valid = filesystem_available(directory, &report->filesystem_available_before);
-    int result = store < 0 ? -1 : recover_tombstone(root, directory, store, name, true, NULL, grace_us, report);
+    int result = store < 0 ? -1 : recover_tombstone(root, directory, store, name, true, cursor, grace_us, report);
     if (store >= 0) close(store);
     if (gc >= 0) close(gc);
     if (report && directory >= 0)
         report->filesystem_after_valid = filesystem_available(directory, &report->filesystem_available_after);
     if (directory >= 0) close(directory);
+    if (result > 0 && cursor && cursor->yielded) return 1;
     return result ? fail(error, error_size, "object deletion deferred or rejected") : 0;
+}
+
+static int tombstone_delete(const char *root, const char *name, const uint64_t *grace_us,
+                             LatcdRetirementDeletionReport *report,
+                             char *error, size_t error_size)
+{
+    return tombstone_delete_cursor(root, name, grace_us, NULL, report, error, error_size);
 }
 
 int latcd_tombstone_delete(const char *root, const char *name, char *error, size_t error_size)
@@ -2041,6 +2050,8 @@ struct LatcdRetirementQueue {
     char last_source[65];
     LatcdRetirementAttempt active;
     uint64_t sequence;
+    LatcdRecoveryCursor *execution;
+    uint64_t execution_started;
 };
 
 LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grace_us)
@@ -2056,6 +2067,7 @@ void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
 {
     if (!queue) return;
     if (queue->cursor) closedir(queue->cursor);
+    latcd_recovery_close(queue->execution);
     g_hash_table_unref(queue->candidates);
     g_free(queue->root); g_free(queue);
 }
@@ -2306,23 +2318,46 @@ int latcd_retirement_queue_defer(LatcdRetirementQueue *queue,
     uint64_t delay = busy ? MIN(RETIREMENT_BUSY_MIN_US << (candidate->busy_count - 1),
                                 RETIREMENT_BUSY_MAX_US) : 100000;
     candidate->retry_at = delay > UINT64_MAX - now_us ? UINT64_MAX : now_us + delay;
+    latcd_recovery_close(queue->execution);
+    queue->execution = NULL;
     memset(&queue->active, 0, sizeof(queue->active));
     return 0;
 }
 
-int latcd_retirement_queue_execute_one(LatcdRetirementQueue *queue,
+int latcd_retirement_queue_execute_step(LatcdRetirementQueue *queue,
+    uint64_t hash_bytes, uint64_t time_us, uint64_t *hashed_bytes,
     LatcdRetirementDeletionReport *report, char *error, size_t error_size)
 {
     if (report) memset(report, 0, sizeof(*report));
-    if (!queue) return fail(error, error_size, "invalid retirement consumer queue");
+    if (hashed_bytes) *hashed_bytes = 0;
+    if (!queue || !hash_bytes || !time_us ||
+        time_us > INT64_MAX - (uint64_t)g_get_monotonic_time())
+        return fail(error, error_size, "invalid retirement consumer budget");
     char *boot = NULL;
     uint64_t now;
-    if (retirement_clock(&boot, &now))
+    if (retirement_clock(&boot, &now)) {
+        if (queue->execution)
+            latcd_retirement_queue_defer(queue, &queue->active, queue->execution_started, true);
         return fail(error, error_size, "cannot read retirement consumer clock");
+    }
     g_free(boot);
-    LatcdRetirementAttempt attempt;
-    int selected = latcd_retirement_queue_take(queue, now, &attempt);
-    if (selected <= 0) return selected;
+    if (!queue->execution) {
+        LatcdRetirementAttempt selected_attempt;
+        int selected = latcd_retirement_queue_take(queue, now, &selected_attempt);
+        if (selected <= 0) return selected;
+        queue->execution = latcd_recovery_open(queue->root, true, error, error_size);
+        queue->execution_started = now;
+        if (!queue->execution) {
+            latcd_retirement_queue_defer(queue, &selected_attempt, now, true);
+            return -1;
+        }
+    }
+    LatcdRetirementAttempt attempt = queue->active;
+    LatcdRecoveryCursor *cursor = queue->execution;
+    cursor->bytes_left = hash_bytes;
+    cursor->deadline = g_get_monotonic_time() + time_us;
+    cursor->yielded = false;
+    uint64_t before_bytes = cursor->progress.hashed_bytes;
     char source[65];
     memcpy(source, attempt.name, 64); source[64] = 0;
     int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -2340,8 +2375,8 @@ int latcd_retirement_queue_execute_one(LatcdRetirementQueue *queue,
     if (!existing) {
         object = openat(root, attempt.name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
         if (object < 0 || flock(object, LOCK_SH | LOCK_NB)) goto out;
-        const char *names[] = {attempt.name};
-        evidence = capture_objects(root, source, names, 1);
+        evidence = recovery_capture(root, source, attempt.name, cursor);
+        if (cursor->yielded) { result = 2; goto out; }
         if (!evidence) goto out;
         latch = lat_aot_v2_cache_source_lock(queue->root, source, LOCK_EX | LOCK_NB,
                                              false, error, error_size);
@@ -2352,8 +2387,9 @@ int latcd_retirement_queue_execute_one(LatcdRetirementQueue *queue,
     }
     if (object >= 0) { close(object); object = -1; }
     if (latch >= 0) { close(latch); latch = -1; }
-    result = latcd_tombstone_delete_due_report(queue->root, attempt.name, queue->grace,
-                                               report, error, error_size);
+    result = tombstone_delete_cursor(queue->root, attempt.name, &queue->grace,
+                                     cursor, report, error, error_size);
+    if (result == 1 && cursor->yielded) result = 2;
 out:
     if (object >= 0) close(object);
     if (latch >= 0) close(latch);
@@ -2361,6 +2397,8 @@ out:
     if (gc >= 0) close(gc);
     if (root >= 0) close(root);
     g_free(evidence);
+    if (hashed_bytes) *hashed_bytes = cursor->progress.hashed_bytes - before_bytes;
+    if (result == 2) return 2;
     /* A failed clock must not turn a busy candidate into an immediate retry. */
     boot = NULL;
     uint64_t completed;
@@ -2371,10 +2409,33 @@ out:
     return result ? fail(error, error_size, "retirement consumer deferred or rejected") : 1;
 }
 
+int latcd_retirement_queue_execute_one(LatcdRetirementQueue *queue,
+    LatcdRetirementDeletionReport *report, char *error, size_t error_size)
+{
+    int result;
+    do {
+        result = latcd_retirement_queue_execute_step(queue, UINT64_MAX, 1000000,
+                                                     NULL, report, error, error_size);
+    } while (result == 2);
+    return result;
+}
+
+int latcd_retirement_queue_cancel(LatcdRetirementQueue *queue,
+                                  char *error, size_t error_size)
+{
+    if (!queue) return fail(error, error_size, "invalid retirement consumer queue");
+    if (!queue->execution) return 0;
+    char *boot = NULL;
+    uint64_t now = queue->execution_started;
+    retirement_clock(&boot, &now);
+    g_free(boot);
+    return latcd_retirement_queue_defer(queue, &queue->active, now, true);
+}
+
 int latcd_retirement_queue_checkpoint(LatcdRetirementQueue *queue,
                                       char *error, size_t error_size)
 {
-    if (!queue || !queue->complete || queue->cursor)
+    if (!queue || !queue->complete || queue->cursor || queue->execution)
         return fail(error, error_size, "cannot checkpoint incomplete retirement discovery");
     int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int gc = root < 0 ? -1 : open_directory(root, ".gc", true);
