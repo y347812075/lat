@@ -12,8 +12,13 @@
 #include <stdatomic.h>
 #include <unistd.h>
 
-typedef struct GuestFdEntry {
+typedef struct GuestFdBackend {
+    atomic_uint refs;
     int host_fd;
+} GuestFdBackend;
+
+typedef struct GuestFdEntry {
+    GuestFdBackend *backend;
     uint64_t generation;
     bool cloexec;
 } GuestFdEntry;
@@ -81,11 +86,34 @@ static GuestFdEntry *alloc_entry(int host_fd, bool cloexec)
         errno = ENOMEM;
         return NULL;
     }
-    *entry = (GuestFdEntry) {
-        .host_fd = host_fd,
-        .cloexec = cloexec,
-    };
+    entry->backend = g_try_new(GuestFdBackend, 1);
+    if (!entry->backend) {
+        g_free(entry);
+        errno = ENOMEM;
+        return NULL;
+    }
+    atomic_init(&entry->backend->refs, 1);
+    entry->backend->host_fd = host_fd;
+    entry->cloexec = cloexec;
     return entry;
+}
+
+/* Allocation failure must not consume a caller-owned host descriptor. */
+static void discard_entry(GuestFdEntry *entry)
+{
+    g_free(entry->backend);
+    g_free(entry);
+}
+
+static int release_backend(GuestFdBackend *backend)
+{
+    if (atomic_fetch_sub_explicit(&backend->refs, 1,
+                                  memory_order_acq_rel) != 1) {
+        return 0;
+    }
+    int result = close(backend->host_fd);
+    g_free(backend);
+    return result;
 }
 
 static void insert_locked(GuestFdTable *table, int guest_fd,
@@ -147,7 +175,7 @@ void guest_fd_table_unref(GuestFdTable *table)
     while (g_hash_table_iter_next(&iter, NULL, &value)) {
         GuestFdEntry *entry = value;
 
-        close(entry->host_fd);
+        release_backend(entry->backend);
     }
     g_hash_table_destroy(table->entries);
     pthread_mutex_destroy(&table->mutex);
@@ -172,16 +200,15 @@ GuestFdTable *guest_fd_table_copy(GuestFdTable *table)
     g_hash_table_iter_init(&iter, table->entries);
     while (g_hash_table_iter_next(&iter, &key, &value)) {
         const GuestFdEntry *source = value;
-        GuestFdEntry *entry = alloc_entry(-1, source->cloexec);
+        GuestFdEntry *entry = g_try_new(GuestFdEntry, 1);
 
         if (!entry) {
+            errno = ENOMEM;
             goto failed;
         }
-        entry->host_fd = fcntl(source->host_fd, F_DUPFD_CLOEXEC, 0);
-        if (entry->host_fd < 0) {
-            g_free(entry);
-            goto failed;
-        }
+        entry->backend = source->backend;
+        entry->cloexec = source->cloexec;
+        atomic_fetch_add_explicit(&entry->backend->refs, 1, memory_order_relaxed);
         insert_locked(copy, GPOINTER_TO_INT(key) - 1, entry);
     }
     pthread_mutex_unlock(&table->mutex);
@@ -219,7 +246,7 @@ int guest_fd_table_import(GuestFdTable *table, int guest_fd, int host_fd,
     pthread_mutex_lock(&table->mutex);
     if (lookup_locked(table, guest_fd)) {
         pthread_mutex_unlock(&table->mutex);
-        g_free(entry);
+        discard_entry(entry);
         errno = EEXIST;
         return -1;
     }
@@ -227,7 +254,7 @@ int guest_fd_table_import(GuestFdTable *table, int guest_fd, int host_fd,
         int saved = errno;
 
         pthread_mutex_unlock(&table->mutex);
-        g_free(entry);
+        discard_entry(entry);
         errno = saved;
         return -1;
     }
@@ -259,7 +286,7 @@ int guest_fd_table_adopt(GuestFdTable *table, int host_fd, bool cloexec,
     allocated = lowest_free_locked(table, 0);
     if (allocated < 0) {
         pthread_mutex_unlock(&table->mutex);
-        g_free(entry);
+        discard_entry(entry);
         errno = EMFILE;
         return -1;
     }
@@ -267,7 +294,7 @@ int guest_fd_table_adopt(GuestFdTable *table, int host_fd, bool cloexec,
         int saved = errno;
 
         pthread_mutex_unlock(&table->mutex);
-        g_free(entry);
+        discard_entry(entry);
         errno = saved;
         return -1;
     }
@@ -297,23 +324,23 @@ int guest_fd_table_dup_min(GuestFdTable *table, int guest_fd, int minimum,
     source = lookup_locked(table, guest_fd);
     if (!source) {
         pthread_mutex_unlock(&table->mutex);
-        g_free(entry);
+        discard_entry(entry);
         errno = EBADF;
         return -1;
     }
     allocated = lowest_free_locked(table, minimum);
     if (allocated < 0) {
         pthread_mutex_unlock(&table->mutex);
-        g_free(entry);
+        discard_entry(entry);
         errno = EMFILE;
         return -1;
     }
-    entry->host_fd = fcntl(source->host_fd, F_DUPFD_CLOEXEC, 0);
-    if (entry->host_fd < 0) {
+    entry->backend->host_fd = fcntl(source->backend->host_fd, F_DUPFD_CLOEXEC, 0);
+    if (entry->backend->host_fd < 0) {
         int saved = errno;
 
         pthread_mutex_unlock(&table->mutex);
-        g_free(entry);
+        discard_entry(entry);
         errno = saved;
         return -1;
     }
@@ -329,7 +356,6 @@ int guest_fd_table_dup_to(GuestFdTable *table, int guest_fd,
     GuestFdEntry *source;
     GuestFdEntry *old;
     GuestFdEntry *entry;
-    int old_host_fd = -1;
 
     if (!table || !valid_guest_fd(new_guest_fd)) {
         errno = EBADF;
@@ -344,29 +370,28 @@ int guest_fd_table_dup_to(GuestFdTable *table, int guest_fd,
     source = lookup_locked(table, guest_fd);
     if (!source) {
         pthread_mutex_unlock(&table->mutex);
-        g_free(entry);
+        discard_entry(entry);
         errno = EBADF;
         return -1;
     }
     if (guest_fd == new_guest_fd) {
         pthread_mutex_unlock(&table->mutex);
-        g_free(entry);
+        discard_entry(entry);
         return new_guest_fd;
     }
-    entry->host_fd = fcntl(source->host_fd, F_DUPFD_CLOEXEC, 0);
-    if (entry->host_fd < 0) {
+    entry->backend->host_fd = fcntl(source->backend->host_fd, F_DUPFD_CLOEXEC, 0);
+    if (entry->backend->host_fd < 0) {
         int saved = errno;
 
         pthread_mutex_unlock(&table->mutex);
-        g_free(entry);
+        discard_entry(entry);
         errno = saved;
         return -1;
     }
     old = g_hash_table_lookup(table->entries, guest_fd_key(new_guest_fd));
     if (old) {
         g_hash_table_steal(table->entries, guest_fd_key(new_guest_fd));
-        old_host_fd = old->host_fd;
-        close(old_host_fd);
+        release_backend(old->backend);
     }
     insert_locked(table, new_guest_fd, entry);
     pthread_mutex_unlock(&table->mutex);
@@ -380,7 +405,6 @@ int guest_fd_table_dup_to(GuestFdTable *table, int guest_fd,
 int guest_fd_table_close(GuestFdTable *table, int guest_fd)
 {
     GuestFdEntry *entry;
-    int host_fd;
 
     if (!table || !valid_guest_fd(guest_fd)) {
         errno = EBADF;
@@ -393,9 +417,8 @@ int guest_fd_table_close(GuestFdTable *table, int guest_fd)
         errno = EBADF;
         return -1;
     }
-    host_fd = entry->host_fd;
     g_hash_table_steal(table->entries, guest_fd_key(guest_fd));
-    int result = close(host_fd);
+    int result = release_backend(entry->backend);
     pthread_mutex_unlock(&table->mutex);
     g_free(entry);
     return result;

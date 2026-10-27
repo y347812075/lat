@@ -22,11 +22,13 @@ void guest_fd_table_unref(GuestFdTable *table);
 
 /*
  * Snapshot guest numbering and logical CLOEXEC under the source-table lock.
- * Backends are duplicated with host CLOEXEC: OFDs remain shared, but subsequent
- * descriptor mutations are independent. Failure leaves the source unchanged.
+ * Backends are refcounted, not duplicated: copies share the same host fd/OFD,
+ * but descriptor numbering and logical flags are independent. Backend close
+ * occurs only on its last reference. Copy/destruction/rollback do not introduce
+ * temporary fd closes that could release the source's POSIX record locks.
  * This does not unshare the host fd table or integrate guest syscall handling.
- * Duplicating/closing backends also has POSIX record-lock side effects; adapters
- * must resolve those semantics before using this for guest unshare/clone.
+ * Guest close/dup replacement still needs per-table record-lock ownership in
+ * the syscall adapter before this can implement guest unshare/clone semantics.
  */
 GuestFdTable *guest_fd_table_copy(GuestFdTable *table);
 

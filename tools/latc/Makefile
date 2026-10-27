@@ -618,7 +618,7 @@ $(BUILD)/tests/test-guest-fd-table: tests/test-guest-fd-table.c \
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
 	  tests/test-guest-fd-table.c aot-v2/common/guest-fd-table.c \
 	  $(LDLIBS) -pthread -Wl,--wrap=close -Wl,--wrap=fcntl \
-	  -Wl,--wrap=pthread_mutex_lock
+	  -Wl,--wrap=pthread_mutex_lock -Wl,--wrap=g_try_malloc
 
 $(BUILD)/tests/test-journal-store: aot-v2/tests/test-journal-store.c latcd/main.c \
 		$(BUILD)/aot-v2/runtime/latcd-client.o \
