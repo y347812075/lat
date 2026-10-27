@@ -416,7 +416,7 @@ static bool record_shape_valid(GKeyFile *record)
     GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
     const char *allowed[] = { "version", "source", "state", "previous", "next",
         "prepared_boot", "prepared_boottime_us", "retired_boot", "retired_boottime_us",
-        "objects", "objects_status", "binding_status" };
+        "objects", "objects_status", "binding_status", "retirement_clock_reason" };
     for (gsize i = 0; valid && i < count; i++) {
         bool known = false;
         for (size_t j = 0; j < G_N_ELEMENTS(allowed); j++)
@@ -425,6 +425,11 @@ static bool record_shape_valid(GKeyFile *record)
     }
     g_hash_table_unref(seen);
     g_strfreev(keys);
+    if (g_key_file_has_key(record, "transaction", "retirement_clock_reason", NULL)) {
+        char *reason = g_key_file_get_string(record, "transaction", "retirement_clock_reason", NULL);
+        valid = valid && (!g_strcmp0(reason, "BOOT_CHANGED") || !g_strcmp0(reason, "CLOCK_MISSING"));
+        g_free(reason);
+    }
     return valid;
 }
 
@@ -1692,6 +1697,8 @@ static int recover_record(int root, int store, const char *name, bool content,
                 if (g_strcmp0(boot, old_boot)) {
                     g_key_file_set_string(record, "transaction", "retired_boot", boot);
                     g_key_file_set_uint64(record, "transaction", "retired_boottime_us", stamp);
+                    g_key_file_set_string(record, "transaction", "retirement_clock_reason",
+                                           old_boot ? "BOOT_CHANGED" : "CLOCK_MISSING");
                     result = write_record(store, name, record);
                 }
             } else result = -1;

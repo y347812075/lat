@@ -20,6 +20,7 @@
 
 static unsigned clock_fault;
 static int64_t monotonic_tick;
+static uint64_t simulated_boottime_us;
 int __real_clock_gettime(clockid_t id, struct timespec *value);
 gint64 __real_g_get_monotonic_time(void);
 gboolean __real_g_file_get_contents(const gchar *name, gchar **contents,
@@ -33,6 +34,11 @@ gint64 __wrap_g_get_monotonic_time(void)
 
 int __wrap_clock_gettime(clockid_t id, struct timespec *value)
 {
+    if (id == CLOCK_BOOTTIME && simulated_boottime_us && !clock_fault) {
+        value->tv_sec = simulated_boottime_us / 1000000;
+        value->tv_nsec = (simulated_boottime_us % 1000000) * 1000;
+        return 0;
+    }
     if (id == CLOCK_BOOTTIME && clock_fault && clock_fault <= 5) {
         if (clock_fault == 1) { errno = EIO; return -1; }
         *value = (struct timespec){ .tv_sec = 1 };
@@ -1425,8 +1431,64 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
                                                evidence, &transaction, error, sizeof(error)));
     put(current, following);
     assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
-    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 0);
+    if (mutation >= 15) {
+        if (mutation == 16) {
+            const char *single[] = {names[0]};
+            char *captured = latcd_retirement_capture_objects(root, source, single, 1);
+            int fd = open(paths[0], O_RDONLY | O_CLOEXEC);
+            assert(fd >= 0 && captured && !latcd_retirement_tombstone(root, source,
+                names[0], fd, captured, error, sizeof(error)));
+            close(fd); g_free(captured);
+        }
+        char *path = single_record(root);
+        GKeyFile *record = g_key_file_new();
+        assert(g_key_file_load_from_file(record, path, 0, NULL));
+        g_key_file_set_string(record, "transaction", "retired_boot",
+                               "12345678-1234-4234-8234-123456789abc");
+        if (mutation == 17) g_key_file_remove_key(record, "transaction", "retired_boot", NULL);
+        g_key_file_set_uint64(record, "transaction", "retired_boottime_us", 1);
+        char *raw = g_key_file_to_data(record, NULL, NULL);
+        put(path, raw); g_free(raw);
+        simulated_boottime_us = UINT64_C(1000000000000);
+        LatcdRetirementQueue *unrecovered = latcd_retirement_queue_new(root, 1000000);
+        LatcdRetirementQueueStats probe;
+        int pending;
+        do {
+            pending = latcd_retirement_queue_step(unrecovered, 1, 10000, &probe,
+                                                  error, sizeof(error));
+        } while (pending > 0);
+        assert(pending < 0 && !probe.complete);
+        latcd_retirement_queue_free(unrecovered);
+        unsigned recovered;
+        assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)));
+        assert(g_key_file_load_from_file(record, path, 0, NULL));
+        char *reason = g_key_file_get_string(record, "transaction", "retirement_clock_reason", NULL);
+        assert(!g_strcmp0(reason, mutation == 17 ? "CLOCK_MISSING" : "BOOT_CHANGED"));
+        g_free(reason);
+        assert(g_key_file_get_uint64(record, "transaction", "retired_boottime_us", NULL) == simulated_boottime_us);
+        g_key_file_unref(record); g_free(path);
+    }
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, mutation >= 15 ? 1000000 : 0);
     LatcdRetirementQueueStats stats = sweep_queue(queue);
+    if (mutation >= 15) {
+        uint64_t deadline = simulated_boottime_us + 1000000;
+        assert(stats.complete && stats.candidates == 3 && !stats.ready &&
+               stats.next_deadline_us == deadline);
+        assert(!latcd_retirement_queue_checkpoint(queue, error, sizeof(error)));
+        latcd_retirement_queue_free(queue);
+        queue = latcd_retirement_queue_new(root, 1000000);
+        assert(!latcd_retirement_queue_restore(queue, error, sizeof(error)));
+        simulated_boottime_us = deadline - 1;
+        unsigned recovered;
+        assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)));
+        stats = sweep_queue(queue);
+        assert(!stats.ready && stats.next_deadline_us == deadline);
+        LatcdRetirementDeletionReport report;
+        assert(!latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error)));
+        for (unsigned i = 0; i < 6; i++) assert(!access(paths[i], F_OK));
+        simulated_boottime_us = deadline;
+        stats = sweep_queue(queue);
+    }
     assert(stats.complete && stats.ready == 3);
     int pins[3] = {-1, -1, -1}, gate = -1;
     if (bounded) {
@@ -1608,6 +1670,7 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
         assert(!stats.candidates);
     }
 cleanup:
+    simulated_boottime_us = 0;
     latcd_retirement_queue_free(queue);
     for (unsigned i = 3; i < 6; i++) assert(!access(paths[i], F_OK));
     for (unsigned i = 0; i < 3; i++) if (pins[i] >= 0) close(pins[i]);
@@ -1669,6 +1732,7 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
     if (mutation == 12) g_key_file_remove_key(record, "transaction", "retired_boot", NULL);
     if (mutation == 13) g_key_file_set_string(record, "transaction", "retired_boottime_us", "-1");
     if (mutation == 14) g_key_file_set_string(record, "transaction", "retired_boottime_us", "18446744073709551616");
+    if (mutation == 15) g_key_file_set_string(record, "transaction", "retirement_clock_reason", "UNKNOWN_REASON");
     char *raw = g_key_file_to_data(record, NULL, NULL);
     put(record_path, raw);
     if (!mutation) {
@@ -1947,7 +2011,7 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
     int result = executor ? latcd_tombstone_delete_due_report(root, names[0], 0, &deletion_report, error, sizeof(error)) :
         latcd_retirement_tombstone(root, source, names[0], fd, single, error, sizeof(error));
     close(fd);
-    bool accepted = !mutation || (!executor && mutation >= 10);
+    bool accepted = !mutation || (!executor && mutation >= 10 && mutation < 15);
     assert((result == 0) == accepted);
     if (!mutation && !executor) assert(!latcd_tombstone_delete(root, names[0], error, sizeof(error)));
     assert((access(paths[0], F_OK) == 0) == (mutation != 0));
@@ -2260,7 +2324,7 @@ int main(int argc, char **argv)
     }
     test_explicit_holds();
     test_due_without_retirement();
-    for (unsigned mutation = 0; mutation < 15; mutation++) {
+    for (unsigned mutation = 0; mutation < 16; mutation++) {
         test_transaction_root_admission(mutation, false);
         test_transaction_root_admission(mutation, true);
     }
@@ -2280,7 +2344,7 @@ int main(int argc, char **argv)
     test_unknown_and_corrupt();
     test_reboot();
     for (unsigned mutation = 0; mutation < 8; mutation++) test_queue_consumer(mutation, false);
-    for (unsigned mutation = 0; mutation < 15; mutation++) test_queue_consumer(mutation, true);
+    for (unsigned mutation = 0; mutation < 18; mutation++) test_queue_consumer(mutation, true);
     for (unsigned phase = 0; phase < 3; phase++)
         for (unsigned fault = 1; fault <= 8; fault++) test_clock_failure(phase, fault);
     for (int mutation = 0; mutation < 7; mutation++) test_object_identity(mutation);
