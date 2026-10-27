@@ -9,12 +9,11 @@
  * guest code only after import() or adopt(). This API owns descriptor lifetime,
  * guest numbering, duplication/replacement and guest FD_CLOEXEC metadata.
  *
- * Syscall input/output conversion is not wired yet. In particular there is no
- * syscall-pin API in this batch, so callers must not treat an unlocked table
- * lookup as protection against concurrent close/replace or POSIX record-lock
- * side effects. Those semantics belong to the syscall-integration batches.
+ * Syscall input/output conversion is not wired yet. Handles stabilize a backend
+ * against close/replace, but do not implement POSIX record-lock ownership.
  */
 typedef struct GuestFdTable GuestFdTable;
+typedef struct GuestFdHandle GuestFdHandle;
 
 GuestFdTable *guest_fd_table_new(void);
 GuestFdTable *guest_fd_table_ref(GuestFdTable *table);
@@ -31,6 +30,18 @@ void guest_fd_table_unref(GuestFdTable *table);
  * the syscall adapter before this can implement guest unshare/clone semantics.
  */
 GuestFdTable *guest_fd_table_copy(GuestFdTable *table);
+
+/* Acquire under the table lock; use the borrowed host fd outside it, then
+ * release. No dup or temporary close: handles share the backend reference.
+ * Only imported/adopted guest numbers resolve, never arbitrary host numbers.
+ * A handle survives table close/replacement/destruction and is single-owner.
+ * The returned fd must not be closed or replaced by the caller. release(NULL)
+ * is harmless and preserves errno, including when the last reference closes.
+ * Callers must quiesce handles before host fork/exec and still adapt per-table
+ * record locks; this API alone does not enable guest syscall virtualization. */
+GuestFdHandle *guest_fd_table_acquire(GuestFdTable *table, int guest_fd);
+int guest_fd_handle_host_fd(const GuestFdHandle *handle);
+void guest_fd_handle_release(GuestFdHandle *handle);
 
 /*
  * Import or adopt a host descriptor. Both consume host_fd on success and leave

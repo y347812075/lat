@@ -17,6 +17,10 @@ typedef struct GuestFdBackend {
     int host_fd;
 } GuestFdBackend;
 
+struct GuestFdHandle {
+    GuestFdBackend *backend;
+};
+
 typedef struct GuestFdEntry {
     GuestFdBackend *backend;
     uint64_t generation;
@@ -114,6 +118,50 @@ static int release_backend(GuestFdBackend *backend)
     int result = close(backend->host_fd);
     g_free(backend);
     return result;
+}
+
+GuestFdHandle *guest_fd_table_acquire(GuestFdTable *table, int guest_fd)
+{
+    if (!table) {
+        errno = EINVAL;
+        return NULL;
+    }
+    GuestFdHandle *handle = g_try_new(GuestFdHandle, 1);
+    if (!handle) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    pthread_mutex_lock(&table->mutex);
+    GuestFdEntry *entry = lookup_locked(table, guest_fd);
+    if (entry) {
+        handle->backend = entry->backend;
+        atomic_fetch_add_explicit(&entry->backend->refs, 1, memory_order_relaxed);
+    }
+    pthread_mutex_unlock(&table->mutex);
+    if (!entry) {
+        g_free(handle);
+        errno = EBADF;
+        return NULL;
+    }
+    return handle;
+}
+
+int guest_fd_handle_host_fd(const GuestFdHandle *handle)
+{
+    if (!handle) {
+        errno = EBADF;
+        return -1;
+    }
+    return handle->backend->host_fd;
+}
+
+void guest_fd_handle_release(GuestFdHandle *handle)
+{
+    if (!handle) return;
+    int saved = errno;
+    release_backend(handle->backend);
+    g_free(handle);
+    errno = saved;
 }
 
 static void insert_locked(GuestFdTable *table, int guest_fd,

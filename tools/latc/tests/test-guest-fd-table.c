@@ -233,6 +233,14 @@ static void test_copy_preserves_record_locks(void)
     assert(!guest_fd_table_import(source, 7, fd, false));
     assert(!__real_fcntl(fd, F_SETLK, &lock));
     assert(record_lock_is_held(fd));
+    GuestFdHandle *handle = guest_fd_table_acquire(source, 7);
+    assert(handle && guest_fd_handle_host_fd(handle) == fd);
+    guest_fd_handle_release(handle);
+    assert(record_lock_is_held(fd));
+    copy_alloc_fail_after = 0;
+    assert(!guest_fd_table_acquire(source, 7) && errno == ENOMEM);
+    copy_alloc_fail_after = -1;
+    assert(record_lock_is_held(fd));
     copy = guest_fd_table_copy(source);
     assert(copy && record_lock_is_held(fd));
     guest_fd_table_unref(copy);
@@ -356,6 +364,48 @@ static void *run_close(void *opaque)
     return NULL;
 }
 
+static void test_handles(void)
+{
+    GuestFdTable *table = guest_fd_table_new();
+    int original[2], replacement[2];
+    assert(table && !pipe2(original, O_CLOEXEC) && !pipe2(replacement, O_CLOEXEC));
+    assert(!guest_fd_table_import(table, 700, original[1], false));
+    assert(!guest_fd_table_import(table, 701, replacement[1], true));
+    errno = 0;
+    assert(!guest_fd_table_acquire(NULL, 700) && errno == EINVAL);
+    assert(!guest_fd_table_acquire(table, -1) && errno == EBADF);
+    assert(!guest_fd_table_acquire(table, original[0]) && errno == EBADF);
+    assert(guest_fd_handle_host_fd(NULL) == -1 && errno == EBADF);
+    copy_alloc_fail_after = 0;
+    assert(!guest_fd_table_acquire(table, 700) && errno == ENOMEM);
+    copy_alloc_fail_after = -1;
+    copy_fail_after = 0;
+    GuestFdHandle *old = guest_fd_table_acquire(table, 700);
+    assert(old && guest_fd_handle_host_fd(old) == original[1]);
+    copy_fail_after = -1;
+    assert(guest_fd_table_dup_to(table, 701, 700, false) == 700);
+    GuestFdHandle *fresh = guest_fd_table_acquire(table, 700);
+    assert(fresh && guest_fd_handle_host_fd(fresh) != guest_fd_handle_host_fd(old));
+    CloseJob closer = { .table = table, .guest_fd = 700 };
+    pthread_t thread;
+    assert(!pthread_create(&thread, NULL, run_close, &closer));
+    assert(!pthread_join(thread, NULL) && !closer.result);
+    guest_fd_table_unref(table);
+    assert(write(guest_fd_handle_host_fd(old), "a", 1) == 1);
+    assert(write(guest_fd_handle_host_fd(fresh), "b", 1) == 1);
+    char byte;
+    assert(read(original[0], &byte, 1) == 1 && byte == 'a');
+    assert(read(replacement[0], &byte, 1) == 1 && byte == 'b');
+    errno = E2BIG;
+    guest_fd_handle_release(old);
+    assert(errno == E2BIG && read(original[0], &byte, 1) == 0);
+    guest_fd_handle_release(fresh);
+    assert(errno == E2BIG && read(replacement[0], &byte, 1) == 0);
+    guest_fd_handle_release(NULL);
+    assert(errno == E2BIG);
+    assert(!close(original[0]) && !close(replacement[0]));
+}
+
 static void *run_fork_start(void *opaque)
 {
     ForkJob *job = opaque;
@@ -373,6 +423,7 @@ int main(void)
     test_copy();
     test_copy_preserves_record_locks();
     test_copy_close_serialization();
+    test_handles();
     GuestFdTable *table = guest_fd_table_new();
     GuestFdTable *thread_ref;
     int pipefd[2];
