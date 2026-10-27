@@ -13,6 +13,9 @@
 #include <sys/inotify.h>
 #include <unistd.h>
 
+static LatcdCacheCapacity *metadata_capacity;
+static uint64_t metadata_limit;
+
 static bool generated_name(const char *name)
 {
     if (strlen(name) < 67 || strspn(name, "0123456789abcdef") < 64) return false;
@@ -139,11 +142,45 @@ static int scan_directory(int fd, unsigned depth, GHashTable *inodes, LatcdCache
     return result;
 }
 
+static int scan_metadata(int fd, unsigned depth, unsigned *visited, uint64_t *total)
+{
+    struct stat before, after;
+    if (depth > 8 || fstat(fd, &before) || !S_ISDIR(before.st_mode) ||
+        before.st_uid != geteuid() || (before.st_mode & 0077)) { close(fd); return -1; }
+    DIR *directory = fdopendir(fd);
+    if (!directory) { close(fd); return -1; }
+    int result = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) { if (errno) result = -1; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        struct stat st;
+        if (++*visited > 100000 || fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW)) {
+            result = -1; break;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            int child = openat(fd, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            if (child < 0 || scan_metadata(child, depth + 1, visited, total)) { result = -1; break; }
+        } else if (S_ISREG(st.st_mode) && st.st_uid == geteuid() && st.st_nlink == 1 &&
+                   st.st_size >= 0 && (uint64_t)st.st_size <= UINT64_MAX - *total) {
+            *total += st.st_size;
+        } else { result = -1; break; }
+    }
+    if (fstat(fd, &after) || before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec || before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec || before.st_ctim.tv_nsec != after.st_ctim.tv_nsec)
+        result = -1;
+    closedir(directory);
+    return result;
+}
+
 int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
                               char *error, size_t error_size)
 {
     pthread_mutex_lock(&capacity->lock);
     bool busy = capacity->reserved || capacity->transient_reserved || capacity->recovered_reserved ||
+        capacity->metadata_reserved ||
         (capacity->unknown_tasks && g_hash_table_size(capacity->unknown_tasks)) ||
         (capacity->expected_names && g_hash_table_size(capacity->expected_names));
     pthread_mutex_unlock(&capacity->lock);
@@ -164,18 +201,39 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
     capacity->root_watch = watch;
     int result = fd < 0 || capacity->root_fd < 0 ? -1 :
         scan_directory(fd, 0, inodes, capacity, &visited, &total);
+    uint64_t metadata = 0;
+    int gc = openat(capacity->root_fd, ".gc", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (gc >= 0) {
+        if (scan_metadata(gc, 0, &visited, &metadata)) result = -1;
+    } else if (errno != ENOENT) result = -1;
     if (watch < 0) result = -1;
     g_hash_table_unref(inodes);
     pthread_mutex_lock(&capacity->lock);
     if (capacity->reserved) result = -1;
     capacity->ready = !result;
-    if (!result) capacity->committed = total;
+    if (!result) {
+        capacity->committed = total;
+        capacity->metadata_committed = metadata;
+    }
     check_changes(capacity);
     if (!capacity->ready) result = -1;
     pthread_mutex_unlock(&capacity->lock);
     if (result && error && error_size)
         snprintf(error, error_size, "capacity: incomplete or unsafe generation inventory");
     return result;
+}
+
+static bool capacity_fits(LatcdCacheCapacity *capacity, uint64_t bytes, uint64_t limit)
+{
+    uint64_t remaining = limit;
+    const uint64_t charges[] = {capacity->committed, capacity->reserved,
+        capacity->transient_reserved, capacity->recovered_reserved, capacity->journal_reserved,
+        capacity->metadata_committed, capacity->metadata_reserved, bytes};
+    for (size_t i = 0; i < G_N_ELEMENTS(charges); i++) {
+        if (charges[i] > remaining) return false;
+        remaining -= charges[i];
+    }
+    return true;
 }
 
 static int reserve_bytes(LatcdCacheCapacity *capacity, uint64_t bytes,
@@ -185,12 +243,7 @@ static int reserve_bytes(LatcdCacheCapacity *capacity, uint64_t bytes,
     check_changes(capacity);
     bool fits = capacity->ready &&
         (!capacity->unknown_tasks || !g_hash_table_size(capacity->unknown_tasks)) &&
-        capacity->committed <= limit &&
-        capacity->reserved <= limit - capacity->committed &&
-        capacity->transient_reserved <= limit - capacity->committed - capacity->reserved &&
-        capacity->recovered_reserved <= limit - capacity->committed - capacity->reserved - capacity->transient_reserved &&
-        capacity->journal_reserved <= limit - capacity->committed - capacity->reserved - capacity->transient_reserved - capacity->recovered_reserved &&
-        bytes <= limit - capacity->committed - capacity->reserved - capacity->transient_reserved - capacity->recovered_reserved - capacity->journal_reserved;
+        capacity_fits(capacity, bytes, limit);
     if (fits) {
         if (transient) capacity->transient_reserved += bytes;
         else capacity->reserved += bytes;
@@ -257,6 +310,7 @@ int latcd_cache_capacity_poll(LatcdCacheCapacity *capacity)
 
 void latcd_cache_capacity_close(LatcdCacheCapacity *capacity)
 {
+    if (metadata_capacity == capacity) metadata_capacity = NULL;
     if (capacity->watch_fd >= 0) close(capacity->watch_fd);
     capacity->watch_fd = -1;
     if (capacity->root_fd >= 0) close(capacity->root_fd);
@@ -269,9 +323,90 @@ void latcd_cache_capacity_close(LatcdCacheCapacity *capacity)
     capacity->recovered_tasks = NULL;
     capacity->recovered_reserved = 0;
     capacity->journal_reserved = 0;
+    capacity->metadata_committed = 0;
+    capacity->metadata_reserved = 0;
     if (capacity->unknown_tasks) g_hash_table_unref(capacity->unknown_tasks);
     capacity->unknown_tasks = NULL;
     capacity->ready = false;
+}
+
+void latcd_cache_capacity_metadata_bind(LatcdCacheCapacity *capacity, uint64_t limit)
+{
+    metadata_capacity = capacity;
+    metadata_limit = limit;
+}
+
+static bool metadata_directory_matches(LatcdCacheCapacity *capacity, int directory)
+{
+    struct stat expected, st;
+    if (fstatat(capacity->root_fd, ".gc", &expected, AT_SYMLINK_NOFOLLOW) ||
+        !S_ISDIR(expected.st_mode)) return false;
+    int fd = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool matched = false;
+    for (unsigned depth = 0; fd >= 0 && depth <= 8; depth++) {
+        if (fstat(fd, &st) || st.st_uid != geteuid() || (st.st_mode & 0077)) break;
+        if (st.st_dev == expected.st_dev && st.st_ino == expected.st_ino) { matched = true; break; }
+        int parent = openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        close(fd);
+        fd = parent;
+    }
+    if (fd >= 0) close(fd);
+    return matched;
+}
+
+int latcd_cache_capacity_metadata_begin(int directory, const char *name, uint64_t bytes,
+    LatcdMetadataReservation *reservation)
+{
+    *reservation = (LatcdMetadataReservation){0};
+    LatcdCacheCapacity *capacity = metadata_capacity;
+    if (!capacity) return 0;
+    struct stat previous;
+    uint64_t old = 0;
+    if (!name || !*name || strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, "..") ||
+        !metadata_directory_matches(capacity, directory)) { errno = EINVAL; return -1; }
+    if (!fstatat(directory, name, &previous, AT_SYMLINK_NOFOLLOW)) {
+        if (!S_ISREG(previous.st_mode) || previous.st_uid != geteuid() ||
+            previous.st_nlink != 1 || previous.st_size < 0) { errno = EINVAL; return -1; }
+        old = previous.st_size;
+    } else if (errno != ENOENT) return -1;
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
+    /* Recovery may need to finish a committed transaction even with the normal
+     * index closed. It is still charged, but cannot open new admission. */
+    bool fits = capacity_fits(capacity, bytes, metadata_limit);
+    if (!fits && old && bytes <= UINT64_MAX - capacity->metadata_reserved) {
+        /* Existing transaction completion cannot be blocked after current has
+         * committed. Preserve the charge and close ordinary admission. */
+        capacity->ready = false;
+        fits = true;
+    }
+    if (fits) {
+        capacity->metadata_reserved += bytes;
+        *reservation = (LatcdMetadataReservation){capacity, bytes, old};
+    }
+    pthread_mutex_unlock(&capacity->lock);
+    if (!fits) errno = ENOSPC;
+    return fits ? 0 : -1;
+}
+
+void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
+    bool replaced, bool leftover)
+{
+    LatcdCacheCapacity *capacity = reservation->capacity;
+    if (!capacity) return;
+    pthread_mutex_lock(&capacity->lock);
+    if (reservation->bytes > capacity->metadata_reserved ||
+        (replaced && reservation->previous > capacity->metadata_committed)) capacity->ready = false;
+    else {
+        capacity->metadata_reserved -= reservation->bytes;
+        uint64_t retained = replaced || leftover ? reservation->bytes : 0;
+        if (replaced) capacity->metadata_committed -= reservation->previous;
+        if (retained > UINT64_MAX - capacity->metadata_committed) capacity->ready = false;
+        else capacity->metadata_committed += retained;
+        if (leftover) capacity->ready = false;
+    }
+    pthread_mutex_unlock(&capacity->lock);
+    *reservation = (LatcdMetadataReservation){0};
 }
 
 int latcd_cache_capacity_restore_task(LatcdCacheCapacity *capacity, const char *id, uint64_t bytes)

@@ -1266,6 +1266,14 @@ static void task_object_identity(GKeyFile *record, const char *group,
 static int persist_task_record(int directory, const char *id, GKeyFile *record)
 {
     char *name = g_strdup_printf("%s.ini", id);
+    gsize length;
+    char *data = g_key_file_to_data(record, &length, NULL);
+    LatcdMetadataReservation reservation;
+    if (latcd_cache_capacity_metadata_begin(directory, name, length, &reservation)) {
+        g_free(data); g_free(name);
+        return -1;
+    }
+    bool installed = false, leftover = false;
     int lease = openat(directory, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
     if (lease < 0 || flock(lease, LOCK_SH | LOCK_NB)) goto failed;
     const char *point = getenv("LATCD_TEST_TASK_RECORD_CRASH");
@@ -1274,8 +1282,6 @@ static int persist_task_record(int directory, const char *id, GKeyFile *record)
     bool inject = point && kind && g_key_file_has_group(record, "task") &&
         !strcmp(kind, copying ? "COPY" : "COMPILER");
     if (inject && !strcmp(point, "created")) raise(SIGKILL);
-    gsize length;
-    char *data = g_key_file_to_data(record, &length, NULL);
     size_t done = 0;
     while (done < length) {
         size_t wanted = inject && !strcmp(point, "partial") ? MIN(length - done, 128) : length - done;
@@ -1285,15 +1291,15 @@ static int persist_task_record(int directory, const char *id, GKeyFile *record)
         done += count;
         if (inject && !strcmp(point, "partial")) raise(SIGKILL);
     }
-    g_free(data);
     if (done != length || fchmod(lease, 0400) || fsync(lease)) goto failed;
     if (inject && !strcmp(point, "synced")) raise(SIGKILL);
     /* No named partial metadata survives a pre-link crash. Unsupported
      * anonymous files fail closed; never fall back to orphan staging names. */
     char descriptor[64];
     snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", lease);
-    if (linkat(AT_FDCWD, descriptor, directory, name, AT_SYMLINK_FOLLOW) ||
-        fsync(directory)) goto failed;
+    if (linkat(AT_FDCWD, descriptor, directory, name, AT_SYMLINK_FOLLOW)) goto failed;
+    installed = true;
+    if (fsync(directory)) goto failed;
     if (inject && !strcmp(point, "linked")) raise(SIGKILL);
     int readonly = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat writer, reader;
@@ -1307,9 +1313,11 @@ static int persist_task_record(int directory, const char *id, GKeyFile *record)
     lease = readonly;
     goto out;
 failed:
-    if (lease >= 0) close(lease);
+    if (lease >= 0 && close(lease)) leftover = true;
     lease = -1;
 out:
+    latcd_cache_capacity_metadata_finish(&reservation, installed, leftover);
+    g_free(data);
     g_free(name);
     return lease;
 }
@@ -3918,6 +3926,8 @@ static void write_stats_locked(LatcdService *service)
     uint64_t transient_bytes = generation_capacity.transient_reserved;
     uint64_t recovered_bytes = generation_capacity.recovered_reserved;
     uint64_t journal_bytes = generation_capacity.journal_reserved;
+    uint64_t metadata_bytes = generation_capacity.metadata_committed;
+    uint64_t metadata_reserved = generation_capacity.metadata_reserved;
     unsigned unknown_budgets = generation_capacity.unknown_tasks ?
         g_hash_table_size(generation_capacity.unknown_tasks) : 0;
     int budget_recovery = atomic_load(&compiler_budget_recovery_state);
@@ -3939,6 +3949,7 @@ static void write_stats_locked(LatcdService *service)
         ",\"publication_reserved_bytes\":%" PRIu64 ",\"compiler_peak_reserved_bytes\":%" PRIu64
         ",\"recovered_compiler_reserved_bytes\":%" PRIu64
         ",\"journal_reserved_bytes\":%" PRIu64
+        ",\"lifecycle_metadata_bytes\":%" PRIu64 ",\"lifecycle_metadata_reserved_bytes\":%" PRIu64
         ",\"unknown_compiler_budget_tasks\":%u"
         ",\"compiler_budget_recovery_state\":%d"
         ",\"retirement_candidates\":%u,\"retirement_due_candidates\":%u"
@@ -3957,7 +3968,8 @@ static void write_stats_locked(LatcdService *service)
         g_hash_table_size(service->active),
         g_hash_table_size(service->running_sources), service->config->workers,
         service->config->max_cache_bytes, (long)getpid(), generation_bytes,
-        publication_bytes, transient_bytes, recovered_bytes, journal_bytes, unknown_budgets, budget_recovery,
+        publication_bytes, transient_bytes, recovered_bytes, journal_bytes,
+        metadata_bytes, metadata_reserved, unknown_budgets, budget_recovery,
         retirement.candidates, retirement.due, retirement.next_deadline_us, retirement.oldest_due_wait_us,
         retirement.complete ? "true" : "false",
         retirement.ready, retirement.deferred, retirement.next_attempt_us,
@@ -6295,6 +6307,7 @@ int main(int argc, char **argv)
         close(cache_owner);
         return 1;
     }
+    latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
     unsigned budget_visited;
     int budget_result;
     do {

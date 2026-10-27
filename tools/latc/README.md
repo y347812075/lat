@@ -913,6 +913,17 @@ scan directories or evict generations during publication. Statistics expose
 `generation_logical_bytes`, `publication_reserved_bytes` and
 `generation_capacity_ready`.
 
+Lifecycle records beneath `.gc` are inventoried separately at startup and
+reported as `lifecycle_metadata_bytes`. The shared persistent-record writers
+reserve their new record size before writing, including replacement coexistence,
+and expose `lifecycle_metadata_reserved_bytes` while in flight. Both charges
+participate in the same cache byte limit. Failed cleanup retains a conservative
+charge and closes admission. Finishing an existing record may exceed the limit
+to preserve already-committed transactions; ordinary new compile admission then
+stays closed. This is logical regular-file accounting, not a filesystem quota:
+directory blocks, manifest/key/source state outside `.gc`, uncontrolled external
+changes, and pre-inventory recovery peak space are not covered by this counter.
+
 Inotify detects unexpected root generation or legacy-subtree changes and queue
 overflow, invalidating subsequent capacity admission until startup inventory.
 Owned publication names stay registered through cleanup. This is conservative

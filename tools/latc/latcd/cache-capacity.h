@@ -13,6 +13,8 @@ typedef struct LatcdCacheCapacity {
     uint64_t transient_reserved;
     uint64_t recovered_reserved;
     uint64_t journal_reserved;
+    uint64_t metadata_committed;
+    uint64_t metadata_reserved;
     void *recovered_tasks;
     void *unknown_tasks;
     bool ready;
@@ -27,7 +29,8 @@ typedef struct LatcdCacheCapacity {
     .watch_fd = -1, .root_fd = -1 }
 
 /* Startup only, under the owner lease, before publishers start. Counts immutable
- * generation objects and legacy superseded objects; not all cache state. */
+ * generation/legacy superseded objects plus .gc regular-file metadata separately;
+ * not all cache state. Unsafe/aliased metadata closes admission. */
 int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
                               char *error, size_t error_size);
 int latcd_cache_capacity_reserve(LatcdCacheCapacity *capacity, uint64_t bytes,
@@ -48,6 +51,22 @@ void latcd_cache_capacity_release_task(LatcdCacheCapacity *capacity, const char 
  * its own in-flight reservation. Failed inventory keeps reservation, closes admission. */
 int latcd_cache_capacity_journal(LatcdCacheCapacity *capacity, uint64_t total,
                                 uint64_t reservation, bool valid);
+/* Bind after startup inventory, before service threads. Unbound writers are
+ * bootstrap/offline operations and get inventoried at the next startup.
+ * Only lifecycle .gc regular-file bytes are covered, not directory blocks or
+ * external writers. close() unbinds after all service threads have stopped. */
+void latcd_cache_capacity_metadata_bind(LatcdCacheCapacity *capacity, uint64_t limit);
+typedef struct LatcdMetadataReservation {
+    LatcdCacheCapacity *capacity;
+    uint64_t bytes, previous;
+} LatcdMetadataReservation;
+int latcd_cache_capacity_metadata_begin(int directory, const char *name, uint64_t bytes,
+    LatcdMetadataReservation *reservation);
+/* replaced: rename/link installed the new record. leftover: temporary removal
+ * or anonymous-file close could not be proved; charge its full reservation.
+ * Caller serializes replacement of the same record. No filesystem scan here. */
+void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
+    bool replaced, bool leftover);
 /* Bracket owned root namespace writes; unexpected changes invalidate admission.
  * Names stay registered through cleanup, including while cache_lock is dropped. */
 int latcd_cache_capacity_expect(LatcdCacheCapacity *capacity, const char *const *names,

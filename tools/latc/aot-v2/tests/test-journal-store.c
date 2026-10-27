@@ -24,6 +24,7 @@ static pid_t start_service(const LatcdConfig *config)
         g_assert_cmpint(ensure_private_directory(config->cache_dir, error, sizeof(error)), ==, 0);
         g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, config->cache_dir,
                                                 error, sizeof(error)), ==, 0);
+        latcd_cache_capacity_metadata_bind(&generation_capacity, config->max_cache_bytes);
         _exit(run_service(config));
     }
     for (unsigned i = 0; i < 500 && access(config->socket_path, F_OK); i++)
@@ -130,6 +131,11 @@ static void check_shared_capacity(const LatcdConfig *original, int source, int c
     g_assert_cmpint(kill(child, SIGTERM), ==, 0);
     wait_ok(child);
     g_assert_cmpint(unlink(native), ==, 0);
+    LatcdCacheCapacity inventory = LATCD_CACHE_CAPACITY_INIT;
+    g_assert_cmpint(latcd_cache_capacity_scan(&inventory, cache, NULL, 0), ==, 0);
+    config.max_cache_bytes += inventory.metadata_committed;
+    latcd_cache_capacity_close(&inventory);
+    pthread_mutex_destroy(&inventory.lock);
     child = start_service(&config);
     int invalid = memfd_create("invalid-journal-source", MFD_CLOEXEC);
     g_assert_cmpint(invalid, >=, 0);

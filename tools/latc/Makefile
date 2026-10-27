@@ -128,6 +128,7 @@ test-cache-capacity: $(BUILD)/tests/test-cache-capacity
 test: test-cache-capacity
 
 $(BUILD)/tests/test-cache-retirement: tests/test-cache-retirement.c \
+		$(BUILD)/latcd/cache-capacity.o \
 		$(BUILD)/latcd/cache-retirement.o $(BUILD)/latcd/parson/parson.o \
 		$(BUILD)/aot-v2/runtime/cache-domain.o \
 		$(BUILD)/aot-v2/runtime/cache-lifecycle.o \

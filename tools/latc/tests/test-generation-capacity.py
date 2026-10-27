@@ -49,6 +49,19 @@ def run(prefix, guest, work):
             time.sleep(0.01)
         raise AssertionError("worker statistics did not settle")
 
+    def metadata_settled():
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            before = sum(path.stat().st_size for path in (cache / '.gc').rglob('*') if path.is_file())
+            value = json.loads(stats.read_bytes())
+            after = sum(path.stat().st_size for path in (cache / '.gc').rglob('*') if path.is_file())
+            if (before == after == value['lifecycle_metadata_bytes'] and
+                    not value['lifecycle_metadata_reserved_bytes']):
+                assert before > 0
+                return value
+            time.sleep(.02)
+        raise AssertionError((before, after, value))
+
     source = hashlib.sha256(guest.read_bytes()).hexdigest()
     current = cache / (source + ".current")
     with (work / "daemon.log").open("wb") as log:
@@ -78,6 +91,7 @@ def run(prefix, guest, work):
             generated = [p for p in cache.iterdir() if p.suffix in {".so", ".native", ".tbset"}]
             unique = {(p.stat().st_dev, p.stat().st_ino): p.stat().st_size for p in generated}
             assert after["generation_logical_bytes"] == sum(unique.values()), after
+            metadata_settled()
             deadline = time.monotonic() + 15
             while True:
                 observed = json.loads(stats.read_bytes())
@@ -138,6 +152,7 @@ def run(prefix, guest, work):
                     break
                 assert daemon.poll() is None and time.monotonic() < deadline, observed
                 time.sleep(.05)
+            metadata_settled()
             deadline = time.monotonic() + 15
             while True:
                 observed = json.loads(stats.read_bytes())

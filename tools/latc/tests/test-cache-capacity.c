@@ -62,8 +62,68 @@ static void test_external_writer(unsigned mutation)
     g_free(root); g_free(outside); g_free(name); g_free(basename); g_free(path); g_free(alias);
 }
 
+static void test_metadata(void)
+{
+    char *root = g_dir_make_tmp("capacity-metadata-XXXXXX", NULL);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "transactions", NULL);
+    char *record = g_build_filename(store, "record.ini", NULL);
+    assert(!g_mkdir_with_parents(store, 0700));
+    put(record, "12345");
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    assert(!capacity.committed && capacity.metadata_committed == 5);
+    assert(latcd_cache_capacity_reserve(&capacity, 1, 5, NULL, 0) < 0);
+    latcd_cache_capacity_metadata_bind(&capacity, 10);
+    int directory = open(store, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    LatcdMetadataReservation first, second;
+    assert(directory >= 0);
+    assert(!latcd_cache_capacity_metadata_begin(directory, "next.ini", 5, &first));
+    assert(capacity.metadata_reserved == 5);
+    assert(latcd_cache_capacity_metadata_begin(directory, "other.ini", 1, &second) < 0);
+    assert(latcd_cache_capacity_scan(&capacity, root, NULL, 0) < 0);
+    latcd_cache_capacity_metadata_finish(&first, false, false);
+    assert(!capacity.metadata_reserved && capacity.metadata_committed == 5);
+    assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 3, &first));
+    latcd_cache_capacity_metadata_finish(&first, true, false);
+    assert(capacity.metadata_committed == 3 && !capacity.metadata_reserved);
+    put(record, "123");
+    latcd_cache_capacity_metadata_bind(&capacity, 3);
+    assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 4, &first));
+    assert(!capacity.ready && capacity.metadata_reserved == 4);
+    latcd_cache_capacity_metadata_finish(&first, true, false);
+    put(record, "1234");
+    assert(capacity.metadata_committed == 4);
+    latcd_cache_capacity_metadata_bind(&capacity, 100);
+    assert(latcd_cache_capacity_metadata_begin(directory, "../escape", 1, &first) < 0);
+    int outside = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(outside >= 0 && latcd_cache_capacity_metadata_begin(outside, "bad", 1, &first) < 0);
+    close(outside);
+    assert(!latcd_cache_capacity_metadata_begin(directory, "partial", 6, &first));
+    latcd_cache_capacity_metadata_finish(&first, false, true);
+    assert(capacity.metadata_committed == 10 && !capacity.ready);
+    latcd_cache_capacity_close(&capacity);
+    assert(!capacity.metadata_committed && !capacity.metadata_reserved);
+    assert(!latcd_cache_capacity_metadata_begin(directory, "offline", 1, &first));
+    assert(!first.capacity);
+    assert(!linkat(directory, "record.ini", directory, "alias", 0));
+    assert(latcd_cache_capacity_scan(&capacity, root, NULL, 0) < 0 && !capacity.ready);
+    assert(!unlinkat(directory, "alias", 0));
+    assert(!symlinkat("record.ini", directory, "alias"));
+    assert(latcd_cache_capacity_scan(&capacity, root, NULL, 0) < 0 && !capacity.ready);
+    assert(!unlinkat(directory, "alias", 0));
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    assert(capacity.metadata_committed == 4 && capacity.ready);
+    latcd_cache_capacity_close(&capacity);
+    close(directory);
+    assert(!unlink(record) && !rmdir(store) && !rmdir(gc) && !rmdir(root));
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    g_free(root); g_free(gc); g_free(store); g_free(record);
+}
+
 int main(void)
 {
+    test_metadata();
     for (unsigned mutation = 0; mutation < 3; mutation++) test_external_writer(mutation);
     char *root = g_dir_make_tmp("cache-capacity-XXXXXX", NULL), error[256];
     assert(root);

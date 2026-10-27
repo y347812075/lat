@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "cache-retirement.h"
+#include "cache-capacity.h"
 #include "../aot-v2/runtime/cache-domain.h"
 #include "../aot-v2/runtime/cache-lifecycle.h"
 #include "parson/parson.h"
@@ -261,6 +262,11 @@ static int write_record(int directory, const char *name, GKeyFile *record)
 {
     gsize size;
     char *data = g_key_file_to_data(record, &size, NULL);
+    LatcdMetadataReservation reservation;
+    if (latcd_cache_capacity_metadata_begin(directory, name, size, &reservation)) {
+        g_free(data);
+        return -1;
+    }
     char *temporary = NULL;
     int fd = -1;
     /* A forked writer may share the parent's random state. Never remove an
@@ -275,6 +281,7 @@ static int write_record(int directory, const char *name, GKeyFile *record)
         if (fd >= 0 || errno != EEXIST) break;
     }
     bool created = fd >= 0;
+    bool replaced = false, leftover = false;
     int result = -1;
     int saved;
     if (fd < 0) goto out;
@@ -295,18 +302,21 @@ static int write_record(int directory, const char *name, GKeyFile *record)
     if (record_write_fault("written") || fchmod(fd, 0400) ||
         record_write_fault("chmod") || fsync(fd) ||
         record_write_fault("file-synced")) goto close_out;
-    if (close(fd)) { fd = -1; goto out; }
+    if (close(fd)) { fd = -1; leftover = true; goto out; }
     fd = -1;
     if (record_write_fault("closed") ||
-        renameat(directory, temporary, directory, name) ||
-        record_write_fault("renamed") || fsync(directory) ||
+        renameat(directory, temporary, directory, name)) goto out;
+    replaced = true;
+    if (record_write_fault("renamed") || fsync(directory) ||
         record_write_fault("directory-synced")) goto out;
     result = 0;
 close_out:
-    if (fd >= 0) close(fd);
+    if (fd >= 0 && close(fd)) leftover = true;
 out:
     saved = errno;
-    if (result && created) unlinkat(directory, temporary, 0);
+    if (result && created && !replaced && unlinkat(directory, temporary, 0) && errno != ENOENT)
+        leftover = true;
+    latcd_cache_capacity_metadata_finish(&reservation, replaced, leftover);
     g_free(temporary);
     g_free(data);
     errno = saved;
