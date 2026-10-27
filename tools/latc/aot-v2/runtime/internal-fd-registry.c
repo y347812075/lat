@@ -17,6 +17,7 @@
 static pthread_mutex_t registry_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t closes_idle = PTHREAD_COND_INITIALIZER;
 static size_t guest_closes;
+static size_t guest_operations;
 static int *protected_fds;
 static size_t protected_count;
 static size_t protected_capacity;
@@ -36,6 +37,7 @@ static void registry_atfork_child(void)
 {
     /* Other threads' pending closes cannot target the child's fd table. */
     guest_closes = 0;
+    guest_operations = 0;
     pthread_mutex_unlock(&registry_lock);
 }
 
@@ -59,7 +61,8 @@ void lat_aot_v2_internal_fd_lock(void)
 void lat_aot_v2_internal_fd_allocation_lock(void)
 {
     pthread_mutex_lock(&registry_lock);
-    while (guest_closes) pthread_cond_wait(&closes_idle, &registry_lock);
+    while (guest_closes || guest_operations)
+        pthread_cond_wait(&closes_idle, &registry_lock);
 }
 
 void lat_aot_v2_internal_fd_unlock(void)
@@ -158,6 +161,32 @@ int lat_aot_v2_internal_fd_close_guest(int fd)
     lat_aot_v2_internal_fd_unlock();
     errno = saved;
     return result;
+}
+
+int lat_aot_v2_internal_fd_guest_begin(int fd)
+{
+    lat_aot_v2_internal_fd_lock();
+    int result = -1;
+    if (fd_is_protected_locked(fd)) errno = EACCES;
+    else if (guest_operations == SIZE_MAX) errno = EOVERFLOW;
+    else {
+        guest_operations++;
+        result = 0;
+    }
+    int saved = errno;
+    lat_aot_v2_internal_fd_unlock();
+    errno = saved;
+    return result;
+}
+
+void lat_aot_v2_internal_fd_guest_end(void)
+{
+    int saved = errno;
+    lat_aot_v2_internal_fd_lock();
+    if (!guest_operations) abort();
+    if (!--guest_operations) pthread_cond_broadcast(&closes_idle);
+    lat_aot_v2_internal_fd_unlock();
+    errno = saved;
 }
 
 static int add_range_fd(int **fds, size_t *count, size_t *capacity, int fd)

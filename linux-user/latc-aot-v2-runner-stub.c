@@ -145,6 +145,16 @@ int latc_aot_v2_fd_close_guest(int fd)
     return close(fd);
 }
 
+int latc_aot_v2_fd_guest_begin(int fd)
+{
+    (void)fd;
+    return 0;
+}
+
+void latc_aot_v2_fd_guest_end(void)
+{
+}
+
 int latc_aot_v2_fd_close_range(unsigned first, unsigned last, bool cloexec,
                                LatcAotV2FdRangeProtected extra_protected,
                                void *opaque)

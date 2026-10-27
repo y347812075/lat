@@ -77,6 +77,8 @@ void latc_aot_v2_fd_snapshot_close(int fd);
 int latc_aot_v2_fd_try_flock(int fd, int operation);
 int latc_aot_v2_fd_fcntl(int fd, int command, int argument);
 int latc_aot_v2_fd_close_guest(int fd);
+int latc_aot_v2_fd_guest_begin(int fd);
+void latc_aot_v2_fd_guest_end(void);
 /* close_range close/CLOEXEC for guest descriptors, skipping AOT-owned and
  * callback-protected descriptors. Unsupported sharing flags are rejected in
  * the syscall wrapper before this entry. */

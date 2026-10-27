@@ -389,6 +389,22 @@ int latc_aot_v2_fd_close_guest(int fd)
     return lat_aot_v2_internal_fd_close_guest(fd);
 }
 
+int latc_aot_v2_fd_guest_begin(int fd)
+{
+    if (lat_aot_v2_internal_fd_guest_begin(fd)) return -1;
+    if (latc_aot_v2_fd_is_protected(fd)) {
+        lat_aot_v2_internal_fd_guest_end();
+        errno = EACCES;
+        return -1;
+    }
+    return 0;
+}
+
+void latc_aot_v2_fd_guest_end(void)
+{
+    lat_aot_v2_internal_fd_guest_end();
+}
+
 static int create_internal_memfd(const char *name, unsigned flags)
 {
     lat_aot_v2_internal_fd_allocation_lock();

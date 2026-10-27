@@ -266,6 +266,76 @@ static bool protect_selected_fd(int fd, void *opaque)
     return fd == *(int *)opaque;
 }
 
+static int test_guest_borrow(void)
+{
+    int ready[2], acquired[2];
+    if (pipe(ready) || pipe(acquired)) return -1;
+    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (fd < 0 || lat_aot_v2_internal_fd_guest_begin(fd) ||
+        lat_aot_v2_internal_fd_guest_begin(fd)) return -1;
+    /* Guest close is allowed while borrowed; no internal number can replace
+     * it until the final borrower ends. This introduces no duplicate close. */
+    if (lat_aot_v2_internal_fd_close_guest(fd)) return -1;
+    AllocationAttempt attempt = {.ready = ready[1], .acquired = acquired[1], .fd = -1};
+    pthread_t allocator;
+    if (pthread_create(&allocator, NULL, allocate_internal_fd, &attempt) ||
+        wait_byte(ready[0])) return -1;
+    int flags = fcntl(acquired[0], F_GETFL);
+    if (flags < 0 || fcntl(acquired[0], F_SETFL, flags | O_NONBLOCK)) return -1;
+    char byte;
+    if (read(acquired[0], &byte, 1) != -1 || errno != EAGAIN) return -1;
+    errno = EIO;
+    lat_aot_v2_internal_fd_guest_end();
+    if (errno != EIO || read(acquired[0], &byte, 1) != -1 || errno != EAGAIN) return -1;
+    /* A fork child must not wait for operations in vanished parent threads. */
+    pid_t child = fork();
+    if (child < 0) return -1;
+    if (!child) {
+        alarm(5);
+        lat_aot_v2_internal_fd_allocation_lock();
+        int opened = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        int failed = opened < 0 || lat_aot_v2_internal_fd_register_locked(opened);
+        lat_aot_v2_internal_fd_unlock();
+        _exit(failed ? 1 : 0);
+    }
+    int status;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status)) return -1;
+    lat_aot_v2_internal_fd_guest_end();
+    void *allocated;
+    if (pthread_join(allocator, &allocated) || allocated || wait_byte(acquired[0]) ||
+        !lat_aot_v2_internal_fd_is_protected(attempt.fd)) return -1;
+    if (lat_aot_v2_internal_fd_guest_begin(attempt.fd) != -1 || errno != EACCES) return -1;
+    /* Rejection must not leave a borrow blocking the next allocation. */
+    lat_aot_v2_internal_fd_allocation_lock();
+    int result = lat_aot_v2_internal_fd_unregister_close_locked(attempt.fd);
+    lat_aot_v2_internal_fd_unlock();
+    for (unsigned i = 0; i < 2; i++) { close(ready[i]); close(acquired[i]); }
+    return result;
+}
+
+static int test_borrow_record_lock(const char *root)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/borrow-record-lock", root);
+    int fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    struct flock lock = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
+    if (fd < 0 || fcntl(fd, F_SETLK, &lock) ||
+        lat_aot_v2_internal_fd_guest_begin(fd)) return -1;
+    if (lseek(fd, 3, SEEK_SET) != 3) return -1;
+    errno = EINVAL;
+    lat_aot_v2_internal_fd_guest_end();
+    if (errno != EINVAL) return -1;
+    pid_t child = fork();
+    if (child < 0) return -1;
+    if (!child) {
+        int result = fcntl(fd, F_SETLK, &lock);
+        _exit(result < 0 && (errno == EACCES || errno == EAGAIN) ? 0 : 1);
+    }
+    int status;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status)) return -1;
+    return close(fd) || unlink(path);
+}
+
 static int duplicate_three(int base, int fds[3])
 {
     int source = open("/dev/null", O_RDONLY | O_CLOEXEC);
@@ -743,7 +813,8 @@ int main(void)
         test_guest_fd_registry(root) || test_atfork_registry() ||
         test_fork_inheritance(root) || test_exec_closes_latch(root) ||
         test_artifact_latch(root) || test_tombstones(root) || test_guest_snapshot(root) ||
-        test_guest_fcntl() || test_guest_close() || test_guest_close_range();
+        test_guest_fcntl() || test_guest_close() || test_guest_close_range() || test_guest_borrow() ||
+        test_borrow_record_lock(root);
     const int operations[] = { LOCK_SH, LOCK_EX, LOCK_SH | LOCK_NB, LOCK_EX | LOCK_NB };
     for (unsigned protected = 0; !result && protected < 2; protected++)
         for (size_t op = 0; !result && op < sizeof(operations) / sizeof(operations[0]); op++)

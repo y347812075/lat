@@ -149,6 +149,21 @@
 #include "qemu.h"
 #include "latc-aot-v2-runner.h"
 #include "latc-x86-syscall-abi.h"
+
+/* Only wrap the host call, never user-memory conversion or other LATX locks.
+ * Internal allocation waits, but guest closes/replacements and the host call
+ * run without the registry lock. No duplicate fd changes POSIX lock ownership.
+ * expression must use the usual -1/errno convention, not POSIX error returns. */
+#define GUEST_FD_HOST_CALL(fd, expression) ({ \
+    __typeof__(expression) guest_fd_result; \
+    if (latc_aot_v2_fd_guest_begin(fd)) { \
+        guest_fd_result = -1; \
+    } else { \
+        guest_fd_result = (expression); \
+        latc_aot_v2_fd_guest_end(); \
+    } \
+    guest_fd_result; \
+})
 #ifdef TARGET_X86_64
 _Static_assert(sizeof(struct target_stat) == sizeof(LatcX86Stat),
                "LATC x86 stat ABI drifted from linux-user");
@@ -16230,7 +16245,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
 #ifdef TARGET_NR_lseek
     case TARGET_NR_lseek:
-        return get_errno(lseek(arg1, arg2, arg3));
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
+        return get_errno(GUEST_FD_HOST_CALL(arg1, lseek(arg1, arg2, arg3)));
 #endif
 #if defined(TARGET_NR_getxpid) && defined(TARGET_ALPHA)
     /* Alpha specific */
@@ -17871,7 +17887,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
 #ifdef TARGET_NR_fstatfs
     case TARGET_NR_fstatfs:
-        ret = get_errno(fstatfs(arg1, &stfs));
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
+        ret = get_errno(GUEST_FD_HOST_CALL(arg1, fstatfs(arg1, &stfs)));
         goto convert_statfs;
 #endif
 #ifdef TARGET_NR_statfs64
@@ -17908,7 +17925,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         }
         return ret;
     case TARGET_NR_fstatfs64:
-        ret = get_errno(fstatfs(arg1, &stfs));
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
+        ret = get_errno(GUEST_FD_HOST_CALL(arg1, fstatfs(arg1, &stfs)));
         goto convert_statfs64;
 #endif
 #ifdef TARGET_NR_socketcall
@@ -18082,6 +18100,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #ifdef TARGET_NR_fstat
     case TARGET_NR_fstat:
         {
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
 #ifdef CONFIG_LATX
             latx_syscall_fs_lock();
 #endif
@@ -18287,7 +18306,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return do_shmdt(arg1);
 #endif
     case TARGET_NR_fsync:
-        return get_errno(fsync(arg1));
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
+        return get_errno(GUEST_FD_HOST_CALL(arg1, fsync(arg1)));
     case TARGET_NR_clone:
         /* Linux manages to have three different orderings for its
          * arguments to clone(); the BACKWARDS and BACKWARDS2 defines
@@ -18409,6 +18429,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_getpgid:
         return get_errno(getpgid(arg1));
     case TARGET_NR_fchdir:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
 #ifdef CONFIG_LATX
         latx_syscall_fs_lock();
 #endif
@@ -18422,16 +18443,17 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #ifdef TARGET_NR__llseek /* Not on alpha */
     case TARGET_NR__llseek:
         {
+            if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
             int64_t res;
 #if !defined(__NR_llseek)
-            res = lseek(arg1, ((uint64_t)arg2 << 32) | (abi_ulong)arg3, arg5);
+            res = GUEST_FD_HOST_CALL(arg1, lseek(arg1, ((uint64_t)arg2 << 32) | (abi_ulong)arg3, arg5));
             if (res == -1) {
                 ret = get_errno(res);
             } else {
                 ret = 0;
             }
 #else
-            ret = get_errno(_llseek(arg1, arg2, arg3, &res, arg5));
+            ret = get_errno(GUEST_FD_HOST_CALL(arg1, _llseek(arg1, arg2, arg3, &res, arg5)));
 #endif
             if ((ret == 0) && put_user_s64(res, arg4)) {
                 return -TARGET_EFAULT;
@@ -18736,7 +18758,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return get_errno(getsid(arg1));
 #if defined(TARGET_NR_fdatasync) /* Not on alpha (osf_datasync ?) */
     case TARGET_NR_fdatasync:
-        return get_errno(fdatasync(arg1));
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
+        return get_errno(GUEST_FD_HOST_CALL(arg1, fdatasync(arg1)));
 #endif
     case TARGET_NR_sched_getaffinity:
         {
@@ -19591,6 +19614,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
 #endif
 #ifdef TARGET_NR_fstat64
     case TARGET_NR_fstat64:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
 #ifdef CONFIG_LATX
         latx_syscall_fs_lock();
 #endif
@@ -20193,6 +20217,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
 #endif
 #ifdef TARGET_NR_fchown32
     case TARGET_NR_fchown32:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
         return get_errno(fchown(arg1, arg2, arg3));
 #endif
 #ifdef TARGET_NR_setresuid32
@@ -20331,6 +20356,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
 #endif
 #ifdef TARGET_NR_arm_fadvise64_64
     case TARGET_NR_arm_fadvise64_64:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
         /* arm_fadvise64_64 looks like fadvise64_64 but
          * with different argument order: fd, advice, offset, len
          * rather than the usual fd, offset, len, advice.
@@ -20346,6 +20372,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
 
 #ifdef TARGET_NR_fadvise64_64
     case TARGET_NR_fadvise64_64:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
 #if defined(TARGET_PPC) || defined(TARGET_XTENSA)
         /* 6 args: fd, advice, offset (high, low), len (high, low) */
         ret = arg2;
@@ -20372,6 +20399,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
 
 #ifdef TARGET_NR_fadvise64
     case TARGET_NR_fadvise64:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
         /* 5 args: fd, offset (high, low), len, advice */
         if (regpairs_aligned(cpu_env, num)) {
             /* offset is in (3,4), len in 5 and advice in 6 */
@@ -20392,6 +20420,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
 #ifdef TARGET_NR_fadvise64
     case TARGET_NR_fadvise64:
 #endif
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
 #ifdef TARGET_S390X
         switch (arg4) {
         case 4: arg4 = POSIX_FADV_NOREUSE + 1; break; /* make sure it's an invalid value */
@@ -20569,15 +20598,16 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
         return get_errno(sys_gettid());
 #ifdef TARGET_NR_readahead
     case TARGET_NR_readahead:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
 #if TARGET_ABI_BITS == 32
         if (regpairs_aligned(cpu_env, num)) {
             arg2 = arg3;
             arg3 = arg4;
             arg4 = arg5;
         }
-        ret = get_errno(readahead(arg1, target_offset64(arg2, arg3) , arg4));
+        ret = get_errno(GUEST_FD_HOST_CALL(arg1, readahead(arg1, target_offset64(arg2, arg3), arg4)));
 #else
-        ret = get_errno(readahead(arg1, arg2, arg3));
+        ret = get_errno(GUEST_FD_HOST_CALL(arg1, readahead(arg1, arg2, arg3)));
 #endif
         return ret;
 #endif
@@ -20609,6 +20639,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
     }
     case TARGET_NR_flistxattr:
     {
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
         void *b = 0;
         if (arg2) {
             b = lock_user(VERIFY_WRITE, arg2, arg3, 0);
@@ -20616,7 +20647,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
                 return -TARGET_EFAULT;
             }
         }
-        ret = get_errno(flistxattr(arg1, b, arg3));
+        ret = get_errno(GUEST_FD_HOST_CALL(arg1, flistxattr(arg1, b, arg3)));
         unlock_user(b, arg2, arg3);
         return ret;
     }
@@ -20699,6 +20730,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
         return ret;
     case TARGET_NR_fgetxattr:
         {
+            if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
             void *n, *v = 0;
             if (arg3) {
                 v = lock_user(VERIFY_WRITE, arg3, arg4, 0);
@@ -20708,7 +20740,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
             }
             n = lock_user_string(arg2);
             if (n) {
-                ret = get_errno(fgetxattr(arg1, n, v, arg4));
+                ret = get_errno(GUEST_FD_HOST_CALL(arg1, fgetxattr(arg1, n, v, arg4)));
             } else {
                 ret = -TARGET_EFAULT;
             }
@@ -21366,6 +21398,7 @@ defined(__loongarch__)
 #if defined(CONFIG_SYNC_FILE_RANGE)
 #if defined(TARGET_NR_sync_file_range)
     case TARGET_NR_sync_file_range:
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
 #if TARGET_ABI_BITS == 32
 #if defined(TARGET_MIPS)
         ret = get_errno(sync_file_range(arg1, target_offset64(arg3, arg4),
@@ -21387,6 +21420,7 @@ defined(__loongarch__)
 #if defined(TARGET_NR_arm_sync_file_range)
     case TARGET_NR_arm_sync_file_range:
 #endif
+        if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
         /* This is like sync_file_range but the arguments are reordered */
 #if TARGET_ABI_BITS == 32
         ret = get_errno(sync_file_range(arg1, target_offset64(arg3, arg4),
