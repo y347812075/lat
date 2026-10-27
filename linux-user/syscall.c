@@ -164,6 +164,14 @@
     } \
     guest_fd_result; \
 })
+
+static int G_GNUC_UNUSED guest_fd_fadvise(int fd, off_t offset, off_t length, int advice)
+{
+    if (latc_aot_v2_fd_guest_begin(fd)) return errno;
+    int result = posix_fadvise(fd, offset, length, advice);
+    latc_aot_v2_fd_guest_end();
+    return result;
+}
 #ifdef TARGET_X86_64
 _Static_assert(sizeof(struct target_stat) == sizeof(LatcX86Stat),
                "LATC x86 stat ABI drifted from linux-user");
@@ -10861,7 +10869,7 @@ static inline abi_long target_ftruncate64(void *cpu_env, abi_long arg1,
         arg2 = arg3;
         arg3 = arg4;
     }
-    return get_errno(ftruncate64(arg1, target_offset64(arg2, arg3)));
+    return get_errno(GUEST_FD_HOST_CALL(arg1, ftruncate64(arg1, target_offset64(arg2, arg3))));
 }
 #endif
 
@@ -14013,7 +14021,7 @@ static int real_proc_self_fd(int ofd)
 
     /* get filename */
     snprintf(buf_in, sizeof(buf_in), "/proc/self/fd/%d", ofd);
-    len = readlink(buf_in, buf_out, sizeof(buf_out) - 1);
+    len = GUEST_FD_HOST_CALL(ofd, readlink(buf_in, buf_out, sizeof(buf_out) - 1));
     if (len < 0) {
         return fd;
     }
@@ -17819,11 +17827,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #ifdef TARGET_NR_ftruncate
     case TARGET_NR_ftruncate:
         return latc_aot_v2_fd_is_protected(arg1) ? -TARGET_EACCES :
-               get_errno(ftruncate(arg1, arg2));
+               get_errno(GUEST_FD_HOST_CALL(arg1, ftruncate(arg1, arg2)));
 #endif
     case TARGET_NR_fchmod:
         return latc_aot_v2_fd_is_protected(arg1) ? -TARGET_EACCES :
-               get_errno(fchmod(arg1, arg2));
+               get_errno(GUEST_FD_HOST_CALL(arg1, fchmod(arg1, arg2)));
 #if defined(TARGET_NR_fchmodat)
     case TARGET_NR_fchmodat:
         if (!(p = lock_user_string(arg2)))
@@ -18106,7 +18114,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
             ret = proc_self_fstat(arg1, &st);
             if (ret) {
-                ret = get_errno(fstat(arg1, &st));
+                ret = get_errno(GUEST_FD_HOST_CALL(arg1, fstat(arg1, &st)));
             }
 #ifdef CONFIG_LATX
             if (!is_error(ret)) {
@@ -18433,7 +18441,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #ifdef CONFIG_LATX
         latx_syscall_fs_lock();
 #endif
-        ret = get_errno(fchdir(arg1));
+        ret = get_errno(GUEST_FD_HOST_CALL(arg1, fchdir(arg1)));
 #ifdef CONFIG_LATX
         latx_syscall_fs_unlock();
 #endif
@@ -19620,7 +19628,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
 #endif
         ret = proc_self_fstat(arg1, &st);
         if (ret) {
-            ret = get_errno(fstat(arg1, &st));
+            ret = get_errno(GUEST_FD_HOST_CALL(arg1, fstat(arg1, &st)));
         }
 #ifdef CONFIG_LATX
         if (!is_error(ret)) {
@@ -19893,7 +19901,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
         }
     case TARGET_NR_fchown:
         return latc_aot_v2_fd_is_protected(arg1) ? -TARGET_EACCES :
-               get_errno(fchown(arg1, low2highuid(arg2), low2highgid(arg3)));
+               get_errno(GUEST_FD_HOST_CALL(arg1, fchown(arg1, low2highuid(arg2), low2highgid(arg3))));
 #if defined(TARGET_NR_fchownat)
     case TARGET_NR_fchownat:
         if (!(p = lock_user_string(arg2)))
@@ -20218,7 +20226,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
 #ifdef TARGET_NR_fchown32
     case TARGET_NR_fchown32:
         if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
-        return get_errno(fchown(arg1, arg2, arg3));
+        return get_errno(GUEST_FD_HOST_CALL(arg1, fchown(arg1, arg2, arg3)));
 #endif
 #ifdef TARGET_NR_setresuid32
     case TARGET_NR_setresuid32:
@@ -20363,7 +20371,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
          * Note that offset and len are both 64-bit so appear as
          * pairs of 32-bit registers.
          */
-        ret = posix_fadvise(arg1, target_offset64(arg3, arg4),
+        ret = guest_fd_fadvise(arg1, target_offset64(arg3, arg4),
                             target_offset64(arg5, arg6), arg2);
         return -host_to_target_errno(ret);
 #endif
@@ -20392,7 +20400,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
             arg6 = arg7;
         }
 #endif
-        ret = posix_fadvise(arg1, target_offset64(arg2, arg3),
+        ret = guest_fd_fadvise(arg1, target_offset64(arg2, arg3),
                             target_offset64(arg4, arg5), arg6);
         return -host_to_target_errno(ret);
 #endif
@@ -20408,7 +20416,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
             arg4 = arg5;
             arg5 = arg6;
         }
-        ret = posix_fadvise(arg1, target_offset64(arg2, arg3), arg4, arg5);
+        ret = guest_fd_fadvise(arg1, target_offset64(arg2, arg3), arg4, arg5);
         return -host_to_target_errno(ret);
 #endif
 
@@ -20430,7 +20438,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
         default: break;
         }
 #endif
-        return -host_to_target_errno(posix_fadvise(arg1, arg2, arg3, arg4));
+        return -host_to_target_errno(guest_fd_fadvise(arg1, arg2, arg3, arg4));
 #endif
 #endif /* end of 64-bit ABI fadvise handling */
 
@@ -20692,7 +20700,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
             if (n && latc_aot_v2_fd_is_protected(arg1)) {
                 ret = -TARGET_EACCES;
             } else if (n) {
-                ret = get_errno(fsetxattr(arg1, n, v, arg4, arg5));
+                ret = get_errno(GUEST_FD_HOST_CALL(arg1, fsetxattr(arg1, n, v, arg4, arg5)));
             } else {
                 ret = -TARGET_EFAULT;
             }
@@ -20774,7 +20782,7 @@ ret = latx_guest_path_protected(AT_FDCWD, p) ? -TARGET_EACCES :
             if (n && latc_aot_v2_fd_is_protected(arg1)) {
                 ret = -TARGET_EACCES;
             } else if (n) {
-                ret = get_errno(fremovexattr(arg1, n));
+                ret = get_errno(GUEST_FD_HOST_CALL(arg1, fremovexattr(arg1, n)));
             } else {
                 ret = -TARGET_EFAULT;
             }
@@ -21388,10 +21396,10 @@ defined(__loongarch__)
     case TARGET_NR_fallocate:
         if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
 #if TARGET_ABI_BITS == 32
-        ret = get_errno(fallocate(arg1, arg2, target_offset64(arg3, arg4),
-                                  target_offset64(arg5, arg6)));
+        ret = get_errno(GUEST_FD_HOST_CALL(arg1, fallocate(arg1, arg2, target_offset64(arg3, arg4),
+                                  target_offset64(arg5, arg6))));
 #else
-        ret = get_errno(fallocate(arg1, arg2, arg3, arg4));
+        ret = get_errno(GUEST_FD_HOST_CALL(arg1, fallocate(arg1, arg2, arg3, arg4)));
 #endif
         return ret;
 #endif
@@ -21401,14 +21409,14 @@ defined(__loongarch__)
         if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
 #if TARGET_ABI_BITS == 32
 #if defined(TARGET_MIPS)
-        ret = get_errno(sync_file_range(arg1, target_offset64(arg3, arg4),
-                                        target_offset64(arg5, arg6), arg7));
+        ret = get_errno(GUEST_FD_HOST_CALL(arg1, sync_file_range(arg1, target_offset64(arg3, arg4),
+                                        target_offset64(arg5, arg6), arg7)));
 #else
-        ret = get_errno(sync_file_range(arg1, target_offset64(arg2, arg3),
-                                        target_offset64(arg4, arg5), arg6));
+        ret = get_errno(GUEST_FD_HOST_CALL(arg1, sync_file_range(arg1, target_offset64(arg2, arg3),
+                                        target_offset64(arg4, arg5), arg6)));
 #endif /* !TARGET_MIPS */
 #else
-        ret = get_errno(sync_file_range(arg1, arg2, arg3, arg4));
+        ret = get_errno(GUEST_FD_HOST_CALL(arg1, sync_file_range(arg1, arg2, arg3, arg4)));
 #endif
         return ret;
 #endif
@@ -21423,10 +21431,10 @@ defined(__loongarch__)
         if (latc_aot_v2_fd_is_protected(arg1)) return -TARGET_EACCES;
         /* This is like sync_file_range but the arguments are reordered */
 #if TARGET_ABI_BITS == 32
-        ret = get_errno(sync_file_range(arg1, target_offset64(arg3, arg4),
-                                        target_offset64(arg5, arg6), arg2));
+        ret = get_errno(GUEST_FD_HOST_CALL(arg1, sync_file_range(arg1, target_offset64(arg3, arg4),
+                                        target_offset64(arg5, arg6), arg2)));
 #else
-        ret = get_errno(sync_file_range(arg1, arg3, arg4, arg2));
+        ret = get_errno(GUEST_FD_HOST_CALL(arg1, sync_file_range(arg1, arg3, arg4, arg2)));
 #endif
         return ret;
 #endif

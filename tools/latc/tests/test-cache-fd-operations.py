@@ -3,6 +3,7 @@
 
 import errno
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -70,7 +71,16 @@ def run(prefix, module, guest, work):
                      ('flistxattr', 196, [0, 0], 0),
                      ('fgetxattr', 193, [-2, 0, 0], -errno.ENODATA),
                      ('ioctl', 16, [0x541B, -1], 0),
-                     ('fchdir', 81, [], 0)]
+                     ('fchdir', 81, [], 0),
+                     ('ftruncate', 77, [control.stat().st_size], 0),
+                     ('fchmod', 91, [0o600], 0),
+                     ('fchown', 93, [os.getuid(), os.getgid()], 0),
+                     ('fallocate', 285, [1, 0, 4096], 0),
+                     ('fsetxattr', 190, [-2, 0, 0, 0], 0),
+                     ('fgetxattr-after-set', 193, [-2, 0, 0], 0),
+                     ('fremovexattr', 199, [-2], 0),
+                     ('fadvise-invalid', 221, [0, 0, 0x7fffffff], -errno.EINVAL),
+                     ('ftruncate-invalid', 77, [-3], -errno.EINVAL)]
             for name, nr, arguments, expected in cases:
                 protected = operation(nr, inherited_number, arguments)
                 normal = operation(nr, directory if name == 'fchdir' else ordinary, arguments)
@@ -86,6 +96,7 @@ def run(prefix, module, guest, work):
                 position = next(line.split(':', 1)[1].strip() for line in info.splitlines()
                                 if line.startswith('pos:'))
                 assert int(position) == 7, 'guest changed the inherited pin offset'
+            assert hashlib.sha256(copied.read_bytes()).digest() == hashlib.sha256(module.read_bytes()).digest()
             assert os.lseek(ordinary, 0, os.SEEK_CUR) == 3
             child.stdin.close()
             assert child.wait(timeout=20) == 0
