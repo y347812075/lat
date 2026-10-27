@@ -31,8 +31,40 @@ static void *reserve_race(void *data)
     return NULL;
 }
 
+static void test_external_writer(unsigned mutation)
+{
+    char *root = g_dir_make_tmp("capacity-write-XXXXXX", NULL);
+    char *outside = g_dir_make_tmp("capacity-writer-XXXXXX", NULL);
+    char *name = g_strnfill(64, 'a');
+    char *basename = g_strconcat(name, ".native", NULL);
+    char *path = g_build_filename(root, basename, NULL);
+    char *alias = g_build_filename(outside, "alias", NULL);
+    assert(root && outside);
+    assert(g_file_set_contents(path, "initial", -1, NULL));
+    assert(!link(path, alias));
+    int writer = open(alias, O_WRONLY | O_CLOEXEC);
+    assert(writer >= 0 && !chmod(path, 0400));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    assert(capacity.committed == 7);
+    if (mutation == 0) assert(pwrite(writer, "replacement", 11, 0) == 11);
+    if (mutation == 1) assert(!ftruncate(writer, 4096));
+    if (mutation == 2) assert(pwrite(writer, "changed", 7, 0) == 7);
+    assert(!latcd_cache_capacity_poll(&capacity));
+    assert(latcd_cache_capacity_reserve(&capacity, 0, UINT64_MAX, NULL, 0) < 0);
+    assert(latcd_cache_capacity_reserve_transient(&capacity, 0, UINT64_MAX, NULL, 0) < 0);
+    assert(!close(writer));
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    assert(capacity.committed == (mutation == 0 ? 11u : mutation == 1 ? 4096u : 7u));
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    assert(!unlink(alias) && !unlink(path) && !rmdir(outside) && !rmdir(root));
+    g_free(root); g_free(outside); g_free(name); g_free(basename); g_free(path); g_free(alias);
+}
+
 int main(void)
 {
+    for (unsigned mutation = 0; mutation < 3; mutation++) test_external_writer(mutation);
     char *root = g_dir_make_tmp("cache-capacity-XXXXXX", NULL), error[256];
     assert(root);
     LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;

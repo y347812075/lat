@@ -46,7 +46,7 @@ static int watch_generation_file(LatcdCacheCapacity *capacity, int parent,
     char path[64];
     snprintf(path, sizeof(path), "/proc/self/fd/%d", file);
     int watch = inotify_add_watch(capacity->watch_fd, path,
-        IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF);
+        IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF);
     if (watch >= 0) {
         GHashTable *names = g_hash_table_lookup(capacity->file_watches,
                                                  GINT_TO_POINTER(watch));
@@ -74,7 +74,7 @@ static void check_changes(LatcdCacheCapacity *capacity)
             if (event->mask & (IN_Q_OVERFLOW | IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED))
                 capacity->ready = false;
             if (event->wd != capacity->root_watch && event->mask != IN_Q_OVERFLOW &&
-                (!(event->mask & IN_ATTRIB) || !watched_name_expected(capacity, event->wd)))
+                (!(event->mask & (IN_MODIFY | IN_ATTRIB)) || !watched_name_expected(capacity, event->wd)))
                 capacity->ready = false;
             if (event->len && (!strcmp(event->name, ".superseded") || generated_name(event->name)) &&
                 (!capacity->expected_names || !g_hash_table_contains(capacity->expected_names, event->name)))
