@@ -1431,6 +1431,39 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
                                                evidence, &transaction, error, sizeof(error)));
     put(current, following);
     assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+    if (!mutation && !bounded) {
+        char *path = single_record(root);
+        GKeyFile *record = g_key_file_new();
+        assert(g_key_file_load_from_file(record, path, 0, NULL));
+        uint64_t stamp = g_key_file_get_uint64(record, "transaction", "retired_boottime_us", NULL);
+        assert(stamp && stamp < UINT64_MAX - 1000000);
+        simulated_boottime_us = stamp + 1000;
+        char *duplicate_id = g_uuid_string_random();
+        char *duplicate_file = g_strconcat(duplicate_id, ".ini", NULL);
+        char *duplicate = g_build_filename(root, ".gc", "transactions", duplicate_file, NULL);
+        for (unsigned order = 0; order < 2; order++) {
+            g_key_file_set_uint64(record, "transaction", "retired_boottime_us",
+                                  stamp + (order ? 500 : 0));
+            char *raw = g_key_file_to_data(record, NULL, NULL);
+            put(path, raw); g_free(raw);
+            g_key_file_set_uint64(record, "transaction", "retired_boottime_us",
+                                  stamp + (order ? 0 : 500));
+            raw = g_key_file_to_data(record, NULL, NULL);
+            put(duplicate, raw); g_free(raw);
+            LatcdRetirementQueue *probe = latcd_retirement_queue_new(root, 1000000);
+            LatcdRetirementQueueStats stats = sweep_queue(probe);
+            assert(stats.complete && stats.candidates == 3 && !stats.ready &&
+                   stats.next_deadline_us == stamp + 1000500);
+            latcd_retirement_queue_free(probe);
+            assert(!unlink(duplicate));
+        }
+        g_key_file_set_uint64(record, "transaction", "retired_boottime_us", stamp);
+        char *raw = g_key_file_to_data(record, NULL, NULL);
+        put(path, raw); g_free(raw);
+        simulated_boottime_us = 0;
+        g_free(duplicate); g_free(duplicate_file); g_free(duplicate_id);
+        g_key_file_unref(record); g_free(path);
+    }
     if (mutation >= 15) {
         if (mutation == 16) {
             const char *single[] = {names[0]};
