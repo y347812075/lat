@@ -3062,6 +3062,100 @@ static gint compare_string_pointers(gconstpointer a, gconstpointer b)
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
+static void publish_page_fixture(const char *root, unsigned id)
+{
+    char error[256];
+    const char *suffix[] = {".so", ".native", ".tbset"};
+    char *src = g_strdup_printf("%064x", id), *names[6], *paths[6];
+    for (unsigned j = 0; j < 6; j++) {
+        names[j] = j < 3 ? g_strconcat(src, suffix[j], NULL) :
+            g_strdup_printf("%s-%s%s", src, src, suffix[j - 3]);
+        paths[j] = g_build_filename(root, names[j], NULL);
+        put(paths[j], "fixture\n");
+    }
+    char *previous = g_strdup_printf("{\"version\":2,\"module\":\"%s\",\"native\":\"%s\","
+        "\"tbset\":\"%s\",\"source_sha256\":\"%s\",\"codegen_id\":\"%s\",\"published_sequence\":1}",
+        names[0], names[1], names[2], src, src);
+    char *next_manifest = g_strdup_printf("{\"version\":2,\"module\":\"%s\",\"native\":\"%s\","
+        "\"tbset\":\"%s\",\"source_sha256\":\"%s\",\"codegen_id\":\"%s\",\"published_sequence\":2}",
+        names[3], names[4], names[5], src, src);
+    char *current = g_strdup_printf("%s/%s.current", root, src);
+    put(current, previous);
+    char *evidence = latcd_retirement_capture_objects(root, src, (const char *const *)names, 6);
+    LatcdRetirementPublication *publication = latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(evidence && publication && !latcd_retirement_publication_prepare(publication, src,
+        next_manifest, strlen(next_manifest), evidence, error, sizeof(error)));
+    put(current, next_manifest);
+    assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
+    latcd_retirement_publication_close(publication);
+    for (unsigned j = 0; j < 6; j++) { g_free(names[j]); g_free(paths[j]); }
+    g_free(evidence); g_free(current); g_free(previous); g_free(next_manifest); g_free(src);
+}
+
+static void test_page_round_insertions(void)
+{
+    char *root = root_new(), error[256], boot[37];
+    uint64_t cutoff;
+    simulated_boottime_us = 100;
+    for (unsigned i = 100; i < 144; i++) publish_page_fixture(root, i);
+    simulated_boottime_us = 200;
+    assert(!latcd_retirement_round_sample(root, boot, &cutoff, error, sizeof(error)) && cutoff == 200);
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 1);
+    LatcdRetirementQueueStats stats;
+    LatcdRetirementPageState page;
+    assert(!latcd_retirement_queue_diagnostic_round(queue, boot, cutoff, NULL));
+    int result;
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0 && !latcd_retirement_queue_aggregated_page(queue, &page) && page.count == 128);
+    char cursor[138];
+    g_strlcpy(cursor, page.cursor, sizeof(cursor));
+    latcd_retirement_queue_free(queue);
+
+    /* Equal-cutoff and later transactions on both sides belong to a later round. */
+    publish_page_fixture(root, 1);
+    publish_page_fixture(root, 1000);
+    simulated_boottime_us = 201;
+    publish_page_fixture(root, 2);
+    publish_page_fixture(root, 1001);
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(!latcd_retirement_queue_diagnostic_round(queue, boot, cutoff, cursor));
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0 && !latcd_retirement_queue_aggregated_page(queue, &page) && page.count == 4);
+    for (unsigned i = 0; i < page.count; i++) {
+        char *src = g_strdup_printf("%064x", 142 + (i + 2) / 3);
+        assert(!strncmp(page.entries[i].name, src, 64));
+        g_free(src);
+    }
+    latcd_retirement_queue_free(queue);
+
+    simulated_boottime_us = 202;
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(!latcd_retirement_queue_diagnostic_round(queue, boot, 202, NULL));
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0 && !latcd_retirement_queue_aggregated_page(queue, &page) && page.count == 128);
+    char *first = g_strdup_printf("%064x", 1);
+    char *second = g_strdup_printf("%064x", 2);
+    assert(!strncmp(page.entries[0].name, first, 64) && !strncmp(page.entries[3].name, second, 64));
+    g_free(first); g_free(second);
+    g_strlcpy(cursor, page.cursor, sizeof(cursor));
+    latcd_retirement_queue_free(queue);
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(!latcd_retirement_queue_diagnostic_round(queue, boot, 202, cursor));
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0 && !latcd_retirement_queue_aggregated_page(queue, &page) && page.count == 16);
+    first = g_strdup_printf("%064x", 1000);
+    second = g_strdup_printf("%064x", 1001);
+    assert(!strncmp(page.entries[10].name, first, 64) && !strncmp(page.entries[13].name, second, 64));
+    g_free(first); g_free(second);
+    latcd_retirement_queue_free(queue);
+    remove_root(root); g_free(root);
+    simulated_boottime_us = 0;
+}
+
 static void test_queue_overflow_fixture(void)
 {
     char *root = root_new(), error[256];
@@ -3370,6 +3464,7 @@ int main(int argc, char **argv)
         test_page_state_write_fault(page_faults[i], true);
     }
     test_queue_overflow_fixture();
+    test_page_round_insertions();
     test_deletion_report(NULL, false);
     test_roots_latch();
     test_recovery_directory_binding(false);
