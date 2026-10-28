@@ -71,6 +71,11 @@ int latcd_retirement_page_state_load(const char *root, LatcdRetirementPageState 
  * invalidates retry/attempt ages; callers must rescan rather than reuse them. */
 int latcd_retirement_page_state_compatible(const LatcdRetirementPageState *state,
                                            const char *boot, uint64_t grace_us);
+/* Build a bounded page plan from the complete sorted candidate key set. The
+ * input remains intact for later pages; entries outside the page are omitted. */
+int latcd_retirement_page_plan(const char *const *names, size_t count,
+                               const char *after, const LatcdRetirementPageDeadline *schedule,
+                               size_t schedule_count, LatcdRetirementPageState *state);
 typedef struct LatcdRecoveryProgress {
     unsigned visited;
     unsigned recovered;

@@ -582,6 +582,33 @@ int latcd_retirement_page_state_compatible(const LatcdRetirementPageState *state
         !strcmp(state->boot, boot) && state->grace_us == grace_us ? 0 : 1;
 }
 
+int latcd_retirement_page_plan(const char *const *names, size_t count,
+                               const char *after, const LatcdRetirementPageDeadline *schedule,
+                               size_t schedule_count, LatcdRetirementPageState *state)
+{
+    LatcdRetirementPage page;
+    if (!state || !names || (!schedule && schedule_count) ||
+        latcd_retirement_page_select(names, count, after, &page) < 0) return -1;
+    memset(state, 0, sizeof(*state));
+    if (!page.count) return 0;
+    unsigned copied = 0;
+    for (size_t i = 0; i < count && copied < page.count; i++) {
+        if (after && strcmp(names[i], after) <= 0) continue;
+        bool found = false;
+        for (size_t j = 0; j < schedule_count; j++) {
+            if (strcmp(names[i], schedule[j].name)) continue;
+            state->entries[state->count++] = schedule[j];
+            found = true;
+            copied++;
+            break;
+        }
+        if (!found) return -1;
+    }
+    if (!state->count) return 0;
+    g_strlcpy(state->cursor, state->entries[state->count - 1].name, sizeof(state->cursor));
+    return 1;
+}
+
 static int set_clock(GKeyFile *record, const char *prefix)
 {
     char *boot = NULL;

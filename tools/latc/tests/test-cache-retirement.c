@@ -822,7 +822,6 @@ static void test_round_cursor(void)
     assert(latcd_retirement_page_select((const char *const *)many->pdata, many->len,
                                         page.next_cursor, &tail) == 1);
     assert(tail.count == 2 && !strcmp(tail.next_cursor, "object-129"));
-    g_ptr_array_unref(many);
     LatcdRetirementPageDeadline deadlines[2] = {
         {"a", 10, 1, 0, 0, 0}, {"b", 20, 1, 0, 0, 0}
     };
@@ -861,6 +860,23 @@ static void test_round_cursor(void)
         "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", state.grace_us) == 1);
     assert(latcd_retirement_page_state_compatible(&loaded, state.boot,
         state.grace_us + 1) == 1);
+    LatcdRetirementPageDeadline plan_schedule[130];
+    const char *plan_names[130];
+    for (unsigned i = 0; i < 130; i++) {
+        plan_names[i] = many->pdata[i];
+        plan_schedule[i] = (LatcdRetirementPageDeadline){
+            .deadline = i + 1, .enqueued = 1
+        };
+        g_strlcpy(plan_schedule[i].name, plan_names[i], sizeof(plan_schedule[i].name));
+    }
+    LatcdRetirementPageState plan;
+    assert(latcd_retirement_page_plan(plan_names, 130, NULL, plan_schedule, 130, &plan) == 1);
+    assert(plan.count == 128 && !strcmp(plan.cursor, "object-127"));
+    char plan_cursor[138];
+    g_strlcpy(plan_cursor, plan.cursor, sizeof(plan_cursor));
+    assert(latcd_retirement_page_plan(plan_names, 130, plan_cursor, plan_schedule, 130, &plan) == 1);
+    assert(plan.count == 2 && !strcmp(plan.cursor, "object-129"));
+    g_ptr_array_unref(many);
     state.cache_inode++;
     assert(latcd_retirement_page_state_store(page_root, &state, page_error,
                                              sizeof(page_error)) == 0);
