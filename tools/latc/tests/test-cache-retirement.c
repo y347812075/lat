@@ -2712,6 +2712,23 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         } while (queued);
         assert(stats.complete && stats.candidates == 3);
         put(marker, receipt);
+        for (unsigned change = 0; change < 2; change++) {
+            do {
+                queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+                assert(queued == 1 && !stats.complete);
+            } while (stats.visited);
+            char *directory = g_path_get_dirname(marker);
+            char *moved = g_strconcat(directory, ".moved", NULL);
+            if (!change) put(marker, receipt);
+            else assert(!rename(directory, moved) && !mkdir(directory, 0700));
+            do {
+                queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+            } while (queued > 0);
+            assert(queued < 0 && !stats.complete);
+            assert(latcd_retirement_queue_aggregated_page(queue, &invalid_page) < 0);
+            if (change) assert(!rmdir(directory) && !rename(moved, directory));
+            g_free(moved); g_free(directory);
+        }
         for (unsigned variant = 0; variant < 10; variant++) {
             GKeyFile *changed = g_key_file_new();
             assert(g_key_file_load_from_data(changed, receipt, -1, 0, NULL));

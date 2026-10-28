@@ -2490,7 +2490,9 @@ struct LatcdRetirementQueue {
     bool aggregating, aggregation_verified, discovery_overflow;
     DIR *cursor;
     int discovery_watch;
+    int discovery_tombstones;
     struct stat discovery_store;
+    struct stat discovery_tombstone_store;
     GHashTable *candidates;
     GHashTable *discovered;
     GHashTable *discovered_keys;
@@ -2507,6 +2509,7 @@ LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grac
 {
     LatcdRetirementQueue *queue = g_new0(LatcdRetirementQueue, 1);
     queue->discovery_watch = -1;
+    queue->discovery_tombstones = -1;
     queue->root = g_strdup(root);
     queue->grace = grace_us;
     queue->candidates = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
@@ -2554,6 +2557,7 @@ void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
     if (!queue) return;
     if (queue->cursor) closedir(queue->cursor);
     if (queue->discovery_watch >= 0) close(queue->discovery_watch);
+    if (queue->discovery_tombstones >= 0) close(queue->discovery_tombstones);
     latcd_recovery_close(queue->execution);
     g_hash_table_unref(queue->candidates);
     g_hash_table_unref(queue->discovered);
@@ -2662,18 +2666,24 @@ static bool queue_outside_page(const LatcdRetirementQueue *queue, const char *na
 
 /* Completed namespace removal only, never physical-space or domain admission.
  * Bind the receipt to this transaction's object, not merely its basename. */
-static int queue_object_removed(const char *root_path, const char *source,
+static int queue_object_removed(LatcdRetirementQueue *queue, const char *source,
                                  const char *name, GKeyFile *objects)
 {
-    int root = open(root_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    int gc = root < 0 ? -1 : open_directory(root, ".gc", false);
-    int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
+    int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int store = queue->discovery_tombstones;
     int result = -1;
     char *raw = NULL, *stored_source = NULL, *hash = NULL;
     size_t size;
     GKeyFile *receipt = g_key_file_new();
-    if (root < 0 || gc < 0) goto out;
-    if (store < 0) { if (errno == ENOENT) result = 0; goto out; }
+    if (root < 0 || store < 0) goto out;
+    int fd = openat(store, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0 && errno == ENOENT) { result = 0; goto out; }
+    struct stat held, path;
+    bool watched = fd >= 0 && !fstat(fd, &held) &&
+        !queue_watch_fd(queue->discovery_watch, fd, IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF) &&
+        !fstatat(store, name, &path, AT_SYMLINK_NOFOLLOW) && object_stat_equal(&held, &path);
+    if (fd >= 0) close(fd);
+    if (!watched) goto out;
     int status = read_file(store, name, RECORD_LIMIT, &raw, &size);
     if (status) { if (status == 1) result = 0; goto out; }
     uint64_t values[4];
@@ -2703,8 +2713,6 @@ static int queue_object_removed(const char *root_path, const char *source,
     }
 out:
     g_free(raw); g_free(stored_source); g_free(hash); g_key_file_unref(receipt);
-    if (store >= 0) close(store);
-    if (gc >= 0) close(gc);
     if (root >= 0) close(root);
     return result;
 }
@@ -2750,7 +2758,7 @@ static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t si
     valid = valid && g_key_file_load_from_data(object_record, (char *)objects, object_size, 0, NULL);
     while (valid && g_hash_table_iter_next(&iterator, &key, NULL)) {
         if (g_hash_table_contains(next_refs, key)) continue;
-        int removed = queue_object_removed(queue->root, source, key, object_record);
+        int removed = queue_object_removed(queue, source, key, object_record);
         if (removed < 0) { valid = false; break; }
         if (removed) continue;
         bool nominated = !queue->diagnostic_cutoff || stamp < queue->diagnostic_cutoff;
@@ -2815,15 +2823,22 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (root < 0) goto out;
         int store = open_store(root, true);
+        int gc = open_directory(root, ".gc", false);
+        queue->discovery_tombstones = gc < 0 ? -1 : open_directory(gc, "tombstones", true);
+        if (gc >= 0) close(gc);
         close(root);
-        if (store < 0) goto out;
+        if (store < 0 || queue->discovery_tombstones < 0) { if (store >= 0) close(store); goto out; }
         queue->cursor = fdopendir(store);
         if (!queue->cursor) { close(store); goto out; }
         queue->discovery_watch = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
         if (queue->discovery_watch < 0 || queue_watch_fd(queue->discovery_watch,
             dirfd(queue->cursor), IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO |
             IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR)) goto out;
-        if (fstat(dirfd(queue->cursor), &queue->discovery_store)) goto out;
+        if (queue_watch_fd(queue->discovery_watch, queue->discovery_tombstones,
+            IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY |
+            IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR) ||
+            fstat(queue->discovery_tombstones, &queue->discovery_tombstone_store) ||
+            fstat(dirfd(queue->cursor), &queue->discovery_store)) goto out;
     }
     int64_t started = g_get_monotonic_time();
     result = 1;
@@ -2854,9 +2869,18 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         struct stat held, path;
         int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         int store = root < 0 ? -1 : open_store(root, false);
+        int gc = root < 0 ? -1 : open_directory(root, ".gc", false);
+        int tombstones = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
+        struct stat held_tombstones, path_tombstones;
         if (store < 0 || fstat(dirfd(queue->cursor), &held) || fstat(store, &path) ||
             !object_stat_equal(&queue->discovery_store, &held) ||
-            !object_stat_equal(&held, &path) || !queue_watch_clean(queue->discovery_watch)) result = -1;
+            !object_stat_equal(&held, &path) || tombstones < 0 ||
+            fstat(queue->discovery_tombstones, &held_tombstones) || fstat(tombstones, &path_tombstones) ||
+            !object_stat_equal(&queue->discovery_tombstone_store, &held_tombstones) ||
+            !object_stat_equal(&held_tombstones, &path_tombstones) ||
+            !queue_watch_clean(queue->discovery_watch)) result = -1;
+        if (tombstones >= 0) close(tombstones);
+        if (gc >= 0) close(gc);
         if (store >= 0) close(store);
         if (root >= 0) close(root);
     }
@@ -2931,6 +2955,10 @@ out:
     if (result <= 0 && queue->discovery_watch >= 0) {
         close(queue->discovery_watch);
         queue->discovery_watch = -1;
+    }
+    if (result <= 0 && queue->discovery_tombstones >= 0) {
+        close(queue->discovery_tombstones);
+        queue->discovery_tombstones = -1;
     }
     if (result < 0) queue->complete = false;
     stats->complete = queue->complete;
