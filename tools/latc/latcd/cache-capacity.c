@@ -181,7 +181,10 @@ static void check_changes(LatcdCacheCapacity *capacity)
                 continue;
             }
             if (g_hash_table_contains(capacity->inventory_directories, watch)) {
-                capacity->ready = false;
+                if (capacity->inventory_active || event->mask &
+                    (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED | IN_Q_OVERFLOW) ||
+                    (!event->len && (event->mask & IN_ATTRIB)))
+                    capacity->ready = false;
                 continue;
             }
             const char *prefix = g_hash_table_lookup(capacity->state_directories, watch);
@@ -451,17 +454,7 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
         capacity->state_committed = state;
     }
     check_changes(capacity);
-    GHashTableIter watches;
-    gpointer directory_watch;
-    g_hash_table_iter_init(&watches, capacity->inventory_directories);
-    while (g_hash_table_iter_next(&watches, &directory_watch, NULL)) {
-        if (!inotify_rm_watch(capacity->watch_fd, GPOINTER_TO_INT(directory_watch)))
-            g_hash_table_add(capacity->state_ignored, directory_watch);
-        else capacity->ready = false;
-    }
-    check_changes(capacity);
     capacity->inventory_active = false;
-    g_hash_table_remove_all(capacity->inventory_directories);
     if (!capacity->ready) result = -1;
     pthread_mutex_unlock(&capacity->lock);
     if (result && error && error_size)

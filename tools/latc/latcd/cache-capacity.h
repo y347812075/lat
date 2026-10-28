@@ -42,7 +42,8 @@ typedef struct LatcdCacheCapacity {
  * and current/.tbsets/.identities state separately. Not all cache state.
  * Unsafe/aliased metadata or state closes admission. Existing .gc file inodes
  * and records installed through metadata_begin/finish are watched for writes
- * and replacement. This is not full .gc namespace or directory-block accounting. */
+ * and replacement. Inventoried .gc directories remain watched for self changes;
+ * newly created directories and directory blocks are not fully accounted. */
 int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
                               char *error, size_t error_size);
 int latcd_cache_capacity_reserve(LatcdCacheCapacity *capacity, uint64_t bytes,
