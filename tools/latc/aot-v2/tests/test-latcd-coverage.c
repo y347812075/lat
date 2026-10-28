@@ -8,6 +8,7 @@
 #define fsync coverage_fsync
 #define linkat coverage_linkat
 #define unlinkat coverage_unlinkat
+#define lat_tb_key_set_read_file coverage_tb_key_set_read_file
 #define main latcd_program_main
 #include "../../latcd/main.c"
 #undef main
@@ -21,7 +22,22 @@
 #undef fsync
 #undef linkat
 #undef unlinkat
+#undef lat_tb_key_set_read_file
 #include <glib/gstdio.h>
+
+extern int lat_tb_key_set_read_file(const char *, const uint8_t [32],
+                                    LatTbKeySet *, char *, size_t);
+static void (*tbset_read_hook)(void);
+int coverage_tb_key_set_read_file(const char *path, const uint8_t digest[32],
+                                  LatTbKeySet *set, char *error, size_t size)
+{
+    if (tbset_read_hook) {
+        void (*hook)(void) = tbset_read_hook;
+        tbset_read_hook = NULL;
+        hook();
+    }
+    return lat_tb_key_set_read_file(path, digest, set, error, size);
+}
 
 extern ssize_t write(int fd, const void *buffer, size_t count);
 extern int fchmod(int fd, mode_t mode);
@@ -124,6 +140,12 @@ ssize_t coverage_pread(int fd, void *buffer, size_t count, off_t offset)
 static const char *hook_path;
 static const char *hook_contents;
 static bool hook_mutate;
+static void switch_manifest_during_tbset_read(void)
+{
+    g_assert_cmpint(pthread_mutex_trylock(&cache_lock), ==, 0);
+    g_assert_true(g_file_set_contents(hook_path, hook_contents, -1, NULL));
+    pthread_mutex_unlock(&cache_lock);
+}
 static void assert_unlocked_read(int fd)
 {
     (void)fd;
@@ -1295,6 +1317,48 @@ int main(int argc, char **argv)
     g_assert_cmpint(fd, >=, 0);
     g_assert_cmpint(lat_tb_key_set_write_fd(fd, &incoming, error, sizeof(error)), ==, 0);
     close(fd);
+    /* Both generations are individually valid; switching after snapshot A
+     * must not turn its TB set into a cache hit for generation B. */
+    gchar *saved_manifest = NULL, *input_fixture = NULL;
+    gsize fixture_size = 0;
+    g_assert_true(g_file_get_contents(manifest, &saved_manifest, NULL, NULL));
+    g_assert_true(g_file_get_contents(input, &input_fixture, &fixture_size, NULL));
+    g_assert_true(g_file_set_contents(tbset_path, input_fixture, fixture_size, NULL));
+    char *native_b_name = g_strdup_printf("%s-new.native", hex);
+    char *tbset_b_name = g_strdup_printf("%s-new.tbset", hex);
+    char *native_b = g_build_filename(directory, native_b_name, NULL);
+    char *tbset_b = g_build_filename(directory, tbset_b_name, NULL);
+    g_assert_true(g_file_set_contents(native_b, "native-b", 8, NULL));
+    g_assert_true(g_file_set_contents(tbset_b, input_fixture, fixture_size, NULL));
+    char *manifest_a = g_strdup_printf("{\"version\":2,\"module\":\"%s\","
+        "\"native\":\"%s\",\"tbset\":\"%s\",\"published_sequence\":1}",
+        new_name, native_b_name, tbset_b_name);
+    char *manifest_b = g_strdup_printf("{\"version\":2,\"module\":\"%s\","
+        "\"native\":\"%s\",\"tbset\":\"%s\",\"published_sequence\":2}",
+        old_name, native_name, tbset_name);
+    g_assert_true(g_file_set_contents(manifest, manifest_a, -1, NULL));
+    g_assert_true(cache_contains_tbset(&config, digest, input));
+    hook_path = manifest;
+    hook_contents = manifest_b;
+    tbset_read_hook = switch_manifest_during_tbset_read;
+    g_assert_false(cache_contains_tbset(&config, digest, input));
+    g_assert_null(tbset_read_hook);
+    g_assert_true(cache_contains_tbset(&config, digest, input));
+    g_assert_true(g_file_set_contents(manifest, saved_manifest, -1, NULL));
+    g_assert_true(g_file_set_contents(tbset_path, "fixture", 7, NULL));
+    g_assert_cmpint(g_chmod(tbset_path, 0444), ==, 0);
+    hook_path = NULL;
+    hook_contents = NULL;
+    g_unlink(native_b);
+    g_unlink(tbset_b);
+    g_free(native_b_name);
+    g_free(tbset_b_name);
+    g_free(native_b);
+    g_free(tbset_b);
+    g_free(manifest_a);
+    g_free(manifest_b);
+    g_free(saved_manifest);
+    g_free(input_fixture);
     char *retained = NULL;
     g_assert_cmpint(preserve_current_keys(&config, hex, digest, input, temporary,
         &retained, error, sizeof(error)), ==, 0);
