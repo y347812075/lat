@@ -195,6 +195,8 @@ static void check_changes(LatcdCacheCapacity *capacity)
                 if (!created_empty && !g_hash_table_contains(capacity->state_expected, event->name))
                     capacity->ready = false;
             }
+            if (capacity->inventory_active && event->wd == capacity->root_watch &&
+                event->len && !strcmp(event->name, ".gc")) capacity->ready = false;
             if (event->len && (!strcmp(event->name, ".superseded") || generated_name(event->name)) &&
                 (!capacity->expected_names || !g_hash_table_contains(capacity->expected_names, event->name)))
                 capacity->ready = false;
@@ -397,6 +399,7 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
     uint64_t total = 0;
     unsigned visited = 0;
     capacity->root_watch = watch;
+    capacity->inventory_active = true;
     int result = fd < 0 || capacity->root_fd < 0 ? -1 :
         scan_directory(fd, 0, inodes, capacity, &visited, &total);
     uint64_t metadata = 0;
@@ -418,6 +421,7 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
         capacity->state_committed = state;
     }
     check_changes(capacity);
+    capacity->inventory_active = false;
     if (!capacity->ready) result = -1;
     pthread_mutex_unlock(&capacity->lock);
     if (result && error && error_size)

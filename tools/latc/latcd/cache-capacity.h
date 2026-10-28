@@ -20,6 +20,7 @@ typedef struct LatcdCacheCapacity {
     void *recovered_tasks;
     void *unknown_tasks;
     bool ready;
+    bool inventory_active;
     int watch_fd;
     int root_fd;
     int root_watch;
