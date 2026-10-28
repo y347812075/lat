@@ -175,14 +175,11 @@ static int open_store(int root, bool create)
     return records;
 }
 
-int latcd_retirement_roots_lock(const char *root, int operation,
-                                char *error, size_t error_size)
+static int roots_lock_gc(int gc, int operation, char *error, size_t error_size)
 {
     if (operation != LOCK_SH && operation != (LOCK_SH | LOCK_NB) &&
         operation != (LOCK_EX | LOCK_NB))
         return fail(error, error_size, "invalid reference roots latch operation");
-    int directory = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", true);
     int fd = gc < 0 ? -1 : openat(gc, "reference-roots.lock",
         O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0600);
     bool created = fd >= 0;
@@ -196,12 +193,21 @@ int latcd_retirement_roots_lock(const char *root, int operation,
         !fstatat(gc, "reference-roots.lock", &path, AT_SYMLINK_NOFOLLOW) &&
         object_stat_equal(&st, &path);
     int saved = errno;
-    if (gc >= 0) close(gc);
-    if (directory >= 0) close(directory);
     if (valid) return fd;
     if (fd >= 0) close(fd);
     errno = saved;
     return fail(error, error_size, "reference roots latch busy or unsafe");
+}
+
+int latcd_retirement_roots_lock(const char *root, int operation,
+                                char *error, size_t error_size)
+{
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", true);
+    int fd = roots_lock_gc(gc, operation, error, error_size);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    return fd;
 }
 
 /* ENOENT is separate from a malformed, unsafe or unreadable root. */
@@ -519,18 +525,12 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
     return valid && !latcd_retirement_page_state_valid(state);
 }
 
-int latcd_retirement_page_state_store(const char *root,
-                                      const LatcdRetirementPageState *state,
-                                      char *error, size_t error_size)
+static int page_state_store_fd(int root_fd, int gc, const LatcdRetirementPageState *state)
 {
-    if (!root || !state || latcd_retirement_page_state_valid(state))
-        return fail(error, error_size, "invalid retirement page state");
-    int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    int gc = root_fd < 0 ? -1 : open_directory(root_fd, ".gc", true);
     int result = -1;
     GKeyFile *record = g_key_file_new();
     struct stat cache;
-    if (gc < 0 || fstat(root_fd, &cache) ||
+    if (gc < 0 || latcd_retirement_page_state_valid(state) || fstat(root_fd, &cache) ||
         state->cache_device != (uint64_t)cache.st_dev ||
         state->cache_inode != (uint64_t)cache.st_ino) goto out;
     g_key_file_set_integer(record, "page", "version", 2);
@@ -555,6 +555,17 @@ int latcd_retirement_page_state_store(const char *root,
     result = write_record(gc, "retirement-page.ini", record);
 out:
     g_key_file_unref(record);
+    return result;
+}
+
+int latcd_retirement_page_state_store(const char *root,
+                                      const LatcdRetirementPageState *state,
+                                      char *error, size_t error_size)
+{
+    if (!root || !state) return fail(error, error_size, "invalid retirement page state");
+    int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = root_fd < 0 ? -1 : open_directory(root_fd, ".gc", true);
+    int result = page_state_store_fd(root_fd, gc, state);
     if (gc >= 0) close(gc);
     if (root_fd >= 0) close(root_fd);
     return result ? fail(error, error_size, "cannot persist retirement page state") : 0;
@@ -598,29 +609,36 @@ int latcd_retirement_page_round_begin(const char *root, uint64_t grace_us,
     if (!root || !state || !grace_us)
         return fail(error, error_size, "invalid retirement round input");
     memset(state, 0, sizeof(*state));
-    int roots = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, error_size);
-    if (roots < 0) return -1;
-    LatcdRetirementPageState existing;
-    int result = -1, directory = -1;
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", true);
+    int roots = roots_lock_gc(gc, LOCK_EX | LOCK_NB, error, error_size);
+    int result = -1;
     char *boot = NULL;
     uint64_t cutoff = 0;
-    struct stat cache;
-    if (latcd_retirement_page_state_load(root, &existing, error, error_size) != 1 ||
-        (directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) < 0 ||
-        fstat(directory, &cache) || retirement_clock(&boot, &cutoff) || !cutoff) goto out;
+    struct stat cache, held_gc, held_lock, path;
+    if (roots < 0 || fstat(directory, &cache) || fstat(gc, &held_gc) ||
+        fstat(roots, &held_lock) ||
+        !fstatat(gc, "retirement-page.ini", &path, AT_SYMLINK_NOFOLLOW) || errno != ENOENT ||
+        retirement_clock(&boot, &cutoff) || !cutoff) goto out;
     LatcdRetirementPageState next = {0};
     next.cache_device = cache.st_dev;
     next.cache_inode = cache.st_ino;
     next.grace_us = grace_us;
     next.round_cutoff = cutoff;
     memcpy(next.boot, boot, sizeof(next.boot));
-    if (latcd_retirement_page_state_store(root, &next, error, error_size)) goto out;
+    if (page_state_store_fd(directory, gc, &next) ||
+        lstat(root, &path) || !object_stat_equal(&cache, &path) ||
+        fstatat(directory, ".gc", &path, AT_SYMLINK_NOFOLLOW) ||
+        path.st_dev != held_gc.st_dev || path.st_ino != held_gc.st_ino ||
+        fstatat(gc, "reference-roots.lock", &path, AT_SYMLINK_NOFOLLOW) ||
+        !object_stat_equal(&held_lock, &path)) goto out;
     *state = next;
     result = 0;
 out:
     g_free(boot);
     if (directory >= 0) close(directory);
-    close(roots);
+    if (roots >= 0) close(roots);
+    if (gc >= 0) close(gc);
     return result ? fail(error, error_size, "cannot begin retirement round; reload state") : 0;
 }
 

@@ -22,6 +22,7 @@
 static unsigned clock_fault;
 static int64_t monotonic_tick;
 static uint64_t simulated_boottime_us;
+static const char *clock_swap_path, *clock_swap_old;
 int __real_clock_gettime(clockid_t id, struct timespec *value);
 gint64 __real_g_get_monotonic_time(void);
 gboolean __real_g_file_get_contents(const gchar *name, gchar **contents,
@@ -35,6 +36,11 @@ gint64 __wrap_g_get_monotonic_time(void)
 
 int __wrap_clock_gettime(clockid_t id, struct timespec *value)
 {
+    if (id == CLOCK_BOOTTIME && clock_swap_path) {
+        assert(!rename(clock_swap_path, clock_swap_old));
+        assert(!mkdir(clock_swap_path, 0700));
+        clock_swap_path = NULL;
+    }
     if (id == CLOCK_BOOTTIME && simulated_boottime_us && !clock_fault) {
         value->tv_sec = simulated_boottime_us / 1000000;
         value->tv_nsec = (simulated_boottime_us % 1000000) * 1000;
@@ -1117,6 +1123,37 @@ static void test_page_round_begin(const char *point, bool crash)
     }
     simulated_boottime_us = 0;
     remove_root(root); g_free(root);
+}
+
+static void test_round_directory_swap(bool swap_gc)
+{
+    char *root = root_new(), error[256];
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *target = g_strdup(swap_gc ? gc : root);
+    char *old_path = g_strconcat(target, "-moved", NULL);
+    int lock = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error));
+    assert(lock >= 0);
+    close(lock);
+    clock_swap_path = target;
+    clock_swap_old = old_path;
+    simulated_boottime_us = 1234;
+    LatcdRetirementPageState state;
+    assert(latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)) < 0);
+    assert(!state.round_cutoff && !clock_swap_path);
+    char *new_page = g_build_filename(root, ".gc", "retirement-page.ini", NULL);
+    assert(!g_file_test(new_page, G_FILE_TEST_EXISTS));
+    simulated_boottime_us = 0;
+    clock_swap_old = NULL;
+    g_free(new_page);
+    if (swap_gc) {
+        assert(!rmdir(gc));
+        assert(!rename(old_path, gc));
+    } else {
+        assert(!rmdir(root));
+        assert(!rename(old_path, root));
+    }
+    remove_root(root);
+    g_free(old_path); g_free(target); g_free(gc); g_free(root);
 }
 
 static void test_page_state_write_fault(const char *point, bool crash)
@@ -3134,6 +3171,8 @@ int main(int argc, char **argv)
     test_queue_empty_store();
     test_round_cursor();
     test_page_round_begin(NULL, false);
+    test_round_directory_swap(false);
+    test_round_directory_swap(true);
     const char *page_faults[] = {"created", "partial-write", "file-synced",
                                  "renamed", "directory-synced"};
     for (unsigned i = 0; i < G_N_ELEMENTS(page_faults); i++) {
