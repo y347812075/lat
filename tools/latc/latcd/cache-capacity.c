@@ -51,6 +51,18 @@ static bool same_file_snapshot(const struct stat *a, const struct stat *b)
         a->st_ctim.tv_sec == b->st_ctim.tv_sec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
 }
 
+typedef struct StateFileWatch {
+    char *key;
+    struct stat snapshot;
+} StateFileWatch;
+
+static void state_file_watch_free(gpointer data)
+{
+    StateFileWatch *entry = data;
+    g_free(entry->key);
+    g_free(entry);
+}
+
 static int watch_state_file(LatcdCacheCapacity *capacity, int parent, const char *name,
                             const char *key, const struct stat *expected)
 {
@@ -70,7 +82,10 @@ static int watch_state_file(LatcdCacheCapacity *capacity, int parent, const char
         same_file_snapshot(&st, &after) && same_file_snapshot(&after, &path_st);
     close(fd);
     if (!stable) return -1;
-    g_hash_table_insert(capacity->state_files, GINT_TO_POINTER(watch), g_strdup(key));
+    StateFileWatch *entry = g_new0(StateFileWatch, 1);
+    entry->key = g_strdup(key);
+    entry->snapshot = after;
+    g_hash_table_insert(capacity->state_files, GINT_TO_POINTER(watch), entry);
     return 0;
 }
 
@@ -170,7 +185,8 @@ static void check_changes(LatcdCacheCapacity *capacity)
                 continue;
             }
             const char *prefix = g_hash_table_lookup(capacity->state_directories, watch);
-            const char *file = g_hash_table_lookup(capacity->state_files, watch);
+            StateFileWatch *watched_file = g_hash_table_lookup(capacity->state_files, watch);
+            const char *file = watched_file ? watched_file->key : NULL;
             if (prefix || file) {
                 char *key = prefix && event->len ? g_build_filename(prefix, event->name, NULL) : NULL;
                 const char *expected = key ? key : file;
@@ -399,7 +415,7 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
     capacity->file_watches = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                                    (GDestroyNotify)g_hash_table_unref);
     capacity->state_directories = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
-    capacity->state_files = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
+    capacity->state_files = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, state_file_watch_free);
     capacity->state_expected = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     capacity->state_ignored = g_hash_table_new(g_direct_hash, g_direct_equal);
     capacity->inventory_directories = g_hash_table_new(g_direct_hash, g_direct_equal);
@@ -751,10 +767,11 @@ void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
          * then remove its watch before installing the replacement watch. */
         check_changes(capacity);
         GHashTableIter iterator;
-        gpointer watch, key;
+        gpointer watch, value;
         g_hash_table_iter_init(&iterator, capacity->state_files);
-        while (g_hash_table_iter_next(&iterator, &watch, &key)) {
-            if (strcmp(key, reservation->name)) continue;
+        while (g_hash_table_iter_next(&iterator, &watch, &value)) {
+            StateFileWatch *entry = value;
+            if (strcmp(entry->key, reservation->name)) continue;
             if (!inotify_rm_watch(capacity->watch_fd, GPOINTER_TO_INT(watch)))
                 g_hash_table_add(capacity->state_ignored, watch);
             g_hash_table_iter_remove(&iterator);
@@ -806,10 +823,11 @@ int latcd_cache_capacity_metadata_remove(int directory, const char *name,
     }
     GHashTableIter iterator;
     gpointer watch, watched_key;
-    bool inventoried = false;
+    StateFileWatch *inventoried = NULL;
     g_hash_table_iter_init(&iterator, capacity->state_files);
     while (g_hash_table_iter_next(&iterator, &watch, &watched_key)) {
-        if (!strcmp(watched_key, key)) { inventoried = true; break; }
+        StateFileWatch *entry = watched_key;
+        if (!strcmp(entry->key, key)) { inventoried = entry; break; }
     }
     if (!inventoried) {
         capacity->ready = false;
@@ -819,7 +837,8 @@ int latcd_cache_capacity_metadata_remove(int directory, const char *name,
     g_hash_table_add(capacity->state_expected, g_strdup(key));
     if (fstatat(directory, name, &st, AT_SYMLINK_NOFOLLOW) ||
         !S_ISREG(st.st_mode) || st.st_uid != geteuid() || st.st_nlink != 1 ||
-        st.st_size < 0 || (uint64_t)st.st_dev != device || (uint64_t)st.st_ino != inode ||
+        st.st_size < 0 || !same_file_snapshot(&inventoried->snapshot, &st) ||
+        (uint64_t)st.st_dev != device || (uint64_t)st.st_ino != inode ||
         (uint64_t)st.st_size > capacity->metadata_committed ||
         unlinkat(directory, name, 0) || fsync(directory)) {
         capacity->ready = false;
@@ -830,7 +849,8 @@ int latcd_cache_capacity_metadata_remove(int directory, const char *name,
     check_changes(capacity);
     g_hash_table_iter_init(&iterator, capacity->state_files);
     while (g_hash_table_iter_next(&iterator, &watch, &watched_key)) {
-        if (strcmp(watched_key, key)) continue;
+        StateFileWatch *entry = watched_key;
+        if (strcmp(entry->key, key)) continue;
         if (!inotify_rm_watch(capacity->watch_fd, GPOINTER_TO_INT(watch)))
             g_hash_table_add(capacity->state_ignored, watch);
         g_hash_table_iter_remove(&iterator);

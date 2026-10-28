@@ -65,7 +65,7 @@ int main(void)
     assert(directory >= 0);
     LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
     capacity.watch_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-    capacity.state_files = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
+    capacity.state_files = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, state_file_watch_free);
     assert(capacity.watch_fd >= 0);
     struct stat expected;
     put_file(target, "old");

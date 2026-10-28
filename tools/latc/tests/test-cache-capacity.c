@@ -116,6 +116,24 @@ static void test_metadata(void)
     g_free(unregistered);
     assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
     latcd_cache_capacity_metadata_bind(&capacity, 10);
+    int held_old = open(record, O_RDONLY | O_CLOEXEC);
+    assert(held_old >= 0);
+    char *replacement = g_build_filename(store, "replacement.ini", NULL);
+    put(replacement, "xyz");
+    assert(!rename(replacement, record));
+    struct stat replaced;
+    assert(!stat(record, &replaced));
+    assert(latcd_cache_capacity_metadata_remove(directory, "record.ini", replaced.st_dev,
+                                                 replaced.st_ino) < 0);
+    assert(!capacity.ready && capacity.metadata_committed == 5 && !access(record, F_OK));
+    close(held_old);
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    latcd_cache_capacity_metadata_bind(&capacity, 10);
+    assert(capacity.metadata_committed == 3);
+    assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 5, &first));
+    put(record, "12345");
+    latcd_cache_capacity_metadata_finish(&first, true, false);
+    g_free(replacement);
     struct stat original;
     assert(!stat(record, &original));
     assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 3, &first));
