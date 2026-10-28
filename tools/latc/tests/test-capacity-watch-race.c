@@ -14,7 +14,7 @@ static int inject_watch(int fd, const char *path, uint32_t mask)
 {
     int result = inotify_add_watch(fd, path, mask);
     assert(result >= 0);
-    if (injection >= 3 && (mask & IN_DONT_FOLLOW)) {
+    if ((injection == 3 || injection == 4) && (mask & IN_DONT_FOLLOW)) {
         int mode = injection;
         injection = 0;
         if (mode == 3) assert(!mkdir(target, 0700));
@@ -22,6 +22,11 @@ static int inject_watch(int fd, const char *path, uint32_t mask)
             assert(!rename(target, replacement));
             assert(!mkdir(target, 0700));
         }
+    }
+    if (injection == 5 && (mask & IN_ONLYDIR) && !(mask & IN_DONT_FOLLOW)) {
+        injection = 0;
+        int writer = open(target, O_CREAT | O_EXCL | O_WRONLY, 0600);
+        assert(writer >= 0 && write(writer, "new", 3) == 3 && !close(writer));
     }
     if (injection == 1) assert(!rename(replacement, target));
     if (injection == 2) {
@@ -87,6 +92,18 @@ int main(void)
         assert(!rmdir(root));
         g_free(target); g_free(replacement); g_free(root);
     }
+    root = g_dir_make_tmp("watch-gc-child-race-XXXXXX", NULL);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    target = g_build_filename(gc, "new-record", NULL);
+    assert(!mkdir(gc, 0700));
+    LatcdCacheCapacity scan = LATCD_CACHE_CAPACITY_INIT;
+    injection = 5;
+    assert(latcd_cache_capacity_scan(&scan, root, NULL, 0) < 0);
+    assert(!scan.ready);
+    latcd_cache_capacity_close(&scan);
+    assert(!pthread_mutex_destroy(&scan.lock));
+    assert(!unlink(target) && !rmdir(gc) && !rmdir(root));
+    g_free(target); g_free(gc); g_free(root);
     puts("watch snapshot race: PASS");
     return 0;
 }

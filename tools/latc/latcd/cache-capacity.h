@@ -30,6 +30,7 @@ typedef struct LatcdCacheCapacity {
     void *state_files;
     void *state_expected;
     void *state_ignored;
+    void *inventory_directories;
 } LatcdCacheCapacity;
 
 #define LATCD_CACHE_CAPACITY_INIT { .lock = PTHREAD_MUTEX_INITIALIZER, \

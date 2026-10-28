@@ -165,6 +165,10 @@ static void check_changes(LatcdCacheCapacity *capacity)
                 g_hash_table_remove(capacity->state_ignored, watch);
                 continue;
             }
+            if (g_hash_table_contains(capacity->inventory_directories, watch)) {
+                capacity->ready = false;
+                continue;
+            }
             const char *prefix = g_hash_table_lookup(capacity->state_directories, watch);
             const char *file = g_hash_table_lookup(capacity->state_files, watch);
             if (prefix || file) {
@@ -265,6 +269,13 @@ static int scan_metadata(int fd, unsigned depth, unsigned *visited, uint64_t *to
     struct stat before, after;
     if (depth > 8 || fstat(fd, &before) || !S_ISDIR(before.st_mode) ||
         before.st_uid != geteuid() || (before.st_mode & 0077)) { close(fd); return -1; }
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+    int watch = inotify_add_watch(capacity->watch_fd, path,
+        IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY | IN_ATTRIB |
+        IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR);
+    if (watch < 0) { close(fd); return -1; }
+    g_hash_table_add(capacity->inventory_directories, GINT_TO_POINTER(watch));
     DIR *directory = fdopendir(fd);
     if (!directory) { close(fd); return -1; }
     int result = 0;
@@ -391,6 +402,7 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
     capacity->state_files = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
     capacity->state_expected = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     capacity->state_ignored = g_hash_table_new(g_direct_hash, g_direct_equal);
+    capacity->inventory_directories = g_hash_table_new(g_direct_hash, g_direct_equal);
     int watch = capacity->watch_fd < 0 ? -1 : inotify_add_watch(capacity->watch_fd, root,
         IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY | IN_ATTRIB |
         IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR | IN_DONT_FOLLOW);
@@ -422,6 +434,15 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
     }
     check_changes(capacity);
     capacity->inventory_active = false;
+    GHashTableIter watches;
+    gpointer directory_watch;
+    g_hash_table_iter_init(&watches, capacity->inventory_directories);
+    while (g_hash_table_iter_next(&watches, &directory_watch, NULL)) {
+        if (!inotify_rm_watch(capacity->watch_fd, GPOINTER_TO_INT(directory_watch)))
+            g_hash_table_add(capacity->state_ignored, directory_watch);
+        else capacity->ready = false;
+    }
+    g_hash_table_remove_all(capacity->inventory_directories);
     if (!capacity->ready) result = -1;
     pthread_mutex_unlock(&capacity->lock);
     if (result && error && error_size)
@@ -534,6 +555,8 @@ void latcd_cache_capacity_close(LatcdCacheCapacity *capacity)
     capacity->state_expected = NULL;
     if (capacity->state_ignored) g_hash_table_unref(capacity->state_ignored);
     capacity->state_ignored = NULL;
+    if (capacity->inventory_directories) g_hash_table_unref(capacity->inventory_directories);
+    capacity->inventory_directories = NULL;
     if (capacity->recovered_tasks) g_hash_table_unref(capacity->recovered_tasks);
     capacity->recovered_tasks = NULL;
     capacity->recovered_reserved = 0;
