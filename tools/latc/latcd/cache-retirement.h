@@ -60,6 +60,13 @@ int latcd_retirement_page_names(const char *const *names, size_t count,
 /* Validate an in-memory page state. This does not serialize, discover, or
  * authorize deletion; count is bounded and entries must be unique/sorted. */
 int latcd_retirement_page_state_valid(const LatcdRetirementPageState *state);
+/* Owner lease required. Persist/read only the bounded scheduler page state;
+ * this is not discovery completeness, reference proof, or deletion authority. */
+int latcd_retirement_page_state_store(const char *root,
+                                      const LatcdRetirementPageState *state,
+                                      char *error, size_t error_size);
+int latcd_retirement_page_state_load(const char *root, LatcdRetirementPageState *state,
+                                     char *error, size_t error_size);
 typedef struct LatcdRecoveryProgress {
     unsigned visited;
     unsigned recovered;

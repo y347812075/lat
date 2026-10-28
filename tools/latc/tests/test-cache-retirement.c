@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "../latcd/cache-retirement.h"
+#include "../latcd/cache-capacity.h"
 #include "../aot-v2/runtime/cache-domain.h"
 #include "../aot-v2/runtime/cache-lifecycle.h"
 
@@ -841,6 +842,72 @@ static void test_round_cursor(void)
     assert(latcd_retirement_page_state_valid(&state) == 0);
     state.entries[1].name[0] = 'a';
     assert(latcd_retirement_page_state_valid(&state) < 0);
+    char *page_root = root_new(), page_error[256];
+    char *page_path = g_build_filename(page_root, ".gc", "retirement-page.ini", NULL);
+    struct stat page_cache;
+    assert(!stat(page_root, &page_cache));
+    state.cache_device = page_cache.st_dev;
+    state.cache_inode = page_cache.st_ino;
+    LatcdRetirementPageState loaded;
+    assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
+                                            sizeof(page_error)) == 1);
+    state.entries[1].name[0] = 'b';
+    assert(latcd_retirement_page_state_store(page_root, &state, page_error,
+                                             sizeof(page_error)) == 0);
+    assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
+                                            sizeof(page_error)) == 0);
+    state.cache_inode++;
+    assert(latcd_retirement_page_state_store(page_root, &state, page_error,
+                                             sizeof(page_error)) == 0);
+    assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
+                                            sizeof(page_error)) < 0);
+    state.cache_inode = page_cache.st_ino;
+    state.cursor[0] = 'c';
+    assert(latcd_retirement_page_state_valid(&state) < 0);
+    state.cursor[0] = 'b';
+    assert(latcd_retirement_page_state_store(page_root, &state, page_error,
+                                             sizeof(page_error)) == 0);
+    GKeyFile *extra = g_key_file_new();
+    assert(g_key_file_load_from_file(extra, page_path, 0, NULL));
+    g_key_file_set_uint64(extra, "entry2", "unexpected", 1);
+    char *extra_data = g_key_file_to_data(extra, NULL, NULL);
+    put(page_path, extra_data);
+    g_free(extra_data);
+    g_key_file_unref(extra);
+    assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
+                                            sizeof(page_error)) < 0);
+    assert(latcd_retirement_page_state_store(page_root, &state, page_error,
+                                             sizeof(page_error)) == 0);
+    assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
+                                            sizeof(page_error)) == 0);
+    assert(loaded.cache_device == state.cache_device && loaded.cache_inode == state.cache_inode &&
+           loaded.grace_us == state.grace_us && !strcmp(loaded.boot, state.boot) &&
+           !strcmp(loaded.cursor, state.cursor) && loaded.count == state.count &&
+           loaded.sequence == state.sequence &&
+           loaded.entries[1].deadline == state.entries[1].deadline &&
+           loaded.entries[1].enqueued == state.entries[1].enqueued &&
+           loaded.entries[1].last_attempt == state.entries[1].last_attempt &&
+           loaded.entries[1].retry_at == state.entries[1].retry_at &&
+           loaded.entries[1].busy_count == state.entries[1].busy_count);
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, page_root, page_error, sizeof(page_error)));
+    char *capacity_root = root_new();
+    assert(!latcd_cache_capacity_scan(&capacity, capacity_root, page_error, sizeof(page_error)));
+    latcd_cache_capacity_metadata_bind(&capacity, 1);
+    LatcdRetirementPageState rejected = state;
+    struct stat capacity_cache;
+    assert(!stat(capacity_root, &capacity_cache));
+    rejected.cache_device = capacity_cache.st_dev;
+    rejected.cache_inode = capacity_cache.st_ino;
+    assert(latcd_retirement_page_state_store(capacity_root, &rejected, page_error,
+                                             sizeof(page_error)) < 0);
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    remove_root(capacity_root); g_free(capacity_root);
+    put(page_path, "[page]\nversion=1\n");
+    assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
+                                            sizeof(page_error)) < 0);
+    g_free(page_path); remove_root(page_root); g_free(page_root);
 }
 
 static void test_tombstone_crash(const char *point, bool crash)

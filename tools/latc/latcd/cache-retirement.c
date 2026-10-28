@@ -445,9 +445,134 @@ int latcd_retirement_page_state_valid(const LatcdRetirementPageState *state)
             state->entries[i].busy_count > 7) return -1;
         if (i && strcmp(state->entries[i - 1].name, state->entries[i].name) >= 0) return -1;
     }
-    if (state->count && strcmp(state->entries[state->count - 1].name, state->cursor) > 0)
-        return -1;
+    if (state->count) {
+        if (strcmp(state->entries[state->count - 1].name, state->cursor)) return -1;
+    } else if (state->cursor[0]) return -1;
     return 0;
+}
+
+static bool record_string_is(GKeyFile *record, const char *group,
+                             const char *key, const char *expected);
+static bool record_uint64(GKeyFile *record, const char *group,
+                          const char *key, uint64_t *value);
+static bool exact_keys(GKeyFile *record, const char *group,
+                       const char *const *expected, size_t count);
+
+static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
+{
+    const char *queue_fields[] = {"version", "cache_device", "cache_inode", "grace_us",
+                                  "boot", "cursor", "sequence", "count"};
+    const char *entry_fields[] = {"name", "deadline", "enqueued", "last_attempt",
+                                  "retry_at", "busy_count"};
+    gsize groups_count;
+    char **groups = g_key_file_get_groups(record, &groups_count);
+    bool valid = groups_count && !strcmp(groups[0], "page") &&
+        exact_keys(record, "page", queue_fields, G_N_ELEMENTS(queue_fields));
+    g_strfreev(groups);
+    if (!valid || !record_string_is(record, "page", "version", "1") ||
+        !record_uint64(record, "page", "cache_device", &state->cache_device) ||
+        !record_uint64(record, "page", "cache_inode", &state->cache_inode) ||
+        !record_uint64(record, "page", "grace_us", &state->grace_us) ||
+        !record_uint64(record, "page", "sequence", &state->sequence)) return false;
+    char *boot = g_key_file_get_string(record, "page", "boot", NULL);
+    char *cursor = g_key_file_get_string(record, "page", "cursor", NULL);
+    uint64_t count;
+    valid = boot && cursor && record_uint64(record, "page", "count", &count) &&
+        count <= 128 &&
+        strlen(boot) == 36 && strlen(cursor) < sizeof(state->cursor);
+    if (valid) {
+        g_strlcpy(state->boot, boot, sizeof(state->boot));
+        g_strlcpy(state->cursor, cursor, sizeof(state->cursor));
+        state->count = (unsigned)count;
+    }
+    if (valid && groups_count != (gsize)state->count + 1) valid = false;
+    g_free(boot); g_free(cursor);
+    for (unsigned i = 0; valid && i < state->count; i++) {
+        char group[32];
+        snprintf(group, sizeof(group), "entry%u", i);
+        uint64_t busy;
+        char *name = g_key_file_get_string(record, group, "name", NULL);
+        valid = exact_keys(record, group, entry_fields, G_N_ELEMENTS(entry_fields)) &&
+            name && strlen(name) < sizeof(state->entries[i].name) &&
+            record_uint64(record, group, "deadline", &state->entries[i].deadline) &&
+            record_uint64(record, group, "enqueued", &state->entries[i].enqueued) &&
+            record_uint64(record, group, "last_attempt", &state->entries[i].last_attempt) &&
+            record_uint64(record, group, "retry_at", &state->entries[i].retry_at) &&
+            record_uint64(record, group, "busy_count", &busy) && busy <= 7;
+        if (valid) {
+            g_strlcpy(state->entries[i].name, name, sizeof(state->entries[i].name));
+            state->entries[i].busy_count = busy;
+        }
+        g_free(name);
+    }
+    return valid && !latcd_retirement_page_state_valid(state);
+}
+
+int latcd_retirement_page_state_store(const char *root,
+                                      const LatcdRetirementPageState *state,
+                                      char *error, size_t error_size)
+{
+    if (!root || !state || latcd_retirement_page_state_valid(state))
+        return fail(error, error_size, "invalid retirement page state");
+    int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = root_fd < 0 ? -1 : open_directory(root_fd, ".gc", true);
+    int result = -1;
+    GKeyFile *record = g_key_file_new();
+    if (gc < 0) goto out;
+    g_key_file_set_integer(record, "page", "version", 1);
+    g_key_file_set_uint64(record, "page", "cache_device", state->cache_device);
+    g_key_file_set_uint64(record, "page", "cache_inode", state->cache_inode);
+    g_key_file_set_uint64(record, "page", "grace_us", state->grace_us);
+    g_key_file_set_string(record, "page", "boot", state->boot);
+    g_key_file_set_string(record, "page", "cursor", state->cursor);
+    g_key_file_set_uint64(record, "page", "sequence", state->sequence);
+    g_key_file_set_uint64(record, "page", "count", state->count);
+    for (unsigned i = 0; i < state->count; i++) {
+        char group[32];
+        snprintf(group, sizeof(group), "entry%u", i);
+        g_key_file_set_string(record, group, "name", state->entries[i].name);
+        g_key_file_set_uint64(record, group, "deadline", state->entries[i].deadline);
+        g_key_file_set_uint64(record, group, "enqueued", state->entries[i].enqueued);
+        g_key_file_set_uint64(record, group, "last_attempt", state->entries[i].last_attempt);
+        g_key_file_set_uint64(record, group, "retry_at", state->entries[i].retry_at);
+        g_key_file_set_uint64(record, group, "busy_count", state->entries[i].busy_count);
+    }
+    result = write_record(gc, "retirement-page.ini", record);
+out:
+    g_key_file_unref(record);
+    if (gc >= 0) close(gc);
+    if (root_fd >= 0) close(root_fd);
+    return result ? fail(error, error_size, "cannot persist retirement page state") : 0;
+}
+
+int latcd_retirement_page_state_load(const char *root, LatcdRetirementPageState *state,
+                                     char *error, size_t error_size)
+{
+    if (!root || !state) return fail(error, error_size, "invalid retirement page state");
+    int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = root_fd < 0 ? -1 : open_directory(root_fd, ".gc", false);
+    struct stat cache;
+    char *raw = NULL;
+    size_t size;
+    GKeyFile *record = g_key_file_new();
+    memset(state, 0, sizeof(*state));
+    int result = -1;
+    if (gc < 0) {
+        if (errno == ENOENT) result = 1;
+        goto out;
+    }
+    int status = read_file(gc, "retirement-page.ini", RECORD_LIMIT, &raw, &size);
+    if (status == 1) { result = 1; goto out; }
+    result = status || fstat(root_fd, &cache) || memchr(raw, 0, size) ||
+        !g_key_file_load_from_data(record, raw, size, 0, NULL) ||
+        !page_state_shape(record, state) ||
+        state->cache_device != (uint64_t)cache.st_dev ||
+        state->cache_inode != (uint64_t)cache.st_ino ? -1 : 0;
+out:
+    g_free(raw); g_key_file_unref(record);
+    if (gc >= 0) close(gc);
+    if (root_fd >= 0) close(root_fd);
+    return result < 0 ? fail(error, error_size, "retirement page state unsafe or incompatible") : result;
 }
 
 static int set_clock(GKeyFile *record, const char *prefix)
@@ -770,11 +895,6 @@ static bool hold_record_valid(GKeyFile *record, const char *id, const char *name
     }
     return valid;
 }
-
-static bool record_string_is(GKeyFile *record, const char *group,
-                             const char *key, const char *expected);
-static bool record_uint64(GKeyFile *record, const char *group,
-                          const char *key, uint64_t *value);
 
 typedef struct MountLeaseRecord {
     char *scope;
