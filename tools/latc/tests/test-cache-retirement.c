@@ -826,6 +826,11 @@ static void test_round_cursor(void)
     assert(latcd_retirement_page_observe(deadlines, 2, "a", 30) == 0);
     assert(deadlines[0].deadline == 30);
     assert(latcd_retirement_page_observe(deadlines, 2, "c", 40) == 1);
+    char selected[128][138];
+    LatcdRetirementPage copy = { .count = 2 };
+    const char *copy_names[] = {"a", "b", "c"};
+    assert(latcd_retirement_page_names(copy_names, 3, &copy, selected) == 2);
+    assert(!strcmp(selected[0], "a") && !strcmp(selected[1], "b"));
 }
 
 static void test_tombstone_crash(const char *point, bool crash)

@@ -43,6 +43,11 @@ int latcd_retirement_page_select(const char *const *names, size_t count,
  * page are ignored; repeated observations retain the maximum deadline. */
 int latcd_retirement_page_observe(LatcdRetirementPageDeadline *deadlines,
                                   size_t count, const char *name, uint64_t deadline);
+/* Copy selected page names into a compact bounded array for second-pass
+ * aggregation. Returns the number copied, or -1 for invalid/oversized input. */
+int latcd_retirement_page_names(const char *const *names, size_t count,
+                                const LatcdRetirementPage *page,
+                                char selected[128][138]);
 typedef struct LatcdRecoveryProgress {
     unsigned visited;
     unsigned recovered;

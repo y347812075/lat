@@ -415,6 +415,24 @@ int latcd_retirement_page_observe(LatcdRetirementPageDeadline *deadlines,
     return 1;
 }
 
+int latcd_retirement_page_names(const char *const *names, size_t count,
+                                const LatcdRetirementPage *page,
+                                char selected[128][138])
+{
+    if (!names || !page || !selected || page->count > 128) return -1;
+    unsigned copied = 0;
+    const char *after = NULL;
+    for (size_t i = 0; i < count; i++) {
+        if (!names[i]) return -1;
+        if (after && strcmp(names[i], after) <= 0) return -1;
+        after = names[i];
+    }
+    for (size_t i = 0; i < count && copied < page->count; i++) {
+        g_strlcpy(selected[copied++], names[i], 138);
+    }
+    return copied;
+}
+
 static int set_clock(GKeyFile *record, const char *prefix)
 {
     char *boot = NULL;
