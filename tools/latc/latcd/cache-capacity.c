@@ -215,7 +215,8 @@ static void check_changes(LatcdCacheCapacity *capacity)
                 if (!created_empty && !g_hash_table_contains(capacity->state_expected, event->name))
                     capacity->ready = false;
             }
-            if (capacity->inventory_active && event->wd == capacity->root_watch &&
+            if ((capacity->inventory_active || capacity->metadata_present) &&
+                event->wd == capacity->root_watch &&
                 event->len && !strcmp(event->name, ".gc")) capacity->ready = false;
             if (event->len && (!strcmp(event->name, ".superseded") || generated_name(event->name)) &&
                 (!capacity->expected_names || !g_hash_table_contains(capacity->expected_names, event->name)))
@@ -433,6 +434,7 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
     uint64_t metadata = 0;
     int gc = openat(capacity->root_fd, ".gc", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (gc >= 0) {
+        capacity->metadata_present = true;
         if (scan_metadata(gc, 0, &visited, &metadata, capacity)) result = -1;
     } else if (errno != ENOENT) result = -1;
     uint64_t state = 0;
@@ -582,6 +584,7 @@ void latcd_cache_capacity_close(LatcdCacheCapacity *capacity)
     capacity->metadata_reserved = 0;
     capacity->state_committed = 0;
     capacity->state_reserved = 0;
+    capacity->metadata_present = false;
     if (capacity->unknown_tasks) g_hash_table_unref(capacity->unknown_tasks);
     capacity->unknown_tasks = NULL;
     capacity->ready = false;

@@ -21,6 +21,7 @@ typedef struct LatcdCacheCapacity {
     void *unknown_tasks;
     bool ready;
     bool inventory_active;
+    bool metadata_present;
     int watch_fd;
     int root_fd;
     int root_watch;

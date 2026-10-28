@@ -268,6 +268,23 @@ static void test_metadata(void)
     g_free(root); g_free(gc); g_free(store); g_free(record);
 }
 
+static void test_metadata_root_replacement(void)
+{
+    char *root = g_dir_make_tmp("capacity-gc-root-XXXXXX", NULL);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *old = g_build_filename(root, "old-gc", NULL);
+    assert(root && !mkdir(gc, 0700));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    assert(!rename(gc, old) && !mkdir(gc, 0700));
+    assert(!latcd_cache_capacity_poll(&capacity));
+    assert(latcd_cache_capacity_reserve(&capacity, 0, UINT64_MAX, NULL, 0) < 0);
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    assert(!rmdir(gc) && !rmdir(old) && !rmdir(root));
+    g_free(gc); g_free(old); g_free(root);
+}
+
 static void test_metadata_changes(unsigned mutation)
 {
     char *root = g_dir_make_tmp("capacity-gc-change-XXXXXX", NULL);
@@ -484,6 +501,7 @@ int main(void)
             test_state_changes(store, mutation);
     test_state();
     test_metadata();
+    test_metadata_root_replacement();
     for (unsigned mutation = 0; mutation < 3; mutation++) test_external_writer(mutation);
     char *root = g_dir_make_tmp("cache-capacity-XXXXXX", NULL), error[256];
     assert(root);
