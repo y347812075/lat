@@ -818,6 +818,16 @@ static void test_round_cursor(void)
     assert(latcd_retirement_page_select((const char *const *)many->pdata, many->len,
                                         NULL, &page) == 1);
     assert(page.count == 128 && !strcmp(page.next_cursor, "object-127"));
+    gpointer saved = many->pdata[129];
+    many->pdata[129] = NULL;
+    assert(latcd_retirement_page_select((const char *const *)many->pdata, many->len,
+                                        NULL, &page) < 0);
+    many->pdata[129] = many->pdata[128];
+    assert(latcd_retirement_page_select((const char *const *)many->pdata, many->len,
+                                        NULL, &page) < 0);
+    many->pdata[129] = saved;
+    assert(latcd_retirement_page_select((const char *const *)many->pdata, many->len,
+                                        NULL, &page) == 1);
     LatcdRetirementPage tail;
     assert(latcd_retirement_page_select((const char *const *)many->pdata, many->len,
                                         page.next_cursor, &tail) == 1);

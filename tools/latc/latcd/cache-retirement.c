@@ -390,14 +390,17 @@ int latcd_retirement_round_complete(LatcdRetirementRound *round,
 int latcd_retirement_page_select(const char *const *names, size_t count,
                                  const char *after, LatcdRetirementPage *page)
 {
-    if (!page || (after && strlen(after) >= sizeof(page->next_cursor)))
+    if (!page || (!names && count) ||
+        (after && strlen(after) >= sizeof(page->next_cursor)))
         return -1;
     memset(page, 0, sizeof(*page));
-    for (size_t i = 0; i < count && page->count < 128; i++) {
-        if (i && strcmp(names[i - 1], names[i]) > 0) return -1;
-        if (!names[i] || (after && strcmp(names[i], after) <= 0)) continue;
-        g_strlcpy(page->next_cursor, names[i], sizeof(page->next_cursor));
-        page->count++;
+    for (size_t i = 0; i < count; i++) {
+        if (!names[i] || !*names[i] || strlen(names[i]) >= sizeof(page->next_cursor) ||
+            (i && strcmp(names[i - 1], names[i]) >= 0)) return -1;
+        if (page->count < 128 && (!after || strcmp(names[i], after) > 0)) {
+            g_strlcpy(page->next_cursor, names[i], sizeof(page->next_cursor));
+            page->count++;
+        }
     }
     return page->count ? 1 : 0;
 }
