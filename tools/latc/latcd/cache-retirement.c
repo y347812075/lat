@@ -368,6 +368,25 @@ int latcd_retirement_round_sample(const char *root, char boot[37], uint64_t *cut
     return result ? fail(error, error_size, "cannot sample retirement round clock") : 0;
 }
 
+int latcd_retirement_round_restore(LatcdRetirementRound *round,
+                                   const char *boot, uint64_t cutoff)
+{
+    if (!round || !boot || strlen(boot) != 36 || !g_uuid_string_is_valid(boot) || !cutoff)
+        return -1;
+    memcpy(round->boot, boot, 37);
+    round->cutoff = cutoff;
+    return 0;
+}
+
+int latcd_retirement_round_complete(LatcdRetirementRound *round,
+                                    const char *boot, uint64_t observed_cutoff)
+{
+    if (!round || !boot || strlen(boot) != 36 || !g_uuid_string_is_valid(boot) || !observed_cutoff ||
+        strcmp(round->boot, boot) || observed_cutoff <= round->cutoff) return -1;
+    round->cutoff = observed_cutoff;
+    return 0;
+}
+
 static int set_clock(GKeyFile *record, const char *prefix)
 {
     char *boot = NULL;

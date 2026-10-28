@@ -787,6 +787,24 @@ static void test_roots_latch(void)
     g_free(alias); g_free(path); remove_root(root); g_free(root);
 }
 
+static void test_round_cursor(void)
+{
+    const char *boot = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const char *other = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    LatcdRetirementRound round = {0};
+    assert(latcd_retirement_round_restore(&round, boot, 100) == 0);
+    assert(!strcmp(round.boot, boot) && round.cutoff == 100);
+    assert(latcd_retirement_round_complete(&round, other, 200) < 0);
+    assert(latcd_retirement_round_restore(&round, other, 50) == 0);
+    assert(latcd_retirement_round_complete(&round, boot, 300) < 0);
+    assert(latcd_retirement_round_restore(&round, boot, 100) == 0);
+    assert(latcd_retirement_round_complete(&round, boot, 100) < 0);
+    assert(latcd_retirement_round_complete(&round, boot, 200) == 0);
+    assert(round.cutoff == 200);
+    assert(latcd_retirement_round_restore(&round, boot, 0) < 0);
+    assert(latcd_retirement_round_restore(&round, "bad", 1) < 0);
+}
+
 static void test_tombstone_crash(const char *point, bool crash)
 {
     char *root = root_new(), *name = g_strdup_printf("%s.native", source);
@@ -2667,6 +2685,7 @@ int main(int argc, char **argv)
     }
     assert(argc == 1);
     test_queue_empty_store();
+    test_round_cursor();
     test_queue_overflow_fixture();
     test_deletion_report(NULL, false);
     test_roots_latch();

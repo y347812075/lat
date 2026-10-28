@@ -16,6 +16,17 @@ int latcd_retirement_roots_lock(const char *root, int operation,
  * This is not domain admission or deletion authorization. */
 int latcd_retirement_round_sample(const char *root, char boot[37], uint64_t *cutoff,
                                   char *error, size_t error_size);
+typedef struct LatcdRetirementRound {
+    char boot[37];
+    uint64_t cutoff;
+} LatcdRetirementRound;
+/* Validate and normalize a persisted round cursor. A cursor from another boot
+ * is not reusable; the caller must sample a fresh one. Completion advances the
+ * cutoff only after the caller has committed the page. No removal authority. */
+int latcd_retirement_round_restore(LatcdRetirementRound *round,
+                                   const char *boot, uint64_t cutoff);
+int latcd_retirement_round_complete(LatcdRetirementRound *round,
+                                    const char *boot, uint64_t observed_cutoff);
 typedef struct LatcdRecoveryProgress {
     unsigned visited;
     unsigned recovered;
