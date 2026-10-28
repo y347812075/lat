@@ -234,15 +234,20 @@ static void test_reboot(void)
 
 static void test_clock_failure(unsigned phase, unsigned fault)
 {
-    char *root = root_new(), *transaction = NULL, error[256];
+    char *root = root_new(), error[256];
     char *current = current_path(root), *path = NULL, *before = NULL;
+    LatcdRetirementPublication *publication =
+        latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication);
     if (phase) {
-        assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
-                                         &transaction, error, sizeof(error)));
+        assert(!latcd_retirement_publication_prepare(publication, source, next, strlen(next), NULL,
+                                                     error, sizeof(error)));
         put(current, next);
         path = single_record(root);
         if (phase == 2) {
-            assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+            assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
+            latcd_retirement_publication_close(publication);
+            publication = NULL;
             GKeyFile *record = g_key_file_new();
             assert(g_key_file_load_from_file(record, path, 0, NULL));
             g_key_file_set_string(record, "transaction", "retired_boot",
@@ -255,14 +260,21 @@ static void test_clock_failure(unsigned phase, unsigned fault)
     }
     clock_fault = fault;
     unsigned recovered;
-    int result = phase == 0 ? latcd_retirement_prepare(root, source, next, strlen(next),
-        NULL, &transaction, error, sizeof(error)) : phase == 1 ?
-        latcd_retirement_finish(root, transaction, error, sizeof(error)) :
+    int result = phase == 0 ? latcd_retirement_publication_prepare(publication, source, next,
+        strlen(next), NULL, error, sizeof(error)) : phase == 1 ?
+        latcd_retirement_publication_finish(publication, error, sizeof(error)) :
         latcd_retirement_recover(root, &recovered, error, sizeof(error));
     clock_fault = 0;
+    if (publication) latcd_retirement_publication_close(publication);
     if (result >= 0) fprintf(stderr, "clock fault accepted phase=%u fault=%u\n", phase, fault);
     assert(result < 0);
-    if (!phase) assert(!transaction);
+    if (!phase) {
+        char *store = g_build_filename(root, ".gc", "transactions", NULL);
+        GDir *directory = g_dir_open(store, 0, NULL);
+        assert(directory && !g_dir_read_name(directory));
+        g_dir_close(directory);
+        g_free(store);
+    }
     else {
         char *after;
         assert(g_file_get_contents(path, &after, NULL, NULL) && !strcmp(before, after));
@@ -271,7 +283,7 @@ static void test_clock_failure(unsigned phase, unsigned fault)
         assert_state(root, "RETIRED");
     }
     remove_root(root);
-    g_free(before); g_free(path); g_free(current); g_free(transaction); g_free(root);
+    g_free(before); g_free(path); g_free(current); g_free(root);
 }
 
 static void test_record_write_fault(const char *point, bool crash,
