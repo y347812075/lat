@@ -394,11 +394,13 @@ static void test_object_identity(int mutation)
     g_free(objects);
     objects = latcd_retirement_capture_objects(root, source, complete_names, 2);
     assert(objects);
-    char error[256], *transaction = NULL;
-    assert(!latcd_retirement_prepare(root, source, manifest, strlen(manifest), objects,
-                                     &transaction, error, sizeof(error)));
+    char error[256];
+    LatcdRetirementPublication *publication = latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication && !latcd_retirement_publication_prepare(publication, source, manifest,
+                                                                strlen(manifest), objects, error, sizeof(error)));
     put(current, manifest);
-    assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+    assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
+    latcd_retirement_publication_close(publication);
     assert_state(root, "RETIRED");
     if (mutation == 1) {
         put(path, "immutable native\n"); /* Same bytes, different inode. */
@@ -446,7 +448,6 @@ static void test_object_identity(int mutation)
         const char *bad[] = {"../escape.native"};
         assert(!latcd_retirement_capture_objects(root, source, bad, 1));
     }
-    g_free(transaction);
     g_free(objects);
     g_free(manifest);
     g_free(module_name);
@@ -1308,7 +1309,7 @@ static void test_tombstone_delete(const char *point, bool crash, int mutation)
 static void test_deleted_transaction_recovery(int mutation, const char *point, bool crash)
 {
     char *root = root_new(), error[256];
-    char *current = current_path(root), *transaction = NULL;
+    char *current = current_path(root);
     char *names[6], *paths[6];
     const char *suffixes[] = {".so", ".native", ".tbset"};
     for (size_t i = 0; i < 6; i++) {
@@ -1325,10 +1326,12 @@ static void test_deleted_transaction_recovery(int mutation, const char *point, b
         names[3], names[4], names[5], source, source);
     put(current, previous);
     char *evidence = latcd_retirement_capture_objects(root, source, (const char *const *)names, 6);
-    assert(evidence && !latcd_retirement_prepare(root, source, following, strlen(following),
-        evidence, &transaction, error, sizeof(error)));
+    LatcdRetirementPublication *publication = latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(evidence && publication && !latcd_retirement_publication_prepare(publication, source,
+        following, strlen(following), evidence, error, sizeof(error)));
     put(current, following);
-    assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+    assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
+    latcd_retirement_publication_close(publication);
     for (size_t i = 0; i < 3; i++) {
         const char *capture[] = {names[i]};
         char *single = latcd_retirement_capture_objects(root, source, capture, 1);
@@ -1429,7 +1432,7 @@ static void test_deleted_transaction_recovery(int mutation, const char *point, b
         }
     }
     for (size_t i = 0; i < 6; i++) { g_free(paths[i]); g_free(names[i]); }
-    g_free(previous); g_free(following); g_free(evidence); g_free(transaction);
+    g_free(previous); g_free(following); g_free(evidence);
     g_free(marker); g_free(current); remove_root(root); g_free(root);
 }
 
