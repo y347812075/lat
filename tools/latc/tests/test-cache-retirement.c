@@ -768,6 +768,16 @@ static void test_roots_latch(void)
     } while (step);
     assert(progress.recovered == 2);
     latcd_recovery_close(recovery);
+    publication = latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication);
+    assert(!latcd_retirement_publication_prepare(publication, source, next, strlen(next),
+                                                 NULL, error, sizeof(error)));
+    assert(latcd_retirement_round_sample(root, round_boot, &cutoff, error, sizeof(error)) < 0);
+    latcd_retirement_publication_close(publication);
+    assert(!latcd_retirement_round_sample(root, round_boot, &cutoff, error, sizeof(error)));
+    unsigned recovered = 0;
+    assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)));
+    assert(recovered == 3);
     g_free(current); g_free(transaction);
     remove_root(root); g_free(root);
     root = root_new();
