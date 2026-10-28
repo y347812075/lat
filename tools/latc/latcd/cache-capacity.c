@@ -649,16 +649,27 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
     if (owned_directory < 0) { g_free(key); return -1; }
     pthread_mutex_lock(&capacity->lock);
     check_changes(capacity);
+    StateFileWatch *tracked = NULL;
+    GHashTableIter tracked_iterator;
+    gpointer tracked_value;
+    g_hash_table_iter_init(&tracked_iterator, capacity->state_files);
+    while (g_hash_table_iter_next(&tracked_iterator, NULL, &tracked_value)) {
+        StateFileWatch *entry = tracked_value;
+        if (!strcmp(entry->key, key)) { tracked = entry; break; }
+    }
     if (!fstatat(directory, name, &previous, AT_SYMLINK_NOFOLLOW)) {
         if (!S_ISREG(previous.st_mode) || previous.st_uid != geteuid() ||
-            previous.st_nlink != 1 || previous.st_size < 0) {
+            previous.st_nlink != 1 || previous.st_size < 0 || !tracked ||
+            !same_file_snapshot(&tracked->snapshot, &previous)) {
+            capacity->ready = false;
             pthread_mutex_unlock(&capacity->lock);
             if (owned_directory >= 0) close(owned_directory);
             g_free(key); errno = EINVAL; return -1;
         }
         old = previous.st_size;
-    } else if (errno != ENOENT) {
+    } else if (errno != ENOENT || tracked) {
         int saved = errno;
+        capacity->ready = false;
         pthread_mutex_unlock(&capacity->lock);
         if (owned_directory >= 0) close(owned_directory);
         g_free(key); errno = saved; return -1;
