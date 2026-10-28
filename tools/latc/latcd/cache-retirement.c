@@ -2299,6 +2299,17 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         queue->epoch++;
         result = 1;
     }
+    if (!result) {
+        GHashTableIter iterator;
+        gpointer value;
+        g_hash_table_iter_init(&iterator, queue->discovered);
+        while (g_hash_table_iter_next(&iterator, NULL, &value)) {
+            if (((RetirementCandidate *)value)->epoch != queue->epoch) {
+                result = -1;
+                break;
+            }
+        }
+    }
     if (!result && *queue->active.name &&
         !g_hash_table_contains(queue->discovered, queue->active.name) &&
         g_hash_table_size(queue->discovered) >= 128) result = -1;

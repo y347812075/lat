@@ -2203,7 +2203,22 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
             assert(queued >= 0);
         } while (queued);
         assert(stats.complete && stats.candidates == 3); /* Missing is not complete. */
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued == 1 && !stats.complete);
+        } while (stats.visited);
         put(marker, receipt);
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+        } while (queued > 0);
+        assert(queued < 0 && !stats.complete);
+        LatcdRetirementAttempt rejected;
+        assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &rejected));
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.complete && stats.candidates == 2);
         for (unsigned variant = 0; variant < 10; variant++) {
             GKeyFile *changed = g_key_file_new();
             assert(g_key_file_load_from_data(changed, receipt, -1, 0, NULL));
