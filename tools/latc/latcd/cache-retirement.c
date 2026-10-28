@@ -3384,11 +3384,26 @@ int latcd_recovery_step(LatcdRecoveryCursor *cursor, unsigned entries,
     if (cursor->failed) return fail(error, error_size, "recovery cursor previously failed");
     if (cursor->done) return 0;
     int roots = -1;
-    if (!cursor->tombstones) {
-        roots = latcd_retirement_roots_lock(cursor->root_path, LOCK_SH | LOCK_NB,
-                                            error, error_size);
-        if (roots < 0) return -1;
+    int gc = open_directory(cursor->root, ".gc", false);
+    struct stat held_root, path_root, held_gc, path_gc, held_store, path_store;
+    if (gc < 0 || fstat(cursor->root, &held_root) || lstat(cursor->root_path, &path_root) ||
+        held_root.st_dev != path_root.st_dev || held_root.st_ino != path_root.st_ino ||
+        fstat(gc, &held_gc) || fstatat(cursor->root, ".gc", &path_gc, AT_SYMLINK_NOFOLLOW) ||
+        held_gc.st_dev != path_gc.st_dev || held_gc.st_ino != path_gc.st_ino ||
+        fstat(dirfd(cursor->directory), &held_store) ||
+        fstatat(gc, cursor->tombstones ? "tombstones" : "transactions", &path_store,
+                AT_SYMLINK_NOFOLLOW) || held_store.st_dev != path_store.st_dev ||
+        held_store.st_ino != path_store.st_ino) {
+        if (gc >= 0) close(gc);
+        cursor->failed = true;
+        recovery_hash_clear(cursor);
+        return fail(error, error_size, "recovery directory binding changed");
     }
+    if (!cursor->tombstones) {
+        roots = roots_lock_gc(gc, LOCK_SH | LOCK_NB, error, error_size);
+        if (roots < 0) { close(gc); return -1; }
+    }
+    close(gc);
     cursor->bytes_left = hash_bytes;
     cursor->deadline = g_get_monotonic_time() + time_us;
     cursor->yielded = false;

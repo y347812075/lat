@@ -1657,6 +1657,27 @@ static void test_recovery_cursor(int mutation, bool tombstones)
     g_free(manifest); remove_root(root); g_free(root);
 }
 
+static void test_recovery_directory_binding(bool replace_root)
+{
+    char *root = root_new(), error[256];
+    LatcdRetirementPublication *publication = latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication && !latcd_retirement_publication_prepare(publication, source, next,
+        strlen(next), NULL, error, sizeof(error)));
+    latcd_retirement_publication_close(publication);
+    LatcdRecoveryCursor *cursor = latcd_recovery_open(root, false, error, sizeof(error));
+    assert(cursor);
+    char *path = replace_root ? g_strdup(root) : g_build_filename(root, ".gc", "transactions", NULL);
+    char *moved = g_strconcat(path, ".moved", NULL);
+    assert(!rename(path, moved) && !mkdir(path, 0700));
+    LatcdRecoveryProgress progress = {0};
+    assert(latcd_recovery_step(cursor, 32, 1024, 100000, &progress, error, sizeof(error)) < 0);
+    assert(!progress.visited && !progress.recovered && !progress.hashed_bytes);
+    assert(!rmdir(path) && !rename(moved, path));
+    assert(latcd_recovery_step(cursor, 32, 1024, 100000, &progress, error, sizeof(error)) < 0);
+    latcd_recovery_close(cursor);
+    g_free(path); g_free(moved); remove_root(root); g_free(root);
+}
+
 static void test_recovery_entry_budget(void)
 {
     char *root = root_new(), error[256];
@@ -3262,6 +3283,8 @@ int main(int argc, char **argv)
     test_queue_overflow_fixture();
     test_deletion_report(NULL, false);
     test_roots_latch();
+    test_recovery_directory_binding(false);
+    test_recovery_directory_binding(true);
     for (unsigned mutation = 0; mutation < 6; mutation++) {
         test_other_current(mutation, false);
         test_other_current(mutation, true);
