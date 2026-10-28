@@ -3082,6 +3082,42 @@ static void test_queue_overflow_fixture(void)
     char boot[37]; uint64_t cutoff;
     assert(!latcd_retirement_round_sample(root, boot, &cutoff, error, sizeof(error)));
     assert(cutoff == 200);
+    char *small_source = g_strdup_printf("%064x", 1);
+    char *small_name = g_strconcat(small_source, ".native", NULL);
+    char *small_path = g_build_filename(root, small_name, NULL);
+    const char *small_names[] = {small_name};
+    char *small_evidence = latcd_retirement_capture_objects(root, small_source, small_names, 1);
+    int small_fd = open(small_path, O_RDONLY | O_CLOEXEC);
+    assert(small_evidence && small_fd >= 0 &&
+        !latcd_retirement_tombstone(root, small_source, small_name, small_fd,
+                                    small_evidence, error, sizeof(error)));
+    close(small_fd);
+    assert(!latcd_tombstone_delete(root, small_name, error, sizeof(error)));
+    char *marker = g_build_filename(root, ".gc", "tombstones", small_name, NULL);
+    char *receipt = NULL;
+    assert(g_file_get_contents(marker, &receipt, NULL, NULL));
+    LatcdRetirementQueue *changed_page = latcd_retirement_queue_new(root, 0);
+    assert(!latcd_retirement_queue_diagnostic_round(changed_page, boot, cutoff, NULL));
+    LatcdRetirementQueueStats changed_stats;
+    int changed_result;
+    do {
+        changed_result = latcd_retirement_queue_step(changed_page, 1, 10000,
+                                                     &changed_stats, error, sizeof(error));
+        assert(changed_result == 1);
+    } while (changed_stats.visited);
+    assert(!unlink(marker));
+    do {
+        changed_result = latcd_retirement_queue_step(changed_page, 32, 10000,
+                                                     &changed_stats, error, sizeof(error));
+    } while (changed_result > 0);
+    LatcdRetirementPageState rejected_page;
+    assert(changed_result < 0 && !changed_stats.complete &&
+           latcd_retirement_queue_aggregated_page(changed_page, &rejected_page) < 0);
+    latcd_retirement_queue_free(changed_page);
+    put(small_path, "fixture\n");
+    assert(!unlink(marker) || errno == ENOENT);
+    g_free(receipt); g_free(marker); g_free(small_evidence);
+    g_free(small_path); g_free(small_name); g_free(small_source);
     char *store = g_build_filename(root, ".gc", "transactions", NULL);
     GDir *directory = g_dir_open(store, 0, NULL);
     assert(directory);

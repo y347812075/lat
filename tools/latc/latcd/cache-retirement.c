@@ -2646,6 +2646,20 @@ static void queue_nominate(LatcdRetirementQueue *queue, const char *name)
     g_hash_table_add(queue->discovered_keys, g_strdup(name));
 }
 
+static bool queue_outside_page(const LatcdRetirementQueue *queue, const char *name)
+{
+    if (queue->diagnostic_cutoff && strcmp(name, queue->diagnostic_after) <= 0)
+        return true;
+    if (!queue->discovery_overflow) return false;
+    GHashTableIter iterator;
+    gpointer key;
+    const char *largest = NULL;
+    g_hash_table_iter_init(&iterator, queue->discovered_keys);
+    while (g_hash_table_iter_next(&iterator, &key, NULL))
+        if (!largest || strcmp(key, largest) > 0) largest = key;
+    return largest && strcmp(name, largest) > 0;
+}
+
 /* Completed namespace removal only, never physical-space or domain admission.
  * Bind the receipt to this transaction's object, not merely its basename. */
 static int queue_object_removed(const char *root_path, const char *source,
@@ -2745,8 +2759,7 @@ static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t si
         } else if (queue->aggregating && nominated) {
             if (g_hash_table_contains(queue->discovered_keys, key))
                 g_hash_table_add(queue->confirmed_keys, g_strdup(key));
-            else if (!queue->discovery_overflow &&
-                     (!queue->diagnostic_cutoff || strcmp(key, queue->diagnostic_after) > 0)) {
+            else if (!queue_outside_page(queue, key)) {
                 valid = false;
                 break;
             }
