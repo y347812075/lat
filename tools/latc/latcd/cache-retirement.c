@@ -2487,7 +2487,7 @@ struct LatcdRetirementQueue {
     uint64_t diagnostic_cutoff, diagnostic_last_time;
     char diagnostic_boot[37], diagnostic_after[138];
     unsigned visited;
-    bool aggregating, aggregation_verified;
+    bool aggregating, aggregation_verified, discovery_overflow;
     DIR *cursor;
     int discovery_watch;
     struct stat discovery_store;
@@ -2628,6 +2628,24 @@ static bool queue_watch_clean(int notify)
     return count < 0 && errno == EAGAIN;
 }
 
+static void queue_nominate(LatcdRetirementQueue *queue, const char *name)
+{
+    if (queue->diagnostic_cutoff && strcmp(name, queue->diagnostic_after) <= 0) return;
+    if (g_hash_table_contains(queue->discovered_keys, name)) return;
+    if (g_hash_table_size(queue->discovered_keys) == 128) {
+        queue->discovery_overflow = true;
+        const char *largest = NULL;
+        GHashTableIter iterator;
+        gpointer key;
+        g_hash_table_iter_init(&iterator, queue->discovered_keys);
+        while (g_hash_table_iter_next(&iterator, &key, NULL))
+            if (!largest || strcmp(key, largest) > 0) largest = key;
+        if (strcmp(name, largest) >= 0) return;
+        g_hash_table_remove(queue->discovered_keys, largest);
+    }
+    g_hash_table_add(queue->discovered_keys, g_strdup(name));
+}
+
 /* Completed namespace removal only, never physical-space or domain admission.
  * Bind the receipt to this transaction's object, not merely its basename. */
 static int queue_object_removed(const char *root_path, const char *source,
@@ -2723,13 +2741,15 @@ static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t si
         if (removed) continue;
         bool nominated = !queue->diagnostic_cutoff || stamp < queue->diagnostic_cutoff;
         if (!queue->aggregating && nominated) {
-            g_hash_table_add(queue->discovered_keys, g_strdup(key));
+            queue_nominate(queue, key);
         } else if (queue->aggregating && nominated) {
-            if (!g_hash_table_contains(queue->discovered_keys, key)) {
+            if (g_hash_table_contains(queue->discovered_keys, key))
+                g_hash_table_add(queue->confirmed_keys, g_strdup(key));
+            else if (!queue->discovery_overflow &&
+                     (!queue->diagnostic_cutoff || strcmp(key, queue->diagnostic_after) > 0)) {
                 valid = false;
                 break;
             }
-            g_hash_table_add(queue->confirmed_keys, g_strdup(key));
         }
         if (!queue->aggregating && !nominated) continue;
         RetirementCandidate *candidate = g_hash_table_lookup(queue->discovered, key);
@@ -2774,6 +2794,7 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         queue->visited = 0;
         queue->aggregating = false;
         queue->aggregation_verified = false;
+        queue->discovery_overflow = false;
         g_hash_table_remove_all(queue->discovered);
         g_hash_table_remove_all(queue->discovered_keys);
         g_hash_table_remove_all(queue->confirmed_keys);
@@ -2863,7 +2884,7 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
     /* Diagnostic pages cannot feed the executor until durable page completion
      * and cross-page retry state are implemented. */
     if (!result && queue->diagnostic_cutoff) result = -1;
-    if (!result && g_hash_table_size(queue->discovered_keys) > 128) result = -1;
+    if (!result && queue->discovery_overflow) result = -1;
     if (!result && *queue->active.name &&
         !g_hash_table_contains(queue->discovered, queue->active.name) &&
         g_hash_table_size(queue->discovered) >= 128) result = -1;

@@ -3238,7 +3238,7 @@ static void test_queue_overflow_fixture(void)
     }
     while (result > 0);
     assert(visited >= 88); /* Both passes must visit all 44 records. */
-    assert(latcd_retirement_queue_discovered_keys(queue) == 132);
+    assert(latcd_retirement_queue_discovered_keys(queue) == 128);
     LatcdRetirementPageState page_state;
     assert(latcd_retirement_queue_page_plan(queue, NULL, &page_state) == 1);
     assert(page_state.count == 128);
@@ -3251,8 +3251,7 @@ static void test_queue_overflow_fixture(void)
     }
     char first_cursor[138];
     g_strlcpy(first_cursor, page_state.cursor, sizeof(first_cursor));
-    assert(latcd_retirement_queue_page_plan(queue, first_cursor, &page_state) == 1);
-    assert(page_state.count == 4);
+    assert(latcd_retirement_queue_page_plan(queue, first_cursor, &page_state) == 0);
     assert(result < 0 && !stats.complete && !stats.candidates);
     LatcdRetirementAttempt attempt;
     assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));

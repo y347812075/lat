@@ -230,11 +230,11 @@ int latcd_retirement_queue_diagnostic_round(LatcdRetirementQueue *queue,
  * required; missing or incompatible state is never treated as a new round. */
 int latcd_retirement_queue_diagnostic_resume(LatcdRetirementQueue *queue,
                                               char *error, size_t error_size);
-/* Diagnostic only: number of distinct object keys seen in the current
- * first-pass discovery. Zero outside an active incomplete page scan. */
+/* Diagnostic only: number of selected keys retained, at most 128.
+ * Zero outside an active incomplete page scan. */
 unsigned latcd_retirement_queue_discovered_keys(const LatcdRetirementQueue *queue);
-/* Diagnostic conversion of the current complete key index into a page plan.
- * Does not select candidates, mutate queue state, or authorize deletion. */
+/* Diagnostic conversion of the retained page into a plan. Other pages require
+ * a fresh monitored scan with the corresponding diagnostic cursor. */
 int latcd_retirement_queue_page_plan(const LatcdRetirementQueue *queue, const char *after,
                                      LatcdRetirementPageState *state);
 /* Diagnostic snapshot of the last aggregation; never authorizes consumption. */
