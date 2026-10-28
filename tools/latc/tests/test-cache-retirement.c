@@ -2977,6 +2977,45 @@ static void test_queue_overflow_fixture(void)
     assert(diagnostic_result < 0 && !latcd_retirement_queue_aggregated_page(diagnostic, &second_page));
     assert(!second_page.count);
     latcd_retirement_queue_free(diagnostic);
+    diagnostic = latcd_retirement_queue_new(root, 0);
+    assert(!latcd_retirement_queue_diagnostic_round(diagnostic, boot, cutoff, NULL));
+    assert(latcd_retirement_queue_step(diagnostic, 1, 10000, &diagnostic_stats,
+                                      error, sizeof(error)) == 1);
+    assert(latcd_retirement_queue_diagnostic_round(diagnostic, boot, cutoff, NULL) < 0);
+    simulated_boottime_us = cutoff - 1;
+    assert(latcd_retirement_queue_step(diagnostic, 1, 10000, &diagnostic_stats,
+                                      error, sizeof(error)) < 0);
+    assert(latcd_retirement_queue_aggregated_page(diagnostic, &second_page) < 0);
+    simulated_boottime_us = cutoff + 100;
+    assert(latcd_retirement_queue_step(diagnostic, 1, 10000, &diagnostic_stats,
+                                      error, sizeof(error)) == 1);
+    simulated_boottime_us = cutoff + 50;
+    assert(latcd_retirement_queue_step(diagnostic, 1, 10000, &diagnostic_stats,
+                                      error, sizeof(error)) < 0);
+    assert(latcd_retirement_queue_aggregated_page(diagnostic, &second_page) < 0);
+    simulated_boottime_us = cutoff;
+    assert(latcd_retirement_queue_step(diagnostic, 1, 10000, &diagnostic_stats,
+                                      error, sizeof(error)) == 1);
+    char *replacement = NULL;
+    assert(g_file_get_contents(duplicate_path, &replacement, NULL, NULL));
+    put(duplicate_path, replacement);
+    g_free(replacement);
+    do {
+        diagnostic_result = latcd_retirement_queue_step(diagnostic, 32, 10000,
+                                                         &diagnostic_stats, error, sizeof(error));
+    } while (diagnostic_result > 0);
+    assert(diagnostic_result < 0 && !diagnostic_stats.complete);
+    assert(latcd_retirement_queue_aggregated_page(diagnostic, &second_page) < 0);
+    assert(!latcd_retirement_queue_take(diagnostic, UINT64_MAX, &diagnostic_attempt));
+    latcd_retirement_queue_free(diagnostic);
+    diagnostic = latcd_retirement_queue_new(root, 0);
+    char *other_boot = g_uuid_string_random();
+    assert(!latcd_retirement_queue_diagnostic_round(diagnostic, other_boot, cutoff, NULL));
+    assert(latcd_retirement_queue_step(diagnostic, 32, 10000, &diagnostic_stats,
+                                      error, sizeof(error)) < 0);
+    assert(latcd_retirement_queue_aggregated_page(diagnostic, &second_page) < 0);
+    g_free(other_boot);
+    latcd_retirement_queue_free(diagnostic);
     assert(!unlink(duplicate_path));
     g_free(duplicate_path);
     LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 0);

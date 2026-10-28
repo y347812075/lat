@@ -2392,7 +2392,7 @@ typedef struct RetirementCandidate {
 struct LatcdRetirementQueue {
     char *root;
     uint64_t grace, epoch;
-    uint64_t diagnostic_cutoff;
+    uint64_t diagnostic_cutoff, diagnostic_last_time;
     char diagnostic_boot[37], diagnostic_after[138];
     unsigned visited;
     bool aggregating, aggregation_verified;
@@ -2653,7 +2653,9 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
     uint64_t now = 0;
     if (retirement_clock(&boot, &now)) goto out;
     if (queue->diagnostic_cutoff &&
-        (strcmp(boot, queue->diagnostic_boot) || now < queue->diagnostic_cutoff)) goto out;
+        (strcmp(boot, queue->diagnostic_boot) || now < queue->diagnostic_cutoff ||
+         (queue->cursor && now < queue->diagnostic_last_time))) goto out;
+    if (queue->diagnostic_cutoff) queue->diagnostic_last_time = now;
     if (!queue->cursor) {
         queue->complete = false;
         queue->visited = 0;
