@@ -278,11 +278,14 @@ static void test_record_write_fault(const char *point, bool crash,
                                     bool finishing, bool initial)
 {
     char *root = root_new(), *current = current_path(root);
-    char *transaction = NULL, error[256];
+    char error[256];
     if (initial) put(current, old);
+    LatcdRetirementPublication *publication =
+        latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication);
     if (finishing) {
-        assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
-                                         &transaction, error, sizeof(error)));
+        assert(!latcd_retirement_publication_prepare(publication, source, next, strlen(next), NULL,
+                                                     error, sizeof(error)));
         put(current, next);
     }
     pid_t child = fork();
@@ -291,9 +294,9 @@ static void test_record_write_fault(const char *point, bool crash,
         char *setting = g_strdup_printf("%s:%s", crash ? "crash" : "error", point);
         assert(!setenv("LATCD_TEST_RETIREMENT_IO", setting, 1));
         int result = finishing ?
-            latcd_retirement_finish(root, transaction, error, sizeof(error)) :
-            latcd_retirement_prepare(root, source, next, strlen(next), NULL,
-                                      &transaction, error, sizeof(error));
+            latcd_retirement_publication_finish(publication, error, sizeof(error)) :
+            latcd_retirement_publication_prepare(publication, source, next, strlen(next), NULL,
+                                                 error, sizeof(error));
         assert(!crash && result < 0);
         _exit(0);
     }
@@ -301,6 +304,7 @@ static void test_record_write_fault(const char *point, bool crash,
     assert(waitpid(child, &status, 0) == child);
     if (crash) assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
     else assert(WIFEXITED(status) && !WEXITSTATUS(status));
+    latcd_retirement_publication_close(publication);
 
     bool renamed = !strcmp(point, "renamed") || !strcmp(point, "directory-synced");
     unsigned expected = finishing || renamed;
@@ -352,7 +356,6 @@ static void test_record_write_fault(const char *point, bool crash,
     g_key_file_unref(record);
     g_free(record_path);
     g_free(store);
-    g_free(transaction);
     g_free(current);
     remove_root(root);
     g_free(root);
