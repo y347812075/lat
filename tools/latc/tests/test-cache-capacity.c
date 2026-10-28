@@ -2,11 +2,26 @@
 #include "../latcd/cache-capacity.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <glib.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+static int remove_fault;
+int __real_unlinkat(int fd, const char *name, int flags);
+int __real_fsync(int fd);
+int __wrap_unlinkat(int fd, const char *name, int flags)
+{
+    if (remove_fault == 1) { errno = EIO; return -1; }
+    return __real_unlinkat(fd, name, flags);
+}
+int __wrap_fsync(int fd)
+{
+    if (remove_fault == 2) { errno = EIO; return -1; }
+    return __real_fsync(fd);
+}
 
 static void put(const char *path, const char *contents)
 {
@@ -90,6 +105,42 @@ static void test_metadata(void)
     assert(latcd_cache_capacity_scan(&capacity, root, NULL, 0) < 0);
     latcd_cache_capacity_metadata_finish(&first, false, false);
     assert(!capacity.metadata_reserved && capacity.metadata_committed == 5);
+    struct stat original;
+    assert(!stat(record, &original));
+    assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 3, &first));
+    assert(latcd_cache_capacity_metadata_remove(directory, "record.ini", original.st_dev,
+                                                 original.st_ino) < 0);
+    assert(capacity.ready && capacity.metadata_committed == 5);
+    latcd_cache_capacity_metadata_finish(&first, false, false);
+    assert(latcd_cache_capacity_metadata_remove(directory, "record.ini", original.st_dev,
+                                                 original.st_ino + 1) < 0);
+    assert(!capacity.ready && capacity.metadata_committed == 5 && !access(record, F_OK));
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    latcd_cache_capacity_metadata_bind(&capacity, 10);
+    for (int fault = 1; fault <= 2; fault++) {
+        assert(!stat(record, &original));
+        remove_fault = fault;
+        assert(latcd_cache_capacity_metadata_remove(directory, "record.ini", original.st_dev,
+                                                     original.st_ino) < 0);
+        remove_fault = 0;
+        assert(!capacity.ready && capacity.metadata_committed == 5);
+        assert((access(record, F_OK) == 0) == (fault == 1));
+        assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+        latcd_cache_capacity_metadata_bind(&capacity, 10);
+        if (fault == 2) {
+            assert(!capacity.metadata_committed);
+            assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 5, &first));
+            put(record, "12345");
+            latcd_cache_capacity_metadata_finish(&first, true, false);
+        }
+    }
+    assert(!stat(record, &original));
+    assert(!latcd_cache_capacity_metadata_remove(directory, "record.ini", original.st_dev,
+                                                  original.st_ino));
+    assert(capacity.ready && !capacity.metadata_committed && access(record, F_OK));
+    assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 5, &first));
+    put(record, "12345");
+    latcd_cache_capacity_metadata_finish(&first, true, false);
     assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 3, &first));
     put(record, "123");
     latcd_cache_capacity_metadata_finish(&first, true, false);

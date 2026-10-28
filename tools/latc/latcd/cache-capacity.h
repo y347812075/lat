@@ -87,6 +87,11 @@ void latcd_cache_capacity_metadata_unstage(LatcdMetadataReservation *reservation
  * only existing nonempty metadata can reserve for recovery completion. No scan here. */
 void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
     bool replaced, bool leftover);
+/* Remove an inventoried .gc regular file bound to expected device/inode.
+ * Same-name writers are serialized. Failed unlink/fsync retains the charge
+ * and closes admission; owner lease and controlled namespace are required. */
+int latcd_cache_capacity_metadata_remove(int directory, const char *name,
+                                         uint64_t device, uint64_t inode);
 /* Ordinary persistent state has no committed-transaction over-limit exception.
  * Allowed directories: root (only SHA.current), .tbsets, .identities.
  * Caller serializes same-record replacement through finish. Uses metadata bind. */

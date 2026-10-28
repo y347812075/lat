@@ -631,20 +631,22 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
     }
     int owned_directory = fcntl(directory, F_DUPFD_CLOEXEC, 0);
     if (owned_directory < 0) { g_free(key); return -1; }
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
     if (!fstatat(directory, name, &previous, AT_SYMLINK_NOFOLLOW)) {
         if (!S_ISREG(previous.st_mode) || previous.st_uid != geteuid() ||
             previous.st_nlink != 1 || previous.st_size < 0) {
+            pthread_mutex_unlock(&capacity->lock);
             if (owned_directory >= 0) close(owned_directory);
             g_free(key); errno = EINVAL; return -1;
         }
         old = previous.st_size;
     } else if (errno != ENOENT) {
         int saved = errno;
+        pthread_mutex_unlock(&capacity->lock);
         if (owned_directory >= 0) close(owned_directory);
         g_free(key); errno = saved; return -1;
     }
-    pthread_mutex_lock(&capacity->lock);
-    check_changes(capacity);
     /* Recovery may need to finish a committed transaction even with the normal
      * index closed. It is still charged, but cannot open new admission. */
     bool fits = capacity->ready && capacity_fits(capacity, bytes, metadata_limit);
@@ -783,6 +785,52 @@ void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
     g_free(reservation->name);
     g_free(reservation->staging);
     *reservation = (LatcdMetadataReservation){0};
+}
+
+int latcd_cache_capacity_metadata_remove(int directory, const char *name,
+                                         uint64_t device, uint64_t inode)
+{
+    LatcdCacheCapacity *capacity = metadata_capacity;
+    if (!capacity || !name || !*name || strchr(name, '/') || !strcmp(name, ".") ||
+        !strcmp(name, "..") || !device || !inode) { errno = EINVAL; return -1; }
+    char *key = metadata_directory_matches(capacity, directory) ?
+        metadata_record_key(directory, name) : NULL;
+    if (!key) { errno = EINVAL; return -1; }
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
+    struct stat st;
+    int result = -1;
+    if (!capacity->ready || g_hash_table_contains(capacity->state_expected, key)) {
+        errno = EBUSY;
+        goto out;
+    }
+    g_hash_table_add(capacity->state_expected, g_strdup(key));
+    if (fstatat(directory, name, &st, AT_SYMLINK_NOFOLLOW) ||
+        !S_ISREG(st.st_mode) || st.st_uid != geteuid() || st.st_nlink != 1 ||
+        st.st_size < 0 || (uint64_t)st.st_dev != device || (uint64_t)st.st_ino != inode ||
+        (uint64_t)st.st_size > capacity->metadata_committed ||
+        unlinkat(directory, name, 0) || fsync(directory)) {
+        capacity->ready = false;
+    } else {
+        capacity->metadata_committed -= (uint64_t)st.st_size;
+        result = 0;
+    }
+    check_changes(capacity);
+    GHashTableIter iterator;
+    gpointer watch, watched_key;
+    g_hash_table_iter_init(&iterator, capacity->state_files);
+    while (g_hash_table_iter_next(&iterator, &watch, &watched_key)) {
+        if (strcmp(watched_key, key)) continue;
+        if (!inotify_rm_watch(capacity->watch_fd, GPOINTER_TO_INT(watch)))
+            g_hash_table_add(capacity->state_ignored, watch);
+        g_hash_table_iter_remove(&iterator);
+    }
+    check_changes(capacity);
+    g_hash_table_remove(capacity->state_expected, key);
+out:
+    pthread_mutex_unlock(&capacity->lock);
+    g_free(key);
+    return result;
 }
 
 int latcd_cache_capacity_restore_task(LatcdCacheCapacity *capacity, const char *id, uint64_t bytes)

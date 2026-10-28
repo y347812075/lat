@@ -119,7 +119,7 @@ $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
 
 $(BUILD)/tests/test-cache-capacity: tests/test-cache-capacity.c $(BUILD)/latcd/cache-capacity.o
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread -Wl,--wrap=unlinkat -Wl,--wrap=fsync
 
 $(BUILD)/tests/test-capacity-watch-race: tests/test-capacity-watch-race.c latcd/cache-capacity.c latcd/cache-capacity.h
 	@mkdir -p $(dir $@)
