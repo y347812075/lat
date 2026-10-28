@@ -1678,6 +1678,25 @@ static void test_recovery_directory_binding(bool replace_root)
     g_free(path); g_free(moved); remove_root(root); g_free(root);
 }
 
+static void test_publication_directory_binding(bool replace_root, bool prepared)
+{
+    char *root = root_new(), error[256];
+    LatcdRetirementPublication *publication = latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication);
+    if (prepared) assert(!latcd_retirement_publication_prepare(publication, source, next,
+        strlen(next), NULL, error, sizeof(error)));
+    char *path = replace_root ? g_strdup(root) : g_build_filename(root, ".gc", NULL);
+    char *moved = g_strconcat(path, ".moved", NULL);
+    assert(!rename(path, moved) && !mkdir(path, 0700));
+    if (prepared) assert(latcd_retirement_publication_finish(publication, error, sizeof(error)) < 0);
+    else assert(latcd_retirement_publication_prepare(publication, source, next,
+        strlen(next), NULL, error, sizeof(error)) < 0);
+    assert(!rmdir(path) && !rename(moved, path));
+    if (prepared) assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
+    latcd_retirement_publication_close(publication);
+    g_free(path); g_free(moved); remove_root(root); g_free(root);
+}
+
 static void test_recovery_entry_budget(void)
 {
     char *root = root_new(), error[256];
@@ -3285,6 +3304,10 @@ int main(int argc, char **argv)
     test_roots_latch();
     test_recovery_directory_binding(false);
     test_recovery_directory_binding(true);
+    test_publication_directory_binding(false, false);
+    test_publication_directory_binding(true, false);
+    test_publication_directory_binding(false, true);
+    test_publication_directory_binding(true, true);
     for (unsigned mutation = 0; mutation < 6; mutation++) {
         test_other_current(mutation, false);
         test_other_current(mutation, true);

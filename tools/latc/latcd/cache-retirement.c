@@ -722,15 +722,14 @@ static int set_clock(GKeyFile *record, const char *prefix)
     return 0;
 }
 
-static int retirement_prepare(const char *root, const char *source,
+static int retirement_prepare(int root_fd, const char *source,
                             const char *next, size_t next_size, const char *objects,
                             char **transaction, char *error, size_t error_size)
 {
     *transaction = NULL;
     if (!source_valid(source) || !next || !next_size || next_size > MANIFEST_LIMIT)
         return fail(error, error_size, "invalid retirement transaction input");
-    int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    int store = root_fd < 0 ? -1 : open_store(root_fd, true);
+    int store = open_store(root_fd, true);
     int result = -1;
     char *previous = NULL;
     size_t previous_size = 0;
@@ -762,7 +761,6 @@ static int retirement_prepare(const char *root, const char *source,
 out:
     if (result) fail(error, error_size, "cannot persist retirement PREPARED: %s", strerror(errno));
     if (store >= 0) close(store);
-    if (root_fd >= 0) close(root_fd);
     g_free(current);
     g_free(previous);
     return result;
@@ -2109,32 +2107,56 @@ out:
     return result;
 }
 
-static int retirement_finish(const char *root, const char *transaction,
+static int retirement_finish(int root_fd, const char *transaction,
                            char *error, size_t error_size)
 {
-    int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    int store = root_fd < 0 ? -1 : open_store(root_fd, false);
+    int store = open_store(root_fd, false);
     int result = store < 0 || fsync(root_fd) ? -1 :
                  recover_record(root_fd, store, transaction, false, NULL);
     if (store >= 0) close(store);
-    if (root_fd >= 0) close(root_fd);
     return result ? fail(error, error_size, "cannot complete retirement transaction") : 0;
 }
 
 struct LatcdRetirementPublication {
     char *root;
     char *transaction;
-    int roots_fd;
+    int root_fd, gc_fd, roots_fd;
 };
+
+static bool publication_bound(LatcdRetirementPublication *publication)
+{
+    struct stat held, path;
+    return !fstat(publication->root_fd, &held) && !lstat(publication->root, &path) &&
+        held.st_dev == path.st_dev && held.st_ino == path.st_ino &&
+        !fstat(publication->gc_fd, &held) &&
+        !fstatat(publication->root_fd, ".gc", &path, AT_SYMLINK_NOFOLLOW) &&
+        held.st_dev == path.st_dev && held.st_ino == path.st_ino &&
+        !fstat(publication->roots_fd, &held) &&
+        !fstatat(publication->gc_fd, "reference-roots.lock", &path, AT_SYMLINK_NOFOLLOW) &&
+        object_stat_equal(&held, &path);
+}
 
 LatcdRetirementPublication *latcd_retirement_publication_open(
     const char *root, char *error, size_t error_size)
 {
-    int fd = latcd_retirement_roots_lock(root, LOCK_SH, error, error_size);
-    if (fd < 0) return NULL;
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", true);
+    int fd = roots_lock_gc(gc, LOCK_SH, error, error_size);
+    if (fd < 0) {
+        if (gc >= 0) close(gc);
+        if (directory >= 0) close(directory);
+        return NULL;
+    }
     LatcdRetirementPublication *publication = g_new0(LatcdRetirementPublication, 1);
     publication->root = g_strdup(root);
+    publication->root_fd = directory;
+    publication->gc_fd = gc;
     publication->roots_fd = fd;
+    if (!publication_bound(publication)) {
+        latcd_retirement_publication_close(publication);
+        fail(error, error_size, "retirement publication directory binding changed");
+        return NULL;
+    }
     return publication;
 }
 
@@ -2142,18 +2164,18 @@ int latcd_retirement_publication_prepare(LatcdRetirementPublication *publication
     const char *source, const char *next, size_t next_size, const char *objects,
     char *error, size_t error_size)
 {
-    if (!publication || publication->transaction)
+    if (!publication || publication->transaction || !publication_bound(publication))
         return fail(error, error_size, "invalid retirement publication state");
-    return retirement_prepare(publication->root, source, next, next_size,
+    return retirement_prepare(publication->root_fd, source, next, next_size,
                                     objects, &publication->transaction, error, error_size);
 }
 
 int latcd_retirement_publication_finish(LatcdRetirementPublication *publication,
     char *error, size_t error_size)
 {
-    if (!publication || !publication->transaction)
+    if (!publication || !publication->transaction || !publication_bound(publication))
         return fail(error, error_size, "retirement publication not prepared");
-    int result = retirement_finish(publication->root, publication->transaction,
+    int result = retirement_finish(publication->root_fd, publication->transaction,
                                          error, error_size);
     if (!result) g_clear_pointer(&publication->transaction, g_free);
     return result;
@@ -2163,6 +2185,8 @@ void latcd_retirement_publication_close(LatcdRetirementPublication *publication)
 {
     if (!publication) return;
     close(publication->roots_fd);
+    close(publication->gc_fd);
+    close(publication->root_fd);
     g_free(publication->transaction);
     g_free(publication->root);
     g_free(publication);
