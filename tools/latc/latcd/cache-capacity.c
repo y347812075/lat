@@ -433,7 +433,6 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
         capacity->state_committed = state;
     }
     check_changes(capacity);
-    capacity->inventory_active = false;
     GHashTableIter watches;
     gpointer directory_watch;
     g_hash_table_iter_init(&watches, capacity->inventory_directories);
@@ -442,6 +441,8 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
             g_hash_table_add(capacity->state_ignored, directory_watch);
         else capacity->ready = false;
     }
+    check_changes(capacity);
+    capacity->inventory_active = false;
     g_hash_table_remove_all(capacity->inventory_directories);
     if (!capacity->ready) result = -1;
     pthread_mutex_unlock(&capacity->lock);

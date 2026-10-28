@@ -10,6 +10,15 @@
 static int injection;
 static char *target;
 static char *replacement;
+static int inject_remove_watch(int fd, int watch)
+{
+    if (injection == 6) {
+        injection = 0;
+        int writer = open(target, O_CREAT | O_EXCL | O_WRONLY, 0600);
+        assert(writer >= 0 && write(writer, "new", 3) == 3 && !close(writer));
+    }
+    return inotify_rm_watch(fd, watch);
+}
 static int inject_watch(int fd, const char *path, uint32_t mask)
 {
     int result = inotify_add_watch(fd, path, mask);
@@ -36,8 +45,10 @@ static int inject_watch(int fd, const char *path, uint32_t mask)
     return result;
 }
 #define inotify_add_watch inject_watch
+#define inotify_rm_watch inject_remove_watch
 #include "../latcd/cache-capacity.c"
 #undef inotify_add_watch
+#undef inotify_rm_watch
 
 static void put_file(const char *name, const char *data)
 {
@@ -102,6 +113,18 @@ int main(void)
     assert(!scan.ready);
     latcd_cache_capacity_close(&scan);
     assert(!pthread_mutex_destroy(&scan.lock));
+    assert(!unlink(target) && !rmdir(gc) && !rmdir(root));
+    g_free(target); g_free(gc); g_free(root);
+    root = g_dir_make_tmp("watch-gc-remove-race-XXXXXX", NULL);
+    gc = g_build_filename(root, ".gc", NULL);
+    target = g_build_filename(gc, "new-record", NULL);
+    assert(!mkdir(gc, 0700));
+    LatcdCacheCapacity removing = LATCD_CACHE_CAPACITY_INIT;
+    injection = 6;
+    assert(latcd_cache_capacity_scan(&removing, root, NULL, 0) < 0);
+    assert(!removing.ready && injection == 0);
+    latcd_cache_capacity_close(&removing);
+    assert(!pthread_mutex_destroy(&removing.lock));
     assert(!unlink(target) && !rmdir(gc) && !rmdir(root));
     g_free(target); g_free(gc); g_free(root);
     puts("watch snapshot race: PASS");
