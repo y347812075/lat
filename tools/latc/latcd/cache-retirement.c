@@ -582,6 +582,19 @@ int latcd_retirement_page_state_compatible(const LatcdRetirementPageState *state
         !strcmp(state->boot, boot) && state->grace_us == grace_us ? 0 : 1;
 }
 
+int latcd_retirement_page_state_resume(const char *root, const char *boot,
+                                       uint64_t grace_us, LatcdRetirementPageState *state,
+                                       char *error, size_t error_size)
+{
+    int result = latcd_retirement_page_state_load(root, state, error, error_size);
+    if (result <= 0 && result == 0 &&
+        latcd_retirement_page_state_compatible(state, boot, grace_us)) {
+        memset(state, 0, sizeof(*state));
+        return fail(error, error_size, "retirement page state incompatible with runtime");
+    }
+    return result;
+}
+
 int latcd_retirement_page_plan(const char *const *names, size_t count,
                                const char *after, const LatcdRetirementPageDeadline *schedule,
                                size_t schedule_count, LatcdRetirementPageState *state)

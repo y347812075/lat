@@ -860,6 +860,10 @@ static void test_round_cursor(void)
         "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", state.grace_us) == 1);
     assert(latcd_retirement_page_state_compatible(&loaded, state.boot,
         state.grace_us + 1) == 1);
+    assert(latcd_retirement_page_state_resume(page_root, state.boot, state.grace_us,
+                                              &loaded, page_error, sizeof(page_error)) == 0);
+    assert(latcd_retirement_page_state_resume(page_root, state.boot, state.grace_us + 1,
+                                              &loaded, page_error, sizeof(page_error)) < 0);
     LatcdRetirementPageDeadline plan_schedule[130];
     const char *plan_names[130];
     for (unsigned i = 0; i < 130; i++) {

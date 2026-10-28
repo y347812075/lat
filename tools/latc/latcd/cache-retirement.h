@@ -71,6 +71,11 @@ int latcd_retirement_page_state_load(const char *root, LatcdRetirementPageState 
  * invalidates retry/attempt ages; callers must rescan rather than reuse them. */
 int latcd_retirement_page_state_compatible(const LatcdRetirementPageState *state,
                                            const char *boot, uint64_t grace_us);
+/* Load and validate a page for the current boot/grace without consuming it.
+ * Returns 1 when absent, 0 when usable, -1 when unsafe/incompatible. */
+int latcd_retirement_page_state_resume(const char *root, const char *boot,
+                                       uint64_t grace_us, LatcdRetirementPageState *state,
+                                       char *error, size_t error_size);
 /* Build a bounded page plan from the complete sorted candidate key set. The
  * input remains intact for later pages; entries outside the page are omitted. */
 int latcd_retirement_page_plan(const char *const *names, size_t count,
