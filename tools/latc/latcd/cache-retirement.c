@@ -584,6 +584,7 @@ out:
     g_free(raw); g_key_file_unref(record);
     if (gc >= 0) close(gc);
     if (root_fd >= 0) close(root_fd);
+    if (result) memset(state, 0, sizeof(*state));
     return result < 0 ? fail(error, error_size, "retirement page state unsafe or incompatible") : result;
 }
 

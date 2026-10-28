@@ -961,6 +961,7 @@ static void test_round_cursor(void)
     g_key_file_unref(extra);
     assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
                                             sizeof(page_error)) < 0);
+    assert(!loaded.round_cutoff && !loaded.count && !loaded.cursor[0]);
     assert(latcd_retirement_page_state_store(page_root, &state, page_error,
                                              sizeof(page_error)) == 0);
     assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
