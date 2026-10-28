@@ -2814,8 +2814,13 @@ static void test_queue_overflow_fixture(void)
     LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 0);
     LatcdRetirementQueueStats stats;
     int result;
-    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    unsigned visited = 0;
+    do {
+        result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error));
+        visited += stats.visited;
+    }
     while (result > 0);
+    assert(visited >= 88); /* Both passes must visit all 44 records. */
     assert(latcd_retirement_queue_discovered_keys(queue) == 132);
     LatcdRetirementPageState page_state;
     assert(latcd_retirement_queue_page_plan(queue, NULL, &page_state) == 1);
