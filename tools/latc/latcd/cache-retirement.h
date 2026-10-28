@@ -27,6 +27,14 @@ int latcd_retirement_round_restore(LatcdRetirementRound *round,
                                    const char *boot, uint64_t cutoff);
 int latcd_retirement_round_complete(LatcdRetirementRound *round,
                                     const char *boot, uint64_t observed_cutoff);
+typedef struct LatcdRetirementPage {
+    char next_cursor[138];
+    unsigned count;
+} LatcdRetirementPage;
+/* Select the next stable-name page from a caller-provided sorted list. Names
+ * must be valid object basenames. This is scheduling only, never admission. */
+int latcd_retirement_page_select(const char *const *names, size_t count,
+                                 const char *after, LatcdRetirementPage *page);
 typedef struct LatcdRecoveryProgress {
     unsigned visited;
     unsigned recovered;

@@ -803,6 +803,25 @@ static void test_round_cursor(void)
     assert(round.cutoff == 200);
     assert(latcd_retirement_round_restore(&round, boot, 0) < 0);
     assert(latcd_retirement_round_restore(&round, "bad", 1) < 0);
+    const char *names[] = {"a", "b", "c", "d"};
+    LatcdRetirementPage page;
+    assert(latcd_retirement_page_select(names, G_N_ELEMENTS(names), "a", &page) == 1);
+    assert(page.count == 3 && !strcmp(page.next_cursor, "d"));
+    assert(latcd_retirement_page_select(names, G_N_ELEMENTS(names), "d", &page) == 0);
+    assert(page.count == 0);
+    const char *unsorted[] = {"b", "a"};
+    assert(latcd_retirement_page_select(unsorted, G_N_ELEMENTS(unsorted), NULL, &page) < 0);
+    GPtrArray *many = g_ptr_array_new_with_free_func(g_free);
+    for (unsigned i = 0; i < 130; i++)
+        g_ptr_array_add(many, g_strdup_printf("object-%03u", i));
+    assert(latcd_retirement_page_select((const char *const *)many->pdata, many->len,
+                                        NULL, &page) == 1);
+    assert(page.count == 128 && !strcmp(page.next_cursor, "object-127"));
+    LatcdRetirementPage tail;
+    assert(latcd_retirement_page_select((const char *const *)many->pdata, many->len,
+                                        page.next_cursor, &tail) == 1);
+    assert(tail.count == 2 && !strcmp(tail.next_cursor, "object-129"));
+    g_ptr_array_unref(many);
 }
 
 static void test_tombstone_crash(const char *point, bool crash)
