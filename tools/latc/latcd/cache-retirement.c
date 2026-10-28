@@ -2392,6 +2392,8 @@ typedef struct RetirementCandidate {
 struct LatcdRetirementQueue {
     char *root;
     uint64_t grace, epoch;
+    uint64_t diagnostic_cutoff;
+    char diagnostic_boot[37], diagnostic_after[138];
     unsigned visited;
     bool aggregating, aggregation_verified;
     DIR *cursor;
@@ -2420,6 +2422,18 @@ LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grac
     queue->discovered_keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     queue->confirmed_keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     return queue;
+}
+
+int latcd_retirement_queue_diagnostic_round(LatcdRetirementQueue *queue,
+    const char *boot, uint64_t cutoff, const char *after)
+{
+    if (!queue || queue->cursor || queue->complete || !boot ||
+        !g_uuid_string_is_valid(boot) || !cutoff ||
+        (after && strlen(after) >= sizeof(queue->diagnostic_after))) return -1;
+    g_strlcpy(queue->diagnostic_boot, boot, sizeof(queue->diagnostic_boot));
+    g_strlcpy(queue->diagnostic_after, after ? after : "", sizeof(queue->diagnostic_after));
+    queue->diagnostic_cutoff = cutoff;
+    return 0;
 }
 
 void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
@@ -2594,15 +2608,17 @@ static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t si
         int removed = queue_object_removed(queue->root, source, key, object_record);
         if (removed < 0) { valid = false; break; }
         if (removed) continue;
-        if (!queue->aggregating) {
+        bool nominated = !queue->diagnostic_cutoff || stamp < queue->diagnostic_cutoff;
+        if (!queue->aggregating && nominated) {
             g_hash_table_add(queue->discovered_keys, g_strdup(key));
-        } else {
+        } else if (queue->aggregating && nominated) {
             if (!g_hash_table_contains(queue->discovered_keys, key)) {
                 valid = false;
                 break;
             }
             g_hash_table_add(queue->confirmed_keys, g_strdup(key));
         }
+        if (!queue->aggregating && !nominated) continue;
         RetirementCandidate *candidate = g_hash_table_lookup(queue->discovered, key);
         if (!candidate) {
             if (queue->aggregating) continue;
@@ -2631,10 +2647,13 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
     if (!queue || !entries || !time_us || time_us > INT64_MAX / 2 || !stats)
         return fail(error, error_size, "invalid retirement queue budget");
     memset(stats, 0, sizeof(*stats));
+    if (!queue->cursor) queue->aggregation_verified = false;
     int result = -1;
     char *boot = NULL;
     uint64_t now = 0;
     if (retirement_clock(&boot, &now)) goto out;
+    if (queue->diagnostic_cutoff &&
+        (strcmp(boot, queue->diagnostic_boot) || now < queue->diagnostic_cutoff)) goto out;
     if (!queue->cursor) {
         queue->complete = false;
         queue->visited = 0;
@@ -2697,10 +2716,13 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         keys = g_list_sort(keys, (GCompareFunc)strcmp);
         g_hash_table_remove_all(queue->discovered);
         unsigned selected = 0;
-        for (GList *item = keys; item && selected < 128; item = item->next, selected++) {
+        for (GList *item = keys; item && selected < 128; item = item->next) {
+            if (queue->diagnostic_cutoff &&
+                strcmp(item->data, queue->diagnostic_after) <= 0) continue;
             RetirementCandidate *candidate = g_new0(RetirementCandidate, 1);
             candidate->enqueued = now;
             g_hash_table_insert(queue->discovered, g_strdup(item->data), candidate);
+            selected++;
         }
         g_list_free(keys);
         rewinddir(queue->cursor);
@@ -2723,6 +2745,9 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         }
     }
     if (!result) queue->aggregation_verified = true;
+    /* Diagnostic pages cannot feed the executor until durable page completion
+     * and cross-page retry state are implemented. */
+    if (!result && queue->diagnostic_cutoff) result = -1;
     if (!result && g_hash_table_size(queue->discovered_keys) > 128) result = -1;
     if (!result && *queue->active.name &&
         !g_hash_table_contains(queue->discovered, queue->active.name) &&
