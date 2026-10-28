@@ -529,7 +529,10 @@ int latcd_retirement_page_state_store(const char *root,
     int gc = root_fd < 0 ? -1 : open_directory(root_fd, ".gc", true);
     int result = -1;
     GKeyFile *record = g_key_file_new();
-    if (gc < 0) goto out;
+    struct stat cache;
+    if (gc < 0 || fstat(root_fd, &cache) ||
+        state->cache_device != (uint64_t)cache.st_dev ||
+        state->cache_inode != (uint64_t)cache.st_ino) goto out;
     g_key_file_set_integer(record, "page", "version", 2);
     g_key_file_set_uint64(record, "page", "cache_device", state->cache_device);
     g_key_file_set_uint64(record, "page", "cache_inode", state->cache_inode);
@@ -586,6 +589,39 @@ out:
     if (root_fd >= 0) close(root_fd);
     if (result) memset(state, 0, sizeof(*state));
     return result < 0 ? fail(error, error_size, "retirement page state unsafe or incompatible") : result;
+}
+
+int latcd_retirement_page_round_begin(const char *root, uint64_t grace_us,
+                                      LatcdRetirementPageState *state,
+                                      char *error, size_t error_size)
+{
+    if (!root || !state || !grace_us)
+        return fail(error, error_size, "invalid retirement round input");
+    memset(state, 0, sizeof(*state));
+    int roots = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, error_size);
+    if (roots < 0) return -1;
+    LatcdRetirementPageState existing;
+    int result = -1, directory = -1;
+    char *boot = NULL;
+    uint64_t cutoff = 0;
+    struct stat cache;
+    if (latcd_retirement_page_state_load(root, &existing, error, error_size) != 1 ||
+        (directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) < 0 ||
+        fstat(directory, &cache) || retirement_clock(&boot, &cutoff) || !cutoff) goto out;
+    LatcdRetirementPageState next = {0};
+    next.cache_device = cache.st_dev;
+    next.cache_inode = cache.st_ino;
+    next.grace_us = grace_us;
+    next.round_cutoff = cutoff;
+    memcpy(next.boot, boot, sizeof(next.boot));
+    if (latcd_retirement_page_state_store(root, &next, error, error_size)) goto out;
+    *state = next;
+    result = 0;
+out:
+    g_free(boot);
+    if (directory >= 0) close(directory);
+    close(roots);
+    return result ? fail(error, error_size, "cannot begin retirement round; reload state") : 0;
 }
 
 int latcd_retirement_page_state_compatible(const LatcdRetirementPageState *state,

@@ -67,6 +67,13 @@ int latcd_retirement_page_state_store(const char *root,
                                       char *error, size_t error_size);
 int latcd_retirement_page_state_load(const char *root, LatcdRetirementPageState *state,
                                      char *error, size_t error_size);
+/* Owner lease required. Create an initial empty round only when no page state
+ * exists, holding roots EX through clock sampling and durable storage. On any
+ * error reload the state before retrying; an interrupted rename may persist.
+ * This is scheduling state, not permission to consume or remove objects. */
+int latcd_retirement_page_round_begin(const char *root, uint64_t grace_us,
+                                      LatcdRetirementPageState *state,
+                                      char *error, size_t error_size);
 /* now_us is a current CLOCK_BOOTTIME sample for boot. A different boot/grace
  * or a future cutoff invalidates the page; callers must rescan. */
 int latcd_retirement_page_state_compatible(const LatcdRetirementPageState *state,

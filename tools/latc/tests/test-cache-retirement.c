@@ -968,7 +968,13 @@ static void test_round_cursor(void)
     g_ptr_array_unref(many);
     state.cache_inode++;
     assert(latcd_retirement_page_state_store(page_root, &state, page_error,
-                                             sizeof(page_error)) == 0);
+                                             sizeof(page_error)) < 0);
+    GKeyFile *wrong_cache = g_key_file_new();
+    assert(g_key_file_load_from_file(wrong_cache, page_path, 0, NULL));
+    g_key_file_set_uint64(wrong_cache, "page", "cache_inode", state.cache_inode);
+    char *wrong_cache_data = g_key_file_to_data(wrong_cache, NULL, NULL);
+    put(page_path, wrong_cache_data);
+    g_free(wrong_cache_data); g_key_file_unref(wrong_cache);
     assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
                                             sizeof(page_error)) < 0);
     state.cache_inode = page_cache.st_ino;
@@ -1061,6 +1067,55 @@ static void test_tombstone_crash(const char *point, bool crash)
         g_key_file_unref(record);
     }
     g_free(marker); g_free(evidence); g_free(path); g_free(name);
+    remove_root(root); g_free(root);
+}
+
+static void test_page_round_begin(const char *point, bool crash)
+{
+    char *root = root_new(), error[256];
+    LatcdRetirementPageState state, loaded;
+    simulated_boottime_us = 1234;
+    if (!point) {
+        int shared = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error));
+        assert(shared >= 0);
+        assert(latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)) < 0);
+        assert(!state.round_cutoff);
+        close(shared);
+        assert(!latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)));
+        assert(state.round_cutoff == 1234 && state.grace_us == 100 && !state.count);
+        assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
+        assert(loaded.round_cutoff == state.round_cutoff && !strcmp(loaded.boot, state.boot));
+        simulated_boottime_us++;
+        assert(latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)) < 0);
+        assert(!state.round_cutoff);
+        assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
+        assert(loaded.round_cutoff == 1234);
+        loaded.cache_inode++;
+        assert(latcd_retirement_page_state_store(root, &loaded, error, sizeof(error)) < 0);
+        assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
+        assert(loaded.round_cutoff == 1234);
+    } else {
+        pid_t child = fork();
+        assert(child >= 0);
+        if (!child) {
+            char *fault = g_strdup_printf("%s:%s", crash ? "crash" : "error", point);
+            assert(!setenv("LATCD_TEST_RETIREMENT_IO", fault, 1));
+            int result = latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error));
+            assert(!crash && result < 0 && !state.round_cutoff);
+            _exit(0);
+        }
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        if (crash) assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+        else assert(WIFEXITED(status) && !WEXITSTATUS(status));
+        int loaded_result = latcd_retirement_page_state_load(root, &loaded, error, sizeof(error));
+        assert(loaded_result == 1 || (!loaded_result && loaded.round_cutoff == 1234));
+        if (loaded_result == 1)
+            assert(!latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)));
+        else
+            assert(latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)) < 0);
+    }
+    simulated_boottime_us = 0;
     remove_root(root); g_free(root);
 }
 
@@ -3078,9 +3133,12 @@ int main(int argc, char **argv)
     assert(argc == 1);
     test_queue_empty_store();
     test_round_cursor();
+    test_page_round_begin(NULL, false);
     const char *page_faults[] = {"created", "partial-write", "file-synced",
                                  "renamed", "directory-synced"};
     for (unsigned i = 0; i < G_N_ELEMENTS(page_faults); i++) {
+        test_page_round_begin(page_faults[i], false);
+        test_page_round_begin(page_faults[i], true);
         test_page_state_write_fault(page_faults[i], false);
         test_page_state_write_fault(page_faults[i], true);
     }
