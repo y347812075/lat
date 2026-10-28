@@ -2376,6 +2376,27 @@ unsigned latcd_retirement_queue_discovered_keys(const LatcdRetirementQueue *queu
     return queue ? g_hash_table_size(queue->discovered_keys) : 0;
 }
 
+int latcd_retirement_queue_page_plan(const LatcdRetirementQueue *queue, const char *after,
+                                     LatcdRetirementPageState *state)
+{
+    if (!queue || !state) return -1;
+    GList *keys = g_hash_table_get_keys(queue->discovered_keys);
+    keys = g_list_sort(keys, (GCompareFunc)strcmp);
+    size_t count = g_list_length(keys);
+    const char **names = g_new0(const char *, count);
+    LatcdRetirementPageDeadline *schedule = g_new0(LatcdRetirementPageDeadline, count);
+    unsigned i = 0;
+    for (GList *item = keys; item; item = item->next, i++) {
+        names[i] = item->data;
+        g_strlcpy(schedule[i].name, item->data, sizeof(schedule[i].name));
+        schedule[i].enqueued = 1;
+        schedule[i].deadline = 1;
+    }
+    int result = latcd_retirement_page_plan(names, count, after, schedule, count, state);
+    g_free(schedule); g_free(names); g_list_free(keys);
+    return result;
+}
+
 static int queue_watch_fd(int notify, int fd, uint32_t mask)
 {
     char path[64];

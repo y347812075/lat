@@ -214,6 +214,10 @@ LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grac
 /* Diagnostic only: number of distinct object keys seen in the current
  * first-pass discovery. Zero outside an active incomplete page scan. */
 unsigned latcd_retirement_queue_discovered_keys(const LatcdRetirementQueue *queue);
+/* Diagnostic conversion of the current complete key index into a page plan.
+ * Does not select candidates, mutate queue state, or authorize deletion. */
+int latcd_retirement_queue_page_plan(const LatcdRetirementQueue *queue, const char *after,
+                                     LatcdRetirementPageState *state);
 int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
                                  uint64_t time_us, LatcdRetirementQueueStats *stats,
                                  char *error, size_t error_size);
