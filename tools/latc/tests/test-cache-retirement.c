@@ -191,6 +191,10 @@ static void test_oversized_prepared(void)
     assert(publication);
     assert(latcd_retirement_publication_prepare(publication, source, next, strlen(next),
                                                  objects, error, sizeof(error)) < 0);
+    g_free(objects);
+    objects = g_strnfill(48700, 'x');
+    assert(latcd_retirement_publication_prepare(publication, source, next, strlen(next),
+                                                 objects, error, sizeof(error)) < 0);
     latcd_retirement_publication_close(publication);
     unsigned recovered = 99;
     assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)) && !recovered);

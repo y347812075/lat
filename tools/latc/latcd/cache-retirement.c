@@ -26,6 +26,7 @@
 
 #define MANIFEST_LIMIT 4096
 #define RECORD_LIMIT 65536
+#define PREPARED_COMPLETION_HEADROOM 512
 #define RETIREMENT_BUSY_MIN_US UINT64_C(60000000)
 #define RETIREMENT_BUSY_MAX_US UINT64_C(3600000000)
 
@@ -754,10 +755,15 @@ static int retirement_prepare(int root_fd, const char *source,
     g_key_file_set_string(record, "transaction", "previous", old64);
     g_key_file_set_string(record, "transaction", "next", new64);
     int clock_status = set_clock(record, "prepared");
+    gsize prepared_size = 0;
+    char *prepared_data = g_key_file_to_data(record, &prepared_size, NULL);
+    g_free(prepared_data);
     char *uuid = g_uuid_string_random();
     char *name = g_strdup_printf("%s.ini", uuid);
     g_free(uuid);
-    result = clock_status ? -1 : write_record(store, name, record);
+    if (prepared_size > RECORD_LIMIT - PREPARED_COMPLETION_HEADROOM) errno = EFBIG;
+    result = clock_status || prepared_size > RECORD_LIMIT - PREPARED_COMPLETION_HEADROOM ?
+        -1 : write_record(store, name, record);
     if (!result) *transaction = g_strdup(name);
     g_free(name);
     g_free(old64);
