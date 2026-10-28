@@ -178,12 +178,14 @@ static void test_crash(int phase, bool initial)
 
 static void test_unknown_and_corrupt(void)
 {
-    char *root = root_new(), *transaction = NULL, error[256];
+    char *root = root_new(), error[256];
     char *current = current_path(root);
     put(current, old);
-    assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
-                                     &transaction, error, sizeof(error)));
+    LatcdRetirementPublication *publication = latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication && !latcd_retirement_publication_prepare(publication, source, next, strlen(next),
+                                                                 NULL, error, sizeof(error)));
     put(current, "unrecognized current\n");
+    latcd_retirement_publication_close(publication);
     unsigned recovered;
     assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)));
     assert_state(root, "UNKNOWN");
@@ -196,18 +198,19 @@ static void test_unknown_and_corrupt(void)
     remove_root(root);
     g_free(path);
     g_free(current);
-    g_free(transaction);
     g_free(root);
 }
 
 static void test_reboot(void)
 {
-    char *root = root_new(), *transaction = NULL, error[256];
+    char *root = root_new(), error[256];
     char *current = current_path(root);
-    assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
-                                     &transaction, error, sizeof(error)));
+    LatcdRetirementPublication *publication = latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication && !latcd_retirement_publication_prepare(publication, source, next, strlen(next),
+                                                                 NULL, error, sizeof(error)));
     put(current, next);
-    assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+    assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
+    latcd_retirement_publication_close(publication);
     char *path = single_record(root);
     GKeyFile *record = g_key_file_new();
     assert(g_key_file_load_from_file(record, path, 0, NULL));
@@ -228,7 +231,6 @@ static void test_reboot(void)
     remove_root(root);
     g_free(path);
     g_free(current);
-    g_free(transaction);
     g_free(root);
 }
 
@@ -459,9 +461,11 @@ static void test_object_identity(int mutation)
 static void test_legacy_and_schema(void)
 {
     char *root = root_new(), *current = current_path(root);
-    char *transaction = NULL, error[256];
-    assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
-                                     &transaction, error, sizeof(error)));
+    char error[256];
+    LatcdRetirementPublication *publication = latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication && !latcd_retirement_publication_prepare(publication, source, next, strlen(next),
+                                                                 NULL, error, sizeof(error)));
+    latcd_retirement_publication_close(publication);
     char *path = single_record(root);
     GKeyFile *record = g_key_file_new();
     assert(g_key_file_load_from_file(record, path, 0, NULL));
@@ -489,7 +493,6 @@ static void test_legacy_and_schema(void)
         g_free(contents);
     }
     g_key_file_unref(record);
-    g_free(transaction);
     g_free(path);
     g_free(current);
     remove_root(root);
