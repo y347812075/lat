@@ -2508,6 +2508,7 @@ int latcd_retirement_queue_diagnostic_resume(LatcdRetirementQueue *queue,
     if (retirement_clock(&boot, &now) ||
         latcd_retirement_page_state_resume(queue->root, boot, queue->grace, now,
                                            &state, error, error_size) ||
+        state.count || state.cursor[0] ||
         latcd_retirement_queue_diagnostic_round(queue, state.boot, state.round_cutoff,
                                                 state.cursor)) goto out;
     result = 0;
