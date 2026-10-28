@@ -1438,7 +1438,7 @@ static void test_deleted_transaction_recovery(int mutation, const char *point, b
 
 static void test_recovery_cursor(int mutation, bool tombstones)
 {
-    char *root = root_new(), error[256], *transaction = NULL;
+    char *root = root_new(), error[256];
     char *names[3], *paths[3];
     const char *suffixes[] = {".so", ".native", ".tbset"};
     char *payload = g_strnfill(192 * 1024 + 1, 'x');
@@ -1462,10 +1462,12 @@ static void test_recovery_cursor(int mutation, bool tombstones)
         close(fd); g_free(single);
         record_path = g_build_filename(root, ".gc", "tombstones", names[0], NULL);
     } else {
-        assert(!latcd_retirement_prepare(root, source, manifest, strlen(manifest), evidence,
-                                         &transaction, error, sizeof(error)));
+        LatcdRetirementPublication *publication = latcd_retirement_publication_open(root, error, sizeof(error));
+        assert(publication && !latcd_retirement_publication_prepare(publication, source, manifest,
+            strlen(manifest), evidence, error, sizeof(error)));
         put(current, manifest);
-        assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+        assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
+        latcd_retirement_publication_close(publication);
         record_path = single_record(root);
     }
     LatcdRecoveryCursor *cursor = latcd_recovery_open(root, tombstones, error, sizeof(error));
@@ -1529,7 +1531,7 @@ static void test_recovery_cursor(int mutation, bool tombstones)
     latcd_recovery_close(cursor);
     for (size_t i = 0; i < 3; i++) { assert(!access(paths[i], F_OK)); g_free(paths[i]); g_free(names[i]); }
     g_free(record_path); g_free(current); g_free(payload); g_free(evidence);
-    g_free(manifest); g_free(transaction); remove_root(root); g_free(root);
+    g_free(manifest); remove_root(root); g_free(root);
 }
 
 static void test_recovery_entry_budget(void)
@@ -1725,7 +1727,7 @@ static LatcdRetirementQueueStats sweep_queue(LatcdRetirementQueue *queue)
 
 static void test_queue_consumer(unsigned mutation, bool bounded)
 {
-    char *root = root_new(), error[256], *transaction = NULL;
+    char *root = root_new(), error[256];
     char *original_record = NULL;
     char *names[6], *paths[6];
     const char *suffixes[] = {".so", ".native", ".tbset"};
@@ -1749,10 +1751,12 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
     char *current = current_path(root);
     put(current, previous);
     char *evidence = latcd_retirement_capture_objects(root, source, (const char *const *)names, 6);
-    assert(evidence && !latcd_retirement_prepare(root, source, following, strlen(following),
-                                               evidence, &transaction, error, sizeof(error)));
+    LatcdRetirementPublication *publication = latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(evidence && publication && !latcd_retirement_publication_prepare(publication, source,
+        following, strlen(following), evidence, error, sizeof(error)));
     put(current, following);
-    assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+    assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
+    latcd_retirement_publication_close(publication);
     if (!mutation && !bounded) {
         char *path = single_record(root);
         GKeyFile *record = g_key_file_new();
@@ -2031,7 +2035,7 @@ cleanup:
     for (unsigned i = 0; i < 3; i++) if (pins[i] >= 0) close(pins[i]);
     if (gate >= 0) close(gate);
     g_free(original_record);
-    g_free(previous); g_free(following); g_free(current); g_free(evidence); g_free(transaction);
+    g_free(previous); g_free(following); g_free(current); g_free(evidence);
     for (unsigned i = 0; i < 6; i++) { g_free(names[i]); g_free(paths[i]); }
     remove_root(root); g_free(root);
 }
