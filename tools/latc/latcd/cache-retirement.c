@@ -2067,6 +2067,7 @@ struct LatcdRetirementQueue {
     int discovery_watch;
     struct stat discovery_store;
     GHashTable *candidates;
+    GHashTable *discovered;
     bool complete;
     char last_source[65];
     LatcdRetirementAttempt active;
@@ -2082,6 +2083,7 @@ LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grac
     queue->root = g_strdup(root);
     queue->grace = grace_us;
     queue->candidates = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    queue->discovered = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     return queue;
 }
 
@@ -2092,6 +2094,7 @@ void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
     if (queue->discovery_watch >= 0) close(queue->discovery_watch);
     latcd_recovery_close(queue->execution);
     g_hash_table_unref(queue->candidates);
+    g_hash_table_unref(queue->discovered);
     g_free(queue->root); g_free(queue);
 }
 
@@ -2203,13 +2206,13 @@ static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t si
         int removed = queue_object_removed(queue->root, source, key, object_record);
         if (removed < 0) { valid = false; break; }
         if (removed) continue;
-        RetirementCandidate *candidate = g_hash_table_lookup(queue->candidates, key);
+        RetirementCandidate *candidate = g_hash_table_lookup(queue->discovered, key);
         if (!candidate) {
             if (queue->aggregating) continue;
-            if (g_hash_table_size(queue->candidates) >= 128) { valid = false; break; }
+            if (g_hash_table_size(queue->discovered) >= 128) { valid = false; break; }
             candidate = g_new0(RetirementCandidate, 1);
             candidate->enqueued = now;
-            g_hash_table_insert(queue->candidates, g_strdup(key), candidate);
+            g_hash_table_insert(queue->discovered, g_strdup(key), candidate);
         }
         uint64_t deadline = stamp + queue->grace;
         candidate->deadline = candidate->epoch == queue->epoch ? MAX(candidate->deadline, deadline) : deadline;
@@ -2239,6 +2242,7 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         queue->complete = false;
         queue->visited = 0;
         queue->aggregating = false;
+        g_hash_table_remove_all(queue->discovered);
         queue->epoch++;
         int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (root < 0) goto out;
@@ -2295,16 +2299,30 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         queue->epoch++;
         result = 1;
     }
+    if (!result && *queue->active.name &&
+        !g_hash_table_contains(queue->discovered, queue->active.name) &&
+        g_hash_table_size(queue->discovered) >= 128) result = -1;
     if (!result) {
         GHashTableIter iterator;
-        gpointer value;
+        gpointer key, value;
         g_hash_table_iter_init(&iterator, queue->candidates);
-        while (g_hash_table_iter_next(&iterator, NULL, &value))
-            if (((RetirementCandidate *)value)->epoch != queue->epoch) {
-                const char *active = queue->active.name;
-                if (!*active || g_hash_table_lookup(queue->candidates, active) != value)
-                    g_hash_table_iter_remove(&iterator);
+        while (g_hash_table_iter_next(&iterator, &key, &value)) {
+            RetirementCandidate *found = g_hash_table_lookup(queue->discovered, key);
+            if (found && found->epoch == queue->epoch) {
+                RetirementCandidate *old = value;
+                found->enqueued = old->enqueued;
+                found->last_attempt = old->last_attempt;
+                found->retry_at = old->retry_at;
+                found->busy_count = old->busy_count;
+            } else if (!g_strcmp0(key, queue->active.name)) {
+                RetirementCandidate *copy = g_memdup2(value, sizeof(RetirementCandidate));
+                g_hash_table_insert(queue->discovered, g_strdup(key), copy);
             }
+        }
+        GHashTable *previous = queue->candidates;
+        queue->candidates = queue->discovered;
+        queue->discovered = previous;
+        g_hash_table_remove_all(queue->discovered);
         queue->complete = true;
     }
 out:
@@ -2315,7 +2333,7 @@ out:
     }
     if (result < 0) queue->complete = false;
     stats->complete = queue->complete;
-    stats->candidates = g_hash_table_size(queue->candidates);
+    stats->candidates = g_hash_table_size(result > 0 ? queue->discovered : queue->candidates);
     GHashTableIter iterator;
     gpointer value;
     g_hash_table_iter_init(&iterator, queue->candidates);

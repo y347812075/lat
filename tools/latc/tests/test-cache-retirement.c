@@ -2567,9 +2567,26 @@ static void test_queue_overflow_fixture(void)
     int result;
     do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
     while (result > 0);
-    assert(result < 0 && !stats.complete && stats.candidates == 128);
+    assert(result < 0 && !stats.complete && !stats.candidates);
     LatcdRetirementAttempt attempt;
     assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));
+    char *store = g_build_filename(root, ".gc", "transactions", NULL);
+    GDir *directory = g_dir_open(store, 0, NULL);
+    assert(directory);
+    GPtrArray *records = g_ptr_array_new_with_free_func(g_free);
+    const char *entry;
+    while ((entry = g_dir_read_name(directory))) g_ptr_array_add(records, g_strdup(entry));
+    g_dir_close(directory);
+    assert(records->len == 44);
+    for (guint i = 0; i + 1 < records->len; i++) {
+        char *path = g_build_filename(store, g_ptr_array_index(records, i), NULL);
+        assert(!unlink(path));
+        g_free(path);
+    }
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(!result && stats.complete && stats.candidates == 3);
+    g_ptr_array_unref(records); g_free(store);
     latcd_retirement_queue_free(queue);
     remove_root(root); g_free(root);
 }
