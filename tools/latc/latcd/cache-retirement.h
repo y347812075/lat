@@ -228,6 +228,9 @@ unsigned latcd_retirement_queue_discovered_keys(const LatcdRetirementQueue *queu
  * Does not select candidates, mutate queue state, or authorize deletion. */
 int latcd_retirement_queue_page_plan(const LatcdRetirementQueue *queue, const char *after,
                                      LatcdRetirementPageState *state);
+/* Diagnostic snapshot of the last aggregation; never authorizes consumption. */
+int latcd_retirement_queue_aggregated_page(const LatcdRetirementQueue *queue,
+                                          LatcdRetirementPageState *state);
 int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
                                  uint64_t time_us, LatcdRetirementQueueStats *stats,
                                  char *error, size_t error_size);

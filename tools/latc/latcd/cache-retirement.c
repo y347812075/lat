@@ -2455,6 +2455,31 @@ int latcd_retirement_queue_page_plan(const LatcdRetirementQueue *queue, const ch
     return result;
 }
 
+int latcd_retirement_queue_aggregated_page(const LatcdRetirementQueue *queue,
+                                          LatcdRetirementPageState *state)
+{
+    if (!queue || !state || queue->cursor || !queue->aggregating) return -1;
+    memset(state, 0, sizeof(*state));
+    GList *keys = g_hash_table_get_keys(queue->discovered);
+    keys = g_list_sort(keys, (GCompareFunc)strcmp);
+    for (GList *item = keys; item; item = item->next) {
+        RetirementCandidate *candidate = g_hash_table_lookup(queue->discovered, item->data);
+        if (state->count == 128 || candidate->epoch != queue->epoch) {
+            g_list_free(keys);
+            memset(state, 0, sizeof(*state));
+            return -1;
+        }
+        LatcdRetirementPageDeadline *entry = &state->entries[state->count++];
+        g_strlcpy(entry->name, item->data, sizeof(entry->name));
+        entry->deadline = candidate->deadline;
+        entry->enqueued = candidate->enqueued;
+    }
+    if (state->count) g_strlcpy(state->cursor, state->entries[state->count - 1].name,
+                                sizeof(state->cursor));
+    g_list_free(keys);
+    return 0;
+}
+
 static int queue_watch_fd(int notify, int fd, uint32_t mask)
 {
     char path[64];
@@ -2661,6 +2686,16 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         if (root >= 0) close(root);
     }
     if (!result && !queue->aggregating) {
+        GList *keys = g_hash_table_get_keys(queue->discovered_keys);
+        keys = g_list_sort(keys, (GCompareFunc)strcmp);
+        g_hash_table_remove_all(queue->discovered);
+        unsigned selected = 0;
+        for (GList *item = keys; item && selected < 128; item = item->next, selected++) {
+            RetirementCandidate *candidate = g_new0(RetirementCandidate, 1);
+            candidate->enqueued = now;
+            g_hash_table_insert(queue->discovered, g_strdup(item->data), candidate);
+        }
+        g_list_free(keys);
         rewinddir(queue->cursor);
         queue->aggregating = true;
         queue->visited = 0;
