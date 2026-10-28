@@ -575,6 +575,13 @@ out:
     return result < 0 ? fail(error, error_size, "retirement page state unsafe or incompatible") : result;
 }
 
+int latcd_retirement_page_state_compatible(const LatcdRetirementPageState *state,
+                                           const char *boot, uint64_t grace_us)
+{
+    return state && boot && grace_us && !latcd_retirement_page_state_valid(state) &&
+        !strcmp(state->boot, boot) && state->grace_us == grace_us ? 0 : 1;
+}
+
 static int set_clock(GKeyFile *record, const char *prefix)
 {
     char *boot = NULL;

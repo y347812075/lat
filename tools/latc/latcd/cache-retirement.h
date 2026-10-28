@@ -67,6 +67,10 @@ int latcd_retirement_page_state_store(const char *root,
                                       char *error, size_t error_size);
 int latcd_retirement_page_state_load(const char *root, LatcdRetirementPageState *state,
                                      char *error, size_t error_size);
+/* Runtime compatibility check for a loaded page. A different boot or grace
+ * invalidates retry/attempt ages; callers must rescan rather than reuse them. */
+int latcd_retirement_page_state_compatible(const LatcdRetirementPageState *state,
+                                           const char *boot, uint64_t grace_us);
 typedef struct LatcdRecoveryProgress {
     unsigned visited;
     unsigned recovered;

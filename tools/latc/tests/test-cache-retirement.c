@@ -856,6 +856,11 @@ static void test_round_cursor(void)
                                              sizeof(page_error)) == 0);
     assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
                                             sizeof(page_error)) == 0);
+    assert(latcd_retirement_page_state_compatible(&loaded, state.boot, state.grace_us) == 0);
+    assert(latcd_retirement_page_state_compatible(&loaded,
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", state.grace_us) == 1);
+    assert(latcd_retirement_page_state_compatible(&loaded, state.boot,
+        state.grace_us + 1) == 1);
     state.cache_inode++;
     assert(latcd_retirement_page_state_store(page_root, &state, page_error,
                                              sizeof(page_error)) == 0);
