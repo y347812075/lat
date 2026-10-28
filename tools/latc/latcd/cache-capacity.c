@@ -766,21 +766,22 @@ void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
         /* Drain old-inode retirement events while the exact target is expected,
          * then remove its watch before installing the replacement watch. */
         check_changes(capacity);
-        GHashTableIter iterator;
-        gpointer watch, value;
-        g_hash_table_iter_init(&iterator, capacity->state_files);
-        while (g_hash_table_iter_next(&iterator, &watch, &value)) {
-            StateFileWatch *entry = value;
-            if (strcmp(entry->key, reservation->name)) continue;
-            if (!inotify_rm_watch(capacity->watch_fd, GPOINTER_TO_INT(watch)))
-                g_hash_table_add(capacity->state_ignored, watch);
-            g_hash_table_iter_remove(&iterator);
+        if (replaced) {
+            GHashTableIter iterator;
+            gpointer watch, value;
+            g_hash_table_iter_init(&iterator, capacity->state_files);
+            while (g_hash_table_iter_next(&iterator, &watch, &value)) {
+                StateFileWatch *entry = value;
+                if (strcmp(entry->key, reservation->name)) continue;
+                if (!inotify_rm_watch(capacity->watch_fd, GPOINTER_TO_INT(watch)))
+                    g_hash_table_add(capacity->state_ignored, watch);
+                g_hash_table_iter_remove(&iterator);
+            }
+            char *basename = g_path_get_basename(reservation->name);
+            int watched = watch_state_file(capacity, reservation->directory, basename, reservation->name, NULL);
+            if (watched) capacity->ready = false;
+            g_free(basename);
         }
-        char *basename = g_path_get_basename(reservation->name);
-        int watched = watch_state_file(capacity, reservation->directory, basename, reservation->name, NULL);
-        if (watched < 0 || (replaced && watched))
-            capacity->ready = false;
-        g_free(basename);
         check_changes(capacity);
         g_hash_table_remove(capacity->state_expected, reservation->name);
         if (reservation->staging) g_hash_table_remove(capacity->state_expected, reservation->staging);

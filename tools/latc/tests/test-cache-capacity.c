@@ -105,6 +105,26 @@ static void test_metadata(void)
     assert(latcd_cache_capacity_scan(&capacity, root, NULL, 0) < 0);
     latcd_cache_capacity_metadata_finish(&first, false, false);
     assert(!capacity.metadata_reserved && capacity.metadata_committed == 5);
+    assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 3, &first));
+    int prior = open(record, O_RDONLY | O_CLOEXEC);
+    assert(prior >= 0);
+    char *failed_replacement = g_build_filename(store, "failed-replacement.ini", NULL);
+    put(failed_replacement, "abc");
+    assert(!rename(failed_replacement, record));
+    latcd_cache_capacity_metadata_finish(&first, false, false);
+    struct stat unexpected_replacement;
+    assert(!stat(record, &unexpected_replacement));
+    assert(latcd_cache_capacity_metadata_remove(directory, "record.ini", unexpected_replacement.st_dev,
+                                                 unexpected_replacement.st_ino) < 0);
+    assert(!capacity.ready && capacity.metadata_committed == 5 && !access(record, F_OK));
+    close(prior);
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    latcd_cache_capacity_metadata_bind(&capacity, 10);
+    assert(capacity.metadata_committed == 3);
+    assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 5, &first));
+    put(record, "12345");
+    latcd_cache_capacity_metadata_finish(&first, true, false);
+    g_free(failed_replacement);
     char *unregistered = g_build_filename(store, "unregistered.ini", NULL);
     put(unregistered, "123");
     struct stat unexpected;
