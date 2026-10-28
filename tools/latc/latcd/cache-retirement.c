@@ -2338,6 +2338,7 @@ struct LatcdRetirementQueue {
     struct stat discovery_store;
     GHashTable *candidates;
     GHashTable *discovered;
+    GHashTable *discovered_keys;
     bool complete;
     char last_source[65];
     LatcdRetirementAttempt active;
@@ -2354,6 +2355,7 @@ LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grac
     queue->grace = grace_us;
     queue->candidates = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     queue->discovered = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    queue->discovered_keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     return queue;
 }
 
@@ -2365,7 +2367,13 @@ void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
     latcd_recovery_close(queue->execution);
     g_hash_table_unref(queue->candidates);
     g_hash_table_unref(queue->discovered);
+    g_hash_table_unref(queue->discovered_keys);
     g_free(queue->root); g_free(queue);
+}
+
+unsigned latcd_retirement_queue_discovered_keys(const LatcdRetirementQueue *queue)
+{
+    return queue ? g_hash_table_size(queue->discovered_keys) : 0;
 }
 
 static int queue_watch_fd(int notify, int fd, uint32_t mask)
@@ -2476,10 +2484,12 @@ static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t si
         int removed = queue_object_removed(queue->root, source, key, object_record);
         if (removed < 0) { valid = false; break; }
         if (removed) continue;
+        if (!queue->aggregating)
+            g_hash_table_add(queue->discovered_keys, g_strdup(key));
         RetirementCandidate *candidate = g_hash_table_lookup(queue->discovered, key);
         if (!candidate) {
             if (queue->aggregating) { valid = false; break; }
-            if (g_hash_table_size(queue->discovered) >= 128) { valid = false; break; }
+            if (g_hash_table_size(queue->discovered) >= 128) continue;
             candidate = g_new0(RetirementCandidate, 1);
             candidate->enqueued = now;
             g_hash_table_insert(queue->discovered, g_strdup(key), candidate);
@@ -2513,6 +2523,7 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         queue->visited = 0;
         queue->aggregating = false;
         g_hash_table_remove_all(queue->discovered);
+        g_hash_table_remove_all(queue->discovered_keys);
         queue->epoch++;
         int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (root < 0) goto out;
@@ -2604,6 +2615,7 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         queue->candidates = queue->discovered;
         queue->discovered = previous;
         g_hash_table_remove_all(queue->discovered);
+        g_hash_table_remove_all(queue->discovered_keys);
         queue->complete = true;
     }
 out:

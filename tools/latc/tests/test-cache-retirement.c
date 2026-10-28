@@ -2816,6 +2816,7 @@ static void test_queue_overflow_fixture(void)
     int result;
     do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
     while (result > 0);
+    assert(latcd_retirement_queue_discovered_keys(queue) == 132);
     assert(result < 0 && !stats.complete && !stats.candidates);
     LatcdRetirementAttempt attempt;
     assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));
@@ -2835,6 +2836,7 @@ static void test_queue_overflow_fixture(void)
     do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
     while (result > 0);
     assert(!result && stats.complete && stats.candidates == 3);
+    assert(latcd_retirement_queue_discovered_keys(queue) == 0);
     g_ptr_array_unref(records); g_free(store);
     latcd_retirement_queue_free(queue);
     remove_root(root); g_free(root);

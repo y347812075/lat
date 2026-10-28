@@ -211,6 +211,9 @@ typedef struct LatcdRetirementQueueStats {
  * MISSING receipts remove completed names only after absence is rechecked.
  * No deletion or timer handoff; missing alone never completes a candidate. */
 LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grace_us);
+/* Diagnostic only: number of distinct object keys seen in the current
+ * first-pass discovery. Zero outside an active incomplete page scan. */
+unsigned latcd_retirement_queue_discovered_keys(const LatcdRetirementQueue *queue);
 int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
                                  uint64_t time_us, LatcdRetirementQueueStats *stats,
                                  char *error, size_t error_size);
