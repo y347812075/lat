@@ -37,7 +37,7 @@ typedef struct LatcdRetirementPageDeadline {
     unsigned busy_count;
 } LatcdRetirementPageDeadline;
 typedef struct LatcdRetirementPageState {
-    uint64_t cache_device, cache_inode, grace_us;
+    uint64_t cache_device, cache_inode, grace_us, round_cutoff;
     char boot[37];
     char cursor[138];
     uint64_t sequence;

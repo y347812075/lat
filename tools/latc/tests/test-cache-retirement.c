@@ -874,11 +874,14 @@ static void test_round_cursor(void)
     g_strlcpy(copy.next_cursor, "a", sizeof(copy.next_cursor));
     assert(latcd_retirement_page_names(copy_names, 3, &copy, selected) < 0);
     LatcdRetirementPageState state = {
-        .cache_device = 1, .cache_inode = 2, .grace_us = 3,
+        .cache_device = 1, .cache_inode = 2, .grace_us = 3, .round_cutoff = 4,
         .boot = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", .cursor = "b", .count = 2,
         .entries = {{"a", 10, 1, 0, 0, 0}, {"b", 20, 1, 0, 0, 0}}
     };
     assert(latcd_retirement_page_state_valid(&state) == 0);
+    state.round_cutoff = 0;
+    assert(latcd_retirement_page_state_valid(&state) < 0);
+    state.round_cutoff = 4;
     state.entries[1].name[0] = 'a';
     assert(latcd_retirement_page_state_valid(&state) < 0);
     char *page_root = root_new(), page_error[256];
@@ -895,6 +898,18 @@ static void test_round_cursor(void)
                                              sizeof(page_error)) == 0);
     assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
                                             sizeof(page_error)) == 0);
+    GKeyFile *legacy = g_key_file_new();
+    assert(g_key_file_load_from_file(legacy, page_path, 0, NULL));
+    g_key_file_set_integer(legacy, "page", "version", 1);
+    assert(g_key_file_remove_key(legacy, "page", "round_cutoff", NULL));
+    char *legacy_data = g_key_file_to_data(legacy, NULL, NULL);
+    put(page_path, legacy_data);
+    g_free(legacy_data);
+    g_key_file_unref(legacy);
+    assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
+                                            sizeof(page_error)) < 0);
+    assert(!latcd_retirement_page_state_store(page_root, &state, page_error, sizeof(page_error)));
+    assert(!latcd_retirement_page_state_load(page_root, &loaded, page_error, sizeof(page_error)));
     assert(latcd_retirement_page_state_compatible(&loaded, state.boot, state.grace_us) == 0);
     assert(latcd_retirement_page_state_compatible(&loaded,
         "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", state.grace_us) == 1);
@@ -946,7 +961,7 @@ static void test_round_cursor(void)
     assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
                                             sizeof(page_error)) == 0);
     assert(loaded.cache_device == state.cache_device && loaded.cache_inode == state.cache_inode &&
-           loaded.grace_us == state.grace_us && !strcmp(loaded.boot, state.boot) &&
+           loaded.grace_us == state.grace_us && loaded.round_cutoff == state.round_cutoff && !strcmp(loaded.boot, state.boot) &&
            !strcmp(loaded.cursor, state.cursor) && loaded.count == state.count &&
            loaded.sequence == state.sequence &&
            loaded.entries[1].deadline == state.entries[1].deadline &&
@@ -1024,12 +1039,13 @@ static void test_page_state_write_fault(const char *point, bool crash)
     struct stat cache;
     assert(!stat(root, &cache));
     LatcdRetirementPageState state = {
-        .cache_device = cache.st_dev, .cache_inode = cache.st_ino, .grace_us = 1,
+        .cache_device = cache.st_dev, .cache_inode = cache.st_ino, .grace_us = 1, .round_cutoff = 2,
         .boot = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", .cursor = "a", .count = 1,
         .entries = {{"a", 10, 1, 0, 0, 0}}
     };
     assert(!latcd_retirement_page_state_store(root, &state, error, sizeof(error)));
     state.entries[0].deadline = 20;
+    state.round_cutoff = 3;
     pid_t child = fork();
     assert(child >= 0);
     if (!child) {
@@ -1045,8 +1061,8 @@ static void test_page_state_write_fault(const char *point, bool crash)
     else assert(WIFEXITED(status) && !WEXITSTATUS(status));
     LatcdRetirementPageState loaded;
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
-    assert(loaded.count == 1 && (loaded.entries[0].deadline == 10 ||
-                                 loaded.entries[0].deadline == 20));
+    assert(loaded.count == 1 && ((loaded.entries[0].deadline == 10 && loaded.round_cutoff == 2) ||
+                                 (loaded.entries[0].deadline == 20 && loaded.round_cutoff == 3)));
     path = g_build_filename(root, ".gc", "retirement-page.ini", NULL);
     assert(g_file_test(path, G_FILE_TEST_IS_REGULAR));
     g_free(path); remove_root(root); g_free(root);

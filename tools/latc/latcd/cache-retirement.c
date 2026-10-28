@@ -445,7 +445,7 @@ int latcd_retirement_page_names(const char *const *names, size_t count,
 
 int latcd_retirement_page_state_valid(const LatcdRetirementPageState *state)
 {
-    if (!state || !state->cache_device || !state->cache_inode || !state->grace_us ||
+    if (!state || !state->cache_device || !state->cache_inode || !state->grace_us || !state->round_cutoff ||
         strlen(state->boot) != 36 || !g_uuid_string_is_valid(state->boot) ||
         state->count > 128 || (state->count && !state->cursor[0]) ||
         (state->cursor[0] && strlen(state->cursor) >= sizeof(state->cursor))) return -1;
@@ -471,7 +471,7 @@ static bool exact_keys(GKeyFile *record, const char *group,
 static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
 {
     const char *queue_fields[] = {"version", "cache_device", "cache_inode", "grace_us",
-                                  "boot", "cursor", "sequence", "count"};
+                                  "boot", "round_cutoff", "cursor", "sequence", "count"};
     const char *entry_fields[] = {"name", "deadline", "enqueued", "last_attempt",
                                   "retry_at", "busy_count"};
     gsize groups_count;
@@ -479,10 +479,11 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
     bool valid = groups_count && !strcmp(groups[0], "page") &&
         exact_keys(record, "page", queue_fields, G_N_ELEMENTS(queue_fields));
     g_strfreev(groups);
-    if (!valid || !record_string_is(record, "page", "version", "1") ||
+    if (!valid || !record_string_is(record, "page", "version", "2") ||
         !record_uint64(record, "page", "cache_device", &state->cache_device) ||
         !record_uint64(record, "page", "cache_inode", &state->cache_inode) ||
         !record_uint64(record, "page", "grace_us", &state->grace_us) ||
+        !record_uint64(record, "page", "round_cutoff", &state->round_cutoff) ||
         !record_uint64(record, "page", "sequence", &state->sequence)) return false;
     char *boot = g_key_file_get_string(record, "page", "boot", NULL);
     char *cursor = g_key_file_get_string(record, "page", "cursor", NULL);
@@ -529,10 +530,11 @@ int latcd_retirement_page_state_store(const char *root,
     int result = -1;
     GKeyFile *record = g_key_file_new();
     if (gc < 0) goto out;
-    g_key_file_set_integer(record, "page", "version", 1);
+    g_key_file_set_integer(record, "page", "version", 2);
     g_key_file_set_uint64(record, "page", "cache_device", state->cache_device);
     g_key_file_set_uint64(record, "page", "cache_inode", state->cache_inode);
     g_key_file_set_uint64(record, "page", "grace_us", state->grace_us);
+    g_key_file_set_uint64(record, "page", "round_cutoff", state->round_cutoff);
     g_key_file_set_string(record, "page", "boot", state->boot);
     g_key_file_set_string(record, "page", "cursor", state->cursor);
     g_key_file_set_uint64(record, "page", "sequence", state->sequence);
