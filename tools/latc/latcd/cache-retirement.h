@@ -11,6 +11,11 @@ typedef struct LatcdRecoveryCursor LatcdRecoveryCursor;
  * Returned CLOEXEC fd is released by close only. Not domain admission. */
 int latcd_retirement_roots_lock(const char *root, int operation,
                                 char *error, size_t error_size);
+/* Owner lease and cooperating transaction writers required. Samples only;
+ * caller must persist the result before using it as a pagination round bound.
+ * This is not domain admission or deletion authorization. */
+int latcd_retirement_round_sample(const char *root, char boot[37], uint64_t *cutoff,
+                                  char *error, size_t error_size);
 typedef struct LatcdRecoveryProgress {
     unsigned visited;
     unsigned recovered;

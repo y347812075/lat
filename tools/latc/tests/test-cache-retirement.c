@@ -722,6 +722,10 @@ static void test_roots_latch(void)
     put(current, old);
     first = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error));
     assert(first >= 0);
+    char round_boot[37] = "stale";
+    uint64_t cutoff = 123;
+    assert(latcd_retirement_round_sample(root, round_boot, &cutoff, error, sizeof(error)) < 0);
+    assert(!*round_boot && !cutoff);
     assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
                                      &transaction, error, sizeof(error)));
     put(current, next);
@@ -731,6 +735,12 @@ static void test_roots_latch(void)
     assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
     assert(latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error)) < 0);
     close(first);
+    clock_fault = 1;
+    assert(latcd_retirement_round_sample(root, round_boot, &cutoff, error, sizeof(error)) < 0);
+    assert(!*round_boot && !cutoff);
+    clock_fault = 0;
+    assert(!latcd_retirement_round_sample(root, round_boot, &cutoff, error, sizeof(error)));
+    assert(g_uuid_string_is_valid(round_boot) && cutoff);
     exclusive = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error));
     assert(exclusive >= 0);
     LatcdRecoveryProgress progress;

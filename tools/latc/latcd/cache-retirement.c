@@ -347,6 +347,27 @@ failed:
     return -1;
 }
 
+int latcd_retirement_round_sample(const char *root, char boot[37], uint64_t *cutoff,
+                                  char *error, size_t error_size)
+{
+    if (!root || !boot || !cutoff)
+        return fail(error, error_size, "invalid retirement round sample");
+    boot[0] = 0;
+    *cutoff = 0;
+    int roots = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, error_size);
+    if (roots < 0) return -1;
+    char *id = NULL;
+    uint64_t stamp = 0;
+    int result = retirement_clock(&id, &stamp);
+    if (!result) {
+        memcpy(boot, id, 37);
+        *cutoff = stamp;
+    }
+    g_free(id);
+    close(roots);
+    return result ? fail(error, error_size, "cannot sample retirement round clock") : 0;
+}
+
 static int set_clock(GKeyFile *record, const char *prefix)
 {
     char *boot = NULL;
