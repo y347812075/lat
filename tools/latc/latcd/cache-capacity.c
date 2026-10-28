@@ -630,7 +630,8 @@ static char *state_record_key(LatcdCacheCapacity *capacity, int directory,
 }
 
 static int record_begin(int directory, const char *name, uint64_t bytes,
-                        LatcdMetadataReservation *reservation, bool state)
+                        LatcdMetadataReservation *reservation, bool state,
+                        bool recovery)
 {
     *reservation = (LatcdMetadataReservation){0};
     LatcdCacheCapacity *capacity = metadata_capacity;
@@ -679,7 +680,7 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
     bool fits = capacity->ready && capacity_fits(capacity, bytes, metadata_limit);
     bool updating = g_hash_table_contains(capacity->state_expected, key);
     if (updating) fits = false;
-    if (!state && !fits && !updating && old && bytes <= UINT64_MAX - capacity->metadata_reserved) {
+    if (recovery && !state && !fits && !updating && old && bytes <= UINT64_MAX - capacity->metadata_reserved) {
         /* Existing transaction completion cannot be blocked after current has
          * committed. Preserve the charge and close ordinary admission. */
         capacity->ready = false;
@@ -704,13 +705,19 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
 int latcd_cache_capacity_metadata_begin(int directory, const char *name, uint64_t bytes,
     LatcdMetadataReservation *reservation)
 {
-    return record_begin(directory, name, bytes, reservation, false);
+    return record_begin(directory, name, bytes, reservation, false, true);
+}
+
+int latcd_cache_capacity_metadata_schedule_begin(int directory, const char *name, uint64_t bytes,
+    LatcdMetadataReservation *reservation)
+{
+    return record_begin(directory, name, bytes, reservation, false, false);
 }
 
 int latcd_cache_capacity_state_begin(int directory, const char *name, uint64_t bytes,
     LatcdMetadataReservation *reservation)
 {
-    return record_begin(directory, name, bytes, reservation, true);
+    return record_begin(directory, name, bytes, reservation, true, false);
 }
 
 int latcd_cache_capacity_metadata_stage(LatcdMetadataReservation *reservation, const char *name)

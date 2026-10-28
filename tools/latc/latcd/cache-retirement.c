@@ -267,12 +267,15 @@ static bool record_write_fault(const char *point)
     return false;
 }
 
-static int write_record(int directory, const char *name, GKeyFile *record)
+static int write_record_kind(int directory, const char *name, GKeyFile *record, bool scheduling)
 {
     gsize size;
     char *data = g_key_file_to_data(record, &size, NULL);
     LatcdMetadataReservation reservation;
-    if (latcd_cache_capacity_metadata_begin(directory, name, size, &reservation)) {
+    int reserved = scheduling ?
+        latcd_cache_capacity_metadata_schedule_begin(directory, name, size, &reservation) :
+        latcd_cache_capacity_metadata_begin(directory, name, size, &reservation);
+    if (reserved) {
         g_free(data);
         return -1;
     }
@@ -332,6 +335,11 @@ out:
     g_free(data);
     errno = saved;
     return result;
+}
+
+static int write_record(int directory, const char *name, GKeyFile *record)
+{
+    return write_record_kind(directory, name, record, false);
 }
 
 static int retirement_clock(char **boot, uint64_t *stamp)
@@ -554,7 +562,7 @@ static int page_state_store_fd(int root_fd, int gc, const LatcdRetirementPageSta
         g_key_file_set_uint64(record, group, "retry_at", state->entries[i].retry_at);
         g_key_file_set_uint64(record, group, "busy_count", state->entries[i].busy_count);
     }
-    result = write_record(gc, "retirement-page.ini", record);
+    result = write_record_kind(gc, "retirement-page.ini", record, true);
 out:
     g_key_file_unref(record);
     return result;
@@ -3096,7 +3104,7 @@ static int queue_checkpoint(LatcdRetirementQueue *queue, bool partial,
     gsize current_size;
     char *current = g_key_file_to_data(record, &current_size, NULL);
     result = status < 0 || current_size > RECORD_LIMIT ? -1 : !status && previous_size == current_size &&
-        !memcmp(previous, current, current_size) ? 0 : write_record(gc, "retirement-scheduler.ini", record);
+        !memcmp(previous, current, current_size) ? 0 : write_record_kind(gc, "retirement-scheduler.ini", record, true);
     g_free(previous); g_free(current);
 out:
     g_free(boot); g_key_file_unref(record);
@@ -3153,7 +3161,7 @@ int latcd_retirement_queue_handoff(LatcdRetirementQueue *queue, const char *reas
     int status = read_file(gc, "retirement-handoff.ini", RECORD_LIMIT, &previous, &size);
     g_free(previous);
     if (status < 0) goto out;
-    result = write_record(gc, "retirement-handoff.ini", record);
+    result = write_record_kind(gc, "retirement-handoff.ini", record, true);
 out:
     if (gc >= 0) close(gc);
     if (root >= 0) close(root);

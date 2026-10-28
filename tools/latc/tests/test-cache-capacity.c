@@ -229,11 +229,15 @@ static void test_metadata(void)
     latcd_cache_capacity_metadata_finish(&first, true, false);
     assert(capacity.metadata_committed == 3 && !capacity.metadata_reserved);
     latcd_cache_capacity_metadata_bind(&capacity, 3);
+    assert(latcd_cache_capacity_metadata_schedule_begin(directory, "record.ini", 4, &first) < 0);
+    assert(capacity.ready && capacity.metadata_committed == 3 && !capacity.metadata_reserved);
     assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 4, &first));
     assert(!capacity.ready && capacity.metadata_reserved == 4);
     put(record, "1234");
     latcd_cache_capacity_metadata_finish(&first, true, false);
     assert(capacity.metadata_committed == 4);
+    assert(latcd_cache_capacity_metadata_schedule_begin(directory, "record.ini", 1, &first) < 0);
+    assert(!capacity.ready && capacity.metadata_committed == 4 && !capacity.metadata_reserved);
     latcd_cache_capacity_metadata_bind(&capacity, 100);
     assert(latcd_cache_capacity_metadata_begin(directory, "../escape", 1, &first) < 0);
     assert(latcd_cache_capacity_metadata_begin(directory, "new-while-closed", 1, &first) < 0);
