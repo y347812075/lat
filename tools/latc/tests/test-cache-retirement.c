@@ -822,17 +822,24 @@ static void test_round_cursor(void)
     assert(latcd_retirement_page_select((const char *const *)many->pdata, many->len,
                                         page.next_cursor, &tail) == 1);
     assert(tail.count == 2 && !strcmp(tail.next_cursor, "object-129"));
+    char selected[128][138];
+    assert(latcd_retirement_page_names((const char *const *)many->pdata, many->len,
+                                       &tail, selected) == 2);
+    assert(!strcmp(selected[0], "object-128") && !strcmp(selected[1], "object-129"));
     LatcdRetirementPageDeadline deadlines[2] = {
         {"a", 10, 1, 0, 0, 0}, {"b", 20, 1, 0, 0, 0}
     };
     assert(latcd_retirement_page_observe(deadlines, 2, "a", 30) == 0);
     assert(deadlines[0].deadline == 30);
     assert(latcd_retirement_page_observe(deadlines, 2, "c", 40) == 1);
-    char selected[128][138];
-    LatcdRetirementPage copy = { .count = 2 };
+    LatcdRetirementPage copy = { .next_cursor = "b", .count = 2 };
     const char *copy_names[] = {"a", "b", "c"};
     assert(latcd_retirement_page_names(copy_names, 3, &copy, selected) == 2);
     assert(!strcmp(selected[0], "a") && !strcmp(selected[1], "b"));
+    g_strlcpy(copy.next_cursor, "missing", sizeof(copy.next_cursor));
+    assert(latcd_retirement_page_names(copy_names, 3, &copy, selected) < 0);
+    g_strlcpy(copy.next_cursor, "a", sizeof(copy.next_cursor));
+    assert(latcd_retirement_page_names(copy_names, 3, &copy, selected) < 0);
     LatcdRetirementPageState state = {
         .cache_device = 1, .cache_inode = 2, .grace_us = 3,
         .boot = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", .cursor = "b", .count = 2,

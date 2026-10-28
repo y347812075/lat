@@ -420,17 +420,22 @@ int latcd_retirement_page_names(const char *const *names, size_t count,
                                 char selected[128][138])
 {
     if (!names || !page || !selected || page->count > 128) return -1;
-    unsigned copied = 0;
+    if (!page->count) return page->next_cursor[0] ? -1 : 0;
     const char *after = NULL;
+    size_t end = count;
     for (size_t i = 0; i < count; i++) {
         if (!names[i]) return -1;
         if (after && strcmp(names[i], after) <= 0) return -1;
+        if (!strcmp(names[i], page->next_cursor)) end = i;
         after = names[i];
     }
-    for (size_t i = 0; i < count && copied < page->count; i++) {
-        g_strlcpy(selected[copied++], names[i], 138);
+    if (end == count || end + 1 < page->count) return -1;
+    size_t start = end + 1 - page->count;
+    for (unsigned i = 0; i < page->count; i++) {
+        if (strlen(names[start + i]) >= sizeof(selected[i])) return -1;
+        g_strlcpy(selected[i], names[start + i], sizeof(selected[i]));
     }
-    return copied;
+    return page->count;
 }
 
 int latcd_retirement_page_state_valid(const LatcdRetirementPageState *state)
