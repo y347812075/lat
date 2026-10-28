@@ -67,14 +67,14 @@ int latcd_retirement_page_state_store(const char *root,
                                       char *error, size_t error_size);
 int latcd_retirement_page_state_load(const char *root, LatcdRetirementPageState *state,
                                      char *error, size_t error_size);
-/* Runtime compatibility check for a loaded page. A different boot or grace
- * invalidates retry/attempt ages; callers must rescan rather than reuse them. */
+/* now_us is a current CLOCK_BOOTTIME sample for boot. A different boot/grace
+ * or a future cutoff invalidates the page; callers must rescan. */
 int latcd_retirement_page_state_compatible(const LatcdRetirementPageState *state,
-                                           const char *boot, uint64_t grace_us);
+                                           const char *boot, uint64_t grace_us, uint64_t now_us);
 /* Load and validate a page for the current boot/grace without consuming it.
  * Returns 1 when absent, 0 when usable, -1 when unsafe/incompatible. */
 int latcd_retirement_page_state_resume(const char *root, const char *boot,
-                                       uint64_t grace_us, LatcdRetirementPageState *state,
+                                       uint64_t grace_us, uint64_t now_us, LatcdRetirementPageState *state,
                                        char *error, size_t error_size);
 /* Build a bounded page plan from the complete sorted candidate key set. The
  * input remains intact for later pages; entries outside the page are omitted. */

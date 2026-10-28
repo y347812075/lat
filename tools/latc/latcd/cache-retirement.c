@@ -588,19 +588,20 @@ out:
 }
 
 int latcd_retirement_page_state_compatible(const LatcdRetirementPageState *state,
-                                           const char *boot, uint64_t grace_us)
+                                           const char *boot, uint64_t grace_us, uint64_t now_us)
 {
-    return state && boot && grace_us && !latcd_retirement_page_state_valid(state) &&
+    return state && boot && grace_us && now_us && !latcd_retirement_page_state_valid(state) &&
+        state->round_cutoff <= now_us &&
         !strcmp(state->boot, boot) && state->grace_us == grace_us ? 0 : 1;
 }
 
 int latcd_retirement_page_state_resume(const char *root, const char *boot,
-                                       uint64_t grace_us, LatcdRetirementPageState *state,
+                                       uint64_t grace_us, uint64_t now_us, LatcdRetirementPageState *state,
                                        char *error, size_t error_size)
 {
     int result = latcd_retirement_page_state_load(root, state, error, error_size);
     if (result <= 0 && result == 0 &&
-        latcd_retirement_page_state_compatible(state, boot, grace_us)) {
+        latcd_retirement_page_state_compatible(state, boot, grace_us, now_us)) {
         memset(state, 0, sizeof(*state));
         return fail(error, error_size, "retirement page state incompatible with runtime");
     }
