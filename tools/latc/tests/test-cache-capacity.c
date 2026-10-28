@@ -105,6 +105,17 @@ static void test_metadata(void)
     assert(latcd_cache_capacity_scan(&capacity, root, NULL, 0) < 0);
     latcd_cache_capacity_metadata_finish(&first, false, false);
     assert(!capacity.metadata_reserved && capacity.metadata_committed == 5);
+    char *unregistered = g_build_filename(store, "unregistered.ini", NULL);
+    put(unregistered, "123");
+    struct stat unexpected;
+    assert(!stat(unregistered, &unexpected));
+    assert(latcd_cache_capacity_metadata_remove(directory, "unregistered.ini", unexpected.st_dev,
+                                                 unexpected.st_ino) < 0);
+    assert(!capacity.ready && capacity.metadata_committed == 5 && !access(unregistered, F_OK));
+    assert(!unlink(unregistered));
+    g_free(unregistered);
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    latcd_cache_capacity_metadata_bind(&capacity, 10);
     struct stat original;
     assert(!stat(record, &original));
     assert(!latcd_cache_capacity_metadata_begin(directory, "record.ini", 3, &first));

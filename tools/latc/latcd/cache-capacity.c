@@ -804,6 +804,18 @@ int latcd_cache_capacity_metadata_remove(int directory, const char *name,
         errno = EBUSY;
         goto out;
     }
+    GHashTableIter iterator;
+    gpointer watch, watched_key;
+    bool inventoried = false;
+    g_hash_table_iter_init(&iterator, capacity->state_files);
+    while (g_hash_table_iter_next(&iterator, &watch, &watched_key)) {
+        if (!strcmp(watched_key, key)) { inventoried = true; break; }
+    }
+    if (!inventoried) {
+        capacity->ready = false;
+        errno = ESTALE;
+        goto out;
+    }
     g_hash_table_add(capacity->state_expected, g_strdup(key));
     if (fstatat(directory, name, &st, AT_SYMLINK_NOFOLLOW) ||
         !S_ISREG(st.st_mode) || st.st_uid != geteuid() || st.st_nlink != 1 ||
@@ -816,8 +828,6 @@ int latcd_cache_capacity_metadata_remove(int directory, const char *name,
         result = 0;
     }
     check_changes(capacity);
-    GHashTableIter iterator;
-    gpointer watch, watched_key;
     g_hash_table_iter_init(&iterator, capacity->state_files);
     while (g_hash_table_iter_next(&iterator, &watch, &watched_key)) {
         if (strcmp(watched_key, key)) continue;
