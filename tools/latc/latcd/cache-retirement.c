@@ -2387,7 +2387,7 @@ struct LatcdRetirementQueue {
     char *root;
     uint64_t grace, epoch;
     unsigned visited;
-    bool aggregating;
+    bool aggregating, aggregation_verified;
     DIR *cursor;
     int discovery_watch;
     struct stat discovery_store;
@@ -2458,7 +2458,7 @@ int latcd_retirement_queue_page_plan(const LatcdRetirementQueue *queue, const ch
 int latcd_retirement_queue_aggregated_page(const LatcdRetirementQueue *queue,
                                           LatcdRetirementPageState *state)
 {
-    if (!queue || !state || queue->cursor || !queue->aggregating) return -1;
+    if (!queue || !state || queue->cursor || !queue->aggregation_verified) return -1;
     memset(state, 0, sizeof(*state));
     GList *keys = g_hash_table_get_keys(queue->discovered);
     keys = g_list_sort(keys, (GCompareFunc)strcmp);
@@ -2633,6 +2633,7 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         queue->complete = false;
         queue->visited = 0;
         queue->aggregating = false;
+        queue->aggregation_verified = false;
         g_hash_table_remove_all(queue->discovered);
         g_hash_table_remove_all(queue->discovered_keys);
         g_hash_table_remove_all(queue->confirmed_keys);
@@ -2702,9 +2703,8 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         queue->epoch++;
         result = 1;
     }
-    if (!result && (g_hash_table_size(queue->discovered_keys) !=
-                    g_hash_table_size(queue->confirmed_keys) ||
-                    g_hash_table_size(queue->discovered_keys) > 128)) result = -1;
+    if (!result && g_hash_table_size(queue->discovered_keys) !=
+                   g_hash_table_size(queue->confirmed_keys)) result = -1;
     if (!result) {
         GHashTableIter iterator;
         gpointer value;
@@ -2716,6 +2716,8 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
             }
         }
     }
+    if (!result) queue->aggregation_verified = true;
+    if (!result && g_hash_table_size(queue->discovered_keys) > 128) result = -1;
     if (!result && *queue->active.name &&
         !g_hash_table_contains(queue->discovered, queue->active.name) &&
         g_hash_table_size(queue->discovered) >= 128) result = -1;

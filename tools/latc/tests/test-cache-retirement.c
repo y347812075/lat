@@ -2470,6 +2470,8 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
             queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
         } while (queued > 0);
         assert(queued < 0 && !stats.complete);
+        LatcdRetirementPageState invalid_page;
+        assert(latcd_retirement_queue_aggregated_page(queue, &invalid_page) < 0);
         LatcdRetirementAttempt rejected;
         assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &rejected));
         do {
