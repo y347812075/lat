@@ -225,6 +225,10 @@ LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grac
  * persist progress; callers must rescan after any failure. */
 int latcd_retirement_queue_diagnostic_round(LatcdRetirementQueue *queue,
     const char *boot, uint64_t cutoff, const char *after);
+/* Resume diagnostic discovery from durable page state. Requires the owner
+ * lease; a missing or incompatible state is never treated as a new round. */
+int latcd_retirement_queue_diagnostic_resume(LatcdRetirementQueue *queue,
+                                              char *error, size_t error_size);
 /* Diagnostic only: number of distinct object keys seen in the current
  * first-pass discovery. Zero outside an active incomplete page scan. */
 unsigned latcd_retirement_queue_discovered_keys(const LatcdRetirementQueue *queue);

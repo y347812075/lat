@@ -2496,6 +2496,26 @@ int latcd_retirement_queue_diagnostic_round(LatcdRetirementQueue *queue,
     return 0;
 }
 
+int latcd_retirement_queue_diagnostic_resume(LatcdRetirementQueue *queue,
+                                              char *error, size_t error_size)
+{
+    if (!queue || queue->cursor || queue->complete || queue->diagnostic_cutoff || queue->epoch)
+        return fail(error, error_size, "retirement round resume requires a new queue");
+    char *boot = NULL;
+    uint64_t now = 0;
+    LatcdRetirementPageState state;
+    int result = -1;
+    if (retirement_clock(&boot, &now) ||
+        latcd_retirement_page_state_resume(queue->root, boot, queue->grace, now,
+                                           &state, error, error_size) ||
+        latcd_retirement_queue_diagnostic_round(queue, state.boot, state.round_cutoff,
+                                                state.cursor)) goto out;
+    result = 0;
+out:
+    g_free(boot);
+    return result ? fail(error, error_size, "cannot resume retirement discovery round") : 0;
+}
+
 void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
 {
     if (!queue) return;

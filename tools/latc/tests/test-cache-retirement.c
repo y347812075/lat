@@ -3062,6 +3062,48 @@ static void test_queue_overflow_fixture(void)
     LatcdRetirementAttempt diagnostic_attempt;
     assert(!latcd_retirement_queue_take(diagnostic, UINT64_MAX, &diagnostic_attempt));
     latcd_retirement_queue_free(diagnostic);
+    diagnostic = latcd_retirement_queue_new(root, 100);
+    assert(latcd_retirement_queue_diagnostic_resume(diagnostic, error, sizeof(error)) < 0);
+    latcd_retirement_queue_free(diagnostic);
+    struct stat round_cache;
+    assert(!stat(root, &round_cache));
+    first_page.cache_device = round_cache.st_dev;
+    first_page.cache_inode = round_cache.st_ino;
+    first_page.grace_us = 100;
+    first_page.round_cutoff = cutoff;
+    g_strlcpy(first_page.boot, boot, sizeof(first_page.boot));
+    assert(!latcd_retirement_page_state_store(root, &first_page, error, sizeof(error)));
+    diagnostic = latcd_retirement_queue_new(root, 101);
+    assert(latcd_retirement_queue_diagnostic_resume(diagnostic, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_queue_take(diagnostic, UINT64_MAX, &diagnostic_attempt));
+    latcd_retirement_queue_free(diagnostic);
+    diagnostic = latcd_retirement_queue_new(root, 100);
+    assert(!latcd_retirement_queue_diagnostic_resume(diagnostic, error, sizeof(error)));
+    assert(latcd_retirement_queue_diagnostic_resume(diagnostic, error, sizeof(error)) < 0);
+    do {
+        diagnostic_result = latcd_retirement_queue_step(diagnostic, 32, 10000,
+                                                         &diagnostic_stats, error, sizeof(error));
+    } while (diagnostic_result > 0);
+    assert(diagnostic_result < 0 && !diagnostic_stats.complete);
+    assert(!latcd_retirement_queue_aggregated_page(diagnostic, &second_page));
+    assert(second_page.count == 4 && strcmp(first_page.cursor, second_page.entries[0].name) < 0);
+    assert(!latcd_retirement_queue_take(diagnostic, UINT64_MAX, &diagnostic_attempt));
+    latcd_retirement_queue_free(diagnostic);
+    char *different_boot = g_uuid_string_random();
+    g_strlcpy(first_page.boot, different_boot, sizeof(first_page.boot));
+    assert(!latcd_retirement_page_state_store(root, &first_page, error, sizeof(error)));
+    diagnostic = latcd_retirement_queue_new(root, 100);
+    assert(latcd_retirement_queue_diagnostic_resume(diagnostic, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_queue_take(diagnostic, UINT64_MAX, &diagnostic_attempt));
+    latcd_retirement_queue_free(diagnostic);
+    g_free(different_boot);
+    char *round_path = g_build_filename(root, ".gc", "retirement-page.ini", NULL);
+    put(round_path, "invalid\n");
+    diagnostic = latcd_retirement_queue_new(root, 100);
+    assert(latcd_retirement_queue_diagnostic_resume(diagnostic, error, sizeof(error)) < 0);
+    latcd_retirement_queue_free(diagnostic);
+    assert(!unlink(round_path));
+    g_free(round_path);
     diagnostic = latcd_retirement_queue_new(root, 0);
     assert(!latcd_retirement_queue_diagnostic_round(diagnostic, boot, cutoff, first_page.cursor));
     do {
