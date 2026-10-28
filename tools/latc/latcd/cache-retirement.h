@@ -147,9 +147,10 @@ int latcd_retirement_tombstone(const char *root, const char *source,
                                const char *name, int object_fd, const char *evidence,
                                char *error, size_t error_size);
 
-/* The caller owns the cache management lease; prepare/finish also require the
- * source commit latch. Recovery may durably complete an exactly bound intent
- * for an already-missing non-current path. It never authorizes file removal. */
+/* The caller owns the cache management lease and holds roots SH through
+ * prepare, current publication and finish; it also holds the source commit
+ * latch. Recovery may durably complete an exactly bound intent for an
+ * already-missing non-current path. It never authorizes file removal. */
 int latcd_retirement_prepare(const char *root, const char *source,
                             const char *next, size_t next_size, const char *objects,
                             char **transaction, char *error, size_t error_size);
