@@ -3959,8 +3959,10 @@ static int cache_contains_tbset(const LatcdConfig *config,
     char hex[65];
     digest_hex(digest, hex);
     LatcdCurrentManifest manifest = {0};
+    pthread_mutex_lock(&cache_lock);
     int manifest_valid = !current_manifest_read(config, hex, &manifest) &&
                          *manifest.tbset;
+    pthread_mutex_unlock(&cache_lock);
     char *path = manifest_valid ?
         g_build_filename(config->cache_dir, manifest.tbset, NULL) : NULL;
     int valid = !lat_tb_key_set_read_file(tbset, digest, &requested,
@@ -3970,13 +3972,16 @@ static int cache_contains_tbset(const LatcdConfig *config,
                 !lat_tb_key_set_difference(&requested, &published, &missing,
                                             error, sizeof(error)) &&
                 !missing.count;
+    LatcdCurrentManifest latest = {0};
     pthread_mutex_lock(&cache_lock);
+    bool unchanged = !current_manifest_read(config, hex, &latest) &&
+        current_manifest_equal(&manifest, &latest);
     char *module_path = manifest_valid ? g_build_filename(
         config->cache_dir, manifest.module, NULL) : NULL;
     char *native_path = manifest_valid ? g_build_filename(
         config->cache_dir, manifest.native, NULL) : NULL;
     LatAotModuleInfoV2 info;
-    valid = valid && cached_module_inspect(module_path, digest, &info) &&
+    valid = valid && unchanged && cached_module_inspect(module_path, digest, &info) &&
             !access(native_path, R_OK);
     pthread_mutex_unlock(&cache_lock);
     g_free(native_path);
@@ -3985,6 +3990,7 @@ static int cache_contains_tbset(const LatcdConfig *config,
     lat_tb_key_set_destroy(&published);
     lat_tb_key_set_destroy(&missing);
     current_manifest_clear(&manifest);
+    current_manifest_clear(&latest);
     g_free(path);
     return valid;
 }
