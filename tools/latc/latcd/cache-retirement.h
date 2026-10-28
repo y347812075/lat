@@ -74,8 +74,8 @@ int latcd_retirement_page_state_load(const char *root, LatcdRetirementPageState 
 int latcd_retirement_page_round_begin(const char *root, uint64_t grace_us,
                                       LatcdRetirementPageState *state,
                                       char *error, size_t error_size);
-/* now_us is a current CLOCK_BOOTTIME sample for boot. A different boot/grace
- * or a future cutoff invalidates the page; callers must rescan. */
+/* now_us is a current CLOCK_BOOTTIME sample for boot. A different boot/grace,
+ * future cutoff/enqueue or retry beyond the maximum backoff invalidates it. */
 int latcd_retirement_page_state_compatible(const LatcdRetirementPageState *state,
                                            const char *boot, uint64_t grace_us, uint64_t now_us);
 /* Load and validate a page for the current boot/grace without consuming it.

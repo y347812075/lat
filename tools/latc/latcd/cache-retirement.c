@@ -26,6 +26,8 @@
 
 #define MANIFEST_LIMIT 4096
 #define RECORD_LIMIT 65536
+#define RETIREMENT_BUSY_MIN_US UINT64_C(60000000)
+#define RETIREMENT_BUSY_MAX_US UINT64_C(3600000000)
 
 static bool object_name_valid(const char *source, const char *name)
 {
@@ -645,9 +647,16 @@ out:
 int latcd_retirement_page_state_compatible(const LatcdRetirementPageState *state,
                                            const char *boot, uint64_t grace_us, uint64_t now_us)
 {
-    return state && boot && grace_us && now_us && !latcd_retirement_page_state_valid(state) &&
-        state->round_cutoff <= now_us &&
-        !strcmp(state->boot, boot) && state->grace_us == grace_us ? 0 : 1;
+    if (!state || !boot || !grace_us || !now_us || latcd_retirement_page_state_valid(state) ||
+        state->round_cutoff > now_us || strcmp(state->boot, boot) || state->grace_us != grace_us)
+        return 1;
+    for (unsigned i = 0; i < state->count; i++) {
+        const LatcdRetirementPageDeadline *entry = &state->entries[i];
+        if (entry->enqueued > now_us ||
+            (entry->retry_at > now_us && entry->retry_at - now_us > RETIREMENT_BUSY_MAX_US))
+            return 1;
+    }
+    return 0;
 }
 
 int latcd_retirement_page_state_resume(const char *root, const char *boot,
@@ -2439,9 +2448,6 @@ typedef struct RetirementCandidate {
     uint64_t last_attempt, retry_at;
     unsigned busy_count;
 } RetirementCandidate;
-
-#define RETIREMENT_BUSY_MIN_US UINT64_C(60000000)
-#define RETIREMENT_BUSY_MAX_US UINT64_C(3600000000)
 
 struct LatcdRetirementQueue {
     char *root;

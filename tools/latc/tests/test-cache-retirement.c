@@ -948,8 +948,29 @@ static void test_round_cursor(void)
         "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", state.grace_us, 4) == 1);
     assert(latcd_retirement_page_state_compatible(&loaded, state.boot,
         state.grace_us + 1, 4) == 1);
+    loaded.entries[0].enqueued = 5;
+    assert(latcd_retirement_page_state_compatible(&loaded, state.boot, state.grace_us, 4) == 1);
+    loaded.entries[0].enqueued = 1;
+    loaded.entries[0].retry_at = UINT64_C(3600000004);
+    assert(latcd_retirement_page_state_compatible(&loaded, state.boot, state.grace_us, 4) == 0);
+    loaded.entries[0].retry_at++;
+    assert(latcd_retirement_page_state_compatible(&loaded, state.boot, state.grace_us, 4) == 1);
+    loaded.entries[0].retry_at = 0;
     assert(latcd_retirement_page_state_resume(page_root, state.boot, state.grace_us,
                                               4, &loaded, page_error, sizeof(page_error)) == 0);
+    state.entries[0].enqueued = 5;
+    assert(!latcd_retirement_page_state_store(page_root, &state, page_error, sizeof(page_error)));
+    assert(latcd_retirement_page_state_resume(page_root, state.boot, state.grace_us,
+                                              4, &loaded, page_error, sizeof(page_error)) < 0);
+    assert(!loaded.round_cutoff && !loaded.count);
+    state.entries[0].enqueued = 1;
+    state.entries[0].retry_at = UINT64_C(3600000005);
+    assert(!latcd_retirement_page_state_store(page_root, &state, page_error, sizeof(page_error)));
+    assert(latcd_retirement_page_state_resume(page_root, state.boot, state.grace_us,
+                                              4, &loaded, page_error, sizeof(page_error)) < 0);
+    assert(!loaded.round_cutoff && !loaded.count);
+    state.entries[0].retry_at = 0;
+    assert(!latcd_retirement_page_state_store(page_root, &state, page_error, sizeof(page_error)));
     assert(latcd_retirement_page_state_resume(page_root, state.boot, state.grace_us,
                                               3, &loaded, page_error, sizeof(page_error)) < 0);
     assert(!loaded.round_cutoff && !loaded.count);
