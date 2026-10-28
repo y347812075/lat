@@ -271,6 +271,11 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record, 
 {
     gsize size;
     char *data = g_key_file_to_data(record, &size, NULL);
+    if (!size || size > RECORD_LIMIT) {
+        g_free(data);
+        errno = EFBIG;
+        return -1;
+    }
     LatcdMetadataReservation reservation;
     int reserved = scheduling ?
         latcd_cache_capacity_metadata_schedule_begin(directory, name, size, &reservation) :

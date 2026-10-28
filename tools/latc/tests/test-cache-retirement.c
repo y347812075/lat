@@ -182,6 +182,21 @@ static void test_crash(int phase, bool initial)
     g_free(current);
 }
 
+static void test_oversized_prepared(void)
+{
+    char *root = root_new(), error[256];
+    char *objects = g_strnfill(65536, 'x');
+    LatcdRetirementPublication *publication =
+        latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication);
+    assert(latcd_retirement_publication_prepare(publication, source, next, strlen(next),
+                                                 objects, error, sizeof(error)) < 0);
+    latcd_retirement_publication_close(publication);
+    unsigned recovered = 99;
+    assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)) && !recovered);
+    g_free(objects); remove_root(root); g_free(root);
+}
+
 static void test_unknown_and_corrupt(void)
 {
     char *root = root_new(), error[256];
@@ -3451,6 +3466,7 @@ int main(int argc, char **argv)
     }
     assert(argc == 1);
     test_queue_empty_store();
+    test_oversized_prepared();
     test_round_cursor();
     test_page_round_begin(NULL, false);
     test_round_directory_swap(false);
