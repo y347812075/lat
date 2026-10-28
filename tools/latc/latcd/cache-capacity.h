@@ -75,6 +75,9 @@ typedef struct LatcdMetadataReservation {
 } LatcdMetadataReservation;
 int latcd_cache_capacity_metadata_begin(int directory, const char *name, uint64_t bytes,
     LatcdMetadataReservation *reservation);
+/* Register a private metadata staging name before creation; cancel on collision. */
+int latcd_cache_capacity_metadata_stage(LatcdMetadataReservation *reservation, const char *name);
+void latcd_cache_capacity_metadata_unstage(LatcdMetadataReservation *reservation);
 /* replaced: rename/link installed the new record. leftover: temporary removal
  * or anonymous-file close could not be proved; charge its full reservation.
  * Caller serializes replacement of the same record. Installed metadata gets a

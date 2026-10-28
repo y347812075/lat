@@ -656,6 +656,39 @@ int latcd_cache_capacity_state_begin(int directory, const char *name, uint64_t b
     return record_begin(directory, name, bytes, reservation, true);
 }
 
+int latcd_cache_capacity_metadata_stage(LatcdMetadataReservation *reservation, const char *name)
+{
+    LatcdCacheCapacity *capacity = reservation->capacity;
+    if (!capacity) return 0;
+    if (reservation->state || reservation->staging || !name || !*name ||
+        strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, "..")) {
+        errno = EINVAL; return -1;
+    }
+    char *key = metadata_record_key(reservation->directory, name);
+    if (!key) { errno = EINVAL; return -1; }
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
+    bool valid = !g_hash_table_contains(capacity->state_expected, key);
+    if (valid) {
+        reservation->staging = key;
+        g_hash_table_add(capacity->state_expected, g_strdup(key));
+    }
+    pthread_mutex_unlock(&capacity->lock);
+    if (!valid) { g_free(key); errno = EBUSY; }
+    return valid ? 0 : -1;
+}
+
+void latcd_cache_capacity_metadata_unstage(LatcdMetadataReservation *reservation)
+{
+    LatcdCacheCapacity *capacity = reservation->capacity;
+    if (!capacity || !reservation->staging) return;
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
+    g_hash_table_remove(capacity->state_expected, reservation->staging);
+    g_clear_pointer(&reservation->staging, g_free);
+    pthread_mutex_unlock(&capacity->lock);
+}
+
 int latcd_cache_capacity_state_stage(LatcdMetadataReservation *reservation, const char *name)
 {
     LatcdCacheCapacity *capacity = reservation->capacity;

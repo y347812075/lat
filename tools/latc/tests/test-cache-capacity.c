@@ -80,6 +80,12 @@ static void test_metadata(void)
     assert(directory >= 0);
     assert(!latcd_cache_capacity_metadata_begin(directory, "next.ini", 5, &first));
     assert(capacity.metadata_reserved == 5);
+    assert(latcd_cache_capacity_metadata_stage(&first, "../bad") < 0);
+    assert(!latcd_cache_capacity_metadata_stage(&first, ".write-first"));
+    assert(latcd_cache_capacity_metadata_stage(&first, ".write-second") < 0);
+    latcd_cache_capacity_metadata_unstage(&first);
+    assert(!latcd_cache_capacity_metadata_stage(&first, ".write-second"));
+    latcd_cache_capacity_metadata_unstage(&first);
     assert(latcd_cache_capacity_metadata_begin(directory, "other.ini", 1, &second) < 0);
     assert(latcd_cache_capacity_scan(&capacity, root, NULL, 0) < 0);
     latcd_cache_capacity_metadata_finish(&first, false, false);

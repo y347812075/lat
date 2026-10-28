@@ -277,9 +277,11 @@ static int write_record(int directory, const char *name, GKeyFile *record)
         g_free(temporary);
         temporary = g_strdup_printf(".write-%s", uuid);
         g_free(uuid);
+        if (latcd_cache_capacity_metadata_stage(&reservation, temporary)) break;
         fd = openat(directory, temporary,
                     O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (fd >= 0 || errno != EEXIST) break;
+        latcd_cache_capacity_metadata_unstage(&reservation);
     }
     bool created = fd >= 0;
     bool replaced = false, leftover = false;
