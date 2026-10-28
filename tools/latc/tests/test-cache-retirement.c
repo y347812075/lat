@@ -978,6 +978,40 @@ static void test_tombstone_crash(const char *point, bool crash)
     remove_root(root); g_free(root);
 }
 
+static void test_page_state_write_fault(const char *point, bool crash)
+{
+    char *root = root_new(), error[256], *path = NULL;
+    struct stat cache;
+    assert(!stat(root, &cache));
+    LatcdRetirementPageState state = {
+        .cache_device = cache.st_dev, .cache_inode = cache.st_ino, .grace_us = 1,
+        .boot = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", .cursor = "a", .count = 1,
+        .entries = {{"a", 10, 1, 0, 0, 0}}
+    };
+    assert(!latcd_retirement_page_state_store(root, &state, error, sizeof(error)));
+    state.entries[0].deadline = 20;
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        char *fault = g_strdup_printf("%s:%s", crash ? "crash" : "error", point);
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", fault, 1));
+        int result = latcd_retirement_page_state_store(root, &state, error, sizeof(error));
+        assert(!crash && result < 0);
+        _exit(0);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child);
+    if (crash) assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    else assert(WIFEXITED(status) && !WEXITSTATUS(status));
+    LatcdRetirementPageState loaded;
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
+    assert(loaded.count == 1 && (loaded.entries[0].deadline == 10 ||
+                                 loaded.entries[0].deadline == 20));
+    path = g_build_filename(root, ".gc", "retirement-page.ini", NULL);
+    assert(g_file_test(path, G_FILE_TEST_IS_REGULAR));
+    g_free(path); remove_root(root); g_free(root);
+}
+
 static void assert_tombstone_status(const char *marker, const char *expected)
 {
     GKeyFile *record = g_key_file_new();
@@ -2816,6 +2850,12 @@ int main(int argc, char **argv)
     assert(argc == 1);
     test_queue_empty_store();
     test_round_cursor();
+    const char *page_faults[] = {"created", "partial-write", "file-synced",
+                                 "renamed", "directory-synced"};
+    for (unsigned i = 0; i < G_N_ELEMENTS(page_faults); i++) {
+        test_page_state_write_fault(page_faults[i], false);
+        test_page_state_write_fault(page_faults[i], true);
+    }
     test_queue_overflow_fixture();
     test_deletion_report(NULL, false);
     test_roots_latch();
