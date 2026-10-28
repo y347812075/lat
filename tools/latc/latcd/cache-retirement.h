@@ -156,6 +156,16 @@ int latcd_retirement_prepare(const char *root, const char *source,
                             char **transaction, char *error, size_t error_size);
 int latcd_retirement_finish(const char *root, const char *transaction,
                            char *error, size_t error_size);
+typedef struct LatcdRetirementPublication LatcdRetirementPublication;
+/* Caller holds source EX. The object retains roots SH until close. */
+LatcdRetirementPublication *latcd_retirement_publication_open(
+    const char *root, char *error, size_t error_size);
+int latcd_retirement_publication_prepare(LatcdRetirementPublication *publication,
+    const char *source, const char *next, size_t next_size, const char *objects,
+    char *error, size_t error_size);
+int latcd_retirement_publication_finish(LatcdRetirementPublication *publication,
+    char *error, size_t error_size);
+void latcd_retirement_publication_close(LatcdRetirementPublication *publication);
 int latcd_retirement_recover(const char *root, unsigned *recovered,
                             char *error, size_t error_size);
 

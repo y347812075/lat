@@ -2916,11 +2916,11 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     }
     source_lock_fd = lat_aot_v2_cache_source_lock(
         config->cache_dir, hex, LOCK_EX, false, error, error_size);
-    int roots_lock_fd = source_lock_fd < 0 ? -1 : latcd_retirement_roots_lock(
-        config->cache_dir, LOCK_SH, error, error_size);
+    LatcdRetirementPublication *publication = source_lock_fd < 0 ? NULL :
+        latcd_retirement_publication_open(config->cache_dir, error, error_size);
     pthread_mutex_lock(&cache_lock);
     bool latest_valid = !current_manifest_read(config, hex, &latest);
-    bool unchanged = source_lock_fd >= 0 && roots_lock_fd >= 0 && pinned && !lstat(module_path, &module_after) &&
+    bool unchanged = source_lock_fd >= 0 && publication && pinned && !lstat(module_path, &module_after) &&
         !lstat(native_path, &native_after) &&
         metadata_equal(&module_before, &module_after) &&
         metadata_equal(&native_before, &native_after) &&
@@ -2940,7 +2940,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     g_free(native_path);
     g_free(tbset_path);
     if (!unchanged || !module_sha256 || !native_sha256) {
-        if (roots_lock_fd >= 0) close(roots_lock_fd);
+        latcd_retirement_publication_close(publication);
         if (source_lock_fd >= 0) close(source_lock_fd);
         g_free(objects);
         g_free(module_sha256);
@@ -2955,7 +2955,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         int unavailable = lat_aot_v2_cache_object_available(path, error, error_size);
         g_free(path);
         if (unavailable) {
-            close(roots_lock_fd);
+            latcd_retirement_publication_close(publication);
             close(source_lock_fd);
             g_free(objects);
             g_free(module_sha256);
@@ -2973,7 +2973,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         ((previous.module_sha256 && strcmp(previous.module_sha256, module_sha256)) ||
          (previous.native_sha256 && strcmp(previous.native_sha256, native_sha256)))) {
         current_manifest_clear(&previous);
-        close(roots_lock_fd);
+        latcd_retirement_publication_close(publication);
         close(source_lock_fd);
         g_free(objects);
         g_free(module_sha256);
@@ -2985,7 +2985,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     char *temporary = g_build_filename(temporary_dir, "current-XXXXXX", NULL);
     int fd = g_mkstemp_full(temporary, O_RDWR | O_CLOEXEC, 0600);
     if (fd < 0) {
-        close(roots_lock_fd);
+        latcd_retirement_publication_close(publication);
         close(source_lock_fd);
         g_free(objects);
         g_free(module_sha256);
@@ -3031,7 +3031,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
                           strerror(errno));
         }
     }
-    char *transaction = NULL;
+    bool prepared = false;
     if (close(fd)) {
         leftover = true;
         if (!result) {
@@ -3040,9 +3040,10 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         }
     }
     char *final = g_strdup_printf("%s/%s.current", config->cache_dir, hex);
-    if (!result && latcd_retirement_prepare(config->cache_dir, hex,
-            contents->str, contents->len, objects, &transaction, error, error_size)) {
-        result = -1;
+    if (!result) {
+        if (latcd_retirement_publication_prepare(publication, hex,
+                contents->str, contents->len, objects, error, error_size)) result = -1;
+        else prepared = true;
     }
     g_string_free(contents, TRUE);
     g_free(objects);
@@ -3065,9 +3066,9 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         if (unlink(temporary) && errno != ENOENT) leftover = true;
     }
     latcd_cache_capacity_metadata_finish(&reservation, installed, leftover);
-    if (transaction) {
+    if (prepared) {
         char retirement_error[256] = {0};
-        if (latcd_retirement_finish(config->cache_dir, transaction,
+        if (latcd_retirement_publication_finish(publication,
                                     retirement_error, sizeof(retirement_error))) {
             /* current rename is the commit point. Recovery retains PREPARED. */
             fprintf(stderr, "latcd: %s; transaction retained for recovery\n",
@@ -3076,8 +3077,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         retirement_notify();
     }
     if (!result && crash && !strcmp(crash, "retired")) raise(SIGKILL);
-    g_free(transaction);
-    close(roots_lock_fd);
+    latcd_retirement_publication_close(publication);
     close(source_lock_fd);
     g_free(final);
     g_free(temporary);

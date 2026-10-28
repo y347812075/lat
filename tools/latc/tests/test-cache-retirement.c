@@ -742,6 +742,19 @@ static void test_roots_latch(void)
     clock_fault = 0;
     assert(!latcd_retirement_round_sample(root, round_boot, &cutoff, error, sizeof(error)));
     assert(g_uuid_string_is_valid(round_boot) && cutoff);
+    LatcdRetirementPublication *publication =
+        latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication);
+    assert(latcd_retirement_round_sample(root, round_boot, &cutoff, error, sizeof(error)) < 0);
+    assert(latcd_retirement_publication_finish(publication, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_publication_prepare(publication, source, next, strlen(next),
+                                                 NULL, error, sizeof(error)));
+    assert(latcd_retirement_publication_prepare(publication, source, next, strlen(next),
+                                                NULL, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
+    assert(latcd_retirement_round_sample(root, round_boot, &cutoff, error, sizeof(error)) < 0);
+    latcd_retirement_publication_close(publication);
+    assert(!latcd_retirement_round_sample(root, round_boot, &cutoff, error, sizeof(error)));
     exclusive = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error));
     assert(exclusive >= 0);
     LatcdRecoveryProgress progress;
@@ -753,7 +766,7 @@ static void test_roots_latch(void)
         step = latcd_recovery_step(recovery, 1, 1024, 10000, &progress, error, sizeof(error));
         assert(step >= 0);
     } while (step);
-    assert(progress.recovered == 1);
+    assert(progress.recovered == 2);
     latcd_recovery_close(recovery);
     g_free(current); g_free(transaction);
     remove_root(root); g_free(root);

@@ -2044,6 +2044,53 @@ int latcd_retirement_finish(const char *root, const char *transaction,
     return result ? fail(error, error_size, "cannot complete retirement transaction") : 0;
 }
 
+struct LatcdRetirementPublication {
+    char *root;
+    char *transaction;
+    int roots_fd;
+};
+
+LatcdRetirementPublication *latcd_retirement_publication_open(
+    const char *root, char *error, size_t error_size)
+{
+    int fd = latcd_retirement_roots_lock(root, LOCK_SH, error, error_size);
+    if (fd < 0) return NULL;
+    LatcdRetirementPublication *publication = g_new0(LatcdRetirementPublication, 1);
+    publication->root = g_strdup(root);
+    publication->roots_fd = fd;
+    return publication;
+}
+
+int latcd_retirement_publication_prepare(LatcdRetirementPublication *publication,
+    const char *source, const char *next, size_t next_size, const char *objects,
+    char *error, size_t error_size)
+{
+    if (!publication || publication->transaction)
+        return fail(error, error_size, "invalid retirement publication state");
+    return latcd_retirement_prepare(publication->root, source, next, next_size,
+                                    objects, &publication->transaction, error, error_size);
+}
+
+int latcd_retirement_publication_finish(LatcdRetirementPublication *publication,
+    char *error, size_t error_size)
+{
+    if (!publication || !publication->transaction)
+        return fail(error, error_size, "retirement publication not prepared");
+    int result = latcd_retirement_finish(publication->root, publication->transaction,
+                                         error, error_size);
+    if (!result) g_clear_pointer(&publication->transaction, g_free);
+    return result;
+}
+
+void latcd_retirement_publication_close(LatcdRetirementPublication *publication)
+{
+    if (!publication) return;
+    close(publication->roots_fd);
+    g_free(publication->transaction);
+    g_free(publication->root);
+    g_free(publication);
+}
+
 int latcd_retirement_recover(const char *root, unsigned *recovered,
                             char *error, size_t error_size)
 {
