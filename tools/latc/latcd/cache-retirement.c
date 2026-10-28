@@ -651,7 +651,7 @@ static int set_clock(GKeyFile *record, const char *prefix)
     return 0;
 }
 
-int latcd_retirement_prepare(const char *root, const char *source,
+static int retirement_prepare(const char *root, const char *source,
                             const char *next, size_t next_size, const char *objects,
                             char **transaction, char *error, size_t error_size)
 {
@@ -2038,7 +2038,7 @@ out:
     return result;
 }
 
-int latcd_retirement_finish(const char *root, const char *transaction,
+static int retirement_finish(const char *root, const char *transaction,
                            char *error, size_t error_size)
 {
     int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -2073,7 +2073,7 @@ int latcd_retirement_publication_prepare(LatcdRetirementPublication *publication
 {
     if (!publication || publication->transaction)
         return fail(error, error_size, "invalid retirement publication state");
-    return latcd_retirement_prepare(publication->root, source, next, next_size,
+    return retirement_prepare(publication->root, source, next, next_size,
                                     objects, &publication->transaction, error, error_size);
 }
 
@@ -2082,7 +2082,7 @@ int latcd_retirement_publication_finish(LatcdRetirementPublication *publication,
 {
     if (!publication || !publication->transaction)
         return fail(error, error_size, "retirement publication not prepared");
-    int result = latcd_retirement_finish(publication->root, publication->transaction,
+    int result = retirement_finish(publication->root, publication->transaction,
                                          error, error_size);
     if (!result) g_clear_pointer(&publication->transaction, g_free);
     return result;

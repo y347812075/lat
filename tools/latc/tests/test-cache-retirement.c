@@ -741,7 +741,7 @@ static void test_roots_latch(void)
     close(exclusive);
     /* A publisher retains SH through transaction completion; a future round
      * cutoff must not be sampled while that publisher is in flight. */
-    char *transaction = NULL, *current = current_path(root);
+    char *current = current_path(root);
     put(current, old);
     first = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error));
     assert(first >= 0);
@@ -749,14 +749,18 @@ static void test_roots_latch(void)
     uint64_t cutoff = 123;
     assert(latcd_retirement_round_sample(root, round_boot, &cutoff, error, sizeof(error)) < 0);
     assert(!*round_boot && !cutoff);
-    assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
-                                     &transaction, error, sizeof(error)));
+    LatcdRetirementPublication *publication =
+        latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication);
+    assert(!latcd_retirement_publication_prepare(publication, source, next, strlen(next),
+                                                 NULL, error, sizeof(error)));
     put(current, next);
     LatcdRecoveryCursor *recovery = latcd_recovery_open(root, false, error, sizeof(error));
     assert(recovery);
     assert(latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error)) < 0);
-    assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+    assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
     assert(latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error)) < 0);
+    latcd_retirement_publication_close(publication);
     close(first);
     clock_fault = 1;
     assert(latcd_retirement_round_sample(root, round_boot, &cutoff, error, sizeof(error)) < 0);
@@ -764,8 +768,7 @@ static void test_roots_latch(void)
     clock_fault = 0;
     assert(!latcd_retirement_round_sample(root, round_boot, &cutoff, error, sizeof(error)));
     assert(g_uuid_string_is_valid(round_boot) && cutoff);
-    LatcdRetirementPublication *publication =
-        latcd_retirement_publication_open(root, error, sizeof(error));
+    publication = latcd_retirement_publication_open(root, error, sizeof(error));
     assert(publication);
     assert(latcd_retirement_round_sample(root, round_boot, &cutoff, error, sizeof(error)) < 0);
     assert(latcd_retirement_publication_finish(publication, error, sizeof(error)) < 0);
@@ -800,7 +803,7 @@ static void test_roots_latch(void)
     unsigned recovered = 0;
     assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)));
     assert(recovered == 3);
-    g_free(current); g_free(transaction);
+    g_free(current);
     remove_root(root); g_free(root);
     root = root_new();
     char *name = g_strconcat(source, ".native", NULL);
@@ -1536,9 +1539,11 @@ static void test_recovery_cursor(int mutation, bool tombstones)
 
 static void test_recovery_entry_budget(void)
 {
-    char *root = root_new(), error[256], *transaction = NULL;
-    assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
-                                     &transaction, error, sizeof(error)));
+    char *root = root_new(), error[256];
+    LatcdRetirementPublication *publication = latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication && !latcd_retirement_publication_prepare(publication, source, next, strlen(next),
+                                                                 NULL, error, sizeof(error)));
+    latcd_retirement_publication_close(publication);
     char *store = g_build_filename(root, ".gc", "transactions", NULL);
     for (unsigned i = 0; i < 80; i++) {
         char *name = g_strdup_printf("%s/.write-%u", store, i);
@@ -1556,7 +1561,7 @@ static void test_recovery_entry_budget(void)
     } while (result > 0);
     assert(steps >= 27 && progress.visited == 81 && progress.recovered == 1 && !progress.hashed_bytes);
     latcd_recovery_close(cursor);
-    g_free(store); g_free(transaction); remove_root(root); g_free(root);
+    g_free(store); remove_root(root); g_free(root);
 }
 
 static void test_partial_generation_delete(void)
@@ -2042,7 +2047,7 @@ cleanup:
 
 static void test_transaction_root_admission(unsigned mutation, bool executor)
 {
-    char *root = root_new(), error[256], *transaction = NULL;
+    char *root = root_new(), error[256];
     char *names[6], *paths[6];
     const char *suffixes[] = {".so", ".native", ".tbset"};
     for (unsigned i = 0; i < 6; i++) {
@@ -2068,11 +2073,13 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
     }
     put(current, previous);
     char *evidence = latcd_retirement_capture_objects(root, source, (const char *const *)names, 6);
-    assert(evidence && !latcd_retirement_prepare(root, source, following, strlen(following), evidence,
-        &transaction, error, sizeof(error)));
+    LatcdRetirementPublication *publication = latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(evidence && publication && !latcd_retirement_publication_prepare(publication, source,
+        following, strlen(following), evidence, error, sizeof(error)));
     put(current, following);
-    if (mutation != 1) assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
-    char *record_path = g_build_filename(root, ".gc", "transactions", transaction, NULL);
+    if (mutation != 1) assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
+    latcd_retirement_publication_close(publication);
+    char *record_path = single_record(root);
     GKeyFile *record = g_key_file_new();
     assert(g_key_file_load_from_file(record, record_path, 0, NULL));
     if (mutation == 2) g_key_file_set_string(record, "transaction", "state", "UNKNOWN");
@@ -2602,7 +2609,7 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         g_free(receipt); g_free(marker);
     }
     g_free(raw); g_key_file_unref(record); g_free(record_path); g_free(evidence);
-    g_free(single); g_free(current); g_free(previous); g_free(following); g_free(transaction);
+    g_free(single); g_free(current); g_free(previous); g_free(following);
     for (unsigned i = 0; i < 6; i++) { g_free(paths[i]); g_free(names[i]); }
     remove_root(root); g_free(root);
 }
@@ -2879,7 +2886,7 @@ static void test_queue_overflow_fixture(void)
     const char *suffix[] = {".so", ".native", ".tbset"};
     for (unsigned i = 1; i <= 44; i++) {
         char *src = g_strdup_printf("%064x", i);
-        char *names[6], *paths[6], *transaction = NULL;
+        char *names[6], *paths[6];
         for (unsigned j = 0; j < 6; j++) {
             names[j] = j < 3 ? g_strconcat(src, suffix[j], NULL) :
                 g_strdup_printf("%s-%s%s", src, src, suffix[j - 3]);
@@ -2895,12 +2902,14 @@ static void test_queue_overflow_fixture(void)
         char *current = g_strdup_printf("%s/%s.current", root, src);
         put(current, previous);
         char *evidence = latcd_retirement_capture_objects(root, src, (const char *const *)names, 6);
-        assert(evidence && !latcd_retirement_prepare(root, src, next_manifest, strlen(next_manifest),
-            evidence, &transaction, error, sizeof(error)));
+        LatcdRetirementPublication *publication = latcd_retirement_publication_open(root, error, sizeof(error));
+        assert(evidence && publication && !latcd_retirement_publication_prepare(publication, src,
+            next_manifest, strlen(next_manifest), evidence, error, sizeof(error)));
         put(current, next_manifest);
-        assert(!latcd_retirement_finish(root, transaction, error, sizeof(error)));
+        assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
+        latcd_retirement_publication_close(publication);
         for (unsigned j = 0; j < 6; j++) { g_free(names[j]); g_free(paths[j]); }
-        g_free(transaction); g_free(evidence); g_free(current); g_free(previous);
+        g_free(evidence); g_free(current); g_free(previous);
         g_free(next_manifest); g_free(src);
     }
     LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 0);
