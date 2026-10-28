@@ -2128,6 +2128,28 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
             assert(queued >= 0);
         } while (queued);
         assert(stats.complete && stats.candidates == 3 && stats.oldest_due_wait_us > wait);
+        LatcdRetirementQueue *active_queue = latcd_retirement_queue_new(root, 0);
+        do {
+            queued = latcd_retirement_queue_step(active_queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        LatcdRetirementAttempt active_attempt;
+        assert(latcd_retirement_queue_take(active_queue, UINT64_MAX, &active_attempt) == 1);
+        assert(!unlink(record_path));
+        do {
+            queued = latcd_retirement_queue_step(active_queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.complete && stats.candidates == 1);
+        assert(!latcd_retirement_queue_defer(active_queue, &active_attempt, 0, false));
+        assert(!latcd_retirement_queue_take(active_queue, UINT64_MAX, &invalid));
+        do {
+            queued = latcd_retirement_queue_step(active_queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.complete && !stats.candidates);
+        latcd_retirement_queue_free(active_queue);
+        put(record_path, raw);
         put(record_path, "[transaction]\nstate=BROKEN\n");
         do {
             queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));

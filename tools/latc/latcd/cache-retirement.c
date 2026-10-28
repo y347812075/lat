@@ -2419,6 +2419,7 @@ int latcd_retirement_queue_defer(LatcdRetirementQueue *queue,
     uint64_t delay = busy ? MIN(RETIREMENT_BUSY_MIN_US << (candidate->busy_count - 1),
                                 RETIREMENT_BUSY_MAX_US) : 100000;
     candidate->retry_at = delay > UINT64_MAX - now_us ? UINT64_MAX : now_us + delay;
+    if (candidate->epoch != queue->epoch) queue->complete = false;
     latcd_recovery_close(queue->execution);
     queue->execution = NULL;
     memset(&queue->active, 0, sizeof(queue->active));
