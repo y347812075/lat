@@ -31,10 +31,18 @@ typedef struct LatcdRetirementPage {
     char next_cursor[138];
     unsigned count;
 } LatcdRetirementPage;
+typedef struct LatcdRetirementPageDeadline {
+    char name[138];
+    uint64_t deadline;
+} LatcdRetirementPageDeadline;
 /* Select the next stable-name page from a caller-provided sorted list. Names
  * must be valid object basenames. This is scheduling only, never admission. */
 int latcd_retirement_page_select(const char *const *names, size_t count,
                                  const char *after, LatcdRetirementPage *page);
+/* Aggregate a transaction deadline into a selected page. Objects outside the
+ * page are ignored; repeated observations retain the maximum deadline. */
+int latcd_retirement_page_observe(LatcdRetirementPageDeadline *deadlines,
+                                  size_t count, const char *name, uint64_t deadline);
 typedef struct LatcdRecoveryProgress {
     unsigned visited;
     unsigned recovered;

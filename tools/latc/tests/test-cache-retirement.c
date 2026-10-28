@@ -822,6 +822,10 @@ static void test_round_cursor(void)
                                         page.next_cursor, &tail) == 1);
     assert(tail.count == 2 && !strcmp(tail.next_cursor, "object-129"));
     g_ptr_array_unref(many);
+    LatcdRetirementPageDeadline deadlines[2] = {{"a", 10}, {"b", 20}};
+    assert(latcd_retirement_page_observe(deadlines, 2, "a", 30) == 0);
+    assert(deadlines[0].deadline == 30);
+    assert(latcd_retirement_page_observe(deadlines, 2, "c", 40) == 1);
 }
 
 static void test_tombstone_crash(const char *point, bool crash)

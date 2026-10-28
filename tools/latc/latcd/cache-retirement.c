@@ -402,6 +402,19 @@ int latcd_retirement_page_select(const char *const *names, size_t count,
     return page->count ? 1 : 0;
 }
 
+int latcd_retirement_page_observe(LatcdRetirementPageDeadline *deadlines,
+                                  size_t count, const char *name, uint64_t deadline)
+{
+    if (!deadlines || count > 128 || !name || !deadline) return -1;
+    for (size_t i = 0; i < count; i++) {
+        if (!strcmp(deadlines[i].name, name)) {
+            if (deadline > deadlines[i].deadline) deadlines[i].deadline = deadline;
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int set_clock(GKeyFile *record, const char *prefix)
 {
     char *boot = NULL;
