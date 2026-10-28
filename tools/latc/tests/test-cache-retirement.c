@@ -3040,12 +3040,17 @@ static void test_queue_empty_store(void)
     remove_root(root); g_free(root);
 }
 
+static gint compare_string_pointers(gconstpointer a, gconstpointer b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
 static void test_queue_overflow_fixture(void)
 {
     char *root = root_new(), error[256];
     const char *suffix[] = {".so", ".native", ".tbset"};
     simulated_boottime_us = 100;
-    for (unsigned i = 1; i <= 44; i++) {
+    for (unsigned i = 44; i > 0; i--) {
         char *src = g_strdup_printf("%064x", i);
         char *names[6], *paths[6];
         for (unsigned j = 0; j < 6; j++) {
@@ -3106,6 +3111,16 @@ static void test_queue_overflow_fixture(void)
     assert(diagnostic_result < 0 && !diagnostic_stats.complete);
     assert(!latcd_retirement_queue_aggregated_page(diagnostic, &first_page));
     assert(first_page.count == 128);
+    GPtrArray *expected = g_ptr_array_new_with_free_func(g_free);
+    for (unsigned i = 1; i <= 44; i++) {
+        char *src = g_strdup_printf("%064x", i);
+        for (unsigned j = 0; j < 3; j++)
+            g_ptr_array_add(expected, g_strconcat(src, suffix[j], NULL));
+        g_free(src);
+    }
+    g_ptr_array_sort(expected, compare_string_pointers);
+    for (unsigned i = 0; i < first_page.count; i++)
+        assert(!strcmp(first_page.entries[i].name, expected->pdata[i]));
     LatcdRetirementAttempt diagnostic_attempt;
     assert(!latcd_retirement_queue_take(diagnostic, UINT64_MAX, &diagnostic_attempt));
     latcd_retirement_queue_free(diagnostic);
@@ -3168,6 +3183,9 @@ static void test_queue_overflow_fixture(void)
     assert(diagnostic_result < 0 && !diagnostic_stats.complete);
     assert(!latcd_retirement_queue_aggregated_page(diagnostic, &second_page));
     assert(second_page.count == 4 && strcmp(first_page.cursor, second_page.entries[0].name) < 0);
+    for (unsigned i = 0; i < second_page.count; i++)
+        assert(!strcmp(second_page.entries[i].name, expected->pdata[128 + i]));
+    g_ptr_array_unref(expected);
     unsigned extended = 0;
     for (unsigned i = 0; i < first_page.count; i++) extended += first_page.entries[i].deadline == 200;
     for (unsigned i = 0; i < second_page.count; i++) extended += second_page.entries[i].deadline == 200;
