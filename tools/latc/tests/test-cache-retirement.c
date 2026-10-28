@@ -2037,6 +2037,10 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         assert(stats.due == 3 && stats.deferred == 3 && !stats.ready);
         assert(!stats.next_deadline_us && stats.next_attempt_us == actual_now + 60000000);
         assert(!latcd_retirement_queue_checkpoint(restored, error, sizeof(error)));
+        assert(latcd_retirement_queue_step(restored, 1, 10000, &stats,
+                                           error, sizeof(error)) == 1);
+        assert(!stats.complete);
+        assert(!latcd_retirement_queue_handoff(restored, "STOP", error, sizeof(error)));
         latcd_retirement_queue_free(restored);
         restored = latcd_retirement_queue_new(root, 0);
         assert(!latcd_retirement_queue_restore(restored, error, sizeof(error)));
