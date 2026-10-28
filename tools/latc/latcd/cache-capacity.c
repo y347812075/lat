@@ -183,7 +183,9 @@ static void check_changes(LatcdCacheCapacity *capacity)
             if (g_hash_table_contains(capacity->inventory_directories, watch)) {
                 if (capacity->inventory_active || event->mask &
                     (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED | IN_Q_OVERFLOW) ||
-                    (!event->len && (event->mask & IN_ATTRIB)))
+                    (!event->len && (event->mask & IN_ATTRIB)) ||
+                    ((event->mask & IN_ISDIR) &&
+                     (event->mask & (IN_DELETE | IN_MOVED_FROM))))
                     capacity->ready = false;
                 continue;
             }

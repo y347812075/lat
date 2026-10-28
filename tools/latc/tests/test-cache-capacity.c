@@ -303,6 +303,23 @@ static void test_metadata_subdirectory_replacement(void)
     g_free(store); g_free(old); g_free(gc); g_free(root);
 }
 
+static void test_new_metadata_subdirectory_move(void)
+{
+    char *root = g_dir_make_tmp("capacity-gc-new-subdir-XXXXXX", NULL);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "new-store", NULL);
+    char *old = g_build_filename(root, "moved-store", NULL);
+    assert(root && !mkdir(gc, 0700));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    assert(!mkdir(store, 0700) && latcd_cache_capacity_poll(&capacity));
+    assert(!rename(store, old) && !latcd_cache_capacity_poll(&capacity));
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    assert(!rmdir(old) && !rmdir(gc) && !rmdir(root));
+    g_free(store); g_free(old); g_free(gc); g_free(root);
+}
+
 static void test_metadata_changes(unsigned mutation)
 {
     char *root = g_dir_make_tmp("capacity-gc-change-XXXXXX", NULL);
@@ -521,6 +538,7 @@ int main(void)
     test_metadata();
     test_metadata_root_replacement();
     test_metadata_subdirectory_replacement();
+    test_new_metadata_subdirectory_move();
     for (unsigned mutation = 0; mutation < 3; mutation++) test_external_writer(mutation);
     char *root = g_dir_make_tmp("cache-capacity-XXXXXX", NULL), error[256];
     assert(root);
