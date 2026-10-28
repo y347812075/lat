@@ -143,12 +143,15 @@ static void test_crash(int phase, bool initial)
     pid_t child = fork();
     assert(child >= 0);
     if (!child) {
-        char error[256], *transaction = NULL;
-        assert(!latcd_retirement_prepare(root, source, next, strlen(next), NULL,
-                                         &transaction, error, sizeof(error)));
+        char error[256];
+        LatcdRetirementPublication *publication =
+            latcd_retirement_publication_open(root, error, sizeof(error));
+        assert(publication);
+        assert(!latcd_retirement_publication_prepare(publication, source, next, strlen(next), NULL,
+                                                     error, sizeof(error)));
         if (phase >= 1) put(current, next);
-        if (phase >= 2) assert(!latcd_retirement_finish(root, transaction,
-                                                       error, sizeof(error)));
+        if (phase >= 2) assert(!latcd_retirement_publication_finish(publication,
+                                                                   error, sizeof(error)));
         raise(SIGKILL);
         _exit(1);
     }
