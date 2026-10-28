@@ -822,7 +822,9 @@ static void test_round_cursor(void)
                                         page.next_cursor, &tail) == 1);
     assert(tail.count == 2 && !strcmp(tail.next_cursor, "object-129"));
     g_ptr_array_unref(many);
-    LatcdRetirementPageDeadline deadlines[2] = {{"a", 10}, {"b", 20}};
+    LatcdRetirementPageDeadline deadlines[2] = {
+        {"a", 10, 1, 0, 0, 0}, {"b", 20, 1, 0, 0, 0}
+    };
     assert(latcd_retirement_page_observe(deadlines, 2, "a", 30) == 0);
     assert(deadlines[0].deadline == 30);
     assert(latcd_retirement_page_observe(deadlines, 2, "c", 40) == 1);
@@ -831,6 +833,14 @@ static void test_round_cursor(void)
     const char *copy_names[] = {"a", "b", "c"};
     assert(latcd_retirement_page_names(copy_names, 3, &copy, selected) == 2);
     assert(!strcmp(selected[0], "a") && !strcmp(selected[1], "b"));
+    LatcdRetirementPageState state = {
+        .cache_device = 1, .cache_inode = 2, .grace_us = 3,
+        .boot = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", .cursor = "b", .count = 2,
+        .entries = {{"a", 10, 1, 0, 0, 0}, {"b", 20, 1, 0, 0, 0}}
+    };
+    assert(latcd_retirement_page_state_valid(&state) == 0);
+    state.entries[1].name[0] = 'a';
+    assert(latcd_retirement_page_state_valid(&state) < 0);
 }
 
 static void test_tombstone_crash(const char *point, bool crash)

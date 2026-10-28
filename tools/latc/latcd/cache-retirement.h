@@ -33,8 +33,17 @@ typedef struct LatcdRetirementPage {
 } LatcdRetirementPage;
 typedef struct LatcdRetirementPageDeadline {
     char name[138];
-    uint64_t deadline;
+    uint64_t deadline, enqueued, last_attempt, retry_at;
+    unsigned busy_count;
 } LatcdRetirementPageDeadline;
+typedef struct LatcdRetirementPageState {
+    uint64_t cache_device, cache_inode, grace_us;
+    char boot[37];
+    char cursor[138];
+    uint64_t sequence;
+    unsigned count;
+    LatcdRetirementPageDeadline entries[128];
+} LatcdRetirementPageState;
 /* Select the next stable-name page from a caller-provided sorted list. Names
  * must be valid object basenames. This is scheduling only, never admission. */
 int latcd_retirement_page_select(const char *const *names, size_t count,
@@ -48,6 +57,9 @@ int latcd_retirement_page_observe(LatcdRetirementPageDeadline *deadlines,
 int latcd_retirement_page_names(const char *const *names, size_t count,
                                 const LatcdRetirementPage *page,
                                 char selected[128][138]);
+/* Validate an in-memory page state. This does not serialize, discover, or
+ * authorize deletion; count is bounded and entries must be unique/sorted. */
+int latcd_retirement_page_state_valid(const LatcdRetirementPageState *state);
 typedef struct LatcdRecoveryProgress {
     unsigned visited;
     unsigned recovered;

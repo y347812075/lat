@@ -433,6 +433,23 @@ int latcd_retirement_page_names(const char *const *names, size_t count,
     return copied;
 }
 
+int latcd_retirement_page_state_valid(const LatcdRetirementPageState *state)
+{
+    if (!state || !state->cache_device || !state->cache_inode || !state->grace_us ||
+        strlen(state->boot) != 36 || !g_uuid_string_is_valid(state->boot) ||
+        state->count > 128 || (state->count && !state->cursor[0]) ||
+        (state->cursor[0] && strlen(state->cursor) >= sizeof(state->cursor))) return -1;
+    for (unsigned i = 0; i < state->count; i++) {
+        if (!state->entries[i].name[0] || !state->entries[i].deadline ||
+            !state->entries[i].enqueued || state->entries[i].last_attempt > state->sequence ||
+            state->entries[i].busy_count > 7) return -1;
+        if (i && strcmp(state->entries[i - 1].name, state->entries[i].name) >= 0) return -1;
+    }
+    if (state->count && strcmp(state->entries[state->count - 1].name, state->cursor) > 0)
+        return -1;
+    return 0;
+}
+
 static int set_clock(GKeyFile *record, const char *prefix)
 {
     char *boot = NULL;
