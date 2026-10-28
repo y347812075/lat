@@ -2208,7 +2208,7 @@ static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t si
         if (removed) continue;
         RetirementCandidate *candidate = g_hash_table_lookup(queue->discovered, key);
         if (!candidate) {
-            if (queue->aggregating) continue;
+            if (queue->aggregating) { valid = false; break; }
             if (g_hash_table_size(queue->discovered) >= 128) { valid = false; break; }
             candidate = g_new0(RetirementCandidate, 1);
             candidate->enqueued = now;
