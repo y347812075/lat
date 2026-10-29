@@ -1678,7 +1678,7 @@ static void test_retry_page_stage_crash(const char *point)
     remove_root(root); g_free(root);
 }
 
-static void test_retry_page_stage(void)
+static void test_retry_page_stage(bool crash_commit)
 {
     char *root = root_new(), error[256], *boot = NULL;
     simulated_boottime_us = 100;
@@ -1829,13 +1829,67 @@ static void test_retry_page_stage(void)
                                                        &completed_budget, page, error, sizeof(error)) &&
            page->completed == 1 && !page->intent_present &&
            !latcd_cache_capacity_recovery_finish(&completed));
+    assert(latcd_retirement_retry_page_commit(root, &completed_budget, error, sizeof(error)) < 0);
     assert(!latcd_retirement_retry_page_begin_unmatched(root, &completed_budget, error, sizeof(error)));
     assert(!latcd_retirement_retry_page_apply_unmatched(root, &completed_budget, error, sizeof(error)));
     assert(!latcd_retirement_retry_page_finish_unmatched(root, &completed_budget, error, sizeof(error)));
     assert(!latcd_retirement_retry_page_load(root, page, error, sizeof(error)) &&
            page->completed == 2 && !page->intent_present);
     assert(latcd_retirement_retry_page_begin_unmatched(root, &completed_budget, error, sizeof(error)) < 0);
+    pid_t commit_child = fork();
+    assert(commit_child >= 0);
+    if (!commit_child) {
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", "crash:file-synced", 1));
+        latcd_retirement_retry_page_commit(root, &completed_budget, error, sizeof(error));
+        _exit(1);
+    }
+    int commit_status;
+    assert(waitpid(commit_child, &commit_status, 0) == commit_child &&
+           WIFSIGNALED(commit_status) && WTERMSIG(commit_status) == SIGKILL);
     latcd_cache_capacity_close(&completed);
+    char *saved_shard = NULL; gsize saved_size = 0;
+    assert(g_file_get_contents(shard_path, &saved_shard, &saved_size, NULL));
+    saved_shard[0] ^= 1;
+    assert(g_file_set_contents(shard_path, saved_shard, saved_size, NULL));
+    LatcdCacheCapacity changed_capacity = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget changed_budget = {0};
+    assert(!latcd_cache_capacity_scan(&changed_capacity, root, error, sizeof(error)));
+    assert(!latcd_cache_capacity_recovery_begin(&changed_capacity));
+    latcd_cache_capacity_metadata_bind(&changed_capacity, UINT64_MAX);
+    assert(latcd_retirement_retry_page_restore_budget(root, &changed_capacity, UINT64_MAX, 100,
+                                                       &changed_budget, page, error, sizeof(error)) < 0 &&
+           latcd_cache_capacity_recovery_finish(&changed_capacity) < 0);
+    latcd_cache_capacity_close(&changed_capacity);
+    saved_shard[0] ^= 1;
+    assert(g_file_set_contents(shard_path, saved_shard, saved_size, NULL));
+    g_free(saved_shard);
+    completed = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
+    memset(&completed_budget, 0, sizeof(completed_budget));
+    assert(!latcd_cache_capacity_scan(&completed, root, error, sizeof(error)));
+    assert(!latcd_cache_capacity_recovery_begin(&completed));
+    latcd_cache_capacity_metadata_bind(&completed, UINT64_MAX);
+    assert(!latcd_retirement_retry_page_restore_budget(root, &completed, UINT64_MAX, 100,
+                                                       &completed_budget, page, error, sizeof(error)) &&
+           page->completed == 2 && !latcd_cache_capacity_recovery_finish(&completed));
+    if (!crash_commit) {
+        assert(!latcd_retirement_retry_page_commit(root, &completed_budget, error, sizeof(error)) &&
+               !completed_budget.capacity);
+    } else {
+    commit_child = fork();
+    assert(commit_child >= 0);
+    if (!commit_child) {
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", "crash:renamed", 1));
+        latcd_retirement_retry_page_commit(root, &completed_budget, error, sizeof(error));
+        _exit(1);
+    }
+    assert(waitpid(commit_child, &commit_status, 0) == commit_child &&
+           WIFSIGNALED(commit_status) && WTERMSIG(commit_status) == SIGKILL);
+    }
+    latcd_cache_capacity_close(&completed);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+           !strcmp(loaded.retry_cursor, second.name) && !loaded.count &&
+           loaded.sequence == state.sequence && !strcmp(loaded.committed_cursor, state.committed_cursor));
+    assert(latcd_retirement_retry_page_load(root, page, error, sizeof(error)) < 0);
     GKeyFile *shard = g_key_file_new();
     assert(g_key_file_load_from_file(shard, shard_path, 0, NULL));
     g_key_file_set_uint64(shard, "schedule", "sequence", 4);
@@ -7877,7 +7931,8 @@ int main(int argc, char **argv)
     test_empty_round_advance_crash("file-synced");
     test_empty_round_advance_crash("renamed");
     test_empty_round_advance_crash("directory-synced");
-    test_retry_page_stage();
+    test_retry_page_stage(false);
+    test_retry_page_stage(true);
     test_retry_page_stage_crash("file-synced");
     test_retry_page_stage_crash("linked");
     test_retry_page_stage_crash("renamed");
