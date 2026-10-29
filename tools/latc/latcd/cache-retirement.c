@@ -1283,6 +1283,12 @@ static int retirement_schedule_access(const char *root, const char *boot,
             for (unsigned i = 0; i < check_page->count; i++) {
                 if (!strcmp(check_page->entries[i].name, name)) {
                     page_results[i] = 3;
+                    if (!check_page->committed_pending && seq <= check_page->sequence &&
+                        enqueued == check_page->entries[i].enqueued &&
+                        attempted == check_page->entries[i].last_attempt &&
+                        retry == check_page->entries[i].retry_at &&
+                        busy == check_page->entries[i].busy_count)
+                        page_results[i] = 4;
                     if (inventory && size < RETIREMENT_SCHEDULE_RECORD_BYTES)
                         inventory->undersized_member = true;
                     break;
@@ -1610,7 +1616,8 @@ int latcd_retirement_page_budget_estimate(const LatcdRetirementPageState *page,
         }
         if (!results[i]) missing++;
         else if (results[i] == LATCD_RETIREMENT_RESULT_DONE ||
-                 results[i] == LATCD_RETIREMENT_RESULT_DEFERRED) present++;
+                 results[i] == LATCD_RETIREMENT_RESULT_DEFERRED ||
+                 (!page->committed_pending && results[i] == 4)) present++;
         else { errno = EINVAL; return -1; }
     }
     if (present > inventory->occupied_slots ||

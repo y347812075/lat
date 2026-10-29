@@ -156,7 +156,8 @@ int latcd_retirement_schedule_load_result(const char *root, const char *boot,
 int latcd_retirement_schedule_check_page(const char *root, uint64_t now_us,
                                     const LatcdRetirementPageState *page,
                                     char *error, size_t error_size);
-/* Diagnostic snapshot only: 0 absent, 1 done, 2 deferred, 3 other record.
+/* Diagnostic snapshot only: 0 absent, 1 done, 2 deferred, 3 conflicting record,
+ * 4 matching prior scheduling snapshot requiring a new result.
  * Cleared on error.
  * Caller must revalidate under its scheduling lease before using any result. */
 int latcd_retirement_schedule_page_results(const char *root, uint64_t now_us,
