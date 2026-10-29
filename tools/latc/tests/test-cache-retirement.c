@@ -400,6 +400,34 @@ static void test_recovery_capacity_admission(int outcome)
     g_free(root);
 }
 
+static void test_metadata_target_revalidation(bool existing)
+{
+    char *root = root_new(), *gc = g_build_filename(root, ".gc", NULL);
+    char *path = g_build_filename(gc, "target.ini", NULL), error[256];
+    assert(!mkdir(gc, 0700));
+    if (existing) put(path, "original\n");
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    int dir = open(gc, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(dir >= 0);
+    LatcdMetadataReservation reservation;
+    assert(!latcd_cache_capacity_metadata_begin(dir, "target.ini", 128, &reservation));
+    assert(!latcd_cache_capacity_metadata_revalidate(&reservation));
+    if (existing) assert(!unlink(path));
+    put(path, "replacement\n");
+    assert(latcd_cache_capacity_metadata_revalidate(&reservation) < 0 && errno == ESTALE);
+    latcd_cache_capacity_metadata_finish(&reservation, false, false);
+    assert(!latcd_cache_capacity_poll(&capacity));
+    char *contents = NULL;
+    assert(g_file_get_contents(path, &contents, NULL, NULL) && !strcmp(contents, "replacement\n"));
+    g_free(contents);
+    close(dir);
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    g_free(path); g_free(gc); remove_root(root); g_free(root);
+}
+
 static void test_oversized_prepared(void)
 {
     char *root = root_new(), error[256];
@@ -8514,6 +8542,8 @@ int main(int argc, char **argv)
     }
     for (int outcome = 0; outcome < 3; outcome++)
         test_recovery_capacity_admission(outcome);
+    test_metadata_target_revalidation(false);
+    test_metadata_target_revalidation(true);
     test_unknown_and_corrupt();
     test_reboot();
     for (unsigned replace = 0; replace < 2; replace++)

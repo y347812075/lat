@@ -434,6 +434,7 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record,
     if (record_write_fault("written") || fchmod(fd, 0400) ||
         record_write_fault("chmod") || fsync(fd) ||
         record_write_fault("file-synced")) goto close_out;
+    if (latcd_cache_capacity_metadata_revalidate(&reservation)) goto close_out;
     if (anonymous) {
         char descriptor[64];
         snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", fd);

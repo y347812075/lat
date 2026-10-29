@@ -178,6 +178,8 @@ void latcd_cache_capacity_metadata_unstage(LatcdMetadataReservation *reservation
  * only existing nonempty metadata can reserve for recovery completion. No scan here. */
 void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
     bool replaced, bool leftover);
+/* Revalidate the target before replacement; this is not an atomic CAS. */
+int latcd_cache_capacity_metadata_revalidate(LatcdMetadataReservation *reservation);
 /* Remove an inventoried .gc regular file bound to expected device/inode.
  * Same-name writers are serialized. Failed unlink/fsync retains the charge
  * and closes admission; owner lease and controlled namespace are required. */

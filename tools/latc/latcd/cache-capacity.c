@@ -1224,6 +1224,25 @@ int latcd_cache_capacity_state_stage(LatcdMetadataReservation *reservation, cons
     return valid ? 0 : -1;
 }
 
+int latcd_cache_capacity_metadata_revalidate(LatcdMetadataReservation *reservation)
+{
+    LatcdCacheCapacity *capacity = reservation->capacity;
+    if (!capacity) return 0;
+    char *name = g_path_get_basename(reservation->name);
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
+    struct stat current;
+    int status = fstatat(reservation->directory, name, &current, AT_SYMLINK_NOFOLLOW);
+    bool valid = reservation->previous_present ?
+        !status && same_file_snapshot(&reservation->previous_snapshot, &current) :
+        status && errno == ENOENT;
+    if (!valid) capacity->ready = false;
+    pthread_mutex_unlock(&capacity->lock);
+    g_free(name);
+    if (!valid) errno = ESTALE;
+    return valid ? 0 : -1;
+}
+
 void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
     bool replaced, bool leftover)
 {
