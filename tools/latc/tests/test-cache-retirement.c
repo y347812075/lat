@@ -2982,6 +2982,25 @@ static void test_deferred_finish_crash(const char *point, bool installed, bool p
     assert(installed ? !loaded.count && !strcmp(loaded.committed_cursor, page.cursor) :
                        loaded.committed_pending && loaded.count == 2);
     assert((latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0) == (!installed || partial));
+    if (!installed && !partial) {
+        LatcdRetirementPageInventory inventory;
+        LatcdRetirementPageState scanned;
+        uint8_t results[128];
+        assert(!latcd_retirement_page_snapshot(root, 150, &scanned, results, &inventory, error, sizeof(error)));
+        LatcdRetirementConsumption consumption = {0};
+        assert(!latcd_retirement_consumption_bind(&scanned, &consumption, 1,
+                    &inventory.members[1].snapshot, inventory.members[1].digest));
+        assert(!latcd_retirement_consumption_check_inventory(&scanned, &consumption, results, &inventory));
+        char *name = g_strconcat(page.entries[1].name, ".ini", NULL);
+        char *path = g_build_filename(store, name, NULL), *saved = g_build_filename(root, "saved-shard", NULL);
+        assert(!rename(path, saved));
+        assert(latcd_retirement_page_snapshot(root, 150, &scanned, results, &inventory, error, sizeof(error)) == 1);
+        assert(!latcd_retirement_consumption_check_inventory(&scanned, &consumption, results, &inventory));
+        LatcdRetirementConsumption absent = {0};
+        assert(latcd_retirement_consumption_check_inventory(&scanned, &absent, results, &inventory) < 0);
+        assert(!rename(saved, path));
+        g_free(saved); g_free(path); g_free(name);
+    }
     LatcdCacheCapacity recovered = LATCD_CACHE_CAPACITY_INIT;
     LatcdPageBudget budget = {0};
     assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
