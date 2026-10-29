@@ -632,7 +632,7 @@ int latcd_retirement_page_budget_identity(const LatcdRetirementPageState *state,
     if (!digest) return -1;
     memset(digest, 0, 32);
     uint8_t membership[32];
-    if (!state || state->committed_pending || latcd_retirement_page_identity(state, membership))
+    if (!state || latcd_retirement_page_identity(state, membership))
         return -1;
     GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
     static const char domain[] = "latcd-retirement-budget-v1";
@@ -1499,7 +1499,7 @@ int latcd_retirement_test_budget_result(const char *root, uint64_t now_us,
     LatcdRetirementPageState page;
     uint8_t actual[32], membership[32];
     bool legacy = false, member = false;
-    int result = page_state_load(root, &page, &legacy, error, error_size) || legacy ||
+    int result = page_state_load(root, &page, &legacy, error, error_size) || legacy || page.committed_pending ||
         latcd_retirement_page_budget_identity(&page, actual) || memcmp(identity, actual, 32) ||
         latcd_retirement_page_identity(&page, membership);
     char *boot = NULL;

@@ -70,7 +70,7 @@ int latcd_retirement_page_state_valid(const LatcdRetirementPageState *state);
 int latcd_retirement_page_identity(const LatcdRetirementPageState *state,
                                    uint8_t digest[32]);
 /* Separate budget identity includes schedule sequence and member enqueue times.
- * It identifies an in-flight page only and does not reserve capacity. */
+ * It remains stable from in-flight to pending and does not reserve capacity. */
 int latcd_retirement_page_budget_identity(const LatcdRetirementPageState *state,
                                           uint8_t digest[32]);
 #ifdef LATCD_RETIREMENT_TESTING

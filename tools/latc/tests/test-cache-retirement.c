@@ -1485,6 +1485,17 @@ static void test_page_identity(void)
     memset(budget_other, 0xff, sizeof(budget_other));
     assert(latcd_retirement_page_budget_identity(&state, budget_other) < 0);
     for (unsigned i = 0; i < sizeof(budget_other); i++) assert(!budget_other[i]);
+    state.results[0] = LATCD_RETIREMENT_RESULT_DEFERRED;
+    state.entries[0].last_attempt = 5;
+    state.entries[0].retry_at = 9;
+    state.entries[0].busy_count = 1;
+    assert(!latcd_retirement_page_budget_identity(&state, budget_other) &&
+           !memcmp(budget_identity, budget_other, 32));
+    state.entries[0].enqueued++;
+    assert(!latcd_retirement_page_budget_identity(&state, budget_other) &&
+           memcmp(budget_identity, budget_other, 32));
+    state.entries[0].enqueued--;
+    state.results[0] = 0;
     state.committed_pending = false;
     state.sequence = 8; state.entries[0].last_attempt = 7;
     state.entries[0].retry_at = 9; state.entries[0].busy_count = 1;
