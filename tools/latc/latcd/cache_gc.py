@@ -841,8 +841,17 @@ class Inventory:
         marker = self.tombstones.get(".gc/tombstones/" + name)
         if (not marker or marker.get("deletion_status") != "UNLINKED" or
                 marker.get("recovery_status") != "MISSING" or name in self.entries or
-                name in self.refs or marker["source"] + ".current" not in self.manifests):
+                name in self.refs or name in self.task_refs or name in self.hold_refs or
+                self.freeze_all or marker["source"] in self.frozen or self.errors or
+                marker["source"] + ".current" not in self.manifests):
             return False
+        for lease in self.mount_leases.values():
+            if lease["state"] == "ACTIVE" and lease["binding_observed"] and (
+                    lease["scope"] == "CACHE" or
+                    (lease["scope"] == "SOURCE" and lease["source"] == marker["source"]) or
+                    (lease["scope"] == "OBJECT" and lease["source"] == marker["source"] and
+                     lease["name"] == name)):
+                return False
         references = self.transaction_refs.get(name, [])
         if not references:
             return False
@@ -850,7 +859,8 @@ class Inventory:
         for reference in references:
             record = self.transactions[reference["transaction"]]
             matching = [obj for obj in record["object_identities"] if obj["name"] == name]
-            if (record["state"] != "RETIRED" or not record["binding_verified"] or
+            if (reference["snapshot"] == "next" or record["state"] != "RETIRED" or
+                    not record["binding_verified"] or
                     record.get("objects_status") != "RECORDED" or not matching or
                     any(any(obj[field] != marker[field] for field in fields) for obj in matching)):
                 return False
@@ -876,6 +886,8 @@ class Inventory:
                 snapshots = self.snapshots[path]
                 if state != "RETIRED":
                     holds.add(state.lower() + "_transaction")
+                if not row and reference["snapshot"] == "next":
+                    holds.add("missing_transaction_next_reference")
                 # Sharing a filename into the next generation does not retire it.
                 next_names = {snapshots["next"][role] for role in ("module", "native", "tbset")}
                 if (state == "RETIRED" and reference["snapshot"] == "previous" and
@@ -891,7 +903,7 @@ class Inventory:
             current = [ref for alias in aliases for ref in self.refs.get(alias["path"], [])]
             if current:
                 holds.add("current_reference")
-            if any(self.task_refs.get(alias["path"]) for alias in aliases):
+            if name in self.task_refs or any(self.task_refs.get(alias["path"]) for alias in aliases):
                 holds.add("persistent_task_reference")
             if any(self.hold_refs.get(alias["path"]) for alias in aliases) or name in self.hold_refs:
                 holds.add("explicit_retention_reference")

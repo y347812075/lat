@@ -814,6 +814,33 @@ class PlannerTest(unittest.TestCase):
         self.assertFalse(plan["complete"])
         self.assertEqual(rows[name]["selection_status"], "held")
 
+    def test_completed_receipt_with_next_reference_or_unknown_inventory(self):
+        old = self.generation("1")
+        self.transaction(old, self.manifest)
+        other = self.generation("2")
+        following = dict(other, module=old["module"])
+        second = self.transaction(other, following)
+        name = old["module"]
+        obj = self.root / name
+        st = obj.stat()
+        raw = (f"[tombstone]\nversion=1\nsource={SOURCE}\nname={name}\nstate=DELETING\n"
+               f"device={st.st_dev}\ninode={st.st_ino}\nsize={st.st_size}\n"
+               f"allocated={st.st_blocks * 512}\nsha256={hashlib.sha256(obj.read_bytes()).hexdigest()}\n"
+               "recovery_status=MISSING\ndeletion_status=UNLINKED\n")
+        self.put(".gc/tombstones/" + name, raw.encode())
+        obj.unlink()
+        _, rows = self.selected()
+        self.assertEqual(rows[name]["selection_status"], "held")
+        self.assertIn("missing_transaction_next_reference", rows[name]["holds"])
+        (self.root / second).unlink()
+        _, rows = self.selected()
+        self.assertEqual(rows[name]["selection_status"], "removed")
+        self.put(".gc/transactions/.write-interrupted", b"partial")
+        plan, rows = self.selected()
+        self.assertFalse(plan["complete"])
+        self.assertEqual(rows[name]["selection_status"], "held")
+        self.assertIn("inventory_or_source_unknown", rows[name]["holds"])
+
     def test_current_and_inventory(self):
         self.put(".superseded/legacy/" + STEM + ".so", b"old")
         self.put(".tmp/part.native", b"work")
