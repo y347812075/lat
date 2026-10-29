@@ -1084,6 +1084,16 @@ class Inventory:
         objects = {}
         for row in self.entries.values():
             objects.setdefault((row["device"], row["inode"]), []).append(row)
+        cache_mounts, source_mounts, object_mounts = [], {}, {}
+        for path, lease in self.mount_leases.items():
+            if lease["state"] != "ACTIVE" or not lease["binding_observed"]:
+                continue
+            if lease["scope"] == "CACHE":
+                cache_mounts.append(path)
+            elif lease["scope"] == "SOURCE":
+                source_mounts.setdefault(lease["source"], []).append(path)
+            else:
+                object_mounts.setdefault(lease["name"], []).append(path)
         output = []
         groups = {}
         for relative, row in sorted(self.entries.items()):
@@ -1091,6 +1101,14 @@ class Inventory:
             category, reasons = "unknown", ["unrecognized_object"]
             referrers = [r for alias in objects[(row["device"], row["inode"])]
                          for r in self.refs.get(alias["path"], [])]
+            aliases = objects[(row["device"], row["inode"])]
+            transactions = [r for alias in aliases for r in self.transaction_refs.get(alias["path"], [])]
+            tasks = [r for alias in aliases for r in self.task_refs.get(alias["path"], [])]
+            holds = [r for alias in aliases for r in self.hold_refs.get(alias["path"], [])]
+            generated = GENERATED.fullmatch(relative)
+            mounts = (cache_mounts + source_mounts.get(generated[1], []) +
+                      [path for alias in aliases for path in object_mounts.get(alias["path"], [])]
+                      if generated else [])
             if stat.S_ISDIR(mode):
                 category, reasons = "directory", ["directory_metadata"]
             elif not stat.S_ISREG(mode):
@@ -1101,13 +1119,15 @@ class Inventory:
                 category, reasons = "current_artifact", ["current_reference"]
                 if any(r["role"] == "native" for r in referrers):
                     reasons.append("incremental_baseline")
-            elif relative in self.transaction_refs:
+            elif transactions:
                 category, reasons = "transaction_artifact", ["persistent_transaction_hold"]
+            elif generated and (holds or tasks or mounts):
+                category, reasons = "retained_artifact", []
             elif relative.startswith(".superseded/"):
                 category, reasons = "legacy_retired", ["legacy_reference_contract_unknown"]
             elif relative.startswith(".tmp/"):
                 category, reasons = "temporary", ["worker_liveness_unknown"]
-                if relative in self.task_refs:
+                if tasks:
                     reasons.append("persistent_task_reference")
             elif relative.startswith(".tbsets/"):
                 category, reasons = "collected_keys", ["accepted_request_state"]
@@ -1121,6 +1141,12 @@ class Inventory:
                 category, reasons = "owner_lock", ["management_lock"]
             elif GENERATED.fullmatch(relative):
                 category, reasons = "unreferenced_artifact", ["no_current_reference_not_liveness_proof"]
+            if holds:
+                reasons.append("explicit_retention_reference")
+            if tasks and "persistent_task_reference" not in reasons:
+                reasons.append("persistent_task_reference")
+            if mounts:
+                reasons.append("mount_lease_reference")
             if self.freeze_all or any(part[:64] in self.frozen for part in relative.split("/")):
                 reasons.append("invalid_source_manifest")
             if self.errors:
@@ -1129,9 +1155,8 @@ class Inventory:
                 reasons.append("lifecycle_and_mount_admission_unverified")
             result = {k: v for k, v in row.items() if not k.startswith("_")}
             result.update(category=category, reasons=reasons, references=referrers,
-                          transaction_references=self.transaction_refs.get(relative, []),
-                          task_references=self.task_refs.get(relative, []),
-                          explicit_hold_references=self.hold_refs.get(relative, []),
+                          transaction_references=transactions, task_references=tasks,
+                          explicit_hold_references=holds, mount_lease_references=mounts,
                           delete_authorized=False)
             output.append(result)
             group = groups.setdefault(category, {"entries": 0, "logical_bytes": 0,

@@ -233,6 +233,29 @@ class PlannerTest(unittest.TestCase):
         hold.chmod(0o600)
         self.run_plan(success=False)
 
+    def test_unreferenced_generation_with_hold_is_retained(self):
+        obj = self.put(SOURCE + '-' + '1' * 64 + '.native', b'old generation')
+        st, cache = obj.stat(), self.root.stat()
+        hold_id = str(uuid.uuid4())
+        record = (f'[hold]\nversion=1\nid={hold_id}\nname={obj.name}\nreason=ROLLBACK\n'
+                  f'state=ACTIVE\ncache_device={cache.st_dev}\ncache_inode={cache.st_ino}\n'
+                  f'object_device={st.st_dev}\nobject_inode={st.st_ino}\n')
+        path = f'.gc/holds/{obj.name}/{hold_id}.ini'
+        self.put(path, record.encode())
+        row = next(row for row in self.run_plan()['entries'] if row['path'] == obj.name)
+        self.assertEqual(row['category'], 'retained_artifact')
+        self.assertIn('explicit_retention_reference', row['reasons'])
+        self.assertEqual(row['explicit_hold_references'], [path])
+        alias = self.root / (SOURCE + '-' + '2' * 64 + '.native')
+        os.link(obj, alias)
+        rows = {row['path']: row for row in self.run_plan()['entries']}
+        self.assertEqual(rows[alias.name]['category'], 'retained_artifact')
+        self.assertEqual(rows[alias.name]['explicit_hold_references'], [path])
+        alias.unlink()
+        self.put(path, record.replace('state=ACTIVE', 'state=RELEASED').encode())
+        row = next(row for row in self.run_plan()['entries'] if row['path'] == obj.name)
+        self.assertEqual(row['category'], 'unreferenced_artifact')
+
     def test_mount_lease_binding_and_release(self):
         old = self.generation('1')
         self.transaction(old, self.manifest)
@@ -249,9 +272,21 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(plan['mount_lease_count'], 1)
         self.assertTrue(plan['mount_leases'][path]['binding_observed'])
         self.assertIn('mount_lease_reference', rows[obj.name]['holds'])
+        entry = next(row for row in plan['entries'] if row['path'] == obj.name)
+        self.assertIn('mount_lease_reference', entry['reasons'])
+        self.assertEqual(entry['mount_lease_references'], [path])
         self.put(path, record.replace('state=ACTIVE', 'state=RELEASED').encode())
         _, rows = self.selected()
         self.assertNotIn('mount_lease_reference', rows[obj.name]['holds'])
+        source_record = record.replace('scope=OBJECT', 'scope=SOURCE').replace(
+            f'name={obj.name}\nobject_device={st.st_dev}\nobject_inode={st.st_ino}',
+            'name=\nobject_device=0\nobject_inode=0')
+        self.put(path, source_record.encode())
+        other = self.put(OTHER + '-' + '1' * 64 + '.native', b'other source')
+        plan = self.run_plan()
+        entries = {row['path']: row for row in plan['entries']}
+        self.assertIn(path, entries[obj.name]['mount_lease_references'])
+        self.assertNotIn(path, entries[other.name]['mount_lease_references'])
         self.put(path, record.replace(f'object_inode={st.st_ino}', 'object_inode=0').encode())
         plan = self.run_plan(success=False)
         self.assertTrue(any(e['reason'] == 'invalid_mount_lease' for e in plan['errors']))
@@ -307,6 +342,26 @@ class PlannerTest(unittest.TestCase):
         task = next(iter(self.run_plan()['tasks'].values()))
         self.assertEqual(task['lease_observation'], 'NO_HOLDER_OBSERVED')
         self.assertFalse(task['completion_verified'])
+
+    def test_task_base_retained_until_input_release(self):
+        obj = self.put(SOURCE + '-' + '1' * 64 + '.native', b'old base')
+        task = self.task()
+        st = obj.stat()
+        fields = (f'[base_native]\nname={obj.name}\ndirectory=cache\n'
+                  f'device={st.st_dev}\ninode={st.st_ino}\nsize={st.st_size}\n'
+                  f'mode={st.st_mode}\nuid={st.st_uid}\n'
+                  f'mtime_sec={st.st_mtime_ns // 10**9}\nmtime_nsec={st.st_mtime_ns % 10**9}\n')
+        self.put(str(task.relative_to(self.root)), task.read_bytes() + fields.encode())
+        row = next(row for row in self.run_plan()['entries'] if row['path'] == obj.name)
+        self.assertEqual(row['category'], 'retained_artifact')
+        self.assertIn('persistent_task_reference', row['reasons'])
+        st = task.stat()
+        release = (f'[handoff]\nversion=1\ntask_id={task.stem}\nstate=INPUTS_RELEASED\n'
+                   f'task_device={st.st_dev}\ntask_inode={st.st_ino}\n')
+        self.put(f'.gc/compiler-releases/{task.name}', release.encode())
+        row = next(row for row in self.run_plan()['entries'] if row['path'] == obj.name)
+        self.assertEqual(row['category'], 'unreferenced_artifact')
+        self.assertNotIn('persistent_task_reference', row['reasons'])
 
     def test_task_bad_schema_and_path(self):
         record = self.task()
@@ -871,6 +926,18 @@ class PlannerTest(unittest.TestCase):
         for args in (["gc"], ["gc", "--delete"], ["gc", "--plan"]):
             result = subprocess.run([str(LATCD), *args], capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 2)
+
+    def test_managed_domain_does_not_authorize_cli_deletion(self):
+        init = subprocess.run([str(LATCD), "gc", "--init-domain", "--cache-dir",
+                               str(self.root)], capture_output=True, text=True, timeout=10)
+        self.assertEqual(init.returncode, 0, init.stderr)
+        before = self.snapshot()
+        for option in ("--delete", "--execute", "--force"):
+            result = subprocess.run([str(LATCD), "gc", option, "--cache-dir", str(self.root)],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(before, self.snapshot(), option + " changed cache contents")
+        self.run_plan()
 
 
 if __name__ == "__main__":
