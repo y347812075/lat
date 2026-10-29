@@ -200,11 +200,11 @@ int latcd_retirement_page_budget_result(const char *root, uint64_t now_us,
 int latcd_retirement_page_budget_commit(const char *root, uint64_t now_us,
                                     const LatcdRetirementPageState *page, struct LatcdPageBudget *budget,
                                     char *error, size_t error_size);
-/* Owner lease and controlled writers required. Preserve every deferred result
- * shard and atomically advance to an empty page. This does not authorize object
+/* Owner lease and controlled writers required. Preserve every result shard
+ * and atomically advance to an empty page. This does not authorize object
  * deletion or guarantee fairness when the bounded shard store is full. On
  * failure reload and re-inventory before releasing an uncertain budget. */
-int latcd_retirement_page_finish_deferred(const char *root, uint64_t now_us,
+int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t now_us,
                                     struct LatcdPageBudget *budget, char *error, size_t error_size);
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
 extern void (*latcd_retirement_test_before_settlement)(void);

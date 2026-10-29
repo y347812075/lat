@@ -2829,11 +2829,13 @@ static void test_deferred_finish_crash(const char *point, bool installed, bool p
         .grace_us = 100, .round_cutoff = 120, .sequence = 3};
     g_strlcpy(empty.boot, boot, sizeof(empty.boot));
     LatcdRetirementPageState page = empty, loaded;
-    page.count = 1;
+    page.count = 2;
     snprintf(page.entries[0].name, sizeof(page.entries[0].name), "%064x.so", 1);
     page.entries[0].deadline = 140; page.entries[0].enqueued = 100;
     page.entries[0].last_attempt = 3; page.entries[0].retry_at = 200; page.entries[0].busy_count = 1;
-    g_strlcpy(page.cursor, page.entries[0].name, sizeof(page.cursor));
+    page.entries[1] = page.entries[0];
+    snprintf(page.entries[1].name, sizeof(page.entries[1].name), "%064x.so", 2);
+    g_strlcpy(page.cursor, page.entries[1].name, sizeof(page.cursor));
     assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
     simulated_boottime_us = 150;
     pid_t child = fork();
@@ -2849,17 +2851,19 @@ static void test_deferred_finish_crash(const char *point, bool installed, bool p
         assert(!latcd_retirement_page_budget_identity(&page, identity));
         assert(!latcd_retirement_page_budget_result(root, 150, identity, &budget, &page.entries[0],
                      LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
+        assert(!latcd_retirement_page_budget_result(root, 150, identity, &budget, &page.entries[1],
+                     LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
         assert(!latcd_retirement_page_budget_commit(root, 150, &page, &budget, error, sizeof(error)));
         char *fault = g_strdup_printf("crash:%s", point);
         assert(!setenv("LATCD_TEST_RETIREMENT_IO", fault, 1));
-        latcd_retirement_page_finish_deferred(root, 150, &budget, error, sizeof(error));
+        latcd_retirement_page_finish_preserving_results(root, 150, &budget, error, sizeof(error));
         _exit(1);
     }
     int status;
     assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
     assert(installed ? !loaded.count && !strcmp(loaded.committed_cursor, page.cursor) :
-                       loaded.committed_pending && loaded.count == 1);
+                       loaded.committed_pending && loaded.count == 2);
     assert((latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0) == (!installed || partial));
     LatcdCacheCapacity recovered = LATCD_CACHE_CAPACITY_INIT;
     LatcdPageBudget budget = {0};
@@ -2870,12 +2874,23 @@ static void test_deferred_finish_crash(const char *point, bool installed, bool p
         assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 100,
                                                      &budget, &loaded, error, sizeof(error)));
         assert(!latcd_cache_capacity_recovery_finish(&recovered));
-        assert(!latcd_retirement_page_finish_deferred(root, 150, &budget, error, sizeof(error)));
+        assert(!latcd_retirement_page_finish_preserving_results(root, 150, &budget, error, sizeof(error)));
     } else assert(!latcd_cache_capacity_recovery_abort(&recovered));
     LatcdRetirementPageState merged = page;
     merged.entries[0].retry_at = 0; merged.entries[0].busy_count = 0;
     assert(!latcd_retirement_schedule_merge_page(root, boot, 100, 150, &merged, error, sizeof(error)));
     assert(merged.entries[0].retry_at == 200 && merged.entries[0].busy_count == 1);
+    if (!partial) {
+        assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && !loaded.count);
+        LatcdRetirementPageState next = page;
+        next.committed_cursor[0] = 0;
+        next.round_cutoff++;
+        next.sequence++;
+        uint8_t results[128] = {0};
+        assert(latcd_retirement_schedule_page_results(root, 150, &next, results, error, sizeof(error)) == 1);
+        assert(results[0] == 3 && results[1] == 3);
+        assert(latcd_retirement_page_commit(root, 150, &next, error, sizeof(error)) < 0);
+    }
     latcd_cache_capacity_close(&recovered);
     assert(!pthread_mutex_destroy(&recovered.lock));
     simulated_boottime_us = 0;
@@ -2919,7 +2934,8 @@ static void test_budgeted_max_page(void)
     assert(!latcd_retirement_page_budget_identity(&page, binding));
     for (unsigned i = 0; i < page.count; i++)
         assert(!latcd_retirement_page_budget_result(root, UINT64_MAX, binding, &budget,
-            &page.entries[i], LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
+            &page.entries[i], i % 2 ? LATCD_RETIREMENT_RESULT_DONE : LATCD_RETIREMENT_RESULT_DEFERRED,
+            error, sizeof(error)));
     assert(!latcd_retirement_page_budget_commit(root, UINT64_MAX, &page, &budget, error, sizeof(error)));
     char *checkpoint = g_build_filename(gc, "retirement-page.ini", NULL);
     assert(!stat(checkpoint, &st) && st.st_size > 0 && st.st_size <= 65536);
@@ -2935,11 +2951,11 @@ static void test_budgeted_max_page(void)
     assert(loaded.committed_pending && loaded.count == 128 && budget.remaining == 2 * 65536);
     assert(!latcd_cache_capacity_recovery_finish(&recovered));
     assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:file-synced", 1));
-    assert(latcd_retirement_page_finish_deferred(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
+    assert(latcd_retirement_page_finish_preserving_results(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
     unsetenv("LATCD_TEST_RETIREMENT_IO");
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && loaded.committed_pending);
     latcd_retirement_test_before_page_finish = fail_page_finish;
-    assert(latcd_retirement_page_finish_deferred(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
+    assert(latcd_retirement_page_finish_preserving_results(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
     assert(!latcd_retirement_test_before_page_finish && budget.invalid && !recovered.ready && budget.capacity);
     assert(latcd_cache_capacity_reserve(&recovered, 1, UINT64_MAX, error, sizeof(error)) < 0);
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
@@ -2950,6 +2966,11 @@ static void test_budgeted_max_page(void)
     assert(!latcd_retirement_schedule_merge_page(root, boot, UINT64_MAX, UINT64_MAX,
                                                   &merged, error, sizeof(error)));
     assert(merged.entries[0].retry_at == UINT64_MAX && merged.entries[0].busy_count == 7);
+    uint64_t sequence = 0;
+    LatcdRetirementPageDeadline retained;
+    assert(!latcd_retirement_schedule_load(root, boot, UINT64_MAX, UINT64_MAX,
+           page.entries[1].name, &sequence, &retained, error, sizeof(error)));
+    assert(sequence == UINT64_MAX && !strcmp(retained.name, page.entries[1].name));
     assert(!latcd_cache_capacity_abandon_page(&recovered, &budget));
     assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);

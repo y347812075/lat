@@ -1884,7 +1884,7 @@ int latcd_retirement_page_budget_commit(const char *root, uint64_t now_us,
     return page_commit(root, now_us, page, budget, true, error, error_size);
 }
 
-int latcd_retirement_page_finish_deferred(const char *root, uint64_t now_us,
+int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t now_us,
                                           LatcdPageBudget *budget, char *error, size_t error_size)
 {
     if (!root || !budget || !budget->capacity || !budget->page_identity_bound)
@@ -1900,8 +1900,6 @@ int latcd_retirement_page_finish_deferred(const char *root, uint64_t now_us,
         !page.budget_bound || !page.committed_pending ||
         latcd_retirement_page_budget_identity(&page, identity) ||
         memcmp(identity, budget->page_identity, sizeof(identity))) goto out;
-    for (unsigned i = 0; i < page.count; i++)
-        if (page.results[i] != LATCD_RETIREMENT_RESULT_DEFERRED) goto out;
     if (schedule_page_results(root, now_us, &page, results, NULL, error, error_size)) goto out;
     directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
@@ -1925,7 +1923,7 @@ out:
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
     close(scheduler);
-    return result ? fail(error, error_size, "deferred page completion uncertain; reload") : 0;
+    return result ? fail(error, error_size, "page completion uncertain; reload") : 0;
 }
 
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
