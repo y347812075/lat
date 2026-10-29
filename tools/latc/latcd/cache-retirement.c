@@ -1263,14 +1263,12 @@ static int retirement_schedule_access(const char *root, const char *boot,
         char *raw = NULL;
         size_t size = 0;
         struct stat record_snapshot;
-        uint8_t record_digest[32];
         GKeyFile *record = g_key_file_new();
         gsize groups_count = 0;
         uint64_t device, inode, grace, seq, enqueued, attempted, retry, busy;
         bool valid = ++count <= RETIREMENT_SCHEDULE_LIMIT &&
             !read_file_snapshot(store, item->d_name, 1024, &raw, &size,
-                                inventory ? &record_snapshot : NULL,
-                                inventory ? record_digest : NULL) &&
+                                inventory ? &record_snapshot : NULL, NULL) &&
             size <= RETIREMENT_SCHEDULE_BYTES - bytes && !memchr(raw, 0, size) &&
             g_key_file_load_from_data(record, raw, size, 0, NULL);
         char **groups = valid ? g_key_file_get_groups(record, &groups_count) : NULL;
@@ -1343,7 +1341,11 @@ static int retirement_schedule_access(const char *root, const char *boot,
                     if (inventory) {
                         inventory->members[i].present = true;
                         inventory->members[i].snapshot = record_snapshot;
-                        memcpy(inventory->members[i].digest, record_digest, 32);
+                        GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+                        g_checksum_update(checksum, (const guchar *)raw, size);
+                        gsize digest_size = sizeof(inventory->members[i].digest);
+                        g_checksum_get_digest(checksum, inventory->members[i].digest, &digest_size);
+                        g_checksum_free(checksum);
                     }
                     if (page_schedule) {
                         page_schedule[i].last_attempt = attempted;
