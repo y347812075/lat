@@ -2590,6 +2590,25 @@ static void test_budgeted_page_stage(void)
     assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
     latcd_cache_capacity_close(&recovered);
     assert(!pthread_mutex_destroy(&recovered.lock));
+    char *checkpoint = g_build_filename(gc, "retirement-page.ini", NULL);
+    char *checkpoint_data = NULL;
+    assert(g_file_get_contents(checkpoint, &checkpoint_data, NULL, NULL));
+    for (unsigned variant = 0; variant < 4; variant++) {
+        GKeyFile *altered = g_key_file_new();
+        assert(g_key_file_load_from_data(altered, checkpoint_data, -1, 0, NULL));
+        const char *field[] = {"result", "last_attempt", "retry_at", "busy_count"};
+        g_key_file_set_uint64(altered, "entry0", field[variant], variant == 0 ? 2 : 1);
+        char *raw = g_key_file_to_data(altered, NULL, NULL);
+        put(checkpoint, raw);
+        assert(latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) < 0);
+        g_free(raw);
+        g_key_file_unref(altered);
+    }
+    put(checkpoint, checkpoint_data);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+           loaded.committed_pending);
+    g_free(checkpoint_data);
+    g_free(checkpoint);
     char *fragment_name = g_strconcat(page.entries[0].name, ".ini", NULL);
     char *fragment_path = g_build_filename(store, fragment_name, NULL);
     LatcdCacheCapacity pending = LATCD_CACHE_CAPACITY_INIT;

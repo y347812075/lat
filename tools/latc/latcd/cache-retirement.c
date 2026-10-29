@@ -689,6 +689,27 @@ int latcd_retirement_page_budget_identity(const LatcdRetirementPageState *state,
     return length == 32 ? 0 : -1;
 }
 
+static int page_snapshot_identity(const LatcdRetirementPageState *state, uint8_t digest[32])
+{
+    uint8_t binding[32];
+    if (latcd_retirement_page_budget_identity(state, binding)) return -1;
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    static const char domain[] = "latcd-retirement-snapshot-v1";
+    g_checksum_update(checksum, (const guchar *)domain, sizeof(domain));
+    g_checksum_update(checksum, binding, sizeof(binding));
+    page_identity_u64(checksum, state->committed_pending);
+    for (unsigned i = 0; i < state->count; i++) {
+        page_identity_u64(checksum, state->entries[i].last_attempt);
+        page_identity_u64(checksum, state->entries[i].retry_at);
+        page_identity_u64(checksum, state->entries[i].busy_count);
+        page_identity_u64(checksum, state->results[i]);
+    }
+    gsize length = 32;
+    g_checksum_get_digest(checksum, digest, &length);
+    g_checksum_free(checksum);
+    return length == 32 ? 0 : -1;
+}
+
 static bool record_string_is(GKeyFile *record, const char *group,
                              const char *key, const char *expected);
 static bool record_uint64(GKeyFile *record, const char *group,
@@ -709,6 +730,9 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
     const char *queue_fields_v6[] = {"version", "cache_device", "cache_inode", "grace_us",
         "boot", "round_cutoff", "committed_cursor", "cursor", "sequence", "count", "pending",
         "budget_protocol", "budget_identity"};
+    const char *queue_fields_v7[] = {"version", "cache_device", "cache_inode", "grace_us",
+        "boot", "round_cutoff", "committed_cursor", "cursor", "sequence", "count", "pending",
+        "budget_protocol", "budget_identity", "snapshot_identity"};
     const char *entry_fields[] = {"name", "deadline", "enqueued", "last_attempt",
                                   "retry_at", "busy_count"};
     const char *entry_fields_v5[] = {"name", "deadline", "enqueued", "last_attempt",
@@ -719,13 +743,15 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
     bool v4 = record_string_is(record, "page", "version", "4");
     bool v5 = record_string_is(record, "page", "version", "5");
     bool v6 = record_string_is(record, "page", "version", "6");
+    bool v7 = record_string_is(record, "page", "version", "7");
     bool valid = groups_count && !strcmp(groups[0], "page") &&
-        (v6 ? exact_keys(record, "page", queue_fields_v6, G_N_ELEMENTS(queue_fields_v6)) :
+        (v7 ? exact_keys(record, "page", queue_fields_v7, G_N_ELEMENTS(queue_fields_v7)) :
+         v6 ? exact_keys(record, "page", queue_fields_v6, G_N_ELEMENTS(queue_fields_v6)) :
          (v4 || v5) ? exact_keys(record, "page", queue_fields_v4, G_N_ELEMENTS(queue_fields_v4)) :
          v3 ? exact_keys(record, "page", queue_fields_v3, G_N_ELEMENTS(queue_fields_v3)) :
               exact_keys(record, "page", queue_fields, G_N_ELEMENTS(queue_fields)));
     g_strfreev(groups);
-    if (!valid || (!v6 && !v5 && !v4 && !v3 && !record_string_is(record, "page", "version", "2")) ||
+    if (!valid || (!v7 && !v6 && !v5 && !v4 && !v3 && !record_string_is(record, "page", "version", "2")) ||
         !record_uint64(record, "page", "cache_device", &state->cache_device) ||
         !record_uint64(record, "page", "cache_inode", &state->cache_inode) ||
         !record_uint64(record, "page", "grace_us", &state->grace_us) ||
@@ -733,10 +759,10 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
         !record_uint64(record, "page", "sequence", &state->sequence)) return false;
     char *boot = g_key_file_get_string(record, "page", "boot", NULL);
     char *cursor = g_key_file_get_string(record, "page", "cursor", NULL);
-    char *committed = (v3 || v4 || v5 || v6) ? g_key_file_get_string(record, "page", "committed_cursor", NULL) : g_strdup("");
+    char *committed = (v3 || v4 || v5 || v6 || v7) ? g_key_file_get_string(record, "page", "committed_cursor", NULL) : g_strdup("");
     uint64_t count, pending = 0;
     valid = boot && cursor && committed && strlen(committed) < sizeof(state->committed_cursor) &&
-        (!(v4 || v5 || v6) || (record_uint64(record, "page", "pending", &pending) && pending <= 1)) &&
+        (!(v4 || v5 || v6 || v7) || (record_uint64(record, "page", "pending", &pending) && pending <= 1)) &&
         (!v4 || !pending) &&
         record_uint64(record, "page", "count", &count) &&
         count <= 128 &&
@@ -755,9 +781,9 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
         snprintf(group, sizeof(group), "entry%u", i);
         uint64_t busy, result = 0;
         char *name = g_key_file_get_string(record, group, "name", NULL);
-        valid = ((v5 || v6) ? exact_keys(record, group, entry_fields_v5, G_N_ELEMENTS(entry_fields_v5)) :
+        valid = ((v5 || v6 || v7) ? exact_keys(record, group, entry_fields_v5, G_N_ELEMENTS(entry_fields_v5)) :
                       exact_keys(record, group, entry_fields, G_N_ELEMENTS(entry_fields))) &&
-            (!(v5 || v6) || (record_uint64(record, group, "result", &result) && result <= 2)) &&
+            (!(v5 || v6 || v7) || (record_uint64(record, group, "result", &result) && result <= 2)) &&
             name && strlen(name) < sizeof(state->entries[i].name) &&
             record_uint64(record, group, "deadline", &state->entries[i].deadline) &&
             record_uint64(record, group, "enqueued", &state->entries[i].enqueued) &&
@@ -772,7 +798,7 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
         g_free(name);
     }
     if (!valid || latcd_retirement_page_state_valid(state)) return false;
-    if (v6) {
+    if (v6 || v7) {
         uint8_t digest[32];
         char expected[65];
         char *identity = g_key_file_get_string(record, "page", "budget_identity", NULL);
@@ -784,6 +810,16 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
         }
         g_free(identity);
         if (!valid) return false;
+        if (v7) {
+            identity = g_key_file_get_string(record, "page", "snapshot_identity", NULL);
+            valid = !page_snapshot_identity(state, digest);
+            if (valid) {
+                for (unsigned i = 0; i < 32; i++) snprintf(expected + 2 * i, 3, "%02x", digest[i]);
+                valid = identity && !strcmp(identity, expected);
+            }
+            g_free(identity);
+            if (!valid) return false;
+        }
         state->budget_bound = true;
     }
     return true;
@@ -804,12 +840,15 @@ static int page_state_store_fd(int root_fd, int gc, const LatcdRetirementPageSta
          memcmp(binding, budget->page_identity, sizeof(binding)))) || fstat(root_fd, &cache) ||
         state->cache_device != (uint64_t)cache.st_dev ||
         state->cache_inode != (uint64_t)cache.st_ino) goto out;
-    g_key_file_set_integer(record, "page", "version", budget ? 6 : 5);
+    g_key_file_set_integer(record, "page", "version", budget ? 7 : 5);
     if (budget) {
         char identity[65];
         for (unsigned i = 0; i < 32; i++) snprintf(identity + 2 * i, 3, "%02x", binding[i]);
         g_key_file_set_integer(record, "page", "budget_protocol", 1);
         g_key_file_set_string(record, "page", "budget_identity", identity);
+        if (page_snapshot_identity(state, binding)) goto out;
+        for (unsigned i = 0; i < 32; i++) snprintf(identity + 2 * i, 3, "%02x", binding[i]);
+        g_key_file_set_string(record, "page", "snapshot_identity", identity);
     }
     g_key_file_set_uint64(record, "page", "cache_device", state->cache_device);
     g_key_file_set_uint64(record, "page", "cache_inode", state->cache_inode);

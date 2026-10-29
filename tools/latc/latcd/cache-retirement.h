@@ -185,14 +185,14 @@ int latcd_retirement_page_budget_estimate(const LatcdRetirementPageState *page,
 /* Owner lease and closed capacity recovery gate required. expected_grace_us is
  * the target runtime configuration, not a value inferred from the checkpoint.
  * Restores a validated
- * in-flight or complete pending v6 page; caller retains budget until resolution.
+ * in-flight or complete pending budget-bound page; caller retains budget until resolution.
  * Returns 0 on restoration, 1 if no page exists, -1 on unsafe state. */
 int latcd_retirement_page_restore_budget(const char *root, struct LatcdCacheCapacity *capacity,
                                     uint64_t limit, uint64_t expected_grace_us,
                                     struct LatcdPageBudget *budget,
                                     LatcdRetirementPageState *page, char *error, size_t error_size);
 /* Caller holds the owner lease and serializes budget lifetime. These operations
- * require a persisted v6 binding and never authorize object deletion. */
+ * require a persisted budget binding and never authorize object deletion. */
 int latcd_retirement_page_budget_result(const char *root, uint64_t now_us,
                                     const uint8_t identity[32], struct LatcdPageBudget *budget,
                                     const LatcdRetirementPageDeadline *entry,
