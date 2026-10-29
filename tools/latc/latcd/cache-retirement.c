@@ -1140,6 +1140,62 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
     return valid ? 0 : -1;
 }
 
+int latcd_retirement_retry_prepare_unmatched(const LatcdRetirementRetryPage *page,
+    const char *original, size_t size, uint64_t now_us, uint8_t output[1024])
+{
+    if (!output) return -1;
+    memset(output, 0, 1024);
+    uint8_t binding[32], digest[32]; gsize digest_size = 32;
+    if (!original || !size || size > 1024 || memchr(original, 0, size) ||
+        latcd_retirement_retry_page_identity(page, binding) || page->intent_present ||
+        page->completed >= page->count || page->items[page->completed].matched ||
+        now_us < page->snapshot_time || now_us > UINT64_MAX - RETIREMENT_BUSY_MIN_US) return -1;
+    const LatcdRetirementRetryItem *item = &page->items[page->completed];
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    g_checksum_update(checksum, (const guchar *)original, size);
+    g_checksum_get_digest(checksum, digest, &digest_size);
+    g_checksum_free(checksum);
+    if (memcmp(digest, item->shard_digest, 32)) return -1;
+    GKeyFile *record = g_key_file_new();
+    const char *v1[] = {"version", "device", "inode", "boot", "grace", "name", "sequence", "enqueued", "last_attempt", "retry_at", "busy_count"};
+    const char *v2[] = {"version", "device", "inode", "boot", "grace", "name", "sequence", "enqueued", "last_attempt", "retry_at", "busy_count", "page_identity", "result"};
+    gsize groups_count = 0; uint64_t device, inode, grace, sequence, enqueued, attempted, retry, busy;
+    bool valid = g_key_file_load_from_data(record, original, size, 0, NULL);
+    char **groups = valid ? g_key_file_get_groups(record, &groups_count) : NULL;
+    bool version2 = valid && record_string_is(record, "schedule", "version", "2");
+    char *name = g_key_file_get_string(record, "schedule", "name", NULL);
+    char *boot = g_key_file_get_string(record, "schedule", "boot", NULL);
+    char *identity = version2 ? g_key_file_get_string(record, "schedule", "page_identity", NULL) : NULL;
+    char *result = version2 ? g_key_file_get_string(record, "schedule", "result", NULL) : NULL;
+    valid = valid && groups_count == 1 && !strcmp(groups[0], "schedule") &&
+        (version2 ? exact_keys(record, "schedule", v2, G_N_ELEMENTS(v2)) && identity &&
+            strlen(identity) == 64 && strspn(identity, "0123456789abcdef") == 64 &&
+            (!g_strcmp0(result, "done") || !g_strcmp0(result, "deferred")) :
+            record_string_is(record, "schedule", "version", "1") && exact_keys(record, "schedule", v1, G_N_ELEMENTS(v1))) &&
+        name && !strcmp(name, item->hint.name) && boot && !strcmp(boot, page->boot) &&
+        record_uint64(record, "schedule", "device", &device) && device == page->cache_device &&
+        record_uint64(record, "schedule", "inode", &inode) && inode == page->cache_inode &&
+        record_uint64(record, "schedule", "grace", &grace) && grace == page->grace_us &&
+        record_uint64(record, "schedule", "sequence", &sequence) && sequence == item->shard_sequence &&
+        record_uint64(record, "schedule", "enqueued", &enqueued) && enqueued == item->hint.enqueued &&
+        record_uint64(record, "schedule", "last_attempt", &attempted) && attempted == item->hint.last_attempt &&
+        record_uint64(record, "schedule", "retry_at", &retry) && retry == item->hint.retry_at &&
+        record_uint64(record, "schedule", "busy_count", &busy) && busy == item->hint.busy_count;
+    if (valid) {
+        g_key_file_set_uint64(record, "schedule", "retry_at", MAX(retry, now_us + RETIREMENT_BUSY_MIN_US));
+        gsize output_size = 0; char *data = g_key_file_to_data(record, &output_size, NULL);
+        if (!data || output_size > 1022) valid = false;
+        else {
+            memcpy(output, data, output_size); output[output_size++] = '#';
+            memset(output + output_size, 'x', 1024 - output_size - 1); output[1023] = '\n';
+        }
+        g_free(data);
+    }
+    g_free(name); g_free(boot); g_free(identity); g_free(result); g_strfreev(groups); g_key_file_unref(record);
+    if (!valid) memset(output, 0, 1024);
+    return valid ? 0 : -1;
+}
+
 static bool record_hex(GKeyFile *record, const char *key, uint8_t *out, size_t size)
 {
     char *value = g_key_file_get_string(record, "consumption", key, NULL);

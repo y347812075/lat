@@ -68,6 +68,9 @@ int latcd_retirement_retry_page_encode(const LatcdRetirementRetryPage *page,
                                        char **data, size_t *size);
 int latcd_retirement_retry_page_decode(const char *data, size_t size,
                                        LatcdRetirementRetryPage *page);
+/* Prepare a bounded deferral while preserving the original shard identity. */
+int latcd_retirement_retry_prepare_unmatched(const LatcdRetirementRetryPage *page,
+    const char *original, size_t size, uint64_t now_us, uint8_t output[1024]);
 /* Select due hints in name order after a separate retry cursor, wrapping once.
  * This is a scheduling hint only; transaction rediscovery is still required. */
 int latcd_retirement_retry_select(const LatcdRetirementPageDeadline *entries,

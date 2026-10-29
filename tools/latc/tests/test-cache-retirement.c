@@ -1726,6 +1726,19 @@ static void test_retry_page_stage(void)
     LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
     assert(!latcd_retirement_retry_page_load(root, page, error, sizeof(error)) && page->count == 1 &&
            !strcmp(page->items[0].hint.name, hint.name) && page->round_sequence == state.sequence);
+    char *original_name = g_strconcat(hint.name, ".ini", NULL);
+    char *original_path = g_build_filename(schedule, original_name, NULL);
+    char *original_data = NULL; gsize original_size = 0; uint8_t replacement[1024];
+    assert(g_file_get_contents(original_path, &original_data, &original_size, NULL));
+    assert(!latcd_retirement_retry_prepare_unmatched(page, original_data, original_size, 100, replacement));
+    GKeyFile *replacement_record = g_key_file_new();
+    assert(g_key_file_load_from_data(replacement_record, (char *)replacement, sizeof(replacement), 0, NULL));
+    assert(g_key_file_get_uint64(replacement_record, "schedule", "retry_at", NULL) == 60000100 &&
+           g_key_file_get_uint64(replacement_record, "schedule", "sequence", NULL) == 3 &&
+           g_key_file_get_uint64(replacement_record, "schedule", "last_attempt", NULL) == 2);
+    original_data[0] ^= 1;
+    assert(latcd_retirement_retry_prepare_unmatched(page, original_data, original_size, 100, replacement) < 0);
+    g_key_file_unref(replacement_record); g_free(original_data); g_free(original_path); g_free(original_name);
     assert(latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) < 0);
     assert(latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0);
     assert(budget.capacity == &capacity && budget.page_identity_bound);
