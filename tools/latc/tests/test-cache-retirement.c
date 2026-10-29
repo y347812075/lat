@@ -3008,6 +3008,22 @@ static void test_deferred_finish_crash(const char *point, bool installed, bool p
         assert(!latcd_retirement_consumption_check_inventory(&scanned, &consumption, results, &inventory));
         LatcdRetirementConsumption absent = {0};
         assert(latcd_retirement_consumption_check_inventory(&scanned, &absent, results, &inventory) < 0);
+        uint64_t bytes;
+        uint8_t binding[32];
+        assert(!latcd_retirement_consumption_budget_estimate(&scanned, &consumption, results, &inventory, &bytes));
+        assert(!latcd_retirement_page_budget_identity(&scanned, binding));
+        LatcdCacheCapacity gate_capacity = LATCD_CACHE_CAPACITY_INIT;
+        LatcdPageBudget gate_budget = {0};
+        assert(!latcd_cache_capacity_scan(&gate_capacity, root, error, sizeof(error)));
+        latcd_cache_capacity_metadata_bind(&gate_capacity, UINT64_MAX);
+        assert(latcd_cache_capacity_restore_page(&gate_capacity, bytes, UINT64_MAX, binding, &gate_budget) < 0);
+        assert(!gate_budget.capacity && !latcd_cache_capacity_recovery_begin(&gate_capacity));
+        assert(!latcd_cache_capacity_restore_page(&gate_capacity, bytes, UINT64_MAX, binding, &gate_budget));
+        assert(gate_budget.remaining == bytes && gate_capacity.metadata_reserved == bytes);
+        assert(!latcd_cache_capacity_recovery_finish(&gate_capacity));
+        assert(!latcd_cache_capacity_cancel_page(&gate_capacity, &gate_budget));
+        latcd_cache_capacity_close(&gate_capacity);
+        assert(!pthread_mutex_destroy(&gate_capacity.lock));
         assert(!rename(saved, path));
         g_free(saved); g_free(path); g_free(name);
     }
