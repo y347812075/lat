@@ -2350,7 +2350,10 @@ static int page_finish(const char *root, uint64_t now_us, bool consumption,
     page.budget_bound = false;
     page.consumption_bound = false;
     memset(&page.consumption, 0, sizeof(page.consumption));
-    if (page_state_store_fd(directory, gc, &page, budget, NULL)) goto out;
+    if (page_state_store_fd(directory, gc, &page, budget, NULL)) {
+        latcd_cache_capacity_page_uncertain(budget->capacity, budget);
+        goto out;
+    }
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
     if (latcd_retirement_test_before_page_finish) latcd_retirement_test_before_page_finish(budget);
 #endif

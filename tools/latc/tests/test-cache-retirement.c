@@ -3434,6 +3434,15 @@ static void test_budgeted_max_page(unsigned consumption)
     assert(latcd_retirement_page_finish_preserving_results(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
     unsetenv("LATCD_TEST_RETIREMENT_IO");
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && loaded.committed_pending);
+    assert(!latcd_cache_capacity_poll(&recovered) && budget.invalid);
+    assert(!latcd_cache_capacity_abandon_page(&recovered, &budget));
+    latcd_cache_capacity_close(&recovered);
+    assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
+    assert(!latcd_cache_capacity_recovery_begin(&recovered));
+    assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, UINT64_MAX,
+                                                 &budget, &loaded, error, sizeof(error)));
+    assert(!latcd_cache_capacity_recovery_finish(&recovered));
     latcd_retirement_test_before_page_finish = fail_page_finish;
     assert(latcd_retirement_page_finish_preserving_results(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
     assert(!latcd_retirement_test_before_page_finish && budget.invalid && !recovered.ready && budget.capacity);
