@@ -122,6 +122,45 @@ fi
 grep -q 'retirement page budget recovery unavailable or checkpoint unsafe' "$page_phase/stderr"
 test ! -e "$page_phase/latcd.sock"
 test "$page_hash" = "$(sha256sum "$page_phase/cache/.gc/retirement-page.ini")"
+for page_kind in inflight pending legacy; do
+    page_phase=$work/retirement-page-$page_kind
+    mkdir -m 700 "$page_phase" "$page_phase/cache" "$page_phase/cache/.gc"
+    python3 - "$page_phase/cache" "$page_kind" <<'PY'
+import os
+import sys
+
+root, kind = sys.argv[1:]
+st = os.stat(root)
+boot = open('/proc/sys/kernel/random/boot_id', encoding='ascii').read().strip()
+name = '0' * 63 + '1.so'
+version = 2 if kind == 'legacy' else 5
+lines = ['[page]', f'version={version}', f'cache_device={st.st_dev}',
+         f'cache_inode={st.st_ino}', 'grace_us=100', f'boot={boot}',
+         'round_cutoff=1']
+if version == 5:
+    lines += ['committed_cursor=']
+lines += [f'cursor={"" if kind == "legacy" else name}', 'sequence=1',
+          f'count={0 if kind == "legacy" else 1}']
+if version == 5:
+    lines += [f'pending={1 if kind == "pending" else 0}', '[entry0]',
+              f'name={name}', 'deadline=2', 'enqueued=1', 'last_attempt=0',
+              'retry_at=0', 'busy_count=0', f'result={1 if kind == "pending" else 0}']
+path = os.path.join(root, '.gc', 'retirement-page.ini')
+with open(path, 'w', encoding='ascii') as record:
+    record.write('\n'.join(lines) + '\n')
+os.chmod(path, 0o400)
+PY
+    page_hash=$(sha256sum "$page_phase/cache/.gc/retirement-page.ini")
+    if "$latcd" --serve --socket "$page_phase/latcd.sock" --cache-dir "$page_phase/cache" \
+         --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+         >"$page_phase/stdout" 2>"$page_phase/stderr"; then
+        echo "latcd accepted $page_kind retirement checkpoint" >&2
+        exit 1
+    fi
+    grep -q 'retirement page budget recovery unavailable or checkpoint unsafe' "$page_phase/stderr"
+    test ! -e "$page_phase/latcd.sock"
+    test "$page_hash" = "$(sha256sum "$page_phase/cache/.gc/retirement-page.ini")"
+done
 
 owner_cache=$work/cache-owner
 owner_phase=$work/cache-owner-primary
