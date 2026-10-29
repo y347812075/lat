@@ -5917,6 +5917,10 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
     GArray *snapshot = g_array_new(FALSE, FALSE, sizeof(RetrySnapshotEntry));
     LatcdRetirementPageState current;
     uint8_t page_identity[32];
+    GKeyFile *page_record = NULL;
+    char *page_data = NULL;
+    size_t page_size = 0;
+    uint64_t page_bytes = 0;
     struct stat cache, path, transactions, tombstone_stat;
     if (scheduler < 0) goto out;
     root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -5989,6 +5993,13 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
         page->count = count;
         g_strlcpy(page->end_cursor, queue->retry_order[count - 1], sizeof(page->end_cursor));
         if (latcd_retirement_retry_page_budget_identity(page, page_identity)) goto out;
+        if (budget) {
+            page_record = g_key_file_new();
+            if (latcd_retirement_retry_page_encode(page, &page_data, &page_size) ||
+                !g_key_file_load_from_data(page_record, page_data, page_size, 0, NULL) ||
+                latcd_cache_capacity_page_peak(page->count, page->count,
+                    RETIREMENT_SCHEDULE_RECORD_BYTES, RECORD_LIMIT, &page_bytes)) goto out;
+        }
     }
 #if defined(LATCD_RETIREMENT_TESTING)
     if (latcd_retirement_test_retry_scanned) latcd_retirement_test_retry_scanned(queue->root);
@@ -6009,20 +6020,15 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
     }
     if (page) {
         if (budget) {
-            char *data = NULL; size_t size = 0; uint64_t bytes = 0;
-            GKeyFile *record = g_key_file_new();
             int matching = latcd_cache_capacity_open_matching_root(capacity, queue->root, root);
             bool not_installed = true;
             int staged = -1;
             if (matching >= 0) close(matching);
-            if (matching >= 0 && !latcd_retirement_retry_page_encode(page, &data, &size) &&
-                g_key_file_load_from_data(record, data, size, 0, NULL) &&
+            if (matching >= 0 &&
                 /* Existing legacy shards may be smaller than the fixed-size
                  * replacement. Reserve full growth for every member. */
-                !latcd_cache_capacity_page_peak(page->count, page->count,
-                    RETIREMENT_SCHEDULE_RECORD_BYTES, RECORD_LIMIT, &bytes) &&
-                !latcd_cache_capacity_reserve_page(capacity, bytes, limit, page_identity, budget)) {
-                staged = write_record_kind(gc, "retirement-page.ini", record, true, false, false,
+                !latcd_cache_capacity_reserve_page(capacity, page_bytes, limit, page_identity, budget)) {
+                staged = write_record_kind(gc, "retirement-page.ini", page_record, true, false, false,
                                            budget, &not_installed);
                 if (staged && not_installed) {
                     int saved = errno;
@@ -6030,7 +6036,6 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
                     errno = saved;
                 }
             }
-            g_free(data); g_key_file_unref(record);
             if (staged) goto out;
         }
     }
@@ -6041,6 +6046,8 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
     }
     result = 0;
 out:
+    if (page_record) g_key_file_unref(page_record);
+    g_free(page_data);
     g_array_free(snapshot, TRUE);
     g_free(boot);
     if (tombstones >= 0) close(tombstones);
