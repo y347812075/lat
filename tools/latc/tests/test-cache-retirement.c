@@ -7057,6 +7057,35 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         assert(!receipt_count && !receipts[0]);
         assert(!unlink(paths[0]));
         latcd_retirement_queue_free(receipt_queue);
+        for (unsigned change = 0; change < 2; change++) {
+            receipt_queue = latcd_retirement_queue_new(root, 1);
+            assert(!latcd_retirement_queue_diagnostic_retry(receipt_queue, retry_boot, retry_cutoff,
+                                                            receipt_hints, 2));
+            do {
+                queued = latcd_retirement_queue_step(receipt_queue, 32, 10000, &receipt_stats,
+                                                      error, sizeof(error));
+            } while (queued > 0);
+            assert(queued < 0 && !latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count));
+            char *shard_name = g_strconcat(receipt_hints[0].name, ".ini", NULL);
+            char *shard = g_build_filename(receipt_schedule, shard_name, NULL);
+            char *saved = NULL;
+            if (!change) put(marker, receipt);
+            else {
+                assert(g_file_get_contents(shard, &saved, NULL, NULL));
+                GKeyFile *altered = g_key_file_new();
+                assert(g_key_file_load_from_data(altered, saved, -1, 0, NULL));
+                g_key_file_set_uint64(altered, "schedule", "enqueued", 2);
+                char *data = g_key_file_to_data(altered, NULL, NULL);
+                put(shard, data);
+                g_free(data); g_key_file_unref(altered);
+            }
+            assert(latcd_retirement_queue_retry_receipts_revalidate(receipt_queue, receipts, &receipt_count,
+                                                                     error, sizeof(error)) < 0);
+            assert(!receipt_count && !receipts[0]);
+            if (change) put(shard, saved);
+            g_free(saved); g_free(shard); g_free(shard_name);
+            latcd_retirement_queue_free(receipt_queue);
+        }
         g_free(receipt_schedule);
         /* Every transaction mentioning a removed name must bind the receipt. */
         GKeyFile *other = g_key_file_new();
