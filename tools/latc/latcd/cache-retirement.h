@@ -56,6 +56,8 @@ typedef struct LatcdRetirementRetryPage {
     unsigned completed;
     bool intent_present;
     uint8_t replacement_digest[128][32];
+    size_t intent_size;
+    uint8_t intent_data[1024];
 } LatcdRetirementRetryPage;
 int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
                                         uint8_t digest[32]);

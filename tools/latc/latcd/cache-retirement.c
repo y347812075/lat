@@ -766,7 +766,18 @@ int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
         (page->retry_cursor[0] && !page_object_name_valid(page->retry_cursor)) ||
         strnlen(page->end_cursor, sizeof(page->end_cursor)) == sizeof(page->end_cursor) ||
         !page->count || page->count > 128 || page->completed > page->count ||
-        (page->intent_present && page->completed == page->count)) return -1;
+        (page->intent_present && page->completed == page->count) ||
+        (page->intent_present ? (!page->intent_size || page->intent_size > sizeof(page->intent_data)) :
+                                page->intent_size != 0)) return -1;
+    if (page->intent_present) {
+        uint8_t intent_digest[32]; gsize length = sizeof(intent_digest);
+        GChecksum *intent = g_checksum_new(G_CHECKSUM_SHA256);
+        g_checksum_update(intent, page->intent_data, page->intent_size);
+        g_checksum_get_digest(intent, intent_digest, &length);
+        g_checksum_free(intent);
+        if (length != sizeof(intent_digest) ||
+            memcmp(intent_digest, page->replacement_digest[page->completed], sizeof(intent_digest))) return -1;
+    }
     bool wrapped = false;
     for (unsigned i = 0; i < page->count; i++) {
         const LatcdRetirementRetryItem *item = &page->items[i];
@@ -799,7 +810,7 @@ int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
     }
     if (strcmp(page->end_cursor, page->items[page->count - 1].hint.name)) return -1;
     GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
-    static const char domain[] = "latcd-retirement-retry-page-v3";
+    static const char domain[] = "latcd-retirement-retry-page-v4";
     g_checksum_update(checksum, (const guchar *)domain, sizeof(domain));
     page_identity_u64(checksum, page->cache_device);
     page_identity_u64(checksum, page->cache_inode);
@@ -815,6 +826,8 @@ int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
     page_identity_u64(checksum, page->count);
     page_identity_u64(checksum, page->completed);
     page_identity_u64(checksum, page->intent_present);
+    page_identity_u64(checksum, page->intent_size);
+    g_checksum_update(checksum, page->intent_data, page->intent_size);
     for (unsigned i = 0; i < page->count; i++) {
         const LatcdRetirementRetryItem *item = &page->items[i];
         page_identity_string(checksum, item->hint.name);
@@ -844,6 +857,7 @@ int latcd_retirement_retry_page_budget_identity(const LatcdRetirementRetryPage *
     LatcdRetirementRetryPage *copy = g_memdup2(page, sizeof(*page));
     copy->completed = 0;
     copy->intent_present = false;
+    copy->intent_size = 0;
     memset(copy->replacement_digest, 0, sizeof(copy->replacement_digest));
     int result = latcd_retirement_retry_page_identity(copy, initial);
     g_free(copy);
@@ -987,7 +1001,7 @@ int latcd_retirement_retry_page_encode(const LatcdRetirementRetryPage *page,
     GKeyFile *record = g_key_file_new();
     char hex[65];
     encode_hex(digest, sizeof(digest), hex);
-    g_key_file_set_integer(record, "retry", "version", 3);
+    g_key_file_set_integer(record, "retry", "version", 4);
     g_key_file_set_uint64(record, "retry", "cache_device", page->cache_device);
     g_key_file_set_uint64(record, "retry", "cache_inode", page->cache_inode);
     g_key_file_set_uint64(record, "retry", "grace_us", page->grace_us);
@@ -1002,6 +1016,9 @@ int latcd_retirement_retry_page_encode(const LatcdRetirementRetryPage *page,
     g_key_file_set_uint64(record, "retry", "count", page->count);
     g_key_file_set_uint64(record, "retry", "completed", page->completed);
     g_key_file_set_uint64(record, "retry", "intent", page->intent_present);
+    char *intent_data = g_base64_encode(page->intent_data, page->intent_size);
+    g_key_file_set_string(record, "retry", "intent_data", intent_data);
+    g_free(intent_data);
     g_key_file_set_string(record, "retry", "identity", hex);
     for (unsigned i = 0; i < page->count; i++) {
         char group[32];
@@ -1036,12 +1053,12 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
     if (!data || !size || size > RECORD_LIMIT || memchr(data, 0, size)) return -1;
     GKeyFile *record = g_key_file_new();
     const char *header[] = {"version", "cache_device", "cache_inode", "grace_us", "round_cutoff", "round_sequence",
-        "snapshot_time", "snapshot_sequence", "boot", "committed_cursor", "retry_cursor", "end_cursor", "count", "completed", "intent", "identity"};
+        "snapshot_time", "snapshot_sequence", "boot", "committed_cursor", "retry_cursor", "end_cursor", "count", "completed", "intent", "intent_data", "identity"};
     const char *fields[] = {"name", "enqueued", "last_attempt", "retry_at", "busy_count", "sequence", "shard_digest", "replacement_digest", "matched", "deadline"};
     uint64_t count = 0, completed = 0, intent = 0;
     bool valid = g_key_file_load_from_data(record, data, size, 0, NULL) &&
         exact_keys(record, "retry", header, G_N_ELEMENTS(header)) &&
-        record_string_is(record, "retry", "version", "3") &&
+        record_string_is(record, "retry", "version", "4") &&
         record_uint64(record, "retry", "cache_device", &page->cache_device) &&
         record_uint64(record, "retry", "cache_inode", &page->cache_inode) &&
         record_uint64(record, "retry", "grace_us", &page->grace_us) &&
@@ -1057,12 +1074,17 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
     char *cursor = g_key_file_get_string(record, "retry", "retry_cursor", NULL);
     char *end = g_key_file_get_string(record, "retry", "end_cursor", NULL);
     char *identity = g_key_file_get_string(record, "retry", "identity", NULL);
+    char *intent_data = g_key_file_get_string(record, "retry", "intent_data", NULL);
+    gsize intent_size = 0;
+    guchar *intent_bytes = intent_data ? g_base64_decode(intent_data, &intent_size) : NULL;
+    char *canonical_intent = intent_bytes ? g_base64_encode(intent_bytes, intent_size) : NULL;
     gsize groups_count = 0;
     char **groups = g_key_file_get_groups(record, &groups_count);
     valid = valid && boot && strlen(boot) < sizeof(page->boot) && committed &&
         strlen(committed) < sizeof(page->committed_cursor) && cursor &&
         strlen(cursor) < sizeof(page->retry_cursor) && end && strlen(end) < sizeof(page->end_cursor) &&
         identity && strlen(identity) == 64 && strspn(identity, "0123456789abcdef") == 64 &&
+        canonical_intent && !strcmp(canonical_intent, intent_data) && intent_size <= sizeof(page->intent_data) &&
         groups_count == count + 1;
     if (valid) {
         g_strlcpy(page->boot, boot, sizeof(page->boot));
@@ -1071,6 +1093,8 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
         g_strlcpy(page->end_cursor, end, sizeof(page->end_cursor));
         page->count = count;
         page->completed = completed; page->intent_present = intent;
+        page->intent_size = intent_size;
+        memcpy(page->intent_data, intent_bytes, intent_size);
     }
     for (unsigned i = 0; valid && i < page->count; i++) {
         char group[32]; uint64_t busy, matched, deadline;
@@ -1110,6 +1134,7 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
         valid = !strcmp(expected, identity);
     } else valid = false;
     g_strfreev(groups); g_free(boot); g_free(committed); g_free(cursor); g_free(end); g_free(identity);
+    g_free(intent_data); g_free(intent_bytes); g_free(canonical_intent);
     g_key_file_unref(record);
     if (!valid) memset(page, 0, sizeof(*page));
     return valid ? 0 : -1;

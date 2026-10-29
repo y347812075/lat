@@ -3944,20 +3944,28 @@ static void test_retry_page_identity(void)
     g_free(tampered); g_free(encoded); g_free(decoded);
     page->completed = 1; page->intent_present = true;
     memset(page->replacement_digest[0], 0x12, 32);
-    memset(page->replacement_digest[1], 0x34, 32);
+    memcpy(page->intent_data, "replacement", 11); page->intent_size = 11;
+    GChecksum *intent_checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    g_checksum_update(intent_checksum, page->intent_data, page->intent_size);
+    gsize intent_digest_size = 32;
+    g_checksum_get_digest(intent_checksum, page->replacement_digest[1], &intent_digest_size);
+    g_checksum_free(intent_checksum);
     assert(!latcd_retirement_retry_page_budget_identity(page, changed_budget) &&
            !memcmp(budget_identity, changed_budget, 32));
     assert(!latcd_retirement_retry_page_identity(page, changed) && memcmp(original, changed, 32));
     assert(!latcd_retirement_retry_page_encode(page, &encoded, &encoded_size));
     decoded = g_new0(LatcdRetirementRetryPage, 1);
     assert(!latcd_retirement_retry_page_decode(encoded, encoded_size, decoded) &&
-           decoded->completed == 1 && decoded->intent_present && decoded->replacement_digest[1][0] == 0x34);
+           decoded->completed == 1 && decoded->intent_present && decoded->intent_size == 11 &&
+           !memcmp(decoded->intent_data, "replacement", 11));
+    decoded->intent_data[0] ^= 1;
+    assert(latcd_retirement_retry_page_identity(decoded, changed) < 0);
     tampered = g_strdup(encoded); field = strstr(tampered, "completed=1");
     assert(field); field[strlen("completed=")] = '2';
     assert(latcd_retirement_retry_page_decode(tampered, encoded_size, decoded) < 0);
     g_free(tampered); g_free(decoded); g_free(encoded);
     memset(page->replacement_digest, 0, sizeof(page->replacement_digest));
-    page->completed = 0; page->intent_present = false;
+    page->completed = 0; page->intent_present = false; page->intent_size = 0;
     page->items[0].shard_sequence++;
     assert(!latcd_retirement_retry_page_identity(page, changed) && memcmp(original, changed, 32));
     assert(!latcd_retirement_retry_page_budget_identity(page, changed_budget) &&
@@ -3989,6 +3997,13 @@ static void test_retry_page_identity(void)
         item->matched = true; item->aggregate = item->hint; item->aggregate.deadline = UINT64_MAX;
     }
     strcpy(page->end_cursor, page->items[127].hint.name);
+    page->intent_present = true; page->intent_size = sizeof(page->intent_data);
+    memset(page->intent_data, 0xab, page->intent_size);
+    intent_checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    g_checksum_update(intent_checksum, page->intent_data, page->intent_size);
+    intent_digest_size = 32;
+    g_checksum_get_digest(intent_checksum, page->replacement_digest[0], &intent_digest_size);
+    g_checksum_free(intent_checksum);
     decoded = g_new0(LatcdRetirementRetryPage, 1);
     assert(!latcd_retirement_retry_page_encode(page, &encoded, &encoded_size) && encoded_size < 65536);
     assert(!latcd_retirement_retry_page_decode(encoded, encoded_size, decoded) && decoded->count == 128);
