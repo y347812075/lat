@@ -437,6 +437,10 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record,
     }
     replaced = true;
     if (not_installed) *not_installed = false;
+    if (anonymous && reservation.capacity) {
+        if (fstat(fd, &reservation.installed_snapshot)) goto close_out;
+        reservation.installed_snapshot_present = true;
+    }
     if (record_write_fault("renamed") || fsync(directory) ||
         record_write_fault("directory-synced")) goto out;
     result = 0;

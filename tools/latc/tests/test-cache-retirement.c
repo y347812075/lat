@@ -36,6 +36,14 @@ static const char *page_lstat_swap_path, *page_lstat_swap_old, *page_lstat_swap_
 static const char *scheduler_swap_root, *scheduler_swap_gc, *scheduler_swap_old;
 static bool scheduler_swap_after_binding;
 static const char *settlement_unexpected;
+static const char *settlement_target, *settlement_saved;
+static void replace_settlement_target(void)
+{
+    assert(!rename(settlement_target, settlement_saved));
+    int fd = open(settlement_target, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0400);
+    assert(fd >= 0 && write(fd, "x", 1) == 1 && !close(fd));
+    latcd_retirement_test_before_settlement = NULL;
+}
 static void invalidate_settlement(void)
 {
     int fd = open(settlement_unexpected, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
@@ -2531,6 +2539,21 @@ static void test_budgeted_page_stage(void)
     unsetenv("LATCD_TEST_RETIREMENT_IO");
     assert(!budget.capacity && capacity.ready && !capacity.metadata_reserved);
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && !loaded.count);
+    char *target = g_build_filename(gc, "retirement-page.ini", NULL);
+    char *saved = g_build_filename(gc, "saved-settlement", NULL);
+    settlement_target = target;
+    settlement_saved = saved;
+    latcd_retirement_test_before_settlement = replace_settlement_target;
+    assert(latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
+                                                &budget, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_test_before_settlement && !capacity.ready && budget.invalid);
+    assert(!latcd_cache_capacity_abandon_page(&capacity, &budget));
+    latcd_cache_capacity_close(&capacity);
+    assert(!unlink(target) && !rename(saved, target));
+    g_free(target); g_free(saved);
+    assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
     assert(!latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
                                                  &budget, error, sizeof(error)));
     assert(budget.capacity == &capacity && budget.page_identity_bound && capacity.ready);
