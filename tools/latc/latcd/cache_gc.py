@@ -152,10 +152,15 @@ class Inventory:
                         self.read_manifest(fd, name, st)
                     if prefix == ".gc" and name == "domain.ini":
                         self.read_domain(fd, st)
-                    if prefix == ".gc/transactions" and not name.startswith(".write-"):
-                        self.read_transaction(fd, name, st)
-                    if prefix == ".gc/tombstones" and not name.startswith(".write-"):
-                        self.read_tombstone(fd, name, st)
+                    if prefix in (".gc/transactions", ".gc/tombstones"):
+                        if name.startswith(".write-"):
+                            self.freeze_all = True
+                            self.error(relative, "incomplete_lifecycle_record",
+                                       "unresolved temporary record")
+                        elif prefix == ".gc/transactions":
+                            self.read_transaction(fd, name, st)
+                        else:
+                            self.read_tombstone(fd, name, st)
                     if prefix == ".gc/tasks":
                         self.read_task(fd, name, st)
                     if prefix == ".gc/compiler-budgets":

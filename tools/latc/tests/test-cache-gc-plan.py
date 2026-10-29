@@ -643,6 +643,21 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(later[old["tbset"]]["selection_status"], "due")
         self.run_plan()
 
+    def test_interrupted_lifecycle_record_freezes_plan(self):
+        old = self.generation("1")
+        self.transaction(old, self.manifest)
+        for directory in ("transactions", "tombstones"):
+            with self.subTest(directory=directory):
+                partial = self.put(f".gc/{directory}/.write-interrupted", b"partial")
+                plan, rows = self.selected()
+                self.assertFalse(plan["complete"])
+                self.assertTrue(any(error["reason"] == "incomplete_lifecycle_record"
+                                    for error in plan["errors"]))
+                self.assertIn("inventory_or_source_unknown", rows[old["module"]]["holds"])
+                self.assertNotEqual(rows[old["module"]]["selection_status"], "due")
+                self.run_plan(success=False)
+                partial.unlink()
+
     def test_unresolved_transaction_roots_hold(self):
         old = self.generation("1")
         self.transaction(old, self.manifest)
