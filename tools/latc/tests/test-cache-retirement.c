@@ -3644,6 +3644,42 @@ static void test_schedule_byte_limit(void)
     }
     g_dir_close(directory);
     assert(total <= UINT64_C(4) * 1024 * 1024 - 1024);
+    LatcdRetirementPageState empty = {.cache_device = cache.st_dev, .cache_inode = cache.st_ino,
+        .grace_us = 100, .round_cutoff = 200, .sequence = 2};
+    g_strlcpy(empty.boot, boot, sizeof(empty.boot));
+    assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
+    simulated_boottime_us = 250;
+    LatcdRetirementPageState page = empty;
+    page.count = 1;
+    snprintf(page.entries[0].name, sizeof(page.entries[0].name), "%064x.so", 4095);
+    page.entries[0].deadline = 200;
+    page.entries[0].enqueued = 100;
+    page.entries[0].last_attempt = 2;
+    page.entries[0].retry_at = 201;
+    page.entries[0].busy_count = 2;
+    g_strlcpy(page.cursor, page.entries[0].name, sizeof(page.cursor));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget budget = {0};
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    assert(!latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
+                                                 &budget, error, sizeof(error)));
+    uint8_t identity[32];
+    assert(!latcd_retirement_page_budget_identity(&page, identity));
+    assert(!latcd_retirement_page_budget_result(root, 250, identity, &budget, &page.entries[0],
+                                                LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
+    assert(!latcd_retirement_page_budget_commit(root, 250, &page, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_consumption_begin(root, 250, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_consumption_prepare(root, 250, 0, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_consumption_apply(root, 250, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_consumption_finish(root, 250, &budget, error, sizeof(error)));
+    snprintf(entry.name, sizeof(entry.name), "%064x.so", 4094);
+    assert(!latcd_retirement_schedule_load(root, boot, 100, 250, entry.name,
+                                           &sequence, &loaded, error, sizeof(error)));
+    assert(loaded.retry_at == 201 && loaded.busy_count == 2);
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    simulated_boottime_us = 0;
     g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
 }
 
