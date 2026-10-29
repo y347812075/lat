@@ -7246,6 +7246,19 @@ static void test_retry_not_due(void)
     assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
     assert(!latcd_cache_capacity_recovery_begin(&capacity));
     latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    struct stat gc_stat; assert(!stat(gc, &gc_stat));
+    retry_sync_device = gc_stat.st_dev; retry_sync_inode = gc_stat.st_ino;
+    retry_sync_fault = true;
+    assert(latcd_retirement_retry_page_restore_budget(root, &capacity, UINT64_MAX, 100,
+                                                      &budget, page, error, sizeof(error)) < 0);
+    retry_sync_fault = false;
+    assert(!budget.capacity && latcd_cache_capacity_recovery_finish(&capacity) < 0);
+    latcd_cache_capacity_close(&capacity);
+    capacity = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    assert(!latcd_cache_capacity_recovery_begin(&capacity));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
     assert(!latcd_retirement_retry_page_restore_budget(root, &capacity, UINT64_MAX, 100,
                                                        &budget, page, error, sizeof(error)) &&
            page->intent_present && !latcd_cache_capacity_recovery_finish(&capacity));
@@ -7254,7 +7267,7 @@ static void test_retry_not_due(void)
     assert(!latcd_retirement_retry_page_commit(root, &budget, error, sizeof(error)));
     assert(!latcd_retirement_page_state_load(root, &state, error, sizeof(error)) &&
            !strcmp(state.retry_cursor, hint.name));
-    latcd_cache_capacity_close(&capacity); g_free(page); g_free(boot); g_free(schedule); g_free(tombstones);
+    latcd_cache_capacity_close(&capacity); g_free(page); g_free(boot); g_free(schedule); g_free(tombstones); g_free(gc);
     simulated_boottime_us = 0; remove_root(root); g_free(root);
 }
 

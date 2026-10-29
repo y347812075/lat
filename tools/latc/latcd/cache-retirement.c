@@ -3035,6 +3035,7 @@ int latcd_retirement_retry_page_restore_budget(const char *root,
             NULL, scheduler, snapshot, error, error_size) ||
         sequence != persisted->snapshot_sequence || retry_validate_snapshot(persisted, snapshot, now, NULL)) goto out;
     if (!directory_matches_at(directory, ".gc", gc) || !directory_matches_at(gc, "retirement-schedule", store) ||
+        fsync(gc) ||
         latcd_retirement_retry_page_budget_identity(persisted, identity) ||
         latcd_cache_capacity_page_peak(persisted->count, persisted->count, RETIREMENT_SCHEDULE_RECORD_BYTES, RECORD_LIMIT, &bytes) ||
         latcd_cache_capacity_restore_page(capacity, bytes, limit, identity, budget)) goto out;
