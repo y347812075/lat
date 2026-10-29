@@ -4848,6 +4848,7 @@ int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,
     if (scheduler < 0) goto out;
     root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     gc = root < 0 ? -1 : open_directory(root, ".gc", false);
+    if (!same_directory(scheduler, gc) || !gc_has_no_partial_records(gc)) goto out;
     roots = roots_lock_gc(gc, LOCK_EX | LOCK_NB, error, error_size);
     store = root < 0 ? -1 : open_store(root, false);
     tombstones = gc < 0 ? -1 : open_directory(gc, "tombstones", false);

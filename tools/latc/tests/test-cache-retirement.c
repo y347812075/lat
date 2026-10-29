@@ -1518,7 +1518,7 @@ static void test_empty_round_advance(void)
     LatcdRetirementPageState state, loaded;
     simulated_boottime_us = 100;
     assert(!latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)));
-    for (unsigned scenario = 0; scenario < 4; scenario++) {
+    for (unsigned scenario = 0; scenario < 5; scenario++) {
         LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 100);
         assert(!latcd_retirement_queue_diagnostic_resume(queue, error, sizeof(error)));
         LatcdRetirementQueueStats stats;
@@ -1537,12 +1537,16 @@ static void test_empty_round_advance(void)
             added = g_build_filename(root, ".gc", "transactions", "unexpected", NULL);
             put(added, "unexpected");
         }
+        if (scenario == 3) {
+            added = g_build_filename(root, ".gc", ".write-unowned", NULL);
+            put(added, "unowned");
+        }
         result = latcd_retirement_queue_round_advance(queue, error, sizeof(error));
-        assert(scenario == 3 ? !result : result < 0);
+        assert(scenario == 4 ? !result : result < 0);
         if (shared >= 0) close(shared);
         if (added) { assert(!unlink(added)); g_free(added); }
         assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
-        assert(loaded.round_cutoff == (scenario == 3 ? 101 : 100));
+        assert(loaded.round_cutoff == (scenario == 4 ? 101 : 100));
         assert(latcd_retirement_queue_round_advance(queue, error, sizeof(error)) < 0);
         latcd_retirement_queue_free(queue);
         simulated_boottime_us = 100;
@@ -1586,6 +1590,29 @@ static void test_empty_round_advance_crash(const char *point)
     do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
     while (result > 0);
     assert(result < 0);
+    if (!strcmp(point, "file-synced")) {
+        assert(latcd_retirement_queue_round_advance(queue, error, sizeof(error)) < 0);
+        latcd_retirement_queue_free(queue);
+        char *gc = g_build_filename(root, ".gc", NULL);
+        GDir *dir = g_dir_open(gc, 0, NULL);
+        assert(dir);
+        const char *name;
+        unsigned removed = 0;
+        while ((name = g_dir_read_name(dir))) {
+            if (!g_str_has_prefix(name, ".write-")) continue;
+            char *path = g_build_filename(gc, name, NULL);
+            assert(!unlink(path));
+            g_free(path);
+            removed++;
+        }
+        assert(removed == 1);
+        g_dir_close(dir); g_free(gc);
+        queue = latcd_retirement_queue_new(root, 100);
+        assert(!latcd_retirement_queue_diagnostic_resume(queue, error, sizeof(error)));
+        do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+        while (result > 0);
+        assert(result < 0);
+    }
     assert(!latcd_retirement_queue_round_advance(queue, error, sizeof(error)));
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && loaded.round_cutoff == 102);
     latcd_retirement_queue_free(queue);
