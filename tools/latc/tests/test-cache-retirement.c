@@ -3042,6 +3042,8 @@ static void test_budgeted_rebind(void)
                                                  &budget, error, sizeof(error)));
     assert(!latcd_retirement_page_budget_identity(&page, identity));
     assert(latcd_retirement_page_budget_commit(root, 150, &page, &budget, error, sizeof(error)) < 0);
+    assert(latcd_retirement_page_budget_result(root, 150, identity, &budget, &page.entries[0],
+                      LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     LatcdRetirementPageDeadline premature = page.entries[0];
     premature.last_attempt = 4; premature.retry_at = 0; premature.busy_count = 0;
     uint64_t reserved = budget.remaining;

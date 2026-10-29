@@ -1337,6 +1337,8 @@ static int retirement_schedule_access(const char *root, const char *boot,
             if (!loading) valid = (!v2 || page_identity) && sequence >= seq && entry->enqueued == enqueued &&
                 entry->last_attempt >= attempted &&
                 !(expected_page && entry->last_attempt > attempted && retry > now_us) &&
+                !(expected_page && v2 && !strcmp(saved_result, "deferred") &&
+                  kind == LATCD_RETIREMENT_RESULT_DONE && retry > now_us) &&
                 (entry->last_attempt != attempted ||
                  (entry->retry_at == retry && entry->busy_count == busy));
         }
