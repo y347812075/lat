@@ -37,6 +37,11 @@ static const char *scheduler_swap_root, *scheduler_swap_gc, *scheduler_swap_old;
 static bool scheduler_swap_after_binding;
 static const char *settlement_unexpected;
 static const char *settlement_target, *settlement_saved;
+static void fail_page_finish(LatcdPageBudget *budget)
+{
+    budget->invalid = true;
+    latcd_retirement_test_before_page_finish = NULL;
+}
 static void replace_settlement_target(void)
 {
     assert(!rename(settlement_target, settlement_saved));
@@ -2933,8 +2938,10 @@ static void test_budgeted_max_page(void)
     assert(latcd_retirement_page_finish_deferred(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
     unsetenv("LATCD_TEST_RETIREMENT_IO");
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && loaded.committed_pending);
-    assert(!latcd_retirement_page_finish_deferred(root, UINT64_MAX, &budget, error, sizeof(error)));
-    assert(!budget.capacity && !recovered.metadata_reserved);
+    latcd_retirement_test_before_page_finish = fail_page_finish;
+    assert(latcd_retirement_page_finish_deferred(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_test_before_page_finish && budget.invalid && !recovered.ready && budget.capacity);
+    assert(latcd_cache_capacity_reserve(&recovered, 1, UINT64_MAX, error, sizeof(error)) < 0);
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
            !loaded.count && !loaded.committed_pending && !strcmp(loaded.committed_cursor, page.cursor));
     LatcdRetirementPageState merged = page;
@@ -2943,6 +2950,10 @@ static void test_budgeted_max_page(void)
     assert(!latcd_retirement_schedule_merge_page(root, boot, UINT64_MAX, UINT64_MAX,
                                                   &merged, error, sizeof(error)));
     assert(merged.entries[0].retry_at == UINT64_MAX && merged.entries[0].busy_count == 7);
+    assert(!latcd_cache_capacity_abandon_page(&recovered, &budget));
+    assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
+    assert(!latcd_retirement_page_startup_check(root, error, sizeof(error)));
     latcd_cache_capacity_close(&recovered);
     assert(!pthread_mutex_destroy(&recovered.lock));
     simulated_boottime_us = 0;

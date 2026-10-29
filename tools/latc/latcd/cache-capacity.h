@@ -108,6 +108,8 @@ int latcd_cache_capacity_reserve_page(LatcdCacheCapacity *capacity, uint64_t byt
                                       uint64_t limit, const uint8_t identity[32],
                                       LatcdPageBudget *budget);
 int latcd_cache_capacity_cancel_page(LatcdCacheCapacity *capacity, LatcdPageBudget *budget);
+/* Once an empty checkpoint is durable, failure to release requires a rescan. */
+int latcd_cache_capacity_finish_page(LatcdCacheCapacity *capacity, LatcdPageBudget *budget);
 /* After admission has failed, discard only the registered, idle budget.
  * This does not reopen admission or resolve a persisted checkpoint; the owner
  * must re-inventory and recover it. The recovery gate must already be closed. */

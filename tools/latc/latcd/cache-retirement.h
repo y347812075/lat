@@ -208,6 +208,7 @@ int latcd_retirement_page_finish_deferred(const char *root, uint64_t now_us,
                                     struct LatcdPageBudget *budget, char *error, size_t error_size);
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
 extern void (*latcd_retirement_test_before_settlement)(void);
+extern void (*latcd_retirement_test_before_page_finish)(struct LatcdPageBudget *budget);
 struct LatcdCacheCapacity;
 struct LatcdPageBudget;
 /* Test-only handoff; caller owns the lease and serializes budget lifetime. */

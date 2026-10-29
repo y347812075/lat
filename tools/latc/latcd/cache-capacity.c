@@ -1037,6 +1037,28 @@ int latcd_cache_capacity_cancel_page(LatcdCacheCapacity *capacity, LatcdPageBudg
     return valid ? 0 : -1;
 }
 
+int latcd_cache_capacity_finish_page(LatcdCacheCapacity *capacity, LatcdPageBudget *budget)
+{
+    if (!capacity || !budget) { errno = EINVAL; return -1; }
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
+    bool owned = capacity->restored_page_budget == budget && budget->capacity == capacity;
+    bool valid = owned && capacity->ready && !capacity->recovery_gate &&
+        budget->page_identity_bound && !budget->invalid && !budget->inflight &&
+        budget->remaining <= capacity->metadata_reserved;
+    if (valid) {
+        capacity->metadata_reserved -= budget->remaining;
+        capacity->restored_page_budget = NULL;
+        *budget = (LatcdPageBudget){0};
+    } else if (owned) {
+        capacity->ready = false;
+        budget->invalid = true;
+    }
+    pthread_mutex_unlock(&capacity->lock);
+    if (!valid) errno = EBUSY;
+    return valid ? 0 : -1;
+}
+
 int latcd_cache_capacity_abandon_page(LatcdCacheCapacity *capacity, LatcdPageBudget *budget)
 {
     if (!capacity || !budget) { errno = EINVAL; return -1; }

@@ -320,6 +320,7 @@ static bool record_write_fault(const char *point)
 
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
 void (*latcd_retirement_test_before_settlement)(void);
+void (*latcd_retirement_test_before_page_finish)(LatcdPageBudget *budget);
 #endif
 
 static int write_record_kind(int directory, const char *name, GKeyFile *record,
@@ -1915,7 +1916,10 @@ int latcd_retirement_page_finish_deferred(const char *root, uint64_t now_us,
     page.committed_pending = false;
     page.budget_bound = false;
     if (page_state_store_fd(directory, gc, &page, budget, NULL)) goto out;
-    result = latcd_cache_capacity_cancel_page(budget->capacity, budget);
+#if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
+    if (latcd_retirement_test_before_page_finish) latcd_retirement_test_before_page_finish(budget);
+#endif
+    result = latcd_cache_capacity_finish_page(budget->capacity, budget);
 out:
     if (matching >= 0) close(matching);
     if (gc >= 0) close(gc);
