@@ -1528,6 +1528,7 @@ static int retirement_schedule_access(const char *root, const char *boot,
             hint.retry_at = retry;
             hint.busy_count = busy;
             g_array_append_val(snapshot, hint);
+            *loaded_sequence = MAX(*loaded_sequence, seq);
         }
         if (valid && check_page && page_results) {
             for (unsigned i = 0; i < check_page->count; i++) {
@@ -2459,19 +2460,23 @@ static gint retry_hint_compare(gconstpointer a, gconstpointer b)
 int latcd_retirement_retry_snapshot(const char *root, const char *boot,
                                     uint64_t grace_us, uint64_t now_us, const char *after,
                                     LatcdRetirementPageDeadline selected[128], unsigned *selected_count,
+                                    uint64_t *sequence,
                                     char *error, size_t error_size)
 {
-    if (!root || !selected || !selected_count) return fail(error, error_size, "invalid retry snapshot output");
+    if (!root || !selected || !selected_count || !sequence) return fail(error, error_size, "invalid retry snapshot output");
     *selected_count = 0;
+    *sequence = 0;
+    uint64_t scanned_sequence = 0;
     GArray *hints = g_array_new(FALSE, FALSE, sizeof(LatcdRetirementPageDeadline));
     int scheduler = scheduler_lock(root, error, error_size);
     int result = scheduler < 0 ? -1 : retirement_schedule_access(root, boot, grace_us, now_us,
-        0, NULL, true, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
+        0, NULL, true, &scanned_sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
         NULL, scheduler, hints, error, error_size);
     if (!result) {
         g_array_sort(hints, retry_hint_compare);
         result = latcd_retirement_retry_select((LatcdRetirementPageDeadline *)hints->data,
                                                hints->len, after, now_us, selected, selected_count);
+        if (!result) *sequence = scanned_sequence;
     }
     if (scheduler >= 0) close(scheduler);
     g_array_free(hints, TRUE);

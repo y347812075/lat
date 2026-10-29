@@ -48,6 +48,7 @@ int latcd_retirement_retry_select(const LatcdRetirementPageDeadline *entries,
 int latcd_retirement_retry_snapshot(const char *root, const char *boot,
                                     uint64_t grace_us, uint64_t now_us, const char *after,
                                     LatcdRetirementPageDeadline selected[128], unsigned *selected_count,
+                                    uint64_t *sequence,
                                     char *error, size_t error_size);
 typedef struct LatcdRetirementConsumption {
     uint8_t completed[16];

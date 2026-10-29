@@ -3748,11 +3748,12 @@ static void test_schedule_byte_limit(void)
                                           .retry_at = 201, .busy_count = 2};
     LatcdRetirementPageDeadline selected[128];
     unsigned selected_count;
+    uint64_t snapshot_sequence;
     char after[138];
     snprintf(after, sizeof(after), "%064x.so", 4093);
     assert(!latcd_retirement_retry_snapshot(root, boot, 100, 200, after,
-                                            selected, &selected_count, error, sizeof(error)));
-    assert(selected_count == 128 && strcmp(selected[0].name, after));
+                                            selected, &selected_count, &snapshot_sequence, error, sizeof(error)));
+    assert(selected_count == 128 && snapshot_sequence == 1 && strcmp(selected[0].name, after));
     snprintf(after, sizeof(after), "%064x.so", 4094);
     assert(!strcmp(selected[0].name, after));
     snprintf(after, sizeof(after), "%064x.so", 1);
@@ -3760,7 +3761,8 @@ static void test_schedule_byte_limit(void)
     char *invalid = g_build_filename(store, "unexpected", NULL);
     put(invalid, "invalid");
     assert(latcd_retirement_retry_snapshot(root, boot, 100, 200, after,
-                                           selected, &selected_count, error, sizeof(error)) < 0 && !selected_count);
+                                           selected, &selected_count, &snapshot_sequence, error, sizeof(error)) < 0 &&
+           !selected_count && !snapshot_sequence);
     assert(!unlink(invalid));
     g_free(invalid);
     snprintf(entry.name, sizeof(entry.name), "%064x.so", 4096);
