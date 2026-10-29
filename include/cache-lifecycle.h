@@ -25,6 +25,17 @@ int lat_aot_v2_cache_source_lock(const char *cache_dir,
                                  bool protect_from_guest,
                                  char *error, size_t error_size);
 
+/* Never creates the lifecycle directories or latch; ENOENT means absent. */
+int lat_aot_v2_cache_source_lock_existing(const char *cache_dir,
+                                          const char *source_hex, int operation,
+                                          bool protect_from_guest,
+                                          char *error, size_t error_size);
+/* Both owner and source acquisition are nonblocking; a busy lock fails. */
+int lat_aot_v2_cache_source_lock_offline(const char *cache_dir,
+                                         const char *source_hex, int operation,
+                                         bool protect_from_guest,
+                                         char *error, size_t error_size);
+
 int lat_aot_v2_cache_close_fd(int fd, bool protected_from_guest,
                               char *error, size_t error_size);
 

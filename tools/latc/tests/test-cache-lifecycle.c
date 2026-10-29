@@ -22,6 +22,64 @@
 static const char source_hex[] =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+static int child_exclusive_attempt(const char *root);
+
+static int test_offline_source_latch(const char *root)
+{
+    const char *other =
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    char path[4096], lockpath[4096], error[256];
+    snprintf(path, sizeof(path), "%s/.latcd.lock", root);
+    if (chmod(root, 0777)) return -1;
+    int unsafe = lat_aot_v2_cache_source_lock_offline(root, other, LOCK_SH, true,
+                                                       error, sizeof(error));
+    int unsafe_errno = errno;
+    int owner_present = access(path, F_OK);
+    int access_errno = errno;
+    if (chmod(root, 0700) || unsafe >= 0 || unsafe_errno != EACCES ||
+        owner_present == 0 || access_errno != ENOENT) return -1;
+    int owner = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (owner < 0 || flock(owner, LOCK_EX | LOCK_NB)) return -1;
+    int fd = lat_aot_v2_cache_source_lock_offline(root, other, LOCK_SH, true,
+                                                   error, sizeof(error));
+    snprintf(lockpath, sizeof(lockpath), "%s/.gc/source-locks/%s.lock", root, other);
+    if (fd >= 0 || errno != EWOULDBLOCK || access(lockpath, F_OK) == 0 || errno != ENOENT)
+        return -1;
+    close(owner);
+    fd = lat_aot_v2_cache_source_lock_offline(root, other, LOCK_SH, true,
+                                               error, sizeof(error));
+    if (fd < 0 || !lat_aot_v2_internal_fd_is_protected(fd) ||
+        lat_aot_v2_cache_close_fd(fd, true, error, sizeof(error))) return -1;
+    return unlink(lockpath) || unlink(path);
+}
+
+static int test_existing_source_latch(const char *root)
+{
+    const char *other =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    char path[4096], error[256];
+    int fd = lat_aot_v2_cache_source_lock_existing(root, source_hex, LOCK_SH,
+                                                   false, error, sizeof(error));
+    snprintf(path, sizeof(path), "%s/.gc", root);
+    if (fd >= 0 || errno != ENOENT || access(path, F_OK) == 0 || errno != ENOENT)
+        return -1;
+    fd = lat_aot_v2_cache_source_lock(root, source_hex, LOCK_SH, false,
+                                      error, sizeof(error));
+    if (fd < 0) return -1;
+    int missing = lat_aot_v2_cache_source_lock_existing(root, other, LOCK_SH,
+                                                        false, error, sizeof(error));
+    snprintf(path, sizeof(path), "%s/.gc/source-locks/%s.lock", root, other);
+    if (missing >= 0 || errno != ENOENT || access(path, F_OK) == 0 || errno != ENOENT)
+        return -1;
+    int protected = lat_aot_v2_cache_source_lock_existing(root, source_hex, LOCK_SH,
+                                                          true, error, sizeof(error));
+    if (protected < 0 || !lat_aot_v2_internal_fd_is_protected(protected) ||
+        child_exclusive_attempt(root)) return -1;
+    if (lat_aot_v2_cache_close_fd(protected, true, error, sizeof(error)) || close(fd))
+        return -1;
+    return 0;
+}
+
 static int child_exclusive_attempt(const char *root)
 {
     pid_t child = fork();
@@ -62,12 +120,13 @@ static int signal_byte(int fd)
 }
 
 static _Thread_local bool pause_source_flock;
+static _Thread_local unsigned pause_flock_number;
 static int flock_entered, flock_release;
 
 int __real_flock(int fd, int operation);
 int __wrap_flock(int fd, int operation)
 {
-    if (pause_source_flock) {
+    if (pause_source_flock && (!pause_flock_number || !--pause_flock_number)) {
         pause_source_flock = false;
         if (signal_byte(flock_entered) || wait_byte(flock_release)) {
             errno = EIO;
@@ -83,6 +142,7 @@ typedef struct SourceLockAttempt {
     bool protected;
     int fd;
     int error;
+    unsigned pause_number;
 } SourceLockAttempt;
 
 static void *acquire_source_latch(void *opaque)
@@ -94,6 +154,79 @@ static void *acquire_source_latch(void *opaque)
         attempt->operation, attempt->protected, error, sizeof(error));
     attempt->error = errno;
     return NULL;
+}
+
+static void *acquire_offline_latch(void *opaque)
+{
+    SourceLockAttempt *attempt = opaque;
+    char error[256];
+    pause_source_flock = true;
+    pause_flock_number = attempt->pause_number;
+    attempt->fd = lat_aot_v2_cache_source_lock_offline(attempt->root, source_hex,
+        LOCK_SH, attempt->protected, error, sizeof(error));
+    attempt->error = errno;
+    return NULL;
+}
+
+static int test_rebound_offline_owner(const char *parent, bool replace_root,
+                                      bool protected, bool after_owner)
+{
+    char root[2048], target[2200], moved[2220], source[2200], old_owner[2240];
+    if (snprintf(root, sizeof(root), "%s/offline-race-%d-%d-%d", parent,
+                 replace_root, protected, after_owner) >= (int)sizeof(root)) return -1;
+    if (mkdir(root, 0700)) return -1;
+    snprintf(target, sizeof(target), "%s%s", root, replace_root ? "" : "/.latcd.lock");
+    snprintf(moved, sizeof(moved), "%s-old", target);
+    int entered[2], release[2];
+    if (pipe(entered) || pipe(release)) return -1;
+    flock_entered = entered[1]; flock_release = release[0];
+    SourceLockAttempt attempt = {.root = root, .protected = protected, .fd = -1,
+                                 .pause_number = after_owner ? 2 : 1};
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, acquire_offline_latch, &attempt) || wait_byte(entered[0]))
+        return -1;
+    if (after_owner) {
+        char owner_path[2200];
+        snprintf(owner_path, sizeof(owner_path), "%s/.latcd.lock", root);
+        int owner = open(owner_path, O_RDWR | O_CLOEXEC);
+        if (owner < 0 || !flock(owner, LOCK_EX | LOCK_NB) || errno != EWOULDBLOCK || close(owner))
+            return -1;
+    }
+    if (rename(target, moved)) return -1;
+    if (replace_root) {
+        if (mkdir(root, 0700)) return -1;
+    } else {
+        int replacement = open(target, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (replacement < 0 || close(replacement)) return -1;
+    }
+    if (signal_byte(release[1]) || pthread_join(thread, NULL)) return -1;
+    snprintf(source, sizeof(source), "%s/.gc/source-locks/%s.lock", root, source_hex);
+    int result = attempt.fd < 0 && attempt.error == ESTALE &&
+                 (after_owner && !replace_root ? 1 :
+                  access(source, F_OK) < 0 && errno == ENOENT) ? 0 : -1;
+    if (attempt.fd >= 0) lat_aot_v2_cache_close_fd(attempt.fd, protected, NULL, 0);
+    if (replace_root) {
+        if (rmdir(root)) result = -1;
+        if (after_owner) {
+            char old_source[2400], old_locks[2350], old_gc[2300];
+            snprintf(old_source, sizeof(old_source), "%s/.gc/source-locks/%s.lock", moved, source_hex);
+            snprintf(old_locks, sizeof(old_locks), "%s/.gc/source-locks", moved);
+            snprintf(old_gc, sizeof(old_gc), "%s/.gc", moved);
+            if (unlink(old_source) || rmdir(old_locks) || rmdir(old_gc)) result = -1;
+        }
+        snprintf(old_owner, sizeof(old_owner), "%s/.latcd.lock", moved);
+        if (unlink(old_owner) || rmdir(moved)) result = -1;
+    } else {
+        if (after_owner) {
+            char locks[2200], gc[2200];
+            snprintf(locks, sizeof(locks), "%s/.gc/source-locks", root);
+            snprintf(gc, sizeof(gc), "%s/.gc", root);
+            if (unlink(source) || rmdir(locks) || rmdir(gc)) result = -1;
+        }
+        if (unlink(target) || unlink(moved) || rmdir(root)) result = -1;
+    }
+    for (unsigned i = 0; i < 2; i++) { close(entered[i]); close(release[i]); }
+    return result;
 }
 
 static int test_rebound_source_latch(const char *root, unsigned kind,
@@ -809,13 +942,19 @@ int main(void)
     const int commands[] = {F_GETFD, F_SETFD, F_DUPFD, F_DUPFD_CLOEXEC};
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
         if (test_dup_registration(false, true, false, commands[i], false)) return 1;
-    int result = test_unsafe_layout(root) || test_source_latch(root) ||
+    int result = test_unsafe_layout(root) || test_existing_source_latch(root) ||
+        test_offline_source_latch(root) ||
+        test_source_latch(root) ||
         test_guest_fd_registry(root) || test_atfork_registry() ||
         test_fork_inheritance(root) || test_exec_closes_latch(root) ||
         test_artifact_latch(root) || test_tombstones(root) || test_guest_snapshot(root) ||
         test_guest_fcntl() || test_guest_close() || test_guest_close_range() || test_guest_borrow() ||
         test_borrow_record_lock(root);
     const int operations[] = { LOCK_SH, LOCK_EX, LOCK_SH | LOCK_NB, LOCK_EX | LOCK_NB };
+    for (unsigned protected = 0; !result && protected < 2; protected++)
+        for (unsigned root_replaced = 0; !result && root_replaced < 2; root_replaced++)
+            for (unsigned after = 0; !result && after < 2; after++)
+                result = test_rebound_offline_owner(root, root_replaced, protected, after);
     for (unsigned protected = 0; !result && protected < 2; protected++)
         for (size_t op = 0; !result && op < sizeof(operations) / sizeof(operations[0]); op++)
             for (unsigned kind = 0; !result && kind < 5; kind++)

@@ -145,9 +145,10 @@ static int verify_private_directory(int fd, const char *label,
 
 static int open_private_subdirectory(int parent, const char *name,
                                      const char *parent_label,
+                                     bool create,
                                      char *error, size_t error_size)
 {
-    if (mkdirat(parent, name, 0700) && errno != EEXIST) {
+    if (create && mkdirat(parent, name, 0700) && errno != EEXIST) {
         return fail(error, error_size, "cannot create %s/%s: %s",
                     parent_label, name, strerror(errno));
     }
@@ -165,16 +166,19 @@ static int open_private_subdirectory(int parent, const char *name,
 }
 
 static int open_source_lock_file(int directory, const char *source_hex,
+                                 bool create,
                                  char *error, size_t error_size)
 {
     char name[80];
     snprintf(name, sizeof(name), "%s.lock", source_hex);
-    int fd = openat(directory, name, O_RDWR | O_CREAT | O_EXCL |
-                    O_CLOEXEC | O_NOFOLLOW, 0600);
+    int fd = create ? openat(directory, name, O_RDWR | O_CREAT | O_EXCL |
+                    O_CLOEXEC | O_NOFOLLOW, 0600) :
+                    openat(directory, name, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
     bool created = fd >= 0;
-    if (fd < 0 && errno == EEXIST) {
+    if (create && fd < 0 && errno == EEXIST) {
         fd = openat(directory, name, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
     }
+    created = create && created;
     if (fd < 0) {
         return fail(error, error_size, "cannot open source latch %s: %s",
                     name, strerror(errno));
@@ -220,9 +224,9 @@ static bool source_lock_still_bound(const char *path, int root, int gc,
         !(opened.st_mode & 0077);
 }
 
-int lat_aot_v2_cache_source_lock(const char *cache_dir,
+static int cache_source_lock(const char *cache_dir,
                                  const char *source_hex, int operation,
-                                 bool protect_from_guest,
+                                 bool protect_from_guest, bool create, int expected_root,
                                  char *error, size_t error_size)
 {
     if (!cache_dir || !*cache_dir || !source_hex_valid(source_hex) ||
@@ -242,13 +246,22 @@ int lat_aot_v2_cache_source_lock(const char *cache_dir,
     if (verify_private_directory(root, "cache domain", error, error_size)) {
         goto error;
     }
-    gc = open_private_subdirectory(root, ".gc", "cache",
+    if (expected_root >= 0) {
+        struct stat actual, expected;
+        if (fstat(root, &actual) || fstat(expected_root, &expected) ||
+            actual.st_dev != expected.st_dev || actual.st_ino != expected.st_ino) {
+            errno = ESTALE;
+            fail(error, error_size, "offline cache root changed before source latch creation");
+            goto error;
+        }
+    }
+    gc = open_private_subdirectory(root, ".gc", "cache", create,
                                        error, error_size);
     if (gc < 0) goto error;
-    locks = open_private_subdirectory(gc, "source-locks", ".gc",
+    locks = open_private_subdirectory(gc, "source-locks", ".gc", create,
                                           error, error_size);
     if (locks < 0) goto error;
-    int fd = open_source_lock_file(locks, source_hex, error, error_size);
+    int fd = open_source_lock_file(locks, source_hex, create, error, error_size);
     if (fd < 0) goto error;
     if (lat_aot_v2_cache_lock_fd(fd, operation, error, error_size)) {
         int saved = errno;
@@ -288,6 +301,84 @@ error:
         errno = saved;
     }
     return -1;
+}
+
+int lat_aot_v2_cache_source_lock(const char *cache_dir,
+                                 const char *source_hex, int operation,
+                                 bool protect_from_guest,
+                                 char *error, size_t error_size)
+{
+    return cache_source_lock(cache_dir, source_hex, operation,
+                             protect_from_guest, true, -1, error, error_size);
+}
+
+int lat_aot_v2_cache_source_lock_existing(const char *cache_dir,
+                                          const char *source_hex, int operation,
+                                          bool protect_from_guest,
+                                          char *error, size_t error_size)
+{
+    return cache_source_lock(cache_dir, source_hex, operation,
+                             protect_from_guest, false, -1, error, error_size);
+}
+
+int lat_aot_v2_cache_source_lock_offline(const char *cache_dir,
+                                         const char *source_hex, int operation,
+                                         bool protect_from_guest,
+                                         char *error, size_t error_size)
+{
+    if (!cache_dir || !*cache_dir || !source_hex_valid(source_hex) ||
+        !lock_operation_valid(operation)) {
+        errno = EINVAL;
+        return fail(error, error_size, "invalid offline source latch arguments");
+    }
+    if (protect_from_guest) lat_aot_v2_internal_fd_allocation_lock();
+    int root = open(cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool root_valid = root >= 0 &&
+        !verify_private_directory(root, "cache domain", error, error_size);
+    int owner = root_valid ? openat(root, ".latcd.lock", O_RDWR | O_CREAT |
+                                    O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    struct stat held, named;
+    bool valid = root_valid && owner >= 0 && !fstat(owner, &held);
+    if (valid && (!S_ISREG(held.st_mode) || held.st_uid != geteuid() ||
+                  held.st_nlink != 1 || (held.st_mode & 0077))) {
+        errno = EACCES;
+        valid = false;
+    }
+    if (valid && flock(owner, LOCK_EX | LOCK_NB)) valid = false;
+    if (valid && (!directory_still_bound(AT_FDCWD, cache_dir, root) ||
+        fstatat(root, ".latcd.lock", &named, AT_SYMLINK_NOFOLLOW) ||
+        held.st_dev != named.st_dev || held.st_ino != named.st_ino)) {
+        errno = ESTALE;
+        valid = false;
+    }
+    bool root_registered = false, owner_registered = false;
+    if (valid && protect_from_guest) {
+        root_registered = !lat_aot_v2_internal_fd_register_locked(root);
+        owner_registered = root_registered && !lat_aot_v2_internal_fd_register_locked(owner);
+        valid = owner_registered;
+    }
+    int saved = valid ? 0 : (errno ? errno : ESTALE);
+    if (!valid) {
+        if (owner_registered) lat_aot_v2_internal_fd_unregister_close_locked(owner);
+        else if (owner >= 0) close(owner);
+        if (root_registered) lat_aot_v2_internal_fd_unregister_close_locked(root);
+        else if (root >= 0) close(root);
+    }
+    if (protect_from_guest) lat_aot_v2_internal_fd_unlock();
+    if (!valid) { errno = saved; return fail(error, error_size, "cannot acquire offline cache owner"); }
+    int fd = cache_source_lock(cache_dir, source_hex, operation | LOCK_NB, protect_from_guest,
+                               true, root, error, error_size);
+    saved = errno;
+    valid = directory_still_bound(AT_FDCWD, cache_dir, root) &&
+        !fstat(owner, &held) && !fstatat(root, ".latcd.lock", &named, AT_SYMLINK_NOFOLLOW) &&
+        held.st_dev == named.st_dev && held.st_ino == named.st_ino &&
+        S_ISREG(held.st_mode) && held.st_uid == geteuid() && held.st_nlink == 1 &&
+        !(held.st_mode & 0077);
+    if (!valid && fd >= 0) { lat_aot_v2_cache_close_fd(fd, protect_from_guest, NULL, 0); fd = -1; saved = ESTALE; }
+    lat_aot_v2_cache_close_fd(root, protect_from_guest, NULL, 0);
+    lat_aot_v2_cache_close_fd(owner, protect_from_guest, NULL, 0);
+    errno = saved;
+    return fd;
 }
 
 int lat_aot_v2_cache_close_fd(int fd, bool protected_from_guest,
