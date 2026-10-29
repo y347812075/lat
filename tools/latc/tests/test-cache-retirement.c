@@ -3666,6 +3666,8 @@ static void test_schedule_byte_limit(void)
                                                  &budget, error, sizeof(error)));
     uint8_t identity[32];
     assert(!latcd_retirement_page_budget_identity(&page, identity));
+    assert(latcd_retirement_page_budget_result(root, 200, identity, &budget, &page.entries[0],
+                                               LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     assert(!latcd_retirement_page_budget_result(root, 250, identity, &budget, &page.entries[0],
                                                 LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
     assert(!latcd_retirement_page_budget_commit(root, 250, &page, &budget, error, sizeof(error)));
