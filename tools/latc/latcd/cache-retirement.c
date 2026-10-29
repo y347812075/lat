@@ -2306,7 +2306,7 @@ out:
     return result ? fail(error, error_size, "consumption apply uncertain; reload") : 0;
 }
 
-int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t now_us,
+static int page_finish(const char *root, uint64_t now_us, bool consumption,
                                           LatcdPageBudget *budget, char *error, size_t error_size)
 {
     if (!root || !budget || !budget->capacity || !budget->page_identity_bound)
@@ -2321,11 +2321,19 @@ int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t n
     int result = -1, directory = -1, gc = -1, matching = -1;
     struct stat held, path;
     if (page_state_load(root, &page, &legacy, error, error_size) || legacy ||
-        !page.budget_bound || !page.committed_pending || page.consumption_bound ||
+        !page.budget_bound || !page.committed_pending || page.consumption_bound != consumption ||
         latcd_retirement_page_budget_identity(&page, identity) ||
         memcmp(identity, budget->page_identity, sizeof(identity))) goto out;
-    if (schedule_page_results(root, now_us, &page, results, &inventory, error, error_size) ||
-        latcd_retirement_page_budget_estimate(&page, results, &inventory, &required)) goto out;
+    int scanned = schedule_page_results(root, now_us, &page, results, &inventory, error, error_size);
+    if (scanned < 0 || (consumption ?
+        latcd_retirement_consumption_budget_estimate(&page, &page.consumption, results, &inventory, &required) :
+        (scanned || latcd_retirement_page_budget_estimate(&page, results, &inventory, &required)))) goto out;
+    if (consumption) {
+        if (page.consumption.intent_present) goto out;
+        for (unsigned i = 0; i < page.count; i++)
+            if (page.results[i] == LATCD_RETIREMENT_RESULT_DONE &&
+                !(page.consumption.completed[i / 8] & (1u << (i % 8)))) goto out;
+    }
     directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
     if (gc < 0 || !same_directory(scheduler, gc) || fstat(directory, &held) ||
@@ -2338,6 +2346,8 @@ int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t n
     page.count = 0;
     page.committed_pending = false;
     page.budget_bound = false;
+    page.consumption_bound = false;
+    memset(&page.consumption, 0, sizeof(page.consumption));
     if (page_state_store_fd(directory, gc, &page, budget, NULL)) goto out;
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
     if (latcd_retirement_test_before_page_finish) latcd_retirement_test_before_page_finish(budget);
@@ -2349,6 +2359,18 @@ out:
     if (directory >= 0) close(directory);
     close(scheduler);
     return result ? fail(error, error_size, "page completion uncertain; reload") : 0;
+}
+
+int latcd_retirement_consumption_finish(const char *root, uint64_t now_us,
+                                        LatcdPageBudget *budget, char *error, size_t error_size)
+{
+    return page_finish(root, now_us, true, budget, error, error_size);
+}
+
+int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t now_us,
+                                                    LatcdPageBudget *budget, char *error, size_t error_size)
+{
+    return page_finish(root, now_us, false, budget, error, error_size);
 }
 
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)

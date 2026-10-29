@@ -3357,7 +3357,20 @@ static void test_budgeted_max_page(bool consumption)
         assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
                !loaded.consumption.intent_present && (loaded.consumption.completed[0] & 2));
         assert(latcd_retirement_consumption_apply(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
-        assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
+        assert(latcd_retirement_consumption_finish(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
+        for (unsigned i = 3; i < page.count; i += 2) {
+            assert(!latcd_retirement_consumption_prepare(root, UINT64_MAX, i, &budget, error, sizeof(error)));
+            assert(!latcd_retirement_consumption_apply(root, UINT64_MAX, &budget, error, sizeof(error)));
+        }
+        assert(!latcd_retirement_consumption_finish(root, UINT64_MAX, &budget, error, sizeof(error)));
+        assert(!budget.capacity);
+        assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+               !loaded.count && !loaded.committed_pending && !strcmp(loaded.committed_cursor, page.cursor));
+        LatcdRetirementPageState merged = page;
+        assert(!latcd_retirement_schedule_merge_page(root, boot, UINT64_MAX, UINT64_MAX,
+                                                     &merged, error, sizeof(error)));
+        assert(merged.entries[0].busy_count == page.entries[0].busy_count &&
+               merged.entries[0].retry_at == page.entries[0].retry_at);
         latcd_cache_capacity_close(&recovered);
         assert(!pthread_mutex_destroy(&recovered.lock));
         simulated_boottime_us = 0;

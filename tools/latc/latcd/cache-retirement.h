@@ -246,6 +246,9 @@ int latcd_retirement_consumption_prepare(const char *root, uint64_t now_us, unsi
 /* Owner lease and controlled namespace required; recovery gate must be closed. */
 int latcd_retirement_consumption_apply(const char *root, uint64_t now_us,
                                     struct LatcdPageBudget *budget, char *error, size_t error_size);
+/* Advance only after all done shards were consumed; deferred shards remain. */
+int latcd_retirement_consumption_finish(const char *root, uint64_t now_us,
+                                    struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Caller holds the owner lease and serializes budget lifetime. These operations
  * require a persisted budget binding and never authorize object deletion. */
 int latcd_retirement_page_budget_result(const char *root, uint64_t now_us,
