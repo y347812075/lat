@@ -24,6 +24,9 @@
 static unsigned clock_fault;
 static int consumption_io_fault;
 static bool consumption_unlinked;
+static bool retry_sync_fault;
+static dev_t retry_sync_device;
+static ino_t retry_sync_inode;
 int __real_unlinkat(int fd, const char *name, int flags);
 int __real_fsync(int fd);
 int __wrap_unlinkat(int fd, const char *name, int flags)
@@ -35,6 +38,9 @@ int __wrap_unlinkat(int fd, const char *name, int flags)
 }
 int __wrap_fsync(int fd)
 {
+    struct stat st;
+    if (retry_sync_fault && !fstat(fd, &st) && st.st_dev == retry_sync_device &&
+        st.st_ino == retry_sync_inode) { errno = EIO; return -1; }
     if (consumption_io_fault == 2 && consumption_unlinked) { errno = EIO; return -1; }
     return __real_fsync(fd);
 }
@@ -1809,6 +1815,23 @@ static void test_retry_page_stage(bool crash_commit)
     assert(!latcd_retirement_retry_page_restore_budget(root, &replaced, UINT64_MAX, 100,
                                                        &replaced_budget, page, error, sizeof(error)) &&
            page->intent_present && !latcd_cache_capacity_recovery_finish(&replaced));
+    struct stat schedule_stat;
+    assert(!stat(schedule, &schedule_stat));
+    retry_sync_device = schedule_stat.st_dev; retry_sync_inode = schedule_stat.st_ino;
+    retry_sync_fault = true;
+    assert(latcd_retirement_retry_page_finish_unmatched(root, &replaced_budget, error, sizeof(error)) < 0);
+    retry_sync_fault = false;
+    assert(!latcd_retirement_retry_page_load(root, page, error, sizeof(error)) &&
+           page->intent_present && !page->completed && replaced_budget.invalid);
+    latcd_cache_capacity_close(&replaced);
+    replaced = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
+    memset(&replaced_budget, 0, sizeof(replaced_budget));
+    assert(!latcd_cache_capacity_scan(&replaced, root, error, sizeof(error)));
+    assert(!latcd_cache_capacity_recovery_begin(&replaced));
+    latcd_cache_capacity_metadata_bind(&replaced, UINT64_MAX);
+    assert(!latcd_retirement_retry_page_restore_budget(root, &replaced, UINT64_MAX, 100,
+                                                       &replaced_budget, page, error, sizeof(error)) &&
+           !latcd_cache_capacity_recovery_finish(&replaced));
     assert(!latcd_retirement_retry_page_apply_unmatched(root, &replaced_budget, error, sizeof(error)));
     pid_t finish_child = fork();
     assert(finish_child >= 0);

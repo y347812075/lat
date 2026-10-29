@@ -3154,6 +3154,9 @@ static int retry_apply_unmatched(const char *root, LatcdPageBudget *budget, bool
         filename = g_strconcat(page->items[page->completed].hint.name, ".ini", NULL);
         if (!g_key_file_load_from_data(record, (char *)page->intent_data, page->intent_size, 0, NULL) ||
             write_record_kind(store, filename, record, true, true, false, budget, NULL)) goto out;
+    } else if (fsync(store)) {
+        latcd_cache_capacity_page_uncertain(budget->capacity, budget);
+        goto out;
     }
     if (finish) {
         page->completed++;
