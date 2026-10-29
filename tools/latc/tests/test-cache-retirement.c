@@ -2725,7 +2725,8 @@ static void test_budgeted_crash(const char *point, bool installed, bool result_w
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
     assert((installed || result_write || commit) ? loaded.count == 1 && loaded.budget_bound : !loaded.count);
     if (!result_write && !commit && !installed)
-        assert(latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0);
+        assert((latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0) ==
+               !strcmp(point, "linked"));
     if (commit) assert(loaded.committed_pending == installed);
     LatcdCacheCapacity recovered = LATCD_CACHE_CAPACITY_INIT;
     LatcdPageBudget budget = {0};
@@ -6237,6 +6238,7 @@ int main(int argc, char **argv)
     test_page_stage();
     test_budgeted_page_stage();
     test_budgeted_crash("file-synced", false, false, false);
+    test_budgeted_crash("linked", false, false, false);
     test_budgeted_crash("renamed", true, false, false);
     test_budgeted_crash("directory-synced", true, false, false);
     test_budgeted_crash("file-synced", false, true, false);

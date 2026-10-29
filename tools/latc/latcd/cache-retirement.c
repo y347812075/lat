@@ -364,7 +364,8 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record,
     char *temporary = NULL;
     int fd = -1;
     struct stat target;
-    bool anonymous = budget && fixed_schedule_size &&
+    bool anonymous = budget != NULL;
+    bool direct_link = anonymous && fixed_schedule_size &&
         fstatat(directory, name, &target, AT_SYMLINK_NOFOLLOW) && errno == ENOENT;
     /* A forked writer may share the parent's random state. Never remove an
      * existing writer's evidence on O_EXCL collision. */
@@ -381,6 +382,7 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record,
         latcd_cache_capacity_metadata_unstage(&reservation);
     }
     bool created = fd >= 0;
+    bool temporary_owned = created && !anonymous;
     bool replaced = false, leftover = false;
     int result = -1;
     int saved;
@@ -405,8 +407,28 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record,
     if (anonymous) {
         char descriptor[64];
         snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", fd);
-        if (record_write_fault("closed") ||
-            linkat(AT_FDCWD, descriptor, directory, name, AT_SYMLINK_FOLLOW)) goto close_out;
+        if (record_write_fault("closed")) goto close_out;
+        if (direct_link) {
+            if (linkat(AT_FDCWD, descriptor, directory, name, AT_SYMLINK_FOLLOW)) goto close_out;
+        } else {
+            bool linked = false;
+            for (int attempt = 0; attempt < 16; attempt++) {
+                char *uuid = g_uuid_string_random();
+                g_free(temporary);
+                temporary = g_strdup_printf(".write-%s", uuid);
+                g_free(uuid);
+                if (latcd_cache_capacity_metadata_stage(&reservation, temporary)) break;
+                if (!linkat(AT_FDCWD, descriptor, directory, temporary, AT_SYMLINK_FOLLOW)) {
+                    linked = true;
+                    temporary_owned = true;
+                    break;
+                }
+                if (errno != EEXIST) break;
+                latcd_cache_capacity_metadata_unstage(&reservation);
+            }
+            if (!linked) goto close_out;
+            if (record_write_fault("linked") || renameat(directory, temporary, directory, name)) goto close_out;
+        }
     } else {
         if (close(fd)) { fd = -1; leftover = true; goto out; }
         fd = -1;
@@ -421,7 +443,7 @@ close_out:
 out:
     saved = errno;
     if (fd >= 0 && close(fd)) leftover = true;
-    if (result && created && !replaced && !anonymous && unlinkat(directory, temporary, 0) && errno != ENOENT)
+    if (result && temporary_owned && !replaced && unlinkat(directory, temporary, 0) && errno != ENOENT)
         leftover = true;
     if (leftover && not_installed) *not_installed = false;
     /* A failed post-rename sync leaves the durable namespace uncertain. */
