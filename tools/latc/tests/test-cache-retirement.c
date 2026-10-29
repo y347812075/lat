@@ -6784,6 +6784,31 @@ static void test_page_round_insertions(void)
     assert(latcd_retirement_queue_retry_items(queue, items, &item_count) < 0 && !item_count);
     latcd_retirement_queue_free(queue);
 
+    assert(!latcd_retirement_schedule_store(root, boot, 1, 200, 3, &hints[0], error, sizeof(error)));
+    struct stat retry_root;
+    assert(!stat(root, &retry_root));
+    LatcdRetirementPageState retry_state = {.cache_device = retry_root.st_dev,
+        .cache_inode = retry_root.st_ino, .grace_us = 1, .round_cutoff = cutoff};
+    g_strlcpy(retry_state.boot, boot, sizeof(retry_state.boot));
+    g_strlcpy(retry_state.retry_cursor, hints[0].name, sizeof(retry_state.retry_cursor));
+    assert(!latcd_retirement_page_state_store(root, &retry_state, error, sizeof(error)));
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0 && !latcd_retirement_queue_retry_items(queue, items, &item_count) && item_count == 2);
+    assert(!strcmp(items[0].hint.name, hints[1].name) && !strcmp(items[1].hint.name, hints[0].name));
+    assert(!latcd_retirement_queue_retry_revalidate(queue, error, sizeof(error)));
+    latcd_retirement_queue_free(queue);
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    retry_state.retry_cursor[0] = 0;
+    assert(!latcd_retirement_page_state_store(root, &retry_state, error, sizeof(error)));
+    assert(latcd_retirement_queue_retry_revalidate(queue, error, sizeof(error)) < 0);
+    latcd_retirement_queue_free(queue);
+
     /* Equal-cutoff and later transactions on both sides belong to a later round. */
     publish_page_fixture(root, 1);
     publish_page_fixture(root, 1000);
