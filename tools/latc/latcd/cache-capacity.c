@@ -775,7 +775,7 @@ static char *state_record_key(LatcdCacheCapacity *capacity, int directory,
 
 static int record_begin(int directory, const char *name, uint64_t bytes,
                         LatcdMetadataReservation *reservation, bool state,
-                        bool recovery, LatcdPageBudget *page_budget)
+                        bool recovery, LatcdPageBudget *page_budget, bool registered_page)
 {
     *reservation = (LatcdMetadataReservation){0};
     LatcdCacheCapacity *capacity = metadata_capacity;
@@ -825,7 +825,8 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
      * index closed. It is still charged, but cannot open new admission. */
     bool fits = capacity->ready && !capacity->recovery_gate &&
         (!capacity->unknown_tasks || !g_hash_table_size(capacity->unknown_tasks)) &&
-        (page_budget ? page_budget->capacity == capacity && !page_budget->invalid && page_budget->remaining >= bytes &&
+        (page_budget ? (!registered_page || capacity->restored_page_budget == page_budget) &&
+                       page_budget->capacity == capacity && !page_budget->invalid && page_budget->remaining >= bytes &&
                        page_budget->inflight < UINT_MAX : capacity_fits(capacity, bytes, metadata_limit));
     bool updating = g_hash_table_contains(capacity->state_expected, key);
     if (updating) fits = false;
@@ -859,7 +860,7 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
 int latcd_cache_capacity_metadata_begin(int directory, const char *name, uint64_t bytes,
     LatcdMetadataReservation *reservation)
 {
-    return record_begin(directory, name, bytes, reservation, false, false, NULL);
+    return record_begin(directory, name, bytes, reservation, false, false, NULL, false);
 }
 
 int latcd_cache_capacity_open_metadata_lock(int directory, const char *name)
@@ -946,19 +947,19 @@ int latcd_cache_capacity_open_metadata_lock(int directory, const char *name)
 int latcd_cache_capacity_metadata_recovery_begin(int directory, const char *name, uint64_t bytes,
     LatcdMetadataReservation *reservation)
 {
-    return record_begin(directory, name, bytes, reservation, false, true, NULL);
+    return record_begin(directory, name, bytes, reservation, false, true, NULL, false);
 }
 
 int latcd_cache_capacity_metadata_schedule_begin(int directory, const char *name, uint64_t bytes,
     LatcdMetadataReservation *reservation)
 {
-    return record_begin(directory, name, bytes, reservation, false, false, NULL);
+    return record_begin(directory, name, bytes, reservation, false, false, NULL, false);
 }
 
 int latcd_cache_capacity_state_begin(int directory, const char *name, uint64_t bytes,
     LatcdMetadataReservation *reservation)
 {
-    return record_begin(directory, name, bytes, reservation, true, false, NULL);
+    return record_begin(directory, name, bytes, reservation, true, false, NULL, false);
 }
 
 static int reserve_page(LatcdCacheCapacity *capacity, uint64_t bytes, uint64_t limit,
@@ -1025,7 +1026,7 @@ int latcd_cache_capacity_page_begin(int directory, const char *name, uint64_t by
         errno = EINVAL;
         return -1;
     }
-    return record_begin(directory, name, bytes, reservation, false, false, budget);
+    return record_begin(directory, name, bytes, reservation, false, false, budget, true);
 }
 
 #ifdef LATCD_CAPACITY_TESTING
@@ -1035,10 +1036,15 @@ int latcd_cache_capacity_test_page_reserve(LatcdCacheCapacity *capacity, uint64_
     if (!capacity || !budget || !bytes) return -1;
     pthread_mutex_lock(&capacity->lock);
     check_changes(capacity);
-    bool fits = !budget->capacity && !budget->remaining && !budget->inflight && !budget->invalid &&
+    bool fits = !capacity->restored_page_budget && !budget->capacity && !budget->remaining && !budget->inflight && !budget->invalid &&
         capacity->ready && (!capacity->unknown_tasks ||
         !g_hash_table_size(capacity->unknown_tasks)) && capacity_fits(capacity, bytes, limit);
-    if (fits) { capacity->metadata_reserved += bytes; budget->remaining = bytes; budget->capacity = capacity; }
+    if (fits) {
+        capacity->metadata_reserved += bytes;
+        budget->remaining = bytes;
+        budget->capacity = capacity;
+        capacity->restored_page_budget = budget;
+    }
     pthread_mutex_unlock(&capacity->lock);
     return fits ? 0 : -1;
 }
@@ -1047,7 +1053,7 @@ int latcd_cache_capacity_test_page_begin(int directory, const char *name, uint64
                                          LatcdPageBudget *budget, LatcdMetadataReservation *reservation)
 {
     if (!metadata_capacity || !budget) return -1;
-    return record_begin(directory, name, bytes, reservation, false, false, budget);
+    return record_begin(directory, name, bytes, reservation, false, false, budget, false);
 }
 
 int latcd_cache_capacity_test_page_release(LatcdCacheCapacity *capacity, LatcdPageBudget *budget)

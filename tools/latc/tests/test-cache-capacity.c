@@ -116,6 +116,13 @@ static void test_recovery_gate(void)
     assert(latcd_cache_capacity_restore_page(&capacity, 1, 100, identity, &duplicate));
     assert(!latcd_cache_capacity_test_page_release(&capacity, &restored));
     assert(!latcd_cache_capacity_reserve_page(&capacity, 10, 100, identity, &restored));
+    LatcdPageBudget copied = restored;
+    assert(latcd_cache_capacity_page_begin(fd, "record", 1, &copied, &reservation));
+    assert(restored.remaining == 10 && copied.remaining == 10 && capacity.metadata_reserved == 10);
+    assert(!latcd_cache_capacity_page_begin(fd, "record", 1, &restored, &reservation));
+    assert(latcd_cache_capacity_cancel_page(&capacity, &restored));
+    latcd_cache_capacity_metadata_finish(&reservation, false, false);
+    assert(restored.remaining == 10 && !restored.inflight);
     assert(latcd_cache_capacity_reserve_page(&capacity, 1, 100, identity, &duplicate));
     assert(latcd_cache_capacity_reserve(&capacity, 20, 100, NULL, 0));
     assert(!latcd_cache_capacity_cancel_page(&capacity, &restored));
