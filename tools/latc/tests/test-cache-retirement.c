@@ -3237,6 +3237,33 @@ static void test_budgeted_page_stage(void)
     assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
     assert(!latcd_cache_capacity_recovery_begin(&recovered));
+    struct stat sync_stat;
+    assert(!stat(gc, &sync_stat));
+    retry_sync_device = sync_stat.st_dev; retry_sync_inode = sync_stat.st_ino;
+    retry_sync_fault = true;
+    assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 100, &budget,
+                                                 &loaded, error, sizeof(error)) < 0);
+    retry_sync_fault = false;
+    assert(!budget.capacity && latcd_cache_capacity_recovery_finish(&recovered) < 0);
+    assert(!latcd_cache_capacity_recovery_abort(&recovered));
+    latcd_cache_capacity_close(&recovered);
+    assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
+    assert(!latcd_cache_capacity_recovery_begin(&recovered));
+    char *sync_store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!stat(sync_store, &sync_stat));
+    retry_sync_device = sync_stat.st_dev; retry_sync_inode = sync_stat.st_ino;
+    retry_sync_fault = true;
+    assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 100, &budget,
+                                                 &loaded, error, sizeof(error)) < 0);
+    retry_sync_fault = false;
+    g_free(sync_store);
+    assert(!budget.capacity && latcd_cache_capacity_recovery_finish(&recovered) < 0);
+    assert(!latcd_cache_capacity_recovery_abort(&recovered));
+    latcd_cache_capacity_close(&recovered);
+    assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
+    assert(!latcd_cache_capacity_recovery_begin(&recovered));
     assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 100, &budget,
                                                   &loaded, error, sizeof(error)));
     assert(loaded.budget_bound && loaded.count == 1 && budget.capacity == &recovered &&
