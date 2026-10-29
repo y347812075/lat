@@ -91,6 +91,36 @@ static int test_exec_lease(const char *path, const LatAotExpectedV2 *expected,
     return result;
 }
 
+static int test_fork_lease(const char *path, const LatAotExpectedV2 *expected)
+{
+    LatAotLoadedModuleV2 loaded;
+    char error[256], byte = 'x';
+    int ready[2], release[2];
+    if (pipe(ready) || pipe(release) ||
+        lat_aot_v2_module_open(path, expected, &loaded, error, sizeof(error))) return -1;
+    pid_t child = fork();
+    if (child < 0) return -1;
+    if (!child) {
+        alarm(10);
+        close(ready[0]); close(release[1]);
+        if (write(ready[1], &byte, 1) != 1 || read(release[0], &byte, 1) != 1) _exit(1);
+        _exit(0);
+    }
+    close(ready[1]); close(release[0]);
+    int result = read(ready[0], &byte, 1) != 1;
+    if (dlclose(loaded.dl_handle) ||
+        lat_aot_v2_cache_close_fd(loaded.backing_fd, true, error, sizeof(error))) result = -1;
+    int probe = open(path, O_RDONLY | O_CLOEXEC);
+    if (probe < 0 || !flock(probe, LOCK_EX | LOCK_NB) || errno != EWOULDBLOCK) result = -1;
+    if (write(release[1], &byte, 1) != 1) result = -1;
+    int status;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) ||
+        probe < 0 || flock(probe, LOCK_EX | LOCK_NB)) result = -1;
+    if (probe >= 0) close(probe);
+    close(ready[0]); close(release[1]);
+    return result;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && (!strcmp(argv[1], "--inherited-holder") ||
@@ -117,7 +147,8 @@ int main(int argc, char **argv)
     char error[256] = {0};
     const char *module_path = argv[expect_reject || expect_pc_reject ? 2 : 1];
     if (!expect_reject && !expect_pc_reject &&
-        (test_exec_lease(module_path, &expected, true) ||
+        (test_fork_lease(module_path, &expected) ||
+         test_exec_lease(module_path, &expected, true) ||
          test_exec_lease(module_path, &expected, false))) {
         fprintf(stderr, "module exec lease test failed\n");
         return 1;
