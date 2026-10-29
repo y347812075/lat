@@ -2827,6 +2827,17 @@ static int open_manifest_module(const char *cache, const char *source_hex,
         close_protected_cache_fd(source_lock);
         source_lock = -1;
         errno = capture_errno;
+        if (module_fd >= 0 && source_latch_test_barrier(
+                "LATX_AOT_V2_TEST_CAPTURE_READY", "LATX_AOT_V2_TEST_CAPTURE_RELEASE",
+                error, error_size)) {
+            int saved_errno = errno;
+            close_protected_cache_fd(module_fd);
+            g_free(path);
+            g_free(module);
+            errno = saved_errno;
+            result = -1;
+            break;
+        }
         if (module_fd < 0 || lat_aot_v2_module_load_fd(module_fd, expected,
                                                        &module->loaded, error, error_size)) {
             int saved_errno = errno;
