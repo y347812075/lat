@@ -3340,13 +3340,29 @@ static void test_budgeted_max_page(bool consumption)
     assert(!latcd_cache_capacity_recovery_finish(&recovered));
     if (consumption) {
         assert(loaded.consumption_bound && loaded.consumption.intent_present && loaded.consumption.intent_index == 1);
-        assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:consumption-unlinked", 1));
-        assert(latcd_retirement_consumption_apply(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
-        unsetenv("LATCD_TEST_RETIREMENT_IO");
-        assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
-               loaded.consumption.intent_present);
         assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
         latcd_cache_capacity_close(&recovered);
+        pid_t child = fork();
+        assert(child >= 0);
+        if (!child) {
+            LatcdCacheCapacity crash_capacity = LATCD_CACHE_CAPACITY_INIT;
+            LatcdPageBudget crash_budget = {0};
+            LatcdRetirementPageState crash_page;
+            assert(!latcd_cache_capacity_scan(&crash_capacity, root, error, sizeof(error)));
+            latcd_cache_capacity_metadata_bind(&crash_capacity, UINT64_MAX);
+            assert(!latcd_cache_capacity_recovery_begin(&crash_capacity));
+            assert(!latcd_retirement_page_restore_budget(root, &crash_capacity, UINT64_MAX, UINT64_MAX,
+                                                         &crash_budget, &crash_page, error, sizeof(error)));
+            assert(!latcd_cache_capacity_recovery_finish(&crash_capacity));
+            assert(!setenv("LATCD_TEST_RETIREMENT_IO", "crash:consumption-unlinked", 1));
+            latcd_retirement_consumption_apply(root, UINT64_MAX, &crash_budget, error, sizeof(error));
+            _exit(1);
+        }
+        int crash_status;
+        assert(waitpid(child, &crash_status, 0) == child && WIFSIGNALED(crash_status) &&
+               WTERMSIG(crash_status) == SIGKILL);
+        assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+               loaded.consumption.intent_present);
         assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
         latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
         assert(!latcd_cache_capacity_recovery_begin(&recovered));
