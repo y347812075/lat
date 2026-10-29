@@ -5916,6 +5916,7 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
     uint64_t sequence = 0;
     GArray *snapshot = g_array_new(FALSE, FALSE, sizeof(RetrySnapshotEntry));
     LatcdRetirementPageState current;
+    uint8_t page_identity[32];
     struct stat cache, path, transactions, tombstone_stat;
     if (scheduler < 0) goto out;
     root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -5972,6 +5973,23 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
                 selected_sequences[i] != queue->retry_item_sequence[i] ||
                 memcmp(selected_digests[i], queue->retry_item_digest[i], 32)) goto out;
     }
+    if (page) {
+        unsigned count = 0;
+        page->cache_device = current.cache_device;
+        page->cache_inode = current.cache_inode;
+        page->grace_us = current.grace_us;
+        page->round_cutoff = current.round_cutoff;
+        page->round_sequence = current.sequence;
+        page->snapshot_time = queue->retry_snapshot_time;
+        page->snapshot_sequence = queue->retry_snapshot_sequence;
+        g_strlcpy(page->boot, current.boot, sizeof(page->boot));
+        g_strlcpy(page->committed_cursor, current.committed_cursor, sizeof(page->committed_cursor));
+        g_strlcpy(page->retry_cursor, current.retry_cursor, sizeof(page->retry_cursor));
+        if (latcd_retirement_queue_retry_items(queue, page->items, &count)) goto out;
+        page->count = count;
+        g_strlcpy(page->end_cursor, queue->retry_order[count - 1], sizeof(page->end_cursor));
+        if (latcd_retirement_retry_page_budget_identity(page, page_identity)) goto out;
+    }
 #if defined(LATCD_RETIREMENT_TESTING)
     if (latcd_retirement_test_retry_scanned) latcd_retirement_test_retry_scanned(queue->root);
 #endif
@@ -5990,22 +6008,6 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
         *receipt_count = queue->retry_count;
     }
     if (page) {
-        unsigned count = 0;
-        uint8_t identity[32];
-        page->cache_device = current.cache_device;
-        page->cache_inode = current.cache_inode;
-        page->grace_us = current.grace_us;
-        page->round_cutoff = current.round_cutoff;
-        page->round_sequence = current.sequence;
-        page->snapshot_time = queue->retry_snapshot_time;
-        page->snapshot_sequence = queue->retry_snapshot_sequence;
-        g_strlcpy(page->boot, current.boot, sizeof(page->boot));
-        g_strlcpy(page->committed_cursor, current.committed_cursor, sizeof(page->committed_cursor));
-        g_strlcpy(page->retry_cursor, current.retry_cursor, sizeof(page->retry_cursor));
-        if (latcd_retirement_queue_retry_items(queue, page->items, &count)) goto out;
-        page->count = count;
-        g_strlcpy(page->end_cursor, queue->retry_order[count - 1], sizeof(page->end_cursor));
-        if (latcd_retirement_retry_page_budget_identity(page, identity)) goto out;
         if (budget) {
             char *data = NULL; size_t size = 0; uint64_t bytes = 0;
             GKeyFile *record = g_key_file_new();
@@ -6019,7 +6021,7 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
                  * replacement. Reserve full growth for every member. */
                 !latcd_cache_capacity_page_peak(page->count, page->count,
                     RETIREMENT_SCHEDULE_RECORD_BYTES, RECORD_LIMIT, &bytes) &&
-                !latcd_cache_capacity_reserve_page(capacity, bytes, limit, identity, budget)) {
+                !latcd_cache_capacity_reserve_page(capacity, bytes, limit, page_identity, budget)) {
                 staged = write_record_kind(gc, "retirement-page.ini", record, true, false, false,
                                            budget, &not_installed);
                 if (staged && not_installed) {
