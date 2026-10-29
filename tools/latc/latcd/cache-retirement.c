@@ -353,13 +353,11 @@ void (*latcd_retirement_test_before_target_revalidate)(void);
 void (*latcd_retirement_test_before_page_finish)(LatcdPageBudget *budget);
 #endif
 
-static int write_record_kind(int directory, const char *name, GKeyFile *record,
-                             bool scheduling, bool fixed_schedule_size, bool recovery,
-                             LatcdPageBudget *budget, bool *not_installed)
+static int write_record_encoded(int directory, const char *name, char *data, gsize size,
+                                bool scheduling, bool fixed_schedule_size, bool recovery,
+                                LatcdPageBudget *budget, bool *not_installed)
 {
     if (not_installed) *not_installed = true;
-    gsize size;
-    char *data = g_key_file_to_data(record, &size, NULL);
     if (fixed_schedule_size) {
         /* Fixed-size records let a full store replace an existing hint even
          * when numeric fields grow, without exceeding the replacement reserve. */
@@ -504,6 +502,16 @@ out:
     g_free(data);
     errno = saved;
     return result;
+}
+
+static int write_record_kind(int directory, const char *name, GKeyFile *record,
+                             bool scheduling, bool fixed_schedule_size, bool recovery,
+                             LatcdPageBudget *budget, bool *not_installed)
+{
+    gsize size;
+    char *data = g_key_file_to_data(record, &size, NULL);
+    return write_record_encoded(directory, name, data, size, scheduling,
+                                fixed_schedule_size, recovery, budget, not_installed);
 }
 
 static int write_record(int directory, const char *name, GKeyFile *record)
@@ -6034,8 +6042,9 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
                 /* Existing legacy shards may be smaller than the fixed-size
                  * replacement. Reserve full growth for every member. */
                 !latcd_cache_capacity_reserve_page(capacity, page_bytes, limit, page_identity, budget)) {
-                staged = write_record_kind(gc, "retirement-page.ini", page_record, true, false, false,
-                                           budget, &not_installed);
+                staged = write_record_encoded(gc, "retirement-page.ini", page_data, page_size,
+                                              true, false, false, budget, &not_installed);
+                page_data = NULL;
                 if (staged && not_installed) {
                     int saved = errno;
                     latcd_cache_capacity_cancel_page(capacity, budget);
