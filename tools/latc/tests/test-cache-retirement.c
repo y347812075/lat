@@ -1801,6 +1801,13 @@ static void test_schedule_check_page(void)
     assert(page_budget.remaining == saved_reservation && page_capacity.ready);
     assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
     assert(!latcd_retirement_test_page_budget_matches(root, budget_binding, error, sizeof(error)));
+    assert(latcd_retirement_page_budget_result(root, 150, budget_binding, &page_budget,
+           &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    LatcdRetirementPageState claimed_bound = page;
+    claimed_bound.budget_bound = true;
+    assert(latcd_retirement_page_budget_commit(root, 150, &claimed_bound, &page_budget,
+                                                error, sizeof(error)) < 0);
+    assert(page_budget.remaining == saved_reservation && page_capacity.ready);
     int budget_scheduler = open(gc, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     assert(budget_scheduler >= 0 && !flock(budget_scheduler, LOCK_EX | LOCK_NB));
     assert(latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
