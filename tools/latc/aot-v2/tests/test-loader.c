@@ -121,6 +121,30 @@ static int test_fork_lease(const char *path, const LatAotExpectedV2 *expected)
     return result;
 }
 
+static int test_capture_lease(const char *path, const LatAotExpectedV2 *expected)
+{
+    char error[256];
+    int fd = lat_aot_v2_module_capture(path, error, sizeof(error));
+    if (fd < 0 || !lat_aot_v2_internal_fd_is_protected(fd) ||
+        fcntl(fd, F_GETFD) != 0) return -1;
+    int probe = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (probe < 0 || !flock(probe, LOCK_EX | LOCK_NB) || errno != EWOULDBLOCK)
+        return -1;
+    LatAotExpectedV2 wrong = *expected;
+    wrong.source_sha256[0] ^= 1;
+    LatAotLoadedModuleV2 module;
+    if (!lat_aot_v2_module_load_fd(fd, &wrong, &module, error, sizeof(error)) ||
+        fcntl(fd, F_GETFD) != -1 || errno != EBADF ||
+        flock(probe, LOCK_EX | LOCK_NB)) return -1;
+    close(probe);
+    fd = lat_aot_v2_module_capture(path, error, sizeof(error));
+    if (fd < 0 || lat_aot_v2_module_load_fd(fd, expected, &module, error, sizeof(error)))
+        return -1;
+    if (module.backing_fd != fd || dlclose(module.dl_handle) ||
+        lat_aot_v2_cache_close_fd(fd, true, error, sizeof(error))) return -1;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && (!strcmp(argv[1], "--inherited-holder") ||
@@ -147,7 +171,8 @@ int main(int argc, char **argv)
     char error[256] = {0};
     const char *module_path = argv[expect_reject || expect_pc_reject ? 2 : 1];
     if (!expect_reject && !expect_pc_reject &&
-        (test_fork_lease(module_path, &expected) ||
+        (test_capture_lease(module_path, &expected) ||
+         test_fork_lease(module_path, &expected) ||
          test_exec_lease(module_path, &expected, true) ||
          test_exec_lease(module_path, &expected, false))) {
         fprintf(stderr, "module exec lease test failed\n");

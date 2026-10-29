@@ -258,17 +258,12 @@ static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
     return 0;
 }
 
-int lat_aot_v2_module_open(const char *path,
-                           const LatAotExpectedV2 *expected,
-                           LatAotLoadedModuleV2 *module,
-                           char *error, size_t error_size)
+int lat_aot_v2_module_capture(const char *path, char *error, size_t error_size)
 {
-    if (!path || !expected || !module) {
+    if (!path) {
         errno = EINVAL;
         return fail(error, error_size, "invalid AOT module arguments");
     }
-    memset(module, 0, sizeof(*module));
-    module->backing_fd = -1;
     lat_aot_v2_internal_fd_allocation_lock();
     /* Keep the lease across exec until a trusted handoff can release it. */
     int fd = open(path, O_RDONLY | O_NOFOLLOW);
@@ -293,6 +288,22 @@ int lat_aot_v2_module_open(const char *path,
         }
         return -1;
     }
+    lat_aot_v2_internal_fd_unlock();
+    return fd;
+}
+
+int lat_aot_v2_module_load_fd(int fd, const LatAotExpectedV2 *expected,
+                              LatAotLoadedModuleV2 *module,
+                              char *error, size_t error_size)
+{
+    if (fd < 0 || !expected || !module) {
+        if (fd >= 0) lat_aot_v2_cache_close_fd(fd, true, NULL, 0);
+        errno = EINVAL;
+        return fail(error, error_size, "invalid AOT module arguments");
+    }
+    memset(module, 0, sizeof(*module));
+    module->backing_fd = -1;
+    lat_aot_v2_internal_fd_allocation_lock();
     LatAotNoteV2 note;
     if (lat_aot_v2_elf_validate_fd(fd, expected, &note,
                                    error, error_size)) {
@@ -338,4 +349,17 @@ int lat_aot_v2_module_open(const char *path,
     module->note = note;
     lat_aot_v2_internal_fd_unlock();
     return 0;
+}
+
+int lat_aot_v2_module_open(const char *path,
+                           const LatAotExpectedV2 *expected,
+                           LatAotLoadedModuleV2 *module,
+                           char *error, size_t error_size)
+{
+    if (!path || !expected || !module) {
+        errno = EINVAL;
+        return fail(error, error_size, "invalid AOT module arguments");
+    }
+    int fd = lat_aot_v2_module_capture(path, error, error_size);
+    return fd < 0 ? -1 : lat_aot_v2_module_load_fd(fd, expected, module, error, error_size);
 }

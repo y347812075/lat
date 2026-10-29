@@ -2822,8 +2822,13 @@ static int open_manifest_module(const char *cache, const char *source_hex,
             break;
         }
         errno = 0;
-        if (lat_aot_v2_module_open(path, expected, &module->loaded,
-                                   error, error_size)) {
+        int module_fd = lat_aot_v2_module_capture(path, error, error_size);
+        int capture_errno = errno;
+        close_protected_cache_fd(source_lock);
+        source_lock = -1;
+        errno = capture_errno;
+        if (module_fd < 0 || lat_aot_v2_module_load_fd(module_fd, expected,
+                                                       &module->loaded, error, error_size)) {
             int saved_errno = errno;
             if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
                 fprintf(stderr,
@@ -2852,7 +2857,7 @@ static int open_manifest_module(const char *cache, const char *source_hex,
     }
     g_ptr_array_free(basenames, TRUE);
     int saved_errno = errno;
-    close_protected_cache_fd(source_lock);
+    if (source_lock >= 0) close_protected_cache_fd(source_lock);
     errno = saved_errno;
     return result;
 }
