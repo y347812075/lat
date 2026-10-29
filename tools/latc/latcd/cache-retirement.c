@@ -2127,7 +2127,7 @@ int latcd_retirement_schedule_store_result(const char *root, const char *boot,
 }
 #endif
 
-int latcd_retirement_schedule_store_page_result(const char *root, uint64_t now_us,
+static int schedule_store_page_result(const char *root, uint64_t now_us,
                                     const LatcdRetirementPageState *page,
                                     const LatcdRetirementPageDeadline *entry,
                                     LatcdRetirementResultKind kind,
@@ -2191,6 +2191,27 @@ int latcd_retirement_schedule_store_page_result(const char *root, uint64_t now_u
     close(scheduler);
     return result;
 }
+
+int latcd_retirement_schedule_store_page_result(const char *root, uint64_t now_us,
+                                    const LatcdRetirementPageState *page,
+                                    const LatcdRetirementPageDeadline *entry,
+                                    LatcdRetirementResultKind kind,
+                                    char *error, size_t error_size)
+{
+    if (kind == LATCD_RETIREMENT_RESULT_DONE)
+        return fail(error, error_size, "done result requires receipt witness");
+    return schedule_store_page_result(root, now_us, page, entry, kind, error, error_size);
+}
+#ifdef LATCD_RETIREMENT_TESTING
+int latcd_retirement_test_store_page_result(const char *root, uint64_t now_us,
+                                    const LatcdRetirementPageState *page,
+                                    const LatcdRetirementPageDeadline *entry,
+                                    LatcdRetirementResultKind kind,
+                                    char *error, size_t error_size)
+{
+    return schedule_store_page_result(root, now_us, page, entry, kind, error, error_size);
+}
+#endif
 
 int latcd_retirement_schedule_load_result(const char *root, const char *boot,
                                     uint64_t grace_us, uint64_t now_us, const char *name,

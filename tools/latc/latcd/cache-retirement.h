@@ -216,12 +216,21 @@ int latcd_retirement_schedule_store_result(const char *root, const char *boot,
                                     char *error, size_t error_size);
 #endif
 /* Require a matching persisted in-flight page and member under scheduler lock.
- * Owner lease and controlled access remain required. */
+ * Owner lease and controlled access remain required. DONE requires a receipt
+ * witness protocol and is currently rejected. */
 int latcd_retirement_schedule_store_page_result(const char *root, uint64_t now_us,
                                     const LatcdRetirementPageState *page,
                                     const LatcdRetirementPageDeadline *entry,
                                     LatcdRetirementResultKind kind,
                                     char *error, size_t error_size);
+#ifdef LATCD_RETIREMENT_TESTING
+/* Fixture-only synthetic result, including DONE without a receipt. */
+int latcd_retirement_test_store_page_result(const char *root, uint64_t now_us,
+                                    const LatcdRetirementPageState *page,
+                                    const LatcdRetirementPageDeadline *entry,
+                                    LatcdRetirementResultKind kind,
+                                    char *error, size_t error_size);
+#endif
 /* Returns 0 for a matching v2 result, 1 for absent/v1/other page, -1 on
  * unsafe storage. Results are hints only, not commit or deletion authority. */
 int latcd_retirement_schedule_load_result(const char *root, const char *boot,

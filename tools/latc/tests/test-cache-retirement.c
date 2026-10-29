@@ -2386,7 +2386,7 @@ static void test_schedule_check_page(void)
     char *filename = g_strconcat(page.entries[0].name, ".ini", NULL);
     assert(!mkdir(replacement_gc, 0700) && !mkdir(replacement_store, 0700));
     page_lstat_swap_path = root; page_lstat_swap_old = old_root; page_lstat_swap_new = replacement;
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+    assert(latcd_retirement_test_store_page_result(root, 150, &page, &page.entries[0],
             LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     assert(!page_lstat_swap_path);
     char *new_record = g_build_filename(root, ".gc", "retirement-schedule", filename, NULL);
@@ -2396,7 +2396,7 @@ static void test_schedule_check_page(void)
     remove_root(replacement);
     g_free(old_record); g_free(new_record); g_free(filename); g_free(old_root);
     g_free(replacement_store); g_free(replacement_gc); g_free(replacement);
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+    assert(latcd_retirement_test_store_page_result(root, 150, &page, &page.entries[0],
             LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
     LatcdRetirementPageState snapshot_page;
@@ -2688,7 +2688,7 @@ static void test_schedule_check_page(void)
     assert(latcd_retirement_page_snapshot(root, 150, &snapshot_page, results, &inventory, error, sizeof(error)) < 0);
     assert(!snapshot_page.count && !results[0]);
     assert(latcd_retirement_page_state_store(root, &page, error, sizeof(error)) < 0);
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+    assert(latcd_retirement_test_store_page_result(root, 150, &page, &page.entries[0],
             LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     assert(latcd_retirement_schedule_store(root, boot, 100, 150, 1, &page.entries[0],
                                            error, sizeof(error)) < 0);
@@ -2697,28 +2697,31 @@ static void test_schedule_check_page(void)
     close(scheduler);
     LatcdRetirementPageState changed = page;
     changed.entries[0].deadline++;
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &changed, &changed.entries[0],
+    assert(latcd_retirement_test_store_page_result(root, 150, &changed, &changed.entries[0],
             LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     changed = page;
     changed.sequence++;
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &changed, &changed.entries[0],
+    assert(latcd_retirement_test_store_page_result(root, 150, &changed, &changed.entries[0],
             LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     changed = page;
     changed.entries[0].enqueued++;
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &changed, &changed.entries[0],
+    assert(latcd_retirement_test_store_page_result(root, 150, &changed, &changed.entries[0],
             LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     changed = page;
     changed.entries[1].enqueued++;
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &changed, &changed.entries[0],
+    assert(latcd_retirement_test_store_page_result(root, 150, &changed, &changed.entries[0],
             LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     LatcdRetirementPageDeadline outsider = page.entries[0];
     outsider.deadline++;
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &outsider,
+    assert(latcd_retirement_test_store_page_result(root, 150, &page, &outsider,
             LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     snprintf(outsider.name, sizeof(outsider.name), "%064x.so", 3);
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &outsider,
+    assert(latcd_retirement_test_store_page_result(root, 150, &page, &outsider,
             LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
-    assert(!latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(strstr(error, "receipt witness"));
+    assert(!latcd_retirement_test_store_page_result(root, 150, &page, &page.entries[0],
             LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
     assert(latcd_retirement_schedule_check_page(root, 150, &page, error, sizeof(error)) == 1);
     assert(latcd_retirement_schedule_page_results(root, 150, &page, results, error, sizeof(error)) == 1);
@@ -2768,7 +2771,7 @@ static void test_schedule_check_page(void)
            !uncommitted.committed_cursor[0] && uncommitted.count == 2);
     LatcdRetirementPageDeadline deferred = page.entries[1];
     deferred.last_attempt = 1; deferred.retry_at = 250; deferred.busy_count = 3;
-    assert(!latcd_retirement_schedule_store_page_result(root, 150, &page, &deferred,
+    assert(!latcd_retirement_test_store_page_result(root, 150, &page, &deferred,
             LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
     assert(!latcd_retirement_schedule_check_page(root, 150, &page, error, sizeof(error)));
     assert(!latcd_retirement_schedule_page_results(root, 150, &page, results, error, sizeof(error)));
@@ -2788,7 +2791,7 @@ static void test_schedule_check_page(void)
     assert(g_key_file_remove_key(legacy, "page", "committed_cursor", NULL));
     char *legacy_data = g_key_file_to_data(legacy, NULL, NULL);
     put(legacy_path, legacy_data);
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+    assert(latcd_retirement_test_store_page_result(root, 150, &page, &page.entries[0],
             LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
     char *after_legacy = NULL;
@@ -2842,7 +2845,7 @@ static void test_schedule_check_page(void)
     page.entries[0].deadline--;
     page.cache_inode++;
     assert(latcd_retirement_schedule_check_page(root, 150, &page, error, sizeof(error)) < 0);
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+    assert(latcd_retirement_test_store_page_result(root, 150, &page, &page.entries[0],
             LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     page.cache_inode--;
     schedule_scan_mutation = store;
@@ -2959,7 +2962,7 @@ static void test_schedule_check_page(void)
                uncommitted.entries[i].enqueued == page.entries[i].enqueued);
     assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
     assert(latcd_retirement_page_stage(root, &page, error, sizeof(error)) < 0);
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+    assert(latcd_retirement_test_store_page_result(root, 150, &page, &page.entries[0],
             LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     LatcdRetirementPageState rejected_round, retained_pending;
     assert(latcd_retirement_page_round_begin(root, 100, &rejected_round,
@@ -3217,7 +3220,7 @@ static void test_budgeted_page_stage(void)
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && loaded.budget_bound &&
            !strcmp(loaded.retry_cursor, empty.retry_cursor));
     assert(latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0);
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+    assert(latcd_retirement_test_store_page_result(root, 150, &page, &page.entries[0],
            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
     uint8_t binding[32];
@@ -3683,10 +3686,10 @@ static void test_rebind_crash(const char *point, bool installed, bool partial)
     LatcdRetirementPageDeadline early = stale.entries[0];
     early.last_attempt = 4; early.busy_count = 0;
     simulated_boottime_us = 150;
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &stale, &early,
+    assert(latcd_retirement_test_store_page_result(root, 150, &stale, &early,
                        LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     assert(!latcd_retirement_page_state_store(root, &stale, error, sizeof(error)));
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &stale, &early,
+    assert(latcd_retirement_test_store_page_result(root, 150, &stale, &early,
                        LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     LatcdRetirementPageDeadline still_deferred;
     uint64_t old_sequence;
@@ -4532,7 +4535,7 @@ static void test_schedule_count_limit(void)
     page.entries[0].enqueued = 100;
     g_strlcpy(page.cursor, page.entries[0].name, sizeof(page.cursor));
     assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
-    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+    assert(latcd_retirement_test_store_page_result(root, 150, &page, &page.entries[0],
             LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)) < 0);
     assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
     LatcdRetirementPageState persisted;
@@ -7872,7 +7875,7 @@ static void test_queue_overflow_fixture(void)
     char *schedule_dir = g_build_filename(root, ".gc", "retirement-schedule", NULL);
     assert(!mkdir(schedule_dir, 0700));
     for (unsigned i = 0; i < first_page.count; i++) {
-        int stored = latcd_retirement_schedule_store_page_result(root, 201, &first_page,
+        int stored = latcd_retirement_test_store_page_result(root, 201, &first_page,
                 &first_page.entries[i], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error));
         if (stored) fprintf(stderr, "page result %u: %s enqueued=%" G_GUINT64_FORMAT "\n",
                             i, error, first_page.entries[i].enqueued);
