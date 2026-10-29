@@ -7211,6 +7211,9 @@ static void test_retry_not_due(void)
     LatcdRetirementPageDeadline hint = {.enqueued = 100, .retry_at = 100};
     snprintf(hint.name, sizeof(hint.name), "%064x.so", 7);
     assert(!latcd_retirement_schedule_store(root, boot, 100, 101, 3, &hint, error, sizeof(error)));
+    LatcdRetirementPageDeadline unmatched = hint;
+    snprintf(unmatched.name, sizeof(unmatched.name), "%064x.so", 8);
+    assert(!latcd_retirement_schedule_store(root, boot, 100, 101, 3, &unmatched, error, sizeof(error)));
     LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT; LatcdPageBudget budget = {0};
     assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
@@ -7225,7 +7228,8 @@ static void test_retry_not_due(void)
     assert(!staged);
     LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
     assert(!latcd_retirement_retry_page_load(root, page, error, sizeof(error)) &&
-           page->count == 1 && page->items[0].matched && page->items[0].aggregate.deadline == 200);
+           page->count == 2 && page->items[0].matched && page->items[0].aggregate.deadline == 200 &&
+           !page->items[1].matched);
     assert(latcd_retirement_retry_page_begin_unmatched(root, &budget, error, sizeof(error)) < 0);
     pid_t child = fork(); assert(child >= 0);
     if (!child) {
@@ -7264,9 +7268,13 @@ static void test_retry_not_due(void)
            page->intent_present && !latcd_cache_capacity_recovery_finish(&capacity));
     assert(!latcd_retirement_retry_page_apply_unmatched(root, &budget, error, sizeof(error)));
     assert(!latcd_retirement_retry_page_finish_unmatched(root, &budget, error, sizeof(error)));
+    assert(latcd_retirement_retry_page_begin_not_due(root, &budget, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_retry_page_begin_unmatched(root, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_retry_page_apply_unmatched(root, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_retry_page_finish_unmatched(root, &budget, error, sizeof(error)));
     assert(!latcd_retirement_retry_page_commit(root, &budget, error, sizeof(error)));
     assert(!latcd_retirement_page_state_load(root, &state, error, sizeof(error)) &&
-           !strcmp(state.retry_cursor, hint.name));
+           !strcmp(state.retry_cursor, unmatched.name));
     latcd_cache_capacity_close(&capacity); g_free(page); g_free(boot); g_free(schedule); g_free(tombstones); g_free(gc);
     simulated_boottime_us = 0; remove_root(root); g_free(root);
 }
