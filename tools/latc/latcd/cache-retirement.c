@@ -1514,10 +1514,10 @@ int latcd_retirement_page_budget_estimate(const LatcdRetirementPageState *page,
 }
 
 int latcd_retirement_page_restore_budget(const char *root, LatcdCacheCapacity *capacity,
-                                    uint64_t limit, LatcdPageBudget *budget,
+                                    uint64_t limit, uint64_t expected_grace_us, LatcdPageBudget *budget,
                                     LatcdRetirementPageState *page, char *error, size_t error_size)
 {
-    if (!root || !capacity || !budget || !page)
+    if (!root || !capacity || !expected_grace_us || !budget || !page)
         return fail(error, error_size, "invalid retirement budget recovery");
     memset(page, 0, sizeof(*page));
     int scheduler = scheduler_lock(root, error, error_size);
@@ -1540,7 +1540,7 @@ int latcd_retirement_page_restore_budget(const char *root, LatcdCacheCapacity *c
     else close(matching);
     if (!status && (legacy || !persisted.budget_bound || !persisted.count ||
         retirement_clock(&boot, &now) ||
-        latcd_retirement_page_state_compatible(&persisted, boot, persisted.grace_us, now) ||
+        latcd_retirement_page_state_compatible(&persisted, boot, expected_grace_us, now) ||
         schedule_page_results(root, now, &persisted, results, &inventory, error, error_size) < 0 ||
         latcd_retirement_page_budget_identity(&persisted, identity) ||
         latcd_retirement_page_budget_estimate(&persisted, results, &inventory, &bytes) ||

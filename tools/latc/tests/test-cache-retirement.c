@@ -2545,11 +2545,14 @@ static void test_budgeted_page_stage(void)
     LatcdCacheCapacity recovered = LATCD_CACHE_CAPACITY_INIT;
     assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
-    assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, &budget,
+    assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 100, &budget,
                                                  &loaded, error, sizeof(error)) < 0);
     assert(!budget.capacity && !loaded.count);
     assert(!latcd_cache_capacity_recovery_begin(&recovered));
-    assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, &budget,
+    assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 101, &budget,
+                                                &loaded, error, sizeof(error)) < 0);
+    assert(!budget.capacity && !loaded.count && recovered.recovery_gate && recovered.ready);
+    assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 100, &budget,
                                                   &loaded, error, sizeof(error)));
     assert(loaded.budget_bound && loaded.count == 1 && budget.capacity == &recovered &&
            budget.remaining == 2 * 65536);
@@ -2565,7 +2568,7 @@ static void test_budgeted_page_stage(void)
     assert(!latcd_cache_capacity_scan(&pending, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&pending, UINT64_MAX);
     assert(!latcd_cache_capacity_recovery_begin(&pending));
-    assert(!latcd_retirement_page_restore_budget(root, &pending, UINT64_MAX, &budget,
+    assert(!latcd_retirement_page_restore_budget(root, &pending, UINT64_MAX, 100, &budget,
                                                   &loaded, error, sizeof(error)));
     assert(loaded.committed_pending && loaded.results[0] == LATCD_RETIREMENT_RESULT_DONE &&
            budget.remaining == 2 * 65536);
@@ -2580,7 +2583,7 @@ static void test_budgeted_page_stage(void)
     assert(!latcd_cache_capacity_scan(&missing, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&missing, UINT64_MAX);
     assert(!latcd_cache_capacity_recovery_begin(&missing));
-    assert(latcd_retirement_page_restore_budget(root, &missing, UINT64_MAX, &budget,
+    assert(latcd_retirement_page_restore_budget(root, &missing, UINT64_MAX, 100, &budget,
                                                  &loaded, error, sizeof(error)) < 0);
     assert(!budget.capacity && !loaded.count && missing.recovery_gate);
     latcd_cache_capacity_close(&missing);
@@ -2604,7 +2607,7 @@ static void test_budgeted_page_stage(void)
         assert(!latcd_cache_capacity_scan(&mismatch, root, error, sizeof(error)));
         latcd_cache_capacity_metadata_bind(&mismatch, UINT64_MAX);
         assert(!latcd_cache_capacity_recovery_begin(&mismatch));
-        assert(latcd_retirement_page_restore_budget(root, &mismatch, UINT64_MAX, &budget,
+        assert(latcd_retirement_page_restore_budget(root, &mismatch, UINT64_MAX, 100, &budget,
                                                      &loaded, error, sizeof(error)) < 0);
         assert(!budget.capacity && !loaded.count && mismatch.recovery_gate);
         latcd_cache_capacity_close(&mismatch);
@@ -2622,7 +2625,7 @@ static void test_budgeted_page_stage(void)
     assert(!latcd_cache_capacity_scan(&conflicting, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&conflicting, UINT64_MAX);
     assert(!latcd_cache_capacity_recovery_begin(&conflicting));
-    assert(latcd_retirement_page_restore_budget(root, &conflicting, UINT64_MAX, &budget,
+    assert(latcd_retirement_page_restore_budget(root, &conflicting, UINT64_MAX, 100, &budget,
                                                  &loaded, error, sizeof(error)) < 0);
     assert(!budget.capacity && !loaded.count && conflicting.recovery_gate);
     latcd_cache_capacity_close(&conflicting);
@@ -2707,7 +2710,7 @@ static void test_budgeted_crash(const char *point, bool installed, bool result_w
     latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
     assert(!latcd_cache_capacity_recovery_begin(&recovered));
     if (installed || result_write || commit) {
-        assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, &budget,
+        assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 100, &budget,
                                                       &loaded, error, sizeof(error)));
         assert(budget.remaining == 2 * 65536 + ((commit || (result_write && installed)) ? 0 : 1024));
         assert(!latcd_cache_capacity_recovery_finish(&recovered));
@@ -2722,7 +2725,7 @@ static void test_budgeted_crash(const char *point, bool installed, bool result_w
             assert(!latcd_retirement_test_budget_commit(root, 150, &page, &budget, error, sizeof(error)));
         assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
     } else {
-        assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, &budget,
+        assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 100, &budget,
                                                      &loaded, error, sizeof(error)) < 0);
         assert(!budget.capacity && recovered.recovery_gate);
     }
