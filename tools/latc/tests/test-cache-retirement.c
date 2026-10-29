@@ -1655,8 +1655,30 @@ static void test_schedule_store(void)
     put(path, before);
     char *saved_read = g_strconcat(path, ".saved", NULL);
     char *replacement_read = g_strconcat(path, ".replacement", NULL);
+    int read_dir = open(store, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    char *read_name = g_path_get_basename(path), *snapshot_data = NULL;
+    size_t snapshot_size = 0;
+    struct stat read_snapshot, actual;
+    uint8_t digest[32];
+    assert(read_dir >= 0 && !latcd_retirement_test_read_snapshot(read_dir, read_name, 1024,
+               &snapshot_data, &snapshot_size, &read_snapshot, digest));
+    assert(!stat(path, &actual) && read_snapshot.st_ino == actual.st_ino && read_snapshot.st_size == actual.st_size);
+    char *expected_hash = g_compute_checksum_for_data(G_CHECKSUM_SHA256,
+                         (const guchar *)snapshot_data, snapshot_size);
+    char actual_hash[65];
+    for (unsigned i = 0; i < 32; i++) snprintf(actual_hash + i * 2, 3, "%02x", digest[i]);
+    assert(!strcmp(actual_hash, expected_hash));
+    g_free(expected_hash); g_free(snapshot_data);
     put(replacement_read, before);
     read_target = path; read_saved = saved_read; read_replacement = replacement_read;
+    latcd_retirement_test_after_read = replace_read_target;
+    memset(&read_snapshot, 0xff, sizeof(read_snapshot)); memset(digest, 0xff, sizeof(digest));
+    assert(latcd_retirement_test_read_snapshot(read_dir, read_name, 1024,
+               &snapshot_data, &snapshot_size, &read_snapshot, digest) < 0);
+    assert(!snapshot_data && !snapshot_size && !read_snapshot.st_ino);
+    for (unsigned i = 0; i < 32; i++) assert(!digest[i]);
+    assert(!unlink(path) && !rename(saved_read, path));
+    put(replacement_read, before);
     latcd_retirement_test_after_read = replace_read_target;
     loaded_sequence = UINT64_MAX;
     memset(&loaded, 0xff, sizeof(loaded));
@@ -1664,6 +1686,7 @@ static void test_schedule_store(void)
                                            &loaded_sequence, &loaded, error, sizeof(error)) < 0);
     assert(!latcd_retirement_test_after_read && !loaded_sequence && !loaded.name[0]);
     assert(!unlink(path) && !rename(saved_read, path));
+    close(read_dir); g_free(read_name);
     g_free(saved_read); g_free(replacement_read);
     entry.last_attempt = 0;
     assert(latcd_retirement_schedule_store(root, boot, 100, 150, 1, &entry, error, sizeof(error)) < 0);

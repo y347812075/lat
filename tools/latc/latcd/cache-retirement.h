@@ -119,6 +119,10 @@ int latcd_retirement_page_state_resume(const char *root, const char *boot,
                                        char *error, size_t error_size);
 #ifdef LATCD_RETIREMENT_TESTING
 extern void (*latcd_retirement_test_after_read)(void);
+struct stat;
+int latcd_retirement_test_read_snapshot(int directory, const char *name, size_t limit,
+                                        char **contents, size_t *size, struct stat *snapshot,
+                                        uint8_t digest[32]);
 /* Fixture writers do not enforce a persisted in-flight page. */
 int latcd_retirement_schedule_store(const char *root, const char *boot,
                                     uint64_t grace_us, uint64_t now_us,

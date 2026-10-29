@@ -267,11 +267,14 @@ int latcd_retirement_roots_lock(const char *root, int operation,
 void (*latcd_retirement_test_after_read)(void);
 #endif
 /* ENOENT is separate from a malformed, unsafe or unreadable root. */
-static int read_file(int directory, const char *name, size_t limit,
-                     char **contents, size_t *size)
+static int read_file_snapshot(int directory, const char *name, size_t limit,
+                              char **contents, size_t *size, struct stat *snapshot,
+                              uint8_t digest[32])
 {
     *contents = NULL;
     *size = 0;
+    if (snapshot) memset(snapshot, 0, sizeof(*snapshot));
+    if (digest) memset(digest, 0, 32);
     int fd = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0) return errno == ENOENT ? 1 : -1;
     struct stat before, after, path;
@@ -297,6 +300,14 @@ static int read_file(int directory, const char *name, size_t limit,
         goto out;
     }
     data[offset] = 0;
+    if (snapshot) *snapshot = after;
+    if (digest) {
+        GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+        g_checksum_update(checksum, (const guchar *)data, offset);
+        gsize digest_size = 32;
+        g_checksum_get_digest(checksum, digest, &digest_size);
+        g_checksum_free(checksum);
+    }
     *contents = data;
     *size = offset;
     result = 0;
@@ -304,6 +315,21 @@ out:
     close(fd);
     return result;
 }
+
+static int read_file(int directory, const char *name, size_t limit,
+                     char **contents, size_t *size)
+{
+    return read_file_snapshot(directory, name, limit, contents, size, NULL, NULL);
+}
+
+#ifdef LATCD_RETIREMENT_TESTING
+int latcd_retirement_test_read_snapshot(int directory, const char *name, size_t limit,
+                                        char **contents, size_t *size, struct stat *snapshot,
+                                        uint8_t digest[32])
+{
+    return read_file_snapshot(directory, name, limit, contents, size, snapshot, digest);
+}
+#endif
 
 static bool record_write_fault(const char *point)
 {
