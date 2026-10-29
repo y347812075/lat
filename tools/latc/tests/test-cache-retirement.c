@@ -2572,10 +2572,26 @@ static void test_budgeted_page_stage(void)
                                                   &loaded, error, sizeof(error)));
     assert(loaded.committed_pending && loaded.results[0] == LATCD_RETIREMENT_RESULT_DONE &&
            budget.remaining == 2 * 65536);
+    char *unexpected = g_build_filename(gc, "unexpected", NULL);
+    put(unexpected, "external change");
+    assert(latcd_cache_capacity_recovery_finish(&pending) < 0);
+    assert(latcd_cache_capacity_abandon_page(&pending, &budget) < 0);
+    assert(!latcd_cache_capacity_recovery_abort(&pending));
+    assert(!latcd_cache_capacity_abandon_page(&pending, &budget));
+    assert(latcd_cache_capacity_reserve(&pending, 1, UINT64_MAX, error, sizeof(error)) < 0);
+    assert(!latcd_cache_capacity_scan(&pending, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&pending, UINT64_MAX);
+    assert(!latcd_cache_capacity_recovery_begin(&pending));
+    assert(!latcd_retirement_page_restore_budget(root, &pending, UINT64_MAX, 100, &budget,
+                                                  &loaded, error, sizeof(error)));
+    assert(loaded.committed_pending && loaded.results[0] == LATCD_RETIREMENT_RESULT_DONE &&
+           budget.remaining == 2 * 65536);
     assert(!latcd_cache_capacity_recovery_finish(&pending));
     assert(!latcd_cache_capacity_test_page_release(&pending, &budget));
     latcd_cache_capacity_close(&pending);
     assert(!pthread_mutex_destroy(&pending.lock));
+    assert(!unlink(unexpected));
+    g_free(unexpected);
     char *fragment_data = NULL;
     assert(g_file_get_contents(fragment_path, &fragment_data, NULL, NULL));
     assert(!unlink(fragment_path));
