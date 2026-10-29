@@ -37,6 +37,13 @@ static const char *scheduler_swap_root, *scheduler_swap_gc, *scheduler_swap_old;
 static bool scheduler_swap_after_binding;
 static const char *settlement_unexpected;
 static const char *settlement_target, *settlement_saved;
+static const char *read_target, *read_saved, *read_replacement;
+static void replace_read_target(void)
+{
+    assert(!rename(read_target, read_saved));
+    assert(!rename(read_replacement, read_target));
+    latcd_retirement_test_after_read = NULL;
+}
 static void fail_page_finish(LatcdPageBudget *budget)
 {
     budget->invalid = true;
@@ -1646,6 +1653,18 @@ static void test_schedule_store(void)
     assert(g_file_get_contents(path, &after, NULL, NULL) && after[0] == 'X');
     g_free(after);
     put(path, before);
+    char *saved_read = g_strconcat(path, ".saved", NULL);
+    char *replacement_read = g_strconcat(path, ".replacement", NULL);
+    put(replacement_read, before);
+    read_target = path; read_saved = saved_read; read_replacement = replacement_read;
+    latcd_retirement_test_after_read = replace_read_target;
+    loaded_sequence = UINT64_MAX;
+    memset(&loaded, 0xff, sizeof(loaded));
+    assert(latcd_retirement_schedule_load(root, boot, 100, 150, entry.name,
+                                           &loaded_sequence, &loaded, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_test_after_read && !loaded_sequence && !loaded.name[0]);
+    assert(!unlink(path) && !rename(saved_read, path));
+    g_free(saved_read); g_free(replacement_read);
     entry.last_attempt = 0;
     assert(latcd_retirement_schedule_store(root, boot, 100, 150, 1, &entry, error, sizeof(error)) < 0);
     entry.last_attempt = 2;

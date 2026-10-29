@@ -263,6 +263,9 @@ int latcd_retirement_roots_lock(const char *root, int operation,
     return fd;
 }
 
+#ifdef LATCD_RETIREMENT_TESTING
+void (*latcd_retirement_test_after_read)(void);
+#endif
 /* ENOENT is separate from a malformed, unsafe or unreadable root. */
 static int read_file(int directory, const char *name, size_t limit,
                      char **contents, size_t *size)
@@ -271,7 +274,7 @@ static int read_file(int directory, const char *name, size_t limit,
     *size = 0;
     int fd = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0) return errno == ENOENT ? 1 : -1;
-    struct stat before, after;
+    struct stat before, after, path;
     int result = -1;
     if (fstat(fd, &before) || !S_ISREG(before.st_mode) ||
         before.st_uid != geteuid() || before.st_nlink != 1 ||
@@ -285,12 +288,11 @@ static int read_file(int directory, const char *name, size_t limit,
         if (count <= 0) { g_free(data); goto out; }
         offset += count;
     }
-    if (fstat(fd, &after) || before.st_dev != after.st_dev ||
-        before.st_ino != after.st_ino || before.st_size != after.st_size ||
-        before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
-        before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
-        before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
-        before.st_ctim.tv_nsec != after.st_ctim.tv_nsec) {
+#ifdef LATCD_RETIREMENT_TESTING
+    if (latcd_retirement_test_after_read) latcd_retirement_test_after_read();
+#endif
+    if (fstat(fd, &after) || fstatat(directory, name, &path, AT_SYMLINK_NOFOLLOW) ||
+        !object_stat_equal(&before, &after) || !object_stat_equal(&after, &path)) {
         g_free(data);
         goto out;
     }
