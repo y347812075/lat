@@ -2263,7 +2263,7 @@ int latcd_retirement_consumption_apply(const char *root, uint64_t now_us,
     LatcdRetirementPageState page;
     LatcdRetirementPageInventory inventory = {0};
     uint8_t identity[32], results[128] = {0};
-    bool legacy = false;
+    bool legacy = false, transitioned = false;
     int directory = -1, gc = -1, store = -1, matching = -1, result = -1;
     char *name = NULL;
     struct stat held, path;
@@ -2287,6 +2287,7 @@ int latcd_retirement_consumption_apply(const char *root, uint64_t now_us,
     if (inventory.members[index].present ?
         latcd_cache_capacity_page_remove_checked(store, name, &inventory.members[index].snapshot, budget) :
         latcd_cache_capacity_page_sync_absent(store, name, budget)) goto out;
+    transitioned = true;
     if (record_write_fault("consumption-unlinked")) goto out;
     if (!directory_matches_at(gc, "retirement-schedule", store) ||
         !directory_matches_at(directory, ".gc", gc)) goto out;
@@ -2297,6 +2298,7 @@ int latcd_retirement_consumption_apply(const char *root, uint64_t now_us,
     memcpy(page.consumption.completed, completed, sizeof(completed));
     result = page_state_store_fd(directory, gc, &page, budget, NULL);
 out:
+    if (result && transitioned) latcd_cache_capacity_page_uncertain(budget->capacity, budget);
     g_free(name);
     if (matching >= 0) close(matching);
     if (store >= 0) close(store);

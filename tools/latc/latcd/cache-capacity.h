@@ -96,6 +96,8 @@ typedef struct LatcdPageBudget {
     bool page_identity_bound;
     uint8_t page_identity[32];
 } LatcdPageBudget;
+/* Invalidate an owned page after an uncertain persistent transition. */
+void latcd_cache_capacity_page_uncertain(LatcdCacheCapacity *capacity, LatcdPageBudget *budget);
 /* Startup only, with ordinary admission gated and the page and its installed
  * fragments verified under the scheduler lock. The caller owns budget storage
  * for the entire reservation lifetime; this does not validate persisted data. */

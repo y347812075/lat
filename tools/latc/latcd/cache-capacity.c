@@ -1037,6 +1037,17 @@ int latcd_cache_capacity_cancel_page(LatcdCacheCapacity *capacity, LatcdPageBudg
     return valid ? 0 : -1;
 }
 
+void latcd_cache_capacity_page_uncertain(LatcdCacheCapacity *capacity, LatcdPageBudget *budget)
+{
+    if (!capacity || !budget) return;
+    pthread_mutex_lock(&capacity->lock);
+    if (capacity->restored_page_budget == budget && budget->capacity == capacity) {
+        capacity->ready = false;
+        budget->invalid = true;
+    }
+    pthread_mutex_unlock(&capacity->lock);
+}
+
 int latcd_cache_capacity_finish_page(LatcdCacheCapacity *capacity, LatcdPageBudget *budget)
 {
     if (!capacity || !budget) { errno = EINVAL; return -1; }

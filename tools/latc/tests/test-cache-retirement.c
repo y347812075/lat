@@ -3365,9 +3365,11 @@ static void test_budgeted_max_page(unsigned consumption)
             assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, UINT64_MAX,
                                                          &budget, &loaded, error, sizeof(error)));
             assert(!latcd_cache_capacity_recovery_finish(&recovered));
-            consumption_io_fault = consumption - 1;
+            consumption_io_fault = consumption < 4 ? consumption - 1 : 0;
             consumption_unlinked = false;
+            if (consumption == 4) assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:consumption-unlinked", 1));
             assert(latcd_retirement_consumption_apply(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
+            if (consumption == 4) unsetenv("LATCD_TEST_RETIREMENT_IO");
             consumption_io_fault = 0;
             assert(!latcd_cache_capacity_poll(&recovered));
             assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
@@ -6996,6 +6998,7 @@ int main(int argc, char **argv)
     test_budgeted_max_page(1);
     test_budgeted_max_page(2);
     test_budgeted_max_page(3);
+    test_budgeted_max_page(4);
     test_budgeted_rebind();
     test_rebind_crash("file-synced", false, false);
     test_rebind_crash("linked", false, true);
