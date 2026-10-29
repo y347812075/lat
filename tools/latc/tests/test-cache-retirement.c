@@ -2735,6 +2735,11 @@ static void test_budgeted_page_stage(void)
     assert(latcd_cache_capacity_reserve(&recovered, 1, UINT64_MAX, error, sizeof(error)) < 0);
     assert(!latcd_cache_capacity_recovery_finish(&recovered));
     assert(!latcd_retirement_page_budget_commit(root, 150, &page, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_consumption_begin(root, 150, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+           loaded.consumption_bound && loaded.committed_pending);
+    assert(latcd_retirement_consumption_begin(root, 150, &budget, error, sizeof(error)) < 0);
+    assert(latcd_retirement_page_finish_preserving_results(root, 150, &budget, error, sizeof(error)) < 0);
     assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
     latcd_cache_capacity_close(&recovered);
     assert(!pthread_mutex_destroy(&recovered.lock));
@@ -2754,7 +2759,16 @@ static void test_budgeted_page_stage(void)
     }
     put(checkpoint, checkpoint_data);
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
-           loaded.committed_pending);
+           loaded.committed_pending && loaded.consumption_bound);
+    GKeyFile *altered_consumption = g_key_file_new();
+    assert(g_key_file_load_from_data(altered_consumption, checkpoint_data, -1, 0, NULL));
+    g_key_file_set_string(altered_consumption, "consumption", "mtime_sec", "-0");
+    char *bad_consumption = g_key_file_to_data(altered_consumption, NULL, NULL);
+    put(checkpoint, bad_consumption);
+    assert(latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) < 0);
+    put(checkpoint, checkpoint_data);
+    g_free(bad_consumption);
+    g_key_file_unref(altered_consumption);
     g_free(checkpoint_data);
     g_free(checkpoint);
     char *fragment_name = g_strconcat(page.entries[0].name, ".ini", NULL);

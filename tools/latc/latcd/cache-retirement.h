@@ -37,6 +37,15 @@ typedef struct LatcdRetirementPageDeadline {
     uint64_t deadline, enqueued, last_attempt, retry_at;
     unsigned busy_count;
 } LatcdRetirementPageDeadline;
+typedef struct LatcdRetirementConsumption {
+    uint8_t completed[16];
+    bool intent_present;
+    unsigned intent_index;
+    uint64_t device, inode, mode, uid, nlink, size, blocks;
+    int64_t mtime_sec, ctime_sec;
+    uint32_t mtime_nsec, ctime_nsec;
+    uint8_t digest[32];
+} LatcdRetirementConsumption;
 typedef struct LatcdRetirementPageState {
     uint64_t cache_device, cache_inode, grace_us, round_cutoff;
     char boot[37];
@@ -48,21 +57,14 @@ typedef struct LatcdRetirementPageState {
     bool committed_pending;
     /* A validated persistent budget binding, not recovery or deletion authority. */
     bool budget_bound;
+    /* Versioned consumption checkpoint, not deletion authorization. */
+    bool consumption_bound;
+    LatcdRetirementConsumption consumption;
     unsigned count;
     LatcdRetirementPageDeadline entries[128];
     /* Result types are populated only for a committed pending page. */
     uint8_t results[128];
 } LatcdRetirementPageState;
-/* In-memory validation only; not persisted and never deletion authority. */
-typedef struct LatcdRetirementConsumption {
-    uint8_t completed[16];
-    bool intent_present;
-    unsigned intent_index;
-    uint64_t device, inode, mode, uid, nlink, size, blocks;
-    int64_t mtime_sec, ctime_sec;
-    uint32_t mtime_nsec, ctime_nsec;
-    uint8_t digest[32];
-} LatcdRetirementConsumption;
 int latcd_retirement_consumption_valid(const LatcdRetirementPageState *page,
                                        const LatcdRetirementConsumption *consumption);
 int latcd_retirement_consumption_identity(const LatcdRetirementPageState *page,
@@ -235,6 +237,9 @@ int latcd_retirement_page_restore_budget(const char *root, struct LatcdCacheCapa
                                     uint64_t limit, uint64_t expected_grace_us,
                                     struct LatcdPageBudget *budget,
                                     LatcdRetirementPageState *page, char *error, size_t error_size);
+/* Begin a consumption checkpoint after revalidating every pending shard. */
+int latcd_retirement_consumption_begin(const char *root, uint64_t now_us,
+                                    struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Caller holds the owner lease and serializes budget lifetime. These operations
  * require a persisted budget binding and never authorize object deletion. */
 int latcd_retirement_page_budget_result(const char *root, uint64_t now_us,
