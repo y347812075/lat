@@ -5086,8 +5086,8 @@ out:
     return result < 0 ? fail(error, error_size, "retirement queue discovery incomplete or unsafe") : result;
 }
 
-int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
-                                             char *error, size_t error_size)
+static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatched,
+                                char *error, size_t error_size)
 {
     if (!queue || !queue->retry_witness || !queue->cursor ||
         queue->discovery_watch < 0 || queue->discovery_tombstones < 0)
@@ -5099,6 +5099,7 @@ int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
     uint64_t now = 0;
     uint64_t sequence = 0;
     GArray *snapshot = g_array_new(FALSE, FALSE, sizeof(RetrySnapshotEntry));
+    LatcdRetirementPageState current;
     struct stat cache, path, transactions, tombstone_stat;
     if (scheduler < 0) goto out;
     root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -5133,8 +5134,9 @@ int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
             found->last_attempt != hint->last_attempt || found->retry_at != hint->retry_at ||
             found->busy_count != hint->busy_count || found->retry_at > now) goto out;
     }
+    if (advance_unmatched && (!queue->retry_snapshot_bound ||
+        g_hash_table_size(queue->confirmed_keys))) goto out;
     if (queue->retry_snapshot_bound) {
-        LatcdRetirementPageState current;
         LatcdRetirementPageDeadline selected[128];
         uint64_t selected_sequences[128] = {0};
         unsigned count = 0;
@@ -5154,6 +5156,11 @@ int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
                 selected_sequences[i] != queue->retry_item_sequence[i]) goto out;
     }
     if (!queue_watch_clean(queue->discovery_watch)) goto out;
+    if (advance_unmatched) {
+        g_strlcpy(current.retry_cursor, queue->retry_order[queue->retry_count - 1],
+                  sizeof(current.retry_cursor));
+        if (page_state_store_fd(root, gc, &current, NULL, NULL)) goto out;
+    }
     result = 0;
 out:
     g_array_free(snapshot, TRUE);
@@ -5169,6 +5176,18 @@ out:
     if (queue->discovery_tombstones >= 0) { close(queue->discovery_tombstones); queue->discovery_tombstones = -1; }
     if (result) queue->aggregation_verified = false;
     return result ? fail(error, error_size, "retry witness changed; rescan") : 0;
+}
+
+int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
+                                             char *error, size_t error_size)
+{
+    return retry_witness_finish(queue, false, error, error_size);
+}
+
+int latcd_retirement_queue_retry_advance_unmatched(LatcdRetirementQueue *queue,
+                                                    char *error, size_t error_size)
+{
+    return retry_witness_finish(queue, true, error, error_size);
 }
 
 int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,

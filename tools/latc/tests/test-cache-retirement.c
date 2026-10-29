@@ -6801,7 +6801,7 @@ static void test_page_round_insertions(void)
     assert(!strcmp(items[0].hint.name, hints[1].name) && !strcmp(items[1].hint.name, hints[0].name));
     assert(items[0].shard_sequence_bound && items[1].shard_sequence_bound &&
            items[0].shard_sequence == 3 && items[1].shard_sequence == 3);
-    assert(!latcd_retirement_queue_retry_revalidate(queue, error, sizeof(error)));
+    assert(latcd_retirement_queue_retry_advance_unmatched(queue, error, sizeof(error)) < 0);
     latcd_retirement_queue_free(queue);
     queue = latcd_retirement_queue_new(root, 1);
     assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
@@ -6811,6 +6811,30 @@ static void test_page_round_insertions(void)
     assert(!latcd_retirement_page_state_store(root, &retry_state, error, sizeof(error)));
     assert(latcd_retirement_queue_retry_revalidate(queue, error, sizeof(error)) < 0);
     latcd_retirement_queue_free(queue);
+
+    shard_name = g_strconcat(hints[0].name, ".ini", NULL);
+    shard_path = g_build_filename(root, ".gc", "retirement-schedule", shard_name, NULL);
+    assert(!unlink(shard_path));
+    g_free(shard_path); g_free(shard_name);
+    g_strlcpy(retry_state.retry_cursor, hints[0].name, sizeof(retry_state.retry_cursor));
+    assert(!latcd_retirement_page_state_store(root, &retry_state, error, sizeof(error)));
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0 && !latcd_retirement_queue_retry_items(queue, items, &item_count) &&
+           item_count == 1 && !items[0].matched);
+    assert(!latcd_retirement_queue_retry_advance_unmatched(queue, error, sizeof(error)));
+    LatcdRetirementPageState advanced;
+    assert(!latcd_retirement_page_state_load(root, &advanced, error, sizeof(error)) &&
+           !strcmp(advanced.retry_cursor, hints[1].name) && !advanced.committed_cursor[0]);
+    LatcdRetirementPageDeadline preserved;
+    uint64_t preserved_sequence;
+    assert(!latcd_retirement_schedule_load(root, boot, 1, 200, hints[1].name,
+                                            &preserved_sequence, &preserved, error, sizeof(error)) &&
+           preserved_sequence == 3 && preserved.enqueued == hints[1].enqueued);
+    latcd_retirement_queue_free(queue);
+    assert(!latcd_retirement_schedule_store(root, boot, 1, 200, 3, &hints[0], error, sizeof(error)));
 
     g_strlcpy(retry_state.retry_cursor, hints[0].name, sizeof(retry_state.retry_cursor));
     assert(!latcd_retirement_page_state_store(root, &retry_state, error, sizeof(error)));

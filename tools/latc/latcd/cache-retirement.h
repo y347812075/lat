@@ -488,6 +488,10 @@ int latcd_retirement_queue_retry_items(const LatcdRetirementQueue *queue,
  * reference-roots locks. This does not authorize deletion or persist a page. */
 int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
     char *error, size_t error_size);
+/* Advance only past an entirely unmatched retry batch while preserving every
+ * shard. Requires a snapshot-bound monitored scan; never authorizes removal. */
+int latcd_retirement_queue_retry_advance_unmatched(LatcdRetirementQueue *queue,
+    char *error, size_t error_size);
 /* Resume diagnostic discovery after the committed cursor. Any in-flight page
  * is ignored and rediscovered; a v2 page never proves completion.
  * Owner lease required; missing or incompatible state is not a new round. */
