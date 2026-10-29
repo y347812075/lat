@@ -418,9 +418,9 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record,
         record_write_fault("directory-synced")) goto out;
     result = 0;
 close_out:
-    if (fd >= 0 && close(fd)) leftover = true;
 out:
     saved = errno;
+    if (fd >= 0 && close(fd)) leftover = true;
     if (result && created && !replaced && !anonymous && unlinkat(directory, temporary, 0) && errno != ENOENT)
         leftover = true;
     if (leftover && not_installed) *not_installed = false;

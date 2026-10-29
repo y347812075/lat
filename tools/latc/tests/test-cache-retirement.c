@@ -1828,10 +1828,16 @@ static void test_schedule_check_page(void)
            &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
     assert(page_budget.remaining == saved_reservation - 1024 && page_capacity.ready);
     uint64_t committed_before_fault = page_capacity.metadata_committed;
+    int fd_before = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    assert(fd_before >= 0);
+    close(fd_before);
     assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:renamed", 1));
     assert(latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
            &page.entries[1], LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)) < 0);
     unsetenv("LATCD_TEST_RETIREMENT_IO");
+    int fd_after = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    assert(fd_after == fd_before);
+    close(fd_after);
     assert(!latcd_cache_capacity_poll(&page_capacity) && page_budget.invalid &&
            page_budget.remaining == saved_reservation - 2048 &&
            page_capacity.metadata_committed == committed_before_fault + 1024);
