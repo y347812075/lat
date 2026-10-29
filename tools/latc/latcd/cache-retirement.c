@@ -765,11 +765,15 @@ int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
         strnlen(page->retry_cursor, sizeof(page->retry_cursor)) == sizeof(page->retry_cursor) ||
         (page->retry_cursor[0] && !page_object_name_valid(page->retry_cursor)) ||
         strnlen(page->end_cursor, sizeof(page->end_cursor)) == sizeof(page->end_cursor) ||
-        !page->count || page->count > 128) return -1;
+        !page->count || page->count > 128 || page->completed > page->count ||
+        (page->intent_present && page->completed == page->count)) return -1;
     bool wrapped = false;
     for (unsigned i = 0; i < page->count; i++) {
         const LatcdRetirementRetryItem *item = &page->items[i];
         const LatcdRetirementPageDeadline *hint = &item->hint, *aggregate = &item->aggregate;
+        bool has_replacement = false;
+        for (unsigned j = 0; j < 32; j++) has_replacement |= page->replacement_digest[i][j] != 0;
+        if (has_replacement != (i < page->completed || (page->intent_present && i == page->completed))) return -1;
         if (strnlen(hint->name, sizeof(hint->name)) == sizeof(hint->name) ||
             !page_object_name_valid(hint->name) || !hint->enqueued ||
             hint->enqueued > page->snapshot_time || hint->last_attempt > item->shard_sequence ||
@@ -795,7 +799,7 @@ int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
     }
     if (strcmp(page->end_cursor, page->items[page->count - 1].hint.name)) return -1;
     GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
-    static const char domain[] = "latcd-retirement-retry-page-v2";
+    static const char domain[] = "latcd-retirement-retry-page-v3";
     g_checksum_update(checksum, (const guchar *)domain, sizeof(domain));
     page_identity_u64(checksum, page->cache_device);
     page_identity_u64(checksum, page->cache_inode);
@@ -809,6 +813,8 @@ int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
     page_identity_string(checksum, page->retry_cursor);
     page_identity_string(checksum, page->end_cursor);
     page_identity_u64(checksum, page->count);
+    page_identity_u64(checksum, page->completed);
+    page_identity_u64(checksum, page->intent_present);
     for (unsigned i = 0; i < page->count; i++) {
         const LatcdRetirementRetryItem *item = &page->items[i];
         page_identity_string(checksum, item->hint.name);
@@ -818,6 +824,7 @@ int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
         page_identity_u64(checksum, item->hint.busy_count);
         page_identity_u64(checksum, item->shard_sequence);
         g_checksum_update(checksum, item->shard_digest, sizeof(item->shard_digest));
+        g_checksum_update(checksum, page->replacement_digest[i], 32);
         page_identity_u64(checksum, item->matched);
         page_identity_u64(checksum, item->aggregate.deadline);
     }
@@ -956,7 +963,7 @@ int latcd_retirement_retry_page_encode(const LatcdRetirementRetryPage *page,
     GKeyFile *record = g_key_file_new();
     char hex[65];
     encode_hex(digest, sizeof(digest), hex);
-    g_key_file_set_integer(record, "retry", "version", 2);
+    g_key_file_set_integer(record, "retry", "version", 3);
     g_key_file_set_uint64(record, "retry", "cache_device", page->cache_device);
     g_key_file_set_uint64(record, "retry", "cache_inode", page->cache_inode);
     g_key_file_set_uint64(record, "retry", "grace_us", page->grace_us);
@@ -969,6 +976,8 @@ int latcd_retirement_retry_page_encode(const LatcdRetirementRetryPage *page,
     g_key_file_set_string(record, "retry", "retry_cursor", page->retry_cursor);
     g_key_file_set_string(record, "retry", "end_cursor", page->end_cursor);
     g_key_file_set_uint64(record, "retry", "count", page->count);
+    g_key_file_set_uint64(record, "retry", "completed", page->completed);
+    g_key_file_set_uint64(record, "retry", "intent", page->intent_present);
     g_key_file_set_string(record, "retry", "identity", hex);
     for (unsigned i = 0; i < page->count; i++) {
         char group[32];
@@ -982,6 +991,8 @@ int latcd_retirement_retry_page_encode(const LatcdRetirementRetryPage *page,
         g_key_file_set_uint64(record, group, "sequence", item->shard_sequence);
         encode_hex(item->shard_digest, sizeof(item->shard_digest), hex);
         g_key_file_set_string(record, group, "shard_digest", hex);
+        encode_hex(page->replacement_digest[i], 32, hex);
+        g_key_file_set_string(record, group, "replacement_digest", hex);
         g_key_file_set_uint64(record, group, "matched", item->matched);
         g_key_file_set_uint64(record, group, "deadline", item->aggregate.deadline);
     }
@@ -1001,12 +1012,12 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
     if (!data || !size || size > RECORD_LIMIT || memchr(data, 0, size)) return -1;
     GKeyFile *record = g_key_file_new();
     const char *header[] = {"version", "cache_device", "cache_inode", "grace_us", "round_cutoff", "round_sequence",
-        "snapshot_time", "snapshot_sequence", "boot", "committed_cursor", "retry_cursor", "end_cursor", "count", "identity"};
-    const char *fields[] = {"name", "enqueued", "last_attempt", "retry_at", "busy_count", "sequence", "shard_digest", "matched", "deadline"};
-    uint64_t count = 0;
+        "snapshot_time", "snapshot_sequence", "boot", "committed_cursor", "retry_cursor", "end_cursor", "count", "completed", "intent", "identity"};
+    const char *fields[] = {"name", "enqueued", "last_attempt", "retry_at", "busy_count", "sequence", "shard_digest", "replacement_digest", "matched", "deadline"};
+    uint64_t count = 0, completed = 0, intent = 0;
     bool valid = g_key_file_load_from_data(record, data, size, 0, NULL) &&
         exact_keys(record, "retry", header, G_N_ELEMENTS(header)) &&
-        record_string_is(record, "retry", "version", "2") &&
+        record_string_is(record, "retry", "version", "3") &&
         record_uint64(record, "retry", "cache_device", &page->cache_device) &&
         record_uint64(record, "retry", "cache_inode", &page->cache_inode) &&
         record_uint64(record, "retry", "grace_us", &page->grace_us) &&
@@ -1014,7 +1025,9 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
         record_uint64(record, "retry", "round_sequence", &page->round_sequence) &&
         record_uint64(record, "retry", "snapshot_time", &page->snapshot_time) &&
         record_uint64(record, "retry", "snapshot_sequence", &page->snapshot_sequence) &&
-        record_uint64(record, "retry", "count", &count) && count && count <= 128;
+        record_uint64(record, "retry", "count", &count) && count && count <= 128 &&
+        record_uint64(record, "retry", "completed", &completed) && completed <= count &&
+        record_uint64(record, "retry", "intent", &intent) && intent <= 1;
     char *boot = g_key_file_get_string(record, "retry", "boot", NULL);
     char *committed = g_key_file_get_string(record, "retry", "committed_cursor", NULL);
     char *cursor = g_key_file_get_string(record, "retry", "retry_cursor", NULL);
@@ -1033,6 +1046,7 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
         g_strlcpy(page->retry_cursor, cursor, sizeof(page->retry_cursor));
         g_strlcpy(page->end_cursor, end, sizeof(page->end_cursor));
         page->count = count;
+        page->completed = completed; page->intent_present = intent;
     }
     for (unsigned i = 0; valid && i < page->count; i++) {
         char group[32]; uint64_t busy, matched, deadline;
@@ -1040,8 +1054,10 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
         snprintf(group, sizeof(group), "entry%u", i);
         char *name = g_key_file_get_string(record, group, "name", NULL);
         char *shard_digest = g_key_file_get_string(record, group, "shard_digest", NULL);
+        char *replacement = g_key_file_get_string(record, group, "replacement_digest", NULL);
         valid = exact_keys(record, group, fields, G_N_ELEMENTS(fields)) && name &&
             shard_digest && strlen(shard_digest) == 64 && strspn(shard_digest, "0123456789abcdef") == 64 &&
+            replacement && strlen(replacement) == 64 && strspn(replacement, "0123456789abcdef") == 64 &&
             strlen(name) < sizeof(item->hint.name) &&
             record_uint64(record, group, "enqueued", &item->hint.enqueued) &&
             record_uint64(record, group, "last_attempt", &item->hint.last_attempt) &&
@@ -1054,12 +1070,15 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
             for (unsigned j = 0; j < 32; j++)
                 item->shard_digest[j] = (g_ascii_xdigit_value(shard_digest[2*j]) << 4) |
                                         g_ascii_xdigit_value(shard_digest[2*j+1]);
+            for (unsigned j = 0; j < 32; j++)
+                page->replacement_digest[i][j] = (g_ascii_xdigit_value(replacement[2*j]) << 4) |
+                                                  g_ascii_xdigit_value(replacement[2*j+1]);
             g_strlcpy(item->hint.name, name, sizeof(item->hint.name));
             item->hint.busy_count = busy; item->shard_sequence_bound = true; item->matched = matched;
             if (matched) { item->aggregate = item->hint; item->aggregate.deadline = deadline; }
             else if (deadline) valid = false;
         }
-        g_free(name); g_free(shard_digest);
+        g_free(name); g_free(shard_digest); g_free(replacement);
     }
     uint8_t digest[32]; char expected[65];
     if (valid && !latcd_retirement_retry_page_identity(page, digest)) {
@@ -2805,6 +2824,7 @@ int latcd_retirement_retry_page_restore_budget(const char *root,
         !gc_has_no_partial_records(gc) || !gc_has_no_partial_records(store) ||
         (matching = latcd_cache_capacity_open_matching_root(capacity, root, directory)) < 0 ||
         latcd_retirement_retry_page_load(root, persisted, error, error_size) ||
+        persisted->completed || persisted->intent_present ||
         retirement_clock(&boot, &now) || strcmp(boot, persisted->boot) ||
         persisted->grace_us != expected_grace_us || persisted->snapshot_time > now ||
         retirement_schedule_access(root, boot, expected_grace_us, now, 0, NULL, true,

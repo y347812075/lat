@@ -52,6 +52,10 @@ typedef struct LatcdRetirementRetryPage {
     char boot[37], committed_cursor[138], retry_cursor[138], end_cursor[138];
     unsigned count;
     LatcdRetirementRetryItem items[128];
+    /* Sequential progress and expected replacement digests; no deletion authority. */
+    unsigned completed;
+    bool intent_present;
+    uint8_t replacement_digest[128][32];
 } LatcdRetirementRetryPage;
 int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
                                         uint8_t digest[32]);

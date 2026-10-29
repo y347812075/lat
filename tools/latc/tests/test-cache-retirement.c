@@ -3940,6 +3940,19 @@ static void test_retry_page_identity(void)
     tampered = g_strconcat(encoded, "unexpected=1\n", NULL);
     assert(latcd_retirement_retry_page_decode(tampered, strlen(tampered), decoded) < 0);
     g_free(tampered); g_free(encoded); g_free(decoded);
+    page->completed = 1; page->intent_present = true;
+    memset(page->replacement_digest[0], 0x12, 32);
+    memset(page->replacement_digest[1], 0x34, 32);
+    assert(!latcd_retirement_retry_page_encode(page, &encoded, &encoded_size));
+    decoded = g_new0(LatcdRetirementRetryPage, 1);
+    assert(!latcd_retirement_retry_page_decode(encoded, encoded_size, decoded) &&
+           decoded->completed == 1 && decoded->intent_present && decoded->replacement_digest[1][0] == 0x34);
+    tampered = g_strdup(encoded); field = strstr(tampered, "completed=1");
+    assert(field); field[strlen("completed=")] = '2';
+    assert(latcd_retirement_retry_page_decode(tampered, encoded_size, decoded) < 0);
+    g_free(tampered); g_free(decoded); g_free(encoded);
+    memset(page->replacement_digest, 0, sizeof(page->replacement_digest));
+    page->completed = 0; page->intent_present = false;
     page->items[0].shard_sequence++;
     assert(!latcd_retirement_retry_page_identity(page, changed) && memcmp(original, changed, 32));
     page->items[0].shard_sequence--;
