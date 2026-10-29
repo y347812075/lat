@@ -2575,6 +2575,32 @@ static void test_budgeted_page_stage(void)
     latcd_cache_capacity_close(&missing);
     assert(!pthread_mutex_destroy(&missing.lock));
     put(fragment_path, fragment_data);
+    for (unsigned variant = 0; variant < 2; variant++) {
+        GKeyFile *altered = g_key_file_new();
+        assert(g_key_file_load_from_data(altered, fragment_data, 1024, 0, NULL));
+        if (!variant) g_key_file_set_string(altered, "schedule", "result", "deferred");
+        else g_key_file_set_uint64(altered, "schedule", "retry_at", 151);
+        gsize length;
+        char *raw = g_key_file_to_data(altered, &length, NULL);
+        assert(length < 1023);
+        char padded[1025];
+        memcpy(padded, raw, length);
+        padded[length++] = '#';
+        memset(padded + length, 'x', 1023 - length);
+        padded[1023] = '\n'; padded[1024] = 0;
+        put(fragment_path, padded);
+        LatcdCacheCapacity mismatch = LATCD_CACHE_CAPACITY_INIT;
+        assert(!latcd_cache_capacity_scan(&mismatch, root, error, sizeof(error)));
+        latcd_cache_capacity_metadata_bind(&mismatch, UINT64_MAX);
+        assert(!latcd_cache_capacity_recovery_begin(&mismatch));
+        assert(latcd_retirement_page_restore_budget(root, &mismatch, UINT64_MAX, &budget,
+                                                     &loaded, error, sizeof(error)) < 0);
+        assert(!budget.capacity && !loaded.count && mismatch.recovery_gate);
+        latcd_cache_capacity_close(&mismatch);
+        assert(!pthread_mutex_destroy(&mismatch.lock));
+        g_free(raw); g_key_file_unref(altered);
+    }
+    put(fragment_path, fragment_data);
     g_free(fragment_data);
     GKeyFile *fragment = g_key_file_new();
     assert(g_key_file_load_from_file(fragment, fragment_path, 0, NULL));
