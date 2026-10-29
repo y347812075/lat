@@ -438,7 +438,18 @@ int main(void)
         close(source);
         g_assert_cmpint(prepare_metadata_directories(cache), ==, 0);
         g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, cache, NULL, 0), ==, 0);
+        g_assert_cmpint(latcd_cache_capacity_recovery_begin(&generation_capacity), ==, 0);
         latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
+        unsigned visited;
+        int recovery;
+        char recovery_error[256];
+        do {
+            recovery = restore_compiler_budgets_step(&config, &compiler_budget_recovery,
+                32, &visited, recovery_error, sizeof(recovery_error));
+        } while (recovery == 1);
+        g_assert_cmpint(recovery, ==, 0);
+        g_assert_cmpint(latcd_cache_capacity_recovery_finish(&generation_capacity), ==, 0);
+        atomic_store(&compiler_budget_recovery_state, 1);
         _exit(run_service(&config));
     }
     for (unsigned i = 0; i < 500 && access(socket_path, F_OK); i++) {

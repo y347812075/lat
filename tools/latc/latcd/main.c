@@ -2162,7 +2162,8 @@ static void *compiler_input_recovery_worker(void *opaque)
     if (timer < 0) fprintf(stderr, "latcd: retirement timer unavailable; periodic discovery only: %s\n", strerror(errno));
     while (!atomic_load(&work->stopping) && !stop_requested) {
         int64_t now = g_get_monotonic_time();
-        if (retirement_safe && now >= next_retirement) {
+        if (retirement_safe && atomic_load(&compiler_budget_recovery_state) == 1 &&
+            now >= next_retirement) {
             LatcdRetirementQueueStats stats;
             char error[256];
             int result = latcd_retirement_queue_step(retirement, 32, 10000,
@@ -2196,7 +2197,7 @@ static void *compiler_input_recovery_worker(void *opaque)
                 int result = restore_compiler_budgets_step(work->config,
                     &compiler_budget_recovery, 32, &visited, error, sizeof(error));
                 if (result <= 0) {
-                    if (!result && !latcd_cache_capacity_poll(&generation_capacity))
+                    if (!result && latcd_cache_capacity_recovery_finish(&generation_capacity))
                         result = fail(error, sizeof(error), "capacity index invalid after compiler budget recovery");
                     atomic_store(&compiler_budget_recovery_state, result < 0 ? -1 : 1);
                     if (result < 0) fprintf(stderr, "latcd: %s\n", error);
@@ -2211,7 +2212,8 @@ static void *compiler_input_recovery_worker(void *opaque)
                 next = g_get_monotonic_time() + (result == 1 ? 100000 : 5000000);
             }
         }
-        int64_t wake = retirement_safe ? MIN(next, next_retirement) : next;
+        int64_t wake = retirement_safe && atomic_load(&compiler_budget_recovery_state) == 1 ?
+            MIN(next, next_retirement) : next;
         int64_t remaining = MAX(INT64_C(0), wake - g_get_monotonic_time());
         int timeout = (int)MIN(INT64_C(1000), (remaining + 999) / 1000);
         struct pollfd signals[] = {
@@ -6648,14 +6650,20 @@ int main(int argc, char **argv)
         return 1;
     }
     close(indexed_root);
+    if (latcd_cache_capacity_recovery_begin(&generation_capacity)) {
+        fprintf(stderr, "latcd: cannot close capacity admission for budget recovery\n");
+        latcd_cache_capacity_close(&generation_capacity);
+        close(cache_owner);
+        return 1;
+    }
     latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
     unsigned budget_visited;
     int budget_result;
     do {
         budget_result = restore_compiler_budgets_step(&config, &compiler_budget_recovery,
             32, &budget_visited, error, sizeof(error));
-    } while (!serve && budget_result == 1 && !stop_requested);
-    if (!budget_result && !latcd_cache_capacity_poll(&generation_capacity))
+    } while (budget_result == 1 && !stop_requested);
+    if (!budget_result && latcd_cache_capacity_recovery_finish(&generation_capacity))
         budget_result = fail(error, sizeof(error), "capacity index invalid after compiler budget recovery");
     atomic_store(&compiler_budget_recovery_state, budget_result < 0 ? -1 : budget_result == 0);
     if (budget_result < 0 || stop_requested) {

@@ -521,12 +521,37 @@ static bool capacity_fits(LatcdCacheCapacity *capacity, uint64_t bytes, uint64_t
     return true;
 }
 
+int latcd_cache_capacity_recovery_begin(LatcdCacheCapacity *capacity)
+{
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
+    bool valid = capacity->ready && !capacity->recovery_gate &&
+        !capacity->reserved && !capacity->transient_reserved &&
+        !capacity->metadata_reserved && !capacity->state_reserved &&
+        (!capacity->expected_names || !g_hash_table_size(capacity->expected_names)) &&
+        (!capacity->state_expected || !g_hash_table_size(capacity->state_expected));
+    if (valid) capacity->recovery_gate = true;
+    pthread_mutex_unlock(&capacity->lock);
+    return valid ? 0 : -1;
+}
+
+int latcd_cache_capacity_recovery_finish(LatcdCacheCapacity *capacity)
+{
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
+    bool valid = capacity->recovery_gate && capacity->ready &&
+        (!capacity->unknown_tasks || !g_hash_table_size(capacity->unknown_tasks));
+    if (valid) capacity->recovery_gate = false;
+    pthread_mutex_unlock(&capacity->lock);
+    return valid ? 0 : -1;
+}
+
 static int reserve_bytes(LatcdCacheCapacity *capacity, uint64_t bytes,
                            uint64_t limit, bool transient, char *error, size_t error_size)
 {
     pthread_mutex_lock(&capacity->lock);
     check_changes(capacity);
-    bool fits = capacity->ready &&
+    bool fits = capacity->ready && !capacity->recovery_gate &&
         (!capacity->unknown_tasks || !g_hash_table_size(capacity->unknown_tasks)) &&
         capacity_fits(capacity, bytes, limit);
     if (fits) {
@@ -556,7 +581,7 @@ int latcd_cache_capacity_expect(LatcdCacheCapacity *capacity, const char *const 
 {
     pthread_mutex_lock(&capacity->lock);
     check_changes(capacity);
-    bool valid = capacity->ready && capacity->expected_names;
+    bool valid = capacity->ready && !capacity->recovery_gate && capacity->expected_names;
     for (size_t i = 0; valid && i < count; i++)
         valid = names[i] && generated_name(names[i]) &&
             !g_hash_table_contains(capacity->expected_names, names[i]);
@@ -646,6 +671,7 @@ void latcd_cache_capacity_close(LatcdCacheCapacity *capacity)
     capacity->state_committed = 0;
     capacity->state_reserved = 0;
     capacity->metadata_present = false;
+    capacity->recovery_gate = false;
     if (capacity->unknown_tasks) g_hash_table_unref(capacity->unknown_tasks);
     capacity->unknown_tasks = NULL;
     capacity->ready = false;
@@ -796,7 +822,7 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
     }
     /* Recovery may need to finish an irreversible operation even with the normal
      * index closed. It is still charged, but cannot open new admission. */
-    bool fits = capacity->ready &&
+    bool fits = capacity->ready && !capacity->recovery_gate &&
         (!capacity->unknown_tasks || !g_hash_table_size(capacity->unknown_tasks)) &&
         (page_budget ? page_budget->capacity == capacity && !page_budget->invalid && page_budget->remaining >= bytes &&
                        page_budget->inflight < UINT_MAX : capacity_fits(capacity, bytes, metadata_limit));

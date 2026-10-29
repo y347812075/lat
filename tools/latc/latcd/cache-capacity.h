@@ -21,6 +21,7 @@ typedef struct LatcdCacheCapacity {
     void *recovered_tasks;
     void *unknown_tasks;
     bool ready;
+    bool recovery_gate;
     bool inventory_active;
     bool metadata_present;
     int watch_fd;
@@ -47,6 +48,11 @@ typedef struct LatcdCacheCapacity {
  * newly created directories and directory blocks are not fully accounted. */
 int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
                               char *error, size_t error_size);
+/* Startup, before service threads: block ordinary reservations until all
+ * persistent budgets have been restored. Finish checks the inventory and
+ * opens admission under the same lock. Failure leaves the gate closed. */
+int latcd_cache_capacity_recovery_begin(LatcdCacheCapacity *capacity);
+int latcd_cache_capacity_recovery_finish(LatcdCacheCapacity *capacity);
 /* Return a readable directory fd for the inventoried root only when the configured path and
  * caller's directory fd still identify it. Caller owns the returned fd.
  * Startup/shutdown and rescans must not race this operation. */
