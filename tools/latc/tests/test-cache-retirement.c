@@ -22,6 +22,22 @@
 #include <unistd.h>
 
 static unsigned clock_fault;
+static int consumption_io_fault;
+static bool consumption_unlinked;
+int __real_unlinkat(int fd, const char *name, int flags);
+int __real_fsync(int fd);
+int __wrap_unlinkat(int fd, const char *name, int flags)
+{
+    if (consumption_io_fault == 1) { errno = EIO; return -1; }
+    int result = __real_unlinkat(fd, name, flags);
+    if (!result && consumption_io_fault == 2) consumption_unlinked = true;
+    return result;
+}
+int __wrap_fsync(int fd)
+{
+    if (consumption_io_fault == 2 && consumption_unlinked) { errno = EIO; return -1; }
+    return __real_fsync(fd);
+}
 static int64_t monotonic_tick;
 static uint64_t simulated_boottime_us;
 static const char *clock_swap_path, *clock_swap_old;
@@ -3277,7 +3293,7 @@ static void test_budgeted_rebind(void)
     g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
 }
 
-static void test_budgeted_max_page(bool consumption)
+static void test_budgeted_max_page(unsigned consumption)
 {
     char *root = root_new(), error[256], *boot = NULL;
     char *gc = g_build_filename(root, ".gc", NULL);
@@ -3342,8 +3358,25 @@ static void test_budgeted_max_page(bool consumption)
         assert(loaded.consumption_bound && loaded.consumption.intent_present && loaded.consumption.intent_index == 1);
         assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
         latcd_cache_capacity_close(&recovered);
-        pid_t child = fork();
-        assert(child >= 0);
+        if (consumption > 1) {
+            assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
+            latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
+            assert(!latcd_cache_capacity_recovery_begin(&recovered));
+            assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, UINT64_MAX,
+                                                         &budget, &loaded, error, sizeof(error)));
+            assert(!latcd_cache_capacity_recovery_finish(&recovered));
+            consumption_io_fault = consumption - 1;
+            consumption_unlinked = false;
+            assert(latcd_retirement_consumption_apply(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
+            consumption_io_fault = 0;
+            assert(!latcd_cache_capacity_poll(&recovered));
+            assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+                   loaded.consumption.intent_present);
+            assert(!latcd_cache_capacity_abandon_page(&recovered, &budget));
+            latcd_cache_capacity_close(&recovered);
+        }
+        pid_t child = consumption == 1 ? fork() : -1;
+        assert(consumption != 1 || child >= 0);
         if (!child) {
             LatcdCacheCapacity crash_capacity = LATCD_CACHE_CAPACITY_INIT;
             LatcdPageBudget crash_budget = {0};
@@ -3358,9 +3391,11 @@ static void test_budgeted_max_page(bool consumption)
             latcd_retirement_consumption_apply(root, UINT64_MAX, &crash_budget, error, sizeof(error));
             _exit(1);
         }
-        int crash_status;
-        assert(waitpid(child, &crash_status, 0) == child && WIFSIGNALED(crash_status) &&
-               WTERMSIG(crash_status) == SIGKILL);
+        if (consumption == 1) {
+            int crash_status;
+            assert(waitpid(child, &crash_status, 0) == child && WIFSIGNALED(crash_status) &&
+                   WTERMSIG(crash_status) == SIGKILL);
+        }
         assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
                loaded.consumption.intent_present);
         assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
@@ -6957,8 +6992,10 @@ int main(int argc, char **argv)
     test_schedule_check_page();
     test_page_stage();
     test_budgeted_page_stage();
-    test_budgeted_max_page(false);
-    test_budgeted_max_page(true);
+    test_budgeted_max_page(0);
+    test_budgeted_max_page(1);
+    test_budgeted_max_page(2);
+    test_budgeted_max_page(3);
     test_budgeted_rebind();
     test_rebind_crash("file-synced", false, false);
     test_rebind_crash("linked", false, true);

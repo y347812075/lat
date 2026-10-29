@@ -149,7 +149,8 @@ $(BUILD)/tests/test-cache-retirement: tests/test-cache-retirement.c \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DLATCD_RETIREMENT_TESTING -DLATCD_CAPACITY_TESTING -o $@ $^ $(LDLIBS) -pthread \
   -Wl,--wrap=clock_gettime -Wl,--wrap=g_file_get_contents -Wl,--wrap=g_get_monotonic_time \
-  -Wl,--wrap=lat_aot_v2_cache_source_lock -Wl,--wrap=lat_aot_v2_cache_lock_fd -Wl,--wrap=readdir -Wl,--wrap=lstat -Wl,--wrap=fstatat
+  -Wl,--wrap=lat_aot_v2_cache_source_lock -Wl,--wrap=lat_aot_v2_cache_lock_fd -Wl,--wrap=readdir -Wl,--wrap=lstat -Wl,--wrap=fstatat \
+  -Wl,--wrap=unlinkat -Wl,--wrap=fsync
 
 .PHONY: test-cache-retirement
 test-cache-retirement: $(BUILD)/tests/test-cache-retirement
