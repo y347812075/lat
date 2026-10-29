@@ -2657,6 +2657,15 @@ static void test_budgeted_page_stage(void)
     LatcdCacheCapacity uncertain = LATCD_CACHE_CAPACITY_INIT;
     assert(!latcd_cache_capacity_scan(&uncertain, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&uncertain, UINT64_MAX);
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:cleanup-sync", 1));
+    assert(latcd_retirement_page_stage_budgeted(root, &page, &uncertain, UINT64_MAX,
+                                                &budget, error, sizeof(error)) < 0);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    assert(budget.capacity == &uncertain && budget.invalid && !uncertain.ready);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && !loaded.count);
+    assert(!latcd_cache_capacity_abandon_page(&uncertain, &budget));
+    assert(!latcd_cache_capacity_scan(&uncertain, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&uncertain, UINT64_MAX);
     assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:renamed", 1));
     assert(latcd_retirement_page_stage_budgeted(root, &page, &uncertain, UINT64_MAX,
                                                 &budget, error, sizeof(error)) < 0);

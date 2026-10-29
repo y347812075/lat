@@ -427,7 +427,8 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record,
                 latcd_cache_capacity_metadata_unstage(&reservation);
             }
             if (!linked) goto close_out;
-            if (record_write_fault("linked") || renameat(directory, temporary, directory, name)) goto close_out;
+            if (record_write_fault("linked") || record_write_fault("cleanup-sync") ||
+                renameat(directory, temporary, directory, name)) goto close_out;
         }
     } else {
         if (close(fd)) { fd = -1; leftover = true; goto out; }
@@ -443,8 +444,10 @@ close_out:
 out:
     saved = errno;
     if (fd >= 0 && close(fd)) leftover = true;
-    if (result && temporary_owned && !replaced && unlinkat(directory, temporary, 0) && errno != ENOENT)
-        leftover = true;
+    if (result && temporary_owned && !replaced) {
+        if (unlinkat(directory, temporary, 0) ||
+            record_write_fault("cleanup-sync") || fsync(directory)) leftover = true;
+    }
     if (leftover && not_installed) *not_installed = false;
     /* A failed post-rename sync leaves the durable namespace uncertain. */
     LatcdCacheCapacity *charged_capacity = reservation.capacity;
