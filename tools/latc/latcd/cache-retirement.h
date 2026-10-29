@@ -192,6 +192,7 @@ int latcd_retirement_page_state_resume(const char *root, const char *boot,
                                        char *error, size_t error_size);
 #ifdef LATCD_RETIREMENT_TESTING
 extern void (*latcd_retirement_test_after_read)(void);
+extern void (*latcd_retirement_test_retry_scanned)(const char *root);
 struct stat;
 int latcd_retirement_test_read_snapshot(int directory, const char *name, size_t limit,
                                         char **contents, size_t *size, struct stat *snapshot,

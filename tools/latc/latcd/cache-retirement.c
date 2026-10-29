@@ -265,6 +265,7 @@ int latcd_retirement_roots_lock(const char *root, int operation,
 
 #ifdef LATCD_RETIREMENT_TESTING
 void (*latcd_retirement_test_after_read)(void);
+void (*latcd_retirement_test_retry_scanned)(const char *root);
 #endif
 /* ENOENT is separate from a malformed, unsafe or unreadable root. */
 static int read_file_snapshot(int directory, const char *name, size_t limit,
@@ -5920,13 +5921,12 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
     root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     gc = root < 0 ? -1 : open_directory(root, ".gc", false);
     if (!same_directory(scheduler, gc) || !gc_has_no_partial_records(gc)) goto out;
-    roots = roots_lock_gc(gc, LOCK_EX | LOCK_NB, error, error_size);
     store = root < 0 ? -1 : open_store(root, false);
     tombstones = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
-    if (roots < 0 || !same_directory(scheduler, gc) || !queue_bind_root(queue, root) ||
+    if (!same_directory(scheduler, gc) || !queue_bind_root(queue, root) ||
         fstat(root, &cache) || lstat(queue->root, &path) || !object_stat_equal(&cache, &path) ||
         !directory_matches_at(root, ".gc", gc) ||
-        !lock_matches_at(gc, "reference-roots.lock", roots) || store < 0 || tombstones < 0 ||
+        store < 0 || tombstones < 0 ||
         fstat(store, &transactions) || fstat(tombstones, &tombstone_stat) ||
         !object_stat_equal(&queue->discovery_store, &transactions) ||
         !same_directory(store, dirfd(queue->cursor)) ||
@@ -5938,6 +5938,17 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
         retirement_schedule_access(queue->root, boot, queue->grace, now, 0, NULL,
             true, &sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL,
             NULL, NULL, scheduler, snapshot, error, error_size)) goto out;
+#if defined(LATCD_RETIREMENT_TESTING)
+    if (latcd_retirement_test_retry_scanned) latcd_retirement_test_retry_scanned(queue->root);
+#endif
+    roots = roots_lock_gc(gc, LOCK_EX | LOCK_NB, error, error_size);
+    if (roots < 0 || !same_directory(scheduler, gc) || !queue_bind_root(queue, root) ||
+        lstat(queue->root, &path) || !object_stat_equal(&cache, &path) ||
+        !directory_matches_at(root, ".gc", gc) ||
+        !lock_matches_at(gc, "reference-roots.lock", roots) ||
+        !directory_matches_at(gc, "transactions", store) ||
+        !directory_matches_at(gc, "tombstones", tombstones) ||
+        !queue_watch_clean(queue->discovery_watch)) goto out;
     for (unsigned i = 0; i < queue->retry_count; i++) {
         const LatcdRetirementPageDeadline *hint = g_hash_table_lookup(queue->retry_hints, queue->retry_order[i]);
         const LatcdRetirementPageDeadline *found = NULL;
