@@ -4370,6 +4370,7 @@ struct LatcdRetirementQueue {
     GHashTable *discovered;
     GHashTable *discovered_keys;
     GHashTable *confirmed_keys;
+    GHashTable *retry_hints;
     bool complete, persistence_uncertain;
     char last_source[65];
     LatcdRetirementAttempt active;
@@ -4413,6 +4414,7 @@ LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grac
     queue->discovered = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     queue->discovered_keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     queue->confirmed_keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    queue->retry_hints = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     return queue;
 }
 
@@ -4452,6 +4454,27 @@ out:
     return result ? fail(error, error_size, "cannot resume retirement discovery round") : 0;
 }
 
+int latcd_retirement_queue_diagnostic_retry(LatcdRetirementQueue *queue,
+    const char *boot, uint64_t cutoff, const LatcdRetirementPageDeadline *hints, unsigned count)
+{
+    if (!queue || !hints || !count || count > 128 || queue->diagnostic_cutoff || queue->epoch ||
+        queue->cursor || queue->complete) return -1;
+    for (unsigned i = 0; i < count; i++) {
+        if (strnlen(hints[i].name, sizeof(hints[i].name)) == sizeof(hints[i].name) ||
+            !page_object_name_valid(hints[i].name) || !hints[i].enqueued ||
+            hints[i].busy_count > 7 || g_hash_table_contains(queue->retry_hints, hints[i].name)) {
+            g_hash_table_remove_all(queue->retry_hints);
+            return -1;
+        }
+        g_hash_table_insert(queue->retry_hints, g_strdup(hints[i].name), g_memdup2(&hints[i], sizeof(hints[i])));
+    }
+    if (latcd_retirement_queue_diagnostic_round(queue, boot, cutoff, NULL)) {
+        g_hash_table_remove_all(queue->retry_hints);
+        return -1;
+    }
+    return 0;
+}
+
 void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
 {
     if (!queue) return;
@@ -4463,6 +4486,7 @@ void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
     g_hash_table_unref(queue->discovered);
     g_hash_table_unref(queue->discovered_keys);
     g_hash_table_unref(queue->confirmed_keys);
+    g_hash_table_unref(queue->retry_hints);
     g_free(queue->root); g_free(queue);
 }
 
@@ -4510,6 +4534,9 @@ int latcd_retirement_queue_aggregated_page(const LatcdRetirementQueue *queue,
         g_strlcpy(entry->name, item->data, sizeof(entry->name));
         entry->deadline = candidate->deadline;
         entry->enqueued = candidate->enqueued;
+        entry->last_attempt = candidate->last_attempt;
+        entry->retry_at = candidate->retry_at;
+        entry->busy_count = candidate->busy_count;
     }
     if (state->count) g_strlcpy(state->cursor, state->entries[state->count - 1].name,
                                 sizeof(state->cursor));
@@ -4534,6 +4561,7 @@ static bool queue_watch_clean(int notify)
 
 static void queue_nominate(LatcdRetirementQueue *queue, const char *name)
 {
+    if (g_hash_table_size(queue->retry_hints) && !g_hash_table_contains(queue->retry_hints, name)) return;
     if (queue->diagnostic_cutoff && strcmp(name, queue->diagnostic_after) <= 0) return;
     if (g_hash_table_contains(queue->discovered_keys, name)) return;
     if (g_hash_table_size(queue->discovered_keys) == 128) {
@@ -4552,6 +4580,7 @@ static void queue_nominate(LatcdRetirementQueue *queue, const char *name)
 
 static bool queue_outside_page(const LatcdRetirementQueue *queue, const char *name)
 {
+    if (g_hash_table_size(queue->retry_hints) && !g_hash_table_contains(queue->retry_hints, name)) return true;
     if (queue->diagnostic_cutoff && strcmp(name, queue->diagnostic_after) <= 0)
         return true;
     if (!queue->discovery_overflow) return false;
@@ -4798,6 +4827,13 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
                 strcmp(item->data, queue->diagnostic_after) <= 0) continue;
             RetirementCandidate *candidate = g_new0(RetirementCandidate, 1);
             candidate->enqueued = now;
+            LatcdRetirementPageDeadline *hint = g_hash_table_lookup(queue->retry_hints, item->data);
+            if (hint) {
+                candidate->enqueued = hint->enqueued;
+                candidate->last_attempt = hint->last_attempt;
+                candidate->retry_at = hint->retry_at;
+                candidate->busy_count = hint->busy_count;
+            }
             g_hash_table_insert(queue->discovered, g_strdup(item->data), candidate);
             selected++;
         }

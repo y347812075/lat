@@ -458,6 +458,10 @@ LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grac
  * persist progress; callers must rescan after any failure. */
 int latcd_retirement_queue_diagnostic_round(LatcdRetirementQueue *queue,
     const char *boot, uint64_t cutoff, const char *after);
+/* Restrict a diagnostic round to due shard hints. Full transaction scans
+ * remain mandatory and the resulting page cannot authorize deletion. */
+int latcd_retirement_queue_diagnostic_retry(LatcdRetirementQueue *queue,
+    const char *boot, uint64_t cutoff, const LatcdRetirementPageDeadline *hints, unsigned count);
 /* Resume diagnostic discovery after the committed cursor. Any in-flight page
  * is ignored and rediscovered; a v2 page never proves completion.
  * Owner lease required; missing or incompatible state is not a new round. */

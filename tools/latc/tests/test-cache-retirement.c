@@ -6697,6 +6697,27 @@ static void test_page_round_insertions(void)
     g_strlcpy(cursor, page.cursor, sizeof(cursor));
     latcd_retirement_queue_free(queue);
 
+    LatcdRetirementPageDeadline hints[2] = {0};
+    hints[0] = page.entries[4];
+    hints[0].enqueued = 90;
+    hints[0].last_attempt = 3;
+    hints[0].retry_at = 199;
+    hints[0].busy_count = 2;
+    snprintf(hints[1].name, sizeof(hints[1].name), "%064x.so", 9999);
+    hints[1].enqueued = 90;
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(!latcd_retirement_queue_diagnostic_retry(queue, boot, cutoff, hints, 2));
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0 && !latcd_retirement_queue_aggregated_page(queue, &page));
+    assert(page.count == 1 && !strcmp(page.entries[0].name, hints[0].name) &&
+           page.entries[0].deadline == 101 && page.entries[0].enqueued == 90 &&
+           page.entries[0].last_attempt == 3 && page.entries[0].retry_at == 199 &&
+           page.entries[0].busy_count == 2);
+    LatcdRetirementAttempt attempt;
+    assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));
+    latcd_retirement_queue_free(queue);
+
     /* Equal-cutoff and later transactions on both sides belong to a later round. */
     publish_page_fixture(root, 1);
     publish_page_fixture(root, 1000);
