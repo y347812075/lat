@@ -2810,6 +2810,65 @@ static void test_budgeted_crash(const char *point, bool installed, bool result_w
     g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
 }
 
+static void test_budgeted_max_page(void)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    struct stat st;
+    assert(!stat(root, &st));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    LatcdRetirementPageState empty = {.cache_device = st.st_dev, .cache_inode = st.st_ino,
+        .grace_us = UINT64_MAX, .round_cutoff = UINT64_MAX - 1, .sequence = UINT64_MAX};
+    g_strlcpy(empty.boot, boot, sizeof(empty.boot));
+    snprintf(empty.committed_cursor, sizeof(empty.committed_cursor), "%064x-%064x.native", 0, 0);
+    LatcdRetirementPageState page = empty, loaded;
+    page.count = 128;
+    for (unsigned i = 0; i < page.count; i++) {
+        snprintf(page.entries[i].name, sizeof(page.entries[i].name), "%064x-%064x.native", i + 1, 0);
+        page.entries[i].deadline = UINT64_MAX;
+        page.entries[i].enqueued = UINT64_MAX - 1;
+        page.entries[i].last_attempt = UINT64_MAX;
+        page.entries[i].retry_at = UINT64_MAX;
+        page.entries[i].busy_count = 7;
+    }
+    g_strlcpy(page.cursor, page.entries[127].name, sizeof(page.cursor));
+    assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
+    simulated_boottime_us = UINT64_MAX;
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget budget = {0};
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    assert(!latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
+                                                 &budget, error, sizeof(error)));
+    uint8_t binding[32];
+    assert(!latcd_retirement_page_budget_identity(&page, binding));
+    for (unsigned i = 0; i < page.count; i++)
+        assert(!latcd_retirement_page_budget_result(root, UINT64_MAX, binding, &budget,
+            &page.entries[i], LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
+    assert(!latcd_retirement_page_budget_commit(root, UINT64_MAX, &page, &budget, error, sizeof(error)));
+    char *checkpoint = g_build_filename(gc, "retirement-page.ini", NULL);
+    assert(!stat(checkpoint, &st) && st.st_size > 0 && st.st_size <= 65536);
+    assert(!latcd_cache_capacity_test_page_release(&capacity, &budget));
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    LatcdCacheCapacity recovered = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
+    assert(!latcd_cache_capacity_recovery_begin(&recovered));
+    assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, UINT64_MAX,
+                                                 &budget, &loaded, error, sizeof(error)));
+    assert(loaded.committed_pending && loaded.count == 128 && budget.remaining == 2 * 65536);
+    assert(!latcd_cache_capacity_recovery_finish(&recovered));
+    assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
+    latcd_cache_capacity_close(&recovered);
+    assert(!pthread_mutex_destroy(&recovered.lock));
+    simulated_boottime_us = 0;
+    g_free(checkpoint); g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
+}
+
 static void test_schedule_max_record(void)
 {
     char *root = root_new(), error[256], *boot = NULL;
@@ -6343,6 +6402,7 @@ int main(int argc, char **argv)
     test_schedule_check_page();
     test_page_stage();
     test_budgeted_page_stage();
+    test_budgeted_max_page();
     test_budgeted_crash("file-synced", false, false, false);
     test_budgeted_crash("linked", false, false, false);
     test_budgeted_crash("renamed", true, false, false);
