@@ -363,9 +363,13 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record,
     }
     char *temporary = NULL;
     int fd = -1;
+    struct stat target;
+    bool anonymous = budget && fixed_schedule_size &&
+        fstatat(directory, name, &target, AT_SYMLINK_NOFOLLOW) && errno == ENOENT;
     /* A forked writer may share the parent's random state. Never remove an
      * existing writer's evidence on O_EXCL collision. */
-    for (int attempt = 0; attempt < 16; attempt++) {
+    if (anonymous) fd = openat(directory, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
+    for (int attempt = 0; !anonymous && attempt < 16; attempt++) {
         char *uuid = g_uuid_string_random();
         g_free(temporary);
         temporary = g_strdup_printf(".write-%s", uuid);
@@ -398,10 +402,16 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record,
     if (record_write_fault("written") || fchmod(fd, 0400) ||
         record_write_fault("chmod") || fsync(fd) ||
         record_write_fault("file-synced")) goto close_out;
-    if (close(fd)) { fd = -1; leftover = true; goto out; }
-    fd = -1;
-    if (record_write_fault("closed") ||
-        renameat(directory, temporary, directory, name)) goto out;
+    if (anonymous) {
+        char descriptor[64];
+        snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", fd);
+        if (record_write_fault("closed") ||
+            linkat(AT_FDCWD, descriptor, directory, name, AT_SYMLINK_FOLLOW)) goto close_out;
+    } else {
+        if (close(fd)) { fd = -1; leftover = true; goto out; }
+        fd = -1;
+        if (record_write_fault("closed") || renameat(directory, temporary, directory, name)) goto out;
+    }
     replaced = true;
     if (not_installed) *not_installed = false;
     if (record_write_fault("renamed") || fsync(directory) ||
@@ -411,7 +421,7 @@ close_out:
     if (fd >= 0 && close(fd)) leftover = true;
 out:
     saved = errno;
-    if (result && created && !replaced && unlinkat(directory, temporary, 0) && errno != ENOENT)
+    if (result && created && !replaced && !anonymous && unlinkat(directory, temporary, 0) && errno != ENOENT)
         leftover = true;
     if (leftover && not_installed) *not_installed = false;
     /* A failed post-rename sync leaves the durable namespace uncertain. */

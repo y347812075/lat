@@ -2641,11 +2641,7 @@ static void test_budgeted_crash(const char *point, bool installed, bool result_w
     assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
     assert(!latcd_cache_capacity_recovery_begin(&recovered));
-    if (result_write && !installed) {
-        assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, &budget,
-                                                     &loaded, error, sizeof(error)) < 0);
-        assert(!budget.capacity && recovered.recovery_gate);
-    } else if (installed || result_write) {
+    if (installed || result_write) {
         assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, &budget,
                                                       &loaded, error, sizeof(error)));
         assert(budget.remaining == 2 * 65536 + (result_write && installed ? 0 : 1024));
