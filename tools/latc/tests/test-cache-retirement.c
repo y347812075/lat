@@ -2938,8 +2938,15 @@ static void test_rebind_crash(const char *point, bool installed, bool partial)
     uint8_t old_identity[32] = {1};
     assert(!latcd_retirement_schedule_store_result(root, boot, 100, 150, 3, &page.entries[0],
                        old_identity, LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
-    assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
+    assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
+    LatcdRetirementPageState stale = page;
+    stale.entries[0].retry_at = 0;
+    LatcdRetirementPageDeadline early = stale.entries[0];
+    early.last_attempt = 4; early.busy_count = 0;
     simulated_boottime_us = 150;
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &stale, &early,
+                       LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
     pid_t child = fork();
     assert(child >= 0);
     if (!child) {
@@ -3026,6 +3033,18 @@ static void test_budgeted_rebind(void)
                                                  &budget, error, sizeof(error)));
     assert(!latcd_retirement_page_budget_identity(&page, identity));
     assert(latcd_retirement_page_budget_commit(root, 150, &page, &budget, error, sizeof(error)) < 0);
+    LatcdRetirementPageDeadline premature = page.entries[0];
+    premature.last_attempt = 4; premature.retry_at = 0; premature.busy_count = 0;
+    uint64_t reserved = budget.remaining;
+    assert(latcd_retirement_page_budget_result(root, 150, identity, &budget, &premature,
+                      LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(budget.remaining == reserved && capacity.ready);
+    LatcdRetirementPageDeadline retained;
+    uint64_t retained_sequence;
+    assert(!latcd_retirement_schedule_load(root, boot, 100, 150, premature.name,
+                                           &retained_sequence, &retained, error, sizeof(error)));
+    assert(retained_sequence == 3 && retained.last_attempt == 3 && retained.retry_at == 200 &&
+           retained.busy_count == 1);
     assert(!latcd_retirement_page_budget_result(root, 150, identity, &budget, &page.entries[0],
                       LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
     assert(!latcd_cache_capacity_test_page_release(&capacity, &budget));

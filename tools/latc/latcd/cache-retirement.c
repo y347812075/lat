@@ -1496,7 +1496,9 @@ int latcd_retirement_schedule_store_page_result(const char *root, uint64_t now_u
     bool persisted_member = false;
     for (unsigned i = 0; i < persisted.count; i++) {
         if (!strcmp(entry->name, persisted.entries[i].name) &&
-            entry->enqueued == persisted.entries[i].enqueued) {
+            entry->enqueued == persisted.entries[i].enqueued &&
+            !(entry->last_attempt > persisted.entries[i].last_attempt &&
+              persisted.entries[i].retry_at > now_us)) {
             persisted_member = true;
             break;
         }
@@ -1778,7 +1780,9 @@ static int page_budget_result(const char *root, uint64_t now_us,
     g_free(boot);
     for (unsigned i = 0; !result && i < page.count; i++)
         if (!strcmp(entry->name, page.entries[i].name) && entry->deadline == page.entries[i].deadline &&
-            entry->enqueued == page.entries[i].enqueued) member = true;
+            entry->enqueued == page.entries[i].enqueued &&
+            !(entry->last_attempt > page.entries[i].last_attempt &&
+              page.entries[i].retry_at > now_us)) member = true;
     int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
     int capacity_root = directory < 0 ? -1 :
