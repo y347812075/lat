@@ -179,6 +179,12 @@ int latcd_retirement_page_budget_estimate(const LatcdRetirementPageState *page,
                                     const uint8_t results[128],
                                     const LatcdRetirementPageInventory *inventory,
                                     uint64_t *bytes);
+/* Owner lease and closed capacity recovery gate required. Restores only a
+ * validated in-flight v6 page; caller retains budget storage until resolution.
+ * Returns 0 on restoration, 1 if no page exists, -1 on unsafe state. */
+int latcd_retirement_page_restore_budget(const char *root, struct LatcdCacheCapacity *capacity,
+                                    uint64_t limit, struct LatcdPageBudget *budget,
+                                    LatcdRetirementPageState *page, char *error, size_t error_size);
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
 extern void (*latcd_retirement_test_before_settlement)(void);
 struct LatcdCacheCapacity;

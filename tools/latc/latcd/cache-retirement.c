@@ -1487,6 +1487,46 @@ int latcd_retirement_page_budget_estimate(const LatcdRetirementPageState *page,
         RETIREMENT_SCHEDULE_RECORD_BYTES, RECORD_LIMIT, bytes);
 }
 
+int latcd_retirement_page_restore_budget(const char *root, LatcdCacheCapacity *capacity,
+                                    uint64_t limit, LatcdPageBudget *budget,
+                                    LatcdRetirementPageState *page, char *error, size_t error_size)
+{
+    if (!root || !capacity || !budget || !page)
+        return fail(error, error_size, "invalid retirement budget recovery");
+    memset(page, 0, sizeof(*page));
+    int scheduler = scheduler_lock(root, error, error_size);
+    if (scheduler < 0) return -1;
+    LatcdRetirementPageState persisted;
+    LatcdRetirementPageInventory inventory = {0};
+    uint8_t results[128] = {0}, identity[32];
+    uint64_t now = 0, bytes = 0;
+    char *boot = NULL;
+    bool legacy = false;
+    int status = page_state_load(root, &persisted, &legacy, error, error_size);
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
+    struct stat held, path;
+    if (status < 0 || gc < 0 || !same_directory(scheduler, gc) || fstat(directory, &held) ||
+        lstat(root, &path) || held.st_dev != path.st_dev || held.st_ino != path.st_ino ||
+        !directory_matches_at(directory, ".gc", gc)) status = -1;
+    int matching = status < 0 ? -1 : latcd_cache_capacity_open_matching_root(capacity, root, directory);
+    if (matching < 0) status = -1;
+    else close(matching);
+    if (!status && (legacy || !persisted.budget_bound || !persisted.count || persisted.committed_pending ||
+        retirement_clock(&boot, &now) ||
+        latcd_retirement_page_state_compatible(&persisted, boot, persisted.grace_us, now) ||
+        schedule_page_results(root, now, &persisted, results, &inventory, error, error_size) < 0 ||
+        latcd_retirement_page_budget_identity(&persisted, identity) ||
+        latcd_retirement_page_budget_estimate(&persisted, results, &inventory, &bytes) ||
+        latcd_cache_capacity_restore_page(capacity, bytes, limit, identity, budget))) status = -1;
+    if (!status) *page = persisted;
+    g_free(boot);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    close(scheduler);
+    return status < 0 ? fail(error, error_size, "retirement budget recovery unsafe") : status;
+}
+
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
 int latcd_retirement_test_page_reserve(const char *root, uint64_t now_us,
                                     LatcdCacheCapacity *capacity, uint64_t limit,

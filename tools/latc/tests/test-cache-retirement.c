@@ -2505,9 +2505,47 @@ static void test_budgeted_page_stage(void)
     assert(budget.capacity == &capacity && budget.page_identity_bound && capacity.ready);
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && loaded.budget_bound);
     assert(latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0);
+    uint8_t binding[32];
+    assert(!latcd_retirement_page_budget_identity(&page, binding));
+    assert(!latcd_retirement_test_budget_result(root, 150, binding, &budget, &page.entries[0],
+                                                LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
     assert(!latcd_cache_capacity_test_page_release(&capacity, &budget));
     latcd_cache_capacity_close(&capacity);
     assert(!pthread_mutex_destroy(&capacity.lock));
+    LatcdCacheCapacity recovered = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
+    assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, &budget,
+                                                 &loaded, error, sizeof(error)) < 0);
+    assert(!budget.capacity && !loaded.count);
+    assert(!latcd_cache_capacity_recovery_begin(&recovered));
+    assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, &budget,
+                                                  &loaded, error, sizeof(error)));
+    assert(loaded.budget_bound && loaded.count == 1 && budget.capacity == &recovered &&
+           budget.remaining == 2 * 65536);
+    assert(latcd_cache_capacity_reserve(&recovered, 1, UINT64_MAX, error, sizeof(error)) < 0);
+    assert(!latcd_cache_capacity_recovery_finish(&recovered));
+    assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
+    latcd_cache_capacity_close(&recovered);
+    assert(!pthread_mutex_destroy(&recovered.lock));
+    char *fragment_name = g_strconcat(page.entries[0].name, ".ini", NULL);
+    char *fragment_path = g_build_filename(store, fragment_name, NULL);
+    GKeyFile *fragment = g_key_file_new();
+    assert(g_key_file_load_from_file(fragment, fragment_path, 0, NULL));
+    g_key_file_set_uint64(fragment, "schedule", "sequence", page.sequence + 1);
+    char *bad_fragment = g_key_file_to_data(fragment, NULL, NULL);
+    put(fragment_path, bad_fragment);
+    LatcdCacheCapacity conflicting = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&conflicting, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&conflicting, UINT64_MAX);
+    assert(!latcd_cache_capacity_recovery_begin(&conflicting));
+    assert(latcd_retirement_page_restore_budget(root, &conflicting, UINT64_MAX, &budget,
+                                                 &loaded, error, sizeof(error)) < 0);
+    assert(!budget.capacity && !loaded.count && conflicting.recovery_gate);
+    latcd_cache_capacity_close(&conflicting);
+    assert(!pthread_mutex_destroy(&conflicting.lock));
+    assert(!unlink(fragment_path));
+    g_free(bad_fragment); g_key_file_unref(fragment); g_free(fragment_path); g_free(fragment_name);
     assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
     LatcdCacheCapacity uncertain = LATCD_CACHE_CAPACITY_INIT;
     assert(!latcd_cache_capacity_scan(&uncertain, root, error, sizeof(error)));
