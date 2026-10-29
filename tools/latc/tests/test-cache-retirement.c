@@ -6887,6 +6887,25 @@ static void test_queue_overflow_fixture(void)
     LatcdRetirementAttempt diagnostic_attempt;
     assert(!latcd_retirement_queue_take(diagnostic, UINT64_MAX, &diagnostic_attempt));
     latcd_retirement_queue_free(diagnostic);
+    LatcdRetirementPageDeadline retry_hint = {0};
+    for (unsigned i = 0; i < first_page.count; i++) {
+        if (first_page.entries[i].deadline == 201) {
+            retry_hint = first_page.entries[i];
+            break;
+        }
+    }
+    assert(retry_hint.name[0]);
+    diagnostic = latcd_retirement_queue_new(root, 100);
+    assert(!latcd_retirement_queue_diagnostic_retry(diagnostic, boot, cutoff, &retry_hint, 1));
+    do {
+        diagnostic_result = latcd_retirement_queue_step(diagnostic, 32, 10000,
+                                                         &diagnostic_stats, error, sizeof(error));
+    } while (diagnostic_result > 0);
+    assert(diagnostic_result < 0 && !latcd_retirement_queue_aggregated_page(diagnostic, &second_page));
+    assert(second_page.count == 1 && !strcmp(second_page.entries[0].name, retry_hint.name) &&
+           second_page.entries[0].deadline == 301);
+    assert(!latcd_retirement_queue_take(diagnostic, UINT64_MAX, &diagnostic_attempt));
+    latcd_retirement_queue_free(diagnostic);
     diagnostic = latcd_retirement_queue_new(root, 100);
     assert(latcd_retirement_queue_diagnostic_resume(diagnostic, error, sizeof(error)) < 0);
     latcd_retirement_queue_free(diagnostic);
