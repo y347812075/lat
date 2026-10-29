@@ -1179,8 +1179,6 @@ static int retry_prepare_deferral(const LatcdRetirementRetryPage *page,
     if (!original || !size || size > 1024 || memchr(original, 0, size) ||
         latcd_retirement_retry_page_identity(page, binding) || page->intent_present ||
         page->completed >= page->count ||
-        (page->items[page->completed].matched &&
-         page->items[page->completed].aggregate.deadline <= now_us) ||
         now_us < page->snapshot_time || now_us > UINT64_MAX - RETIREMENT_BUSY_MIN_US) return -1;
     const LatcdRetirementRetryItem *item = &page->items[page->completed];
     GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
@@ -3052,7 +3050,7 @@ out:
     return result ? fail(error, error_size, "retry budget recovery unsafe") : 0;
 }
 
-static int retry_page_begin_deferral(const char *root, LatcdPageBudget *budget, bool matched,
+static int retry_page_begin_deferral(const char *root, LatcdPageBudget *budget, int mode,
                                      char *error, size_t error_size)
 {
     if (!root || !budget || !budget->capacity) return fail(error, error_size, "missing retry budget");
@@ -3075,10 +3073,12 @@ static int retry_page_begin_deferral(const char *root, LatcdPageBudget *budget, 
         (matching = latcd_cache_capacity_open_matching_root(budget->capacity, root, directory)) < 0 ||
         latcd_retirement_retry_page_load(root, page, error, error_size) ||
         page->completed == page->count || page->intent_present ||
-        page->items[page->completed].matched != matched ||
+        page->items[page->completed].matched != (mode != 0) ||
         latcd_retirement_retry_page_budget_identity(page, identity) || !budget->page_identity_bound ||
         memcmp(identity, budget->page_identity, 32) || retirement_clock(&boot, &now) ||
         strcmp(boot, page->boot) || now < page->snapshot_time ||
+        (mode == 1 && page->items[page->completed].aggregate.deadline <= now) ||
+        (mode == 2 && page->items[page->completed].aggregate.deadline > now) ||
         retirement_schedule_access(root, boot, page->grace_us, now, 0, NULL, true,
             &sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
             NULL, scheduler, snapshot, error, error_size) || sequence != page->snapshot_sequence ||
@@ -3112,13 +3112,19 @@ out:
 int latcd_retirement_retry_page_begin_unmatched(const char *root, LatcdPageBudget *budget,
                                                  char *error, size_t error_size)
 {
-    return retry_page_begin_deferral(root, budget, false, error, error_size);
+    return retry_page_begin_deferral(root, budget, 0, error, error_size);
 }
 
 int latcd_retirement_retry_page_begin_not_due(const char *root, LatcdPageBudget *budget,
                                                char *error, size_t error_size)
 {
-    return retry_page_begin_deferral(root, budget, true, error, error_size);
+    return retry_page_begin_deferral(root, budget, 1, error, error_size);
+}
+
+int latcd_retirement_retry_page_begin_unattempted(const char *root, LatcdPageBudget *budget,
+                                                   char *error, size_t error_size)
+{
+    return retry_page_begin_deferral(root, budget, 2, error, error_size);
 }
 
 static int retry_apply_unmatched(const char *root, LatcdPageBudget *budget, bool finish,

@@ -7194,7 +7194,7 @@ static void publish_page_fixture(const char *root, unsigned id)
     g_free(evidence); g_free(current); g_free(previous); g_free(next_manifest); g_free(src);
 }
 
-static void test_retry_not_due(void)
+static void test_retry_not_due(bool due)
 {
     char *root = root_new(), error[256], *boot = NULL;
     simulated_boottime_us = 100;
@@ -7231,16 +7231,19 @@ static void test_retry_not_due(void)
            page->count == 2 && page->items[0].matched && page->items[0].aggregate.deadline == 200 &&
            !page->items[1].matched);
     assert(latcd_retirement_retry_page_begin_unmatched(root, &budget, error, sizeof(error)) < 0);
+    assert(latcd_retirement_retry_page_begin_unattempted(root, &budget, error, sizeof(error)) < 0);
     pid_t child = fork(); assert(child >= 0);
     if (!child) {
         simulated_boottime_us = 200;
         _exit(latcd_retirement_retry_page_begin_not_due(root, &budget, error, sizeof(error)) < 0 ? 0 : 1);
     }
     int status; assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
+    if (due) simulated_boottime_us = 200;
     child = fork(); assert(child >= 0);
     if (!child) {
         assert(!setenv("LATCD_TEST_RETIREMENT_IO", "crash:renamed", 1));
-        latcd_retirement_retry_page_begin_not_due(root, &budget, error, sizeof(error));
+        if (due) latcd_retirement_retry_page_begin_unattempted(root, &budget, error, sizeof(error));
+        else latcd_retirement_retry_page_begin_not_due(root, &budget, error, sizeof(error));
         _exit(1);
     }
     assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
@@ -8106,7 +8109,8 @@ int main(int argc, char **argv)
         test_page_state_write_fault(page_faults[i], true);
     }
     test_queue_overflow_fixture();
-    test_retry_not_due();
+    test_retry_not_due(false);
+    test_retry_not_due(true);
     test_page_round_insertions();
     test_deletion_report(NULL, false);
     test_roots_latch();
