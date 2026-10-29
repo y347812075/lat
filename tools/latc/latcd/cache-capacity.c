@@ -844,9 +844,7 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
             .previous = old, .previous_present = previous_present,
             .state = state, .directory = owned_directory, .name = key};
         if (previous_present) reservation->previous_snapshot = previous;
-#ifdef LATCD_CAPACITY_TESTING
         reservation->page_budget = page_budget;
-#endif
         g_hash_table_add(capacity->state_expected, g_strdup(key));
     }
     pthread_mutex_unlock(&capacity->lock);
@@ -984,6 +982,16 @@ int latcd_cache_capacity_restore_page(LatcdCacheCapacity *capacity, uint64_t byt
     pthread_mutex_unlock(&capacity->lock);
     if (!valid) errno = EBUSY;
     return valid ? 0 : -1;
+}
+
+int latcd_cache_capacity_page_begin(int directory, const char *name, uint64_t bytes,
+                                    LatcdPageBudget *budget, LatcdMetadataReservation *reservation)
+{
+    if (!metadata_capacity || !budget || !budget->page_identity_bound) {
+        errno = EINVAL;
+        return -1;
+    }
+    return record_begin(directory, name, bytes, reservation, false, false, budget);
 }
 
 #ifdef LATCD_CAPACITY_TESTING
@@ -1141,22 +1149,18 @@ void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
         if (retained > UINT64_MAX - *committed) capacity->ready = false;
         else *committed += retained;
         if (leftover) capacity->ready = false;
-#ifdef LATCD_CAPACITY_TESTING
         if (reservation->page_budget && !leftover) {
             uint64_t returned = replaced ? reservation->previous : reservation->bytes;
             if (returned > UINT64_MAX - reservation->page_budget->remaining ||
                 returned > UINT64_MAX - *reserved) capacity->ready = false;
             else { reservation->page_budget->remaining += returned; *reserved += returned; }
         }
-#endif
     }
-#ifdef LATCD_CAPACITY_TESTING
     if (reservation->page_budget) {
         if (!capacity->ready) reservation->page_budget->invalid = true;
         if (!reservation->page_budget->inflight) capacity->ready = false;
         else reservation->page_budget->inflight--;
     }
-#endif
     pthread_mutex_unlock(&capacity->lock);
     close(reservation->directory);
     g_free(reservation->name);

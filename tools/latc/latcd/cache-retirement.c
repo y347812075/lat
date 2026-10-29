@@ -350,12 +350,8 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record,
     }
     LatcdMetadataReservation reservation;
     int reserved;
-#ifdef LATCD_CAPACITY_TESTING
-    if (budget) reserved = latcd_cache_capacity_test_page_begin(directory, name, size, budget, &reservation);
+    if (budget) reserved = latcd_cache_capacity_page_begin(directory, name, size, budget, &reservation);
     else
-#else
-    (void)budget;
-#endif
     reserved = recovery ?
         latcd_cache_capacity_metadata_recovery_begin(directory, name, size, &reservation) : scheduling ?
         latcd_cache_capacity_metadata_schedule_begin(directory, name, size, &reservation) :

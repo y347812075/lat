@@ -119,10 +119,11 @@ typedef struct LatcdMetadataReservation {
     int directory;
     char *name;
     char *staging;
-#ifdef LATCD_CAPACITY_TESTING
     LatcdPageBudget *page_budget;
-#endif
 } LatcdMetadataReservation;
+/* Caller holds the scheduler lock and retains the bound budget through finish. */
+int latcd_cache_capacity_page_begin(int directory, const char *name, uint64_t bytes,
+                                    LatcdPageBudget *budget, LatcdMetadataReservation *reservation);
 #ifdef LATCD_CAPACITY_TESTING
 extern void (*latcd_capacity_test_before_lock_create)(void);
 extern void (*latcd_capacity_test_before_lock_finish)(void);
