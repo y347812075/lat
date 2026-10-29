@@ -4226,6 +4226,20 @@ static void test_retry_select(void)
     assert(!latcd_retirement_retry_select(entries, 4096, NULL, 199, selected, &count) && !count);
     assert(!latcd_retirement_retry_select(entries, 4096, NULL, 201, selected, &count) &&
            count == 128 && !strcmp(selected[127].name, entries[127].name));
+    bool visited[4096] = {0};
+    char cursor[138] = {0};
+    for (unsigned page = 0; page < 32; page++) {
+        assert(!latcd_retirement_retry_select(entries, 4096, cursor, 201, selected, &count) && count == 128);
+        for (unsigned i = 0; i < count; i++) {
+            unsigned id = 0;
+            assert(sscanf(selected[i].name, "%x", &id) == 1 && id >= 1 && id <= 4096 && !visited[id - 1]);
+            visited[id - 1] = true;
+        }
+        g_strlcpy(cursor, selected[count - 1].name, sizeof(cursor));
+    }
+    for (unsigned i = 0; i < 4096; i++) assert(visited[i]);
+    assert(!latcd_retirement_retry_select(entries, 4096, cursor, 201, selected, &count) &&
+           count == 128 && !strcmp(selected[0].name, entries[0].name));
     entries[1] = entries[0];
     assert(latcd_retirement_retry_select(entries, 4096, NULL, 201, selected, &count) < 0 && !count);
     g_free(entries);
