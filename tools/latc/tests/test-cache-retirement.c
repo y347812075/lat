@@ -1752,6 +1752,10 @@ static void test_retry_page_stage(void)
                                                        &restored, page, error, sizeof(error)));
     assert(restored.capacity == &recovered && page->count == 1 &&
            !latcd_cache_capacity_recovery_finish(&recovered));
+    assert(!latcd_retirement_retry_page_begin_unmatched(root, &restored, error, sizeof(error)));
+    assert(!latcd_retirement_retry_page_load(root, page, error, sizeof(error)) &&
+           page->intent_present && page->intent_size == 1024 && !page->completed);
+    assert(latcd_retirement_retry_page_begin_unmatched(root, &restored, error, sizeof(error)) < 0);
     latcd_cache_capacity_close(&recovered);
     char *shard_name = g_strconcat(hint.name, ".ini", NULL);
     char *shard_path = g_build_filename(schedule, shard_name, NULL);
