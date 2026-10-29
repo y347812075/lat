@@ -7001,6 +7001,54 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
             assert(queued >= 0);
         } while (queued);
         assert(stats.complete && stats.candidates == 2 && stats.due == 2);
+        /* Every transaction mentioning a removed name must bind the receipt. */
+        GKeyFile *other = g_key_file_new();
+        assert(g_key_file_load_from_data(other, raw, -1, 0, NULL));
+        char *encoded_objects = g_key_file_get_string(other, "transaction", "objects", NULL);
+        gsize object_size;
+        guchar *object_data = g_base64_decode(encoded_objects, &object_size);
+        GKeyFile *object_record = g_key_file_new();
+        assert(g_key_file_load_from_data(object_record, (char *)object_data, object_size, 0, NULL));
+        int object_count = g_key_file_get_integer(object_record, "objects", "count", NULL);
+        bool changed_object = false;
+        for (int i = 0; i < object_count; i++) {
+            char group[32];
+            snprintf(group, sizeof(group), "object%d", i);
+            char *object_name = g_key_file_get_string(object_record, group, "name", NULL);
+            if (!strcmp(object_name, names[0])) {
+                uint64_t inode = g_key_file_get_uint64(object_record, group, "inode", NULL);
+                assert(inode < UINT64_MAX);
+                g_key_file_set_uint64(object_record, group, "inode", inode + 1);
+                changed_object = true;
+            }
+            g_free(object_name);
+        }
+        assert(changed_object);
+        gsize changed_size;
+        char *changed_objects = g_key_file_to_data(object_record, &changed_size, NULL);
+        char *changed_encoded = g_base64_encode((guchar *)changed_objects, changed_size);
+        g_key_file_set_string(other, "transaction", "objects", changed_encoded);
+        char *other_raw = g_key_file_to_data(other, NULL, NULL);
+        char *other_id = g_uuid_string_random();
+        char *other_file = g_strconcat(other_id, ".ini", NULL);
+        char *other_path = g_build_filename(root, ".gc", "transactions", other_file, NULL);
+        put(other_path, other_raw);
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+        } while (queued > 0);
+        assert(queued < 0 && !stats.complete);
+        LatcdRetirementAttempt conflict_attempt;
+        assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &conflict_attempt));
+        put(other_path, raw);
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        assert(stats.complete && stats.candidates == 2);
+        assert(!unlink(other_path));
+        g_free(other_path); g_free(other_file); g_free(other_id); g_free(other_raw);
+        g_free(changed_encoded); g_free(changed_objects); g_key_file_unref(object_record);
+        g_free(object_data); g_free(encoded_objects); g_key_file_unref(other);
         assert(!latcd_retirement_queue_checkpoint(queue, error, sizeof(error)));
         latcd_retirement_queue_free(queue);
         queue = latcd_retirement_queue_new(root, 0);
