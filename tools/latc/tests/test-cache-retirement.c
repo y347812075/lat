@@ -1623,6 +1623,63 @@ static void test_empty_round_advance_crash(const char *point)
     remove_root(root); g_free(root);
 }
 
+static void test_retry_page_stage(void)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    simulated_boottime_us = 100;
+    LatcdRetirementPageState state, loaded;
+    assert(!latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *schedule = g_build_filename(gc, "retirement-schedule", NULL);
+    char *transactions = g_build_filename(gc, "transactions", NULL);
+    char *tombstones = g_build_filename(gc, "tombstones", NULL);
+    assert(!mkdir(schedule, 0700) && !mkdir(transactions, 0700) && !mkdir(tombstones, 0700));
+    LatcdRetirementPageDeadline hint = {.enqueued = 90, .last_attempt = 2, .retry_at = 99, .busy_count = 1};
+    snprintf(hint.name, sizeof(hint.name), "%064x.so", 7);
+    assert(!latcd_retirement_schedule_store(root, boot, 100, 100, 3, &hint, error, sizeof(error)));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget budget = {0};
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 100);
+    assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
+    LatcdRetirementQueueStats stats; int result;
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0 && latcd_retirement_queue_retry_page_stage(queue, &capacity, 1,
+                                                                 &budget, error, sizeof(error)) < 0);
+    assert(!budget.capacity && !latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
+    latcd_retirement_queue_free(queue);
+    queue = latcd_retirement_queue_new(root, 100);
+    assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:file-synced", 1));
+    assert(result < 0 && latcd_retirement_queue_retry_page_stage(queue, &capacity, UINT64_MAX,
+                                                                 &budget, error, sizeof(error)) < 0);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    assert(!budget.capacity && !latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
+    latcd_retirement_queue_free(queue);
+    queue = latcd_retirement_queue_new(root, 100);
+    assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0 && !latcd_retirement_queue_retry_page_stage(queue, &capacity, UINT64_MAX,
+                                                                  &budget, error, sizeof(error)));
+    LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
+    assert(!latcd_retirement_retry_page_load(root, page, error, sizeof(error)) && page->count == 1 &&
+           !strcmp(page->items[0].hint.name, hint.name) && page->round_sequence == state.sequence);
+    assert(latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) < 0);
+    assert(latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0);
+    assert(budget.capacity == &capacity && budget.page_identity_bound);
+    latcd_retirement_queue_free(queue); latcd_cache_capacity_close(&capacity);
+    g_free(page); g_free(boot); g_free(tombstones); g_free(transactions); g_free(schedule); g_free(gc);
+    simulated_boottime_us = 0;
+    remove_root(root); g_free(root);
+}
+
 static void test_unmatched_retry_advance_crash(const char *point)
 {
     char *root = root_new(), error[256], *boot = NULL;
@@ -7558,6 +7615,7 @@ int main(int argc, char **argv)
     test_empty_round_advance_crash("file-synced");
     test_empty_round_advance_crash("renamed");
     test_empty_round_advance_crash("directory-synced");
+    test_retry_page_stage();
     test_unmatched_retry_advance_crash("file-synced");
     test_unmatched_retry_advance_crash("renamed");
     test_unmatched_retry_advance_crash("directory-synced");

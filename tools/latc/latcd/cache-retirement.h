@@ -46,7 +46,7 @@ typedef struct LatcdRetirementRetryItem {
 } LatcdRetirementRetryItem;
 /* Immutable input to a retry checkpoint. It is not removal authority. */
 typedef struct LatcdRetirementRetryPage {
-    uint64_t cache_device, cache_inode, grace_us, round_cutoff;
+    uint64_t cache_device, cache_inode, grace_us, round_cutoff, round_sequence;
     uint64_t snapshot_time, snapshot_sequence;
     char boot[37], committed_cursor[138], retry_cursor[138], end_cursor[138];
     unsigned count;
@@ -507,6 +507,13 @@ int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
  * before return, so the output is neither a durable checkpoint nor authority. */
 int latcd_retirement_queue_retry_page_snapshot(LatcdRetirementQueue *queue,
     LatcdRetirementRetryPage *page, char *error, size_t error_size);
+/* Atomically stage a witnessed retry input with a conservative peak budget.
+ * An active retry checkpoint is not deletion authority. */
+int latcd_retirement_queue_retry_page_stage(LatcdRetirementQueue *queue,
+    struct LatcdCacheCapacity *capacity, uint64_t limit, struct LatcdPageBudget *budget,
+    char *error, size_t error_size);
+int latcd_retirement_retry_page_load(const char *root, LatcdRetirementRetryPage *page,
+    char *error, size_t error_size);
 /* Advance only past an entirely unmatched retry batch while preserving every
  * shard. Requires a snapshot-bound monitored scan; never authorizes removal. */
 int latcd_retirement_queue_retry_advance_unmatched(LatcdRetirementQueue *queue,

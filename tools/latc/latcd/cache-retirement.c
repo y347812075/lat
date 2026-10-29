@@ -802,6 +802,7 @@ int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
     page_identity_string(checksum, page->boot);
     page_identity_u64(checksum, page->grace_us);
     page_identity_u64(checksum, page->round_cutoff);
+    page_identity_u64(checksum, page->round_sequence);
     page_identity_u64(checksum, page->snapshot_time);
     page_identity_u64(checksum, page->snapshot_sequence);
     page_identity_string(checksum, page->committed_cursor);
@@ -959,6 +960,7 @@ int latcd_retirement_retry_page_encode(const LatcdRetirementRetryPage *page,
     g_key_file_set_uint64(record, "retry", "cache_inode", page->cache_inode);
     g_key_file_set_uint64(record, "retry", "grace_us", page->grace_us);
     g_key_file_set_uint64(record, "retry", "round_cutoff", page->round_cutoff);
+    g_key_file_set_uint64(record, "retry", "round_sequence", page->round_sequence);
     g_key_file_set_uint64(record, "retry", "snapshot_time", page->snapshot_time);
     g_key_file_set_uint64(record, "retry", "snapshot_sequence", page->snapshot_sequence);
     g_key_file_set_string(record, "retry", "boot", page->boot);
@@ -995,7 +997,7 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
     memset(page, 0, sizeof(*page));
     if (!data || !size || size > RECORD_LIMIT || memchr(data, 0, size)) return -1;
     GKeyFile *record = g_key_file_new();
-    const char *header[] = {"version", "cache_device", "cache_inode", "grace_us", "round_cutoff",
+    const char *header[] = {"version", "cache_device", "cache_inode", "grace_us", "round_cutoff", "round_sequence",
         "snapshot_time", "snapshot_sequence", "boot", "committed_cursor", "retry_cursor", "end_cursor", "count", "identity"};
     const char *fields[] = {"name", "enqueued", "last_attempt", "retry_at", "busy_count", "sequence", "matched", "deadline"};
     uint64_t count = 0;
@@ -1006,6 +1008,7 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
         record_uint64(record, "retry", "cache_inode", &page->cache_inode) &&
         record_uint64(record, "retry", "grace_us", &page->grace_us) &&
         record_uint64(record, "retry", "round_cutoff", &page->round_cutoff) &&
+        record_uint64(record, "retry", "round_sequence", &page->round_sequence) &&
         record_uint64(record, "retry", "snapshot_time", &page->snapshot_time) &&
         record_uint64(record, "retry", "snapshot_sequence", &page->snapshot_sequence) &&
         record_uint64(record, "retry", "count", &count) && count && count <= 128;
@@ -1389,6 +1392,25 @@ int latcd_retirement_page_state_load(const char *root, LatcdRetirementPageState 
                                      char *error, size_t error_size)
 {
     return page_state_load(root, state, NULL, error, error_size);
+}
+
+int latcd_retirement_retry_page_load(const char *root, LatcdRetirementRetryPage *page,
+                                     char *error, size_t error_size)
+{
+    if (!root || !page) return fail(error, error_size, "invalid retry page output");
+    memset(page, 0, sizeof(*page));
+    int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = root_fd < 0 ? -1 : open_directory(root_fd, ".gc", false);
+    char *raw = NULL; size_t size = 0; struct stat cache;
+    int status = gc < 0 ? -1 : read_file(gc, "retirement-page.ini", RECORD_LIMIT, &raw, &size);
+    int result = status == 1 ? 1 : status || fstat(root_fd, &cache) ||
+        latcd_retirement_retry_page_decode(raw, size, page) ||
+        page->cache_device != (uint64_t)cache.st_dev || page->cache_inode != (uint64_t)cache.st_ino ? -1 : 0;
+    g_free(raw);
+    if (gc >= 0) close(gc);
+    if (root_fd >= 0) close(root_fd);
+    if (result) memset(page, 0, sizeof(*page));
+    return result < 0 ? fail(error, error_size, "retry page unsafe or incompatible") : result;
 }
 
 static bool gc_has_no_partial_records(int gc)
@@ -5278,6 +5300,7 @@ out:
 
 static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatched,
                                 LatcdRetirementRetryPage *page,
+                                LatcdCacheCapacity *capacity, uint64_t limit, LatcdPageBudget *budget,
                                 char *error, size_t error_size)
 {
     if (page) memset(page, 0, sizeof(*page));
@@ -5355,6 +5378,7 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
         page->cache_inode = current.cache_inode;
         page->grace_us = current.grace_us;
         page->round_cutoff = current.round_cutoff;
+        page->round_sequence = current.sequence;
         page->snapshot_time = queue->retry_snapshot_time;
         page->snapshot_sequence = queue->retry_snapshot_sequence;
         g_strlcpy(page->boot, current.boot, sizeof(page->boot));
@@ -5364,6 +5388,31 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
         page->count = count;
         g_strlcpy(page->end_cursor, queue->retry_order[count - 1], sizeof(page->end_cursor));
         if (latcd_retirement_retry_page_identity(page, identity)) goto out;
+        if (budget) {
+            char *data = NULL; size_t size = 0; uint64_t bytes = 0;
+            GKeyFile *record = g_key_file_new();
+            int matching = latcd_cache_capacity_open_matching_root(capacity, queue->root, root);
+            bool not_installed = true;
+            int staged = -1;
+            if (matching >= 0) close(matching);
+            if (matching >= 0 && !latcd_retirement_retry_page_encode(page, &data, &size) &&
+                g_key_file_load_from_data(record, data, size, 0, NULL) &&
+                /* Existing legacy shards may be smaller than the fixed-size
+                 * replacement. Reserve full growth for every member. */
+                !latcd_cache_capacity_page_peak(page->count, page->count,
+                    RETIREMENT_SCHEDULE_RECORD_BYTES, RECORD_LIMIT, &bytes) &&
+                !latcd_cache_capacity_reserve_page(capacity, bytes, limit, identity, budget)) {
+                staged = write_record_kind(gc, "retirement-page.ini", record, true, false, false,
+                                           budget, &not_installed);
+                if (staged && not_installed) {
+                    int saved = errno;
+                    latcd_cache_capacity_cancel_page(capacity, budget);
+                    errno = saved;
+                }
+            }
+            g_free(data); g_key_file_unref(record);
+            if (staged) goto out;
+        }
     }
     if (advance_unmatched) {
         g_strlcpy(current.retry_cursor, queue->retry_order[queue->retry_count - 1],
@@ -5393,20 +5442,31 @@ out:
 int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
                                              char *error, size_t error_size)
 {
-    return retry_witness_finish(queue, false, NULL, error, error_size);
+    return retry_witness_finish(queue, false, NULL, NULL, 0, NULL, error, error_size);
 }
 
 int latcd_retirement_queue_retry_page_snapshot(LatcdRetirementQueue *queue,
     LatcdRetirementRetryPage *page, char *error, size_t error_size)
 {
     if (!page) return fail(error, error_size, "missing retry page output");
-    return retry_witness_finish(queue, false, page, error, error_size);
+    return retry_witness_finish(queue, false, page, NULL, 0, NULL, error, error_size);
+}
+
+int latcd_retirement_queue_retry_page_stage(LatcdRetirementQueue *queue,
+    LatcdCacheCapacity *capacity, uint64_t limit, LatcdPageBudget *budget,
+    char *error, size_t error_size)
+{
+    if (!capacity || !budget) return fail(error, error_size, "missing retry page budget");
+    LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
+    int result = retry_witness_finish(queue, false, page, capacity, limit, budget, error, error_size);
+    g_free(page);
+    return result;
 }
 
 int latcd_retirement_queue_retry_advance_unmatched(LatcdRetirementQueue *queue,
                                                     char *error, size_t error_size)
 {
-    return retry_witness_finish(queue, true, NULL, error, error_size);
+    return retry_witness_finish(queue, true, NULL, NULL, 0, NULL, error, error_size);
 }
 
 int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,
