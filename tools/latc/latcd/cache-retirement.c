@@ -4533,6 +4533,39 @@ int latcd_retirement_queue_retry_matches(const LatcdRetirementQueue *queue,
     return 0;
 }
 
+int latcd_retirement_queue_retry_items(const LatcdRetirementQueue *queue,
+    LatcdRetirementRetryItem items[128], unsigned *count)
+{
+    if (!items || !count) return -1;
+    memset(items, 0, 128 * sizeof(*items));
+    *count = 0;
+    if (!queue || !queue->retry_count || queue->cursor || !queue->aggregation_verified)
+        return -1;
+    for (unsigned i = 0; i < queue->retry_count; i++) {
+        const char *name = queue->retry_order[i];
+        const LatcdRetirementPageDeadline *hint = g_hash_table_lookup(queue->retry_hints, name);
+        const RetirementCandidate *candidate = g_hash_table_lookup(queue->discovered, name);
+        bool matched = g_hash_table_contains(queue->confirmed_keys, name);
+        if (!hint || matched != (candidate != NULL) ||
+            (candidate && candidate->epoch != queue->epoch)) {
+            memset(items, 0, 128 * sizeof(*items));
+            return -1;
+        }
+        items[i].hint = *hint;
+        items[i].matched = matched;
+        if (matched) {
+            g_strlcpy(items[i].aggregate.name, name, sizeof(items[i].aggregate.name));
+            items[i].aggregate.deadline = candidate->deadline;
+            items[i].aggregate.enqueued = candidate->enqueued;
+            items[i].aggregate.last_attempt = candidate->last_attempt;
+            items[i].aggregate.retry_at = candidate->retry_at;
+            items[i].aggregate.busy_count = candidate->busy_count;
+        }
+    }
+    *count = queue->retry_count;
+    return 0;
+}
+
 void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
 {
     if (!queue) return;

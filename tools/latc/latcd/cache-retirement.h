@@ -37,6 +37,11 @@ typedef struct LatcdRetirementPageDeadline {
     uint64_t deadline, enqueued, last_attempt, retry_at;
     unsigned busy_count;
 } LatcdRetirementPageDeadline;
+typedef struct LatcdRetirementRetryItem {
+    LatcdRetirementPageDeadline hint;
+    LatcdRetirementPageDeadline aggregate;
+    bool matched;
+} LatcdRetirementRetryItem;
 /* Select due hints in name order after a separate retry cursor, wrapping once.
  * This is a scheduling hint only; transaction rediscovery is still required. */
 int latcd_retirement_retry_select(const LatcdRetirementPageDeadline *entries,
@@ -469,6 +474,10 @@ int latcd_retirement_queue_diagnostic_retry(LatcdRetirementQueue *queue,
  * match is not proof that a shard or its object can be removed. */
 int latcd_retirement_queue_retry_matches(const LatcdRetirementQueue *queue,
     bool matches[128], unsigned *count);
+/* Complete monitored retry discovery in selection order, including unmatched
+ * hints. The returned snapshot is diagnostic, not deletion authorization. */
+int latcd_retirement_queue_retry_items(const LatcdRetirementQueue *queue,
+    LatcdRetirementRetryItem items[128], unsigned *count);
 /* Resume diagnostic discovery after the committed cursor. Any in-flight page
  * is ignored and rediscovered; a v2 page never proves completion.
  * Owner lease required; missing or incompatible state is not a new round. */
