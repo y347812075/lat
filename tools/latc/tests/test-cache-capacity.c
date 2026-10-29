@@ -121,6 +121,7 @@ static void test_recovery_gate(void)
     assert(!restored.capacity && !capacity.metadata_reserved);
     assert(!latcd_cache_capacity_reserve_page(&capacity, 10, 100, identity, &restored));
     LatcdPageBudget copied = restored;
+    assert(latcd_cache_capacity_abandon_page(&capacity, &restored));
     assert(latcd_cache_capacity_page_begin(fd, "record", 1, &copied, &reservation));
     assert(restored.remaining == 10 && copied.remaining == 10 && capacity.metadata_reserved == 10);
     assert(!latcd_cache_capacity_page_begin(fd, "record", 1, &restored, &reservation));
@@ -151,6 +152,40 @@ static void test_recovery_gate(void)
     g_free(record);
     assert(!rmdir(gc) && !rmdir(root));
     g_free(gc); g_free(root);
+}
+
+static void test_abandon_bound_page(void)
+{
+    char *root = g_dir_make_tmp("capacity-abandon-XXXXXX", NULL);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *unexpected = g_build_filename(gc, "unexpected", NULL);
+    assert(root && !mkdir(gc, 0700));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    latcd_cache_capacity_metadata_bind(&capacity, 100);
+    uint8_t identity[32] = {1};
+    LatcdPageBudget budget = {0};
+    assert(!latcd_cache_capacity_reserve_page(&capacity, 10, 100, identity, &budget));
+    int directory = open(gc, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    LatcdMetadataReservation reservation;
+    assert(directory >= 0 && !latcd_cache_capacity_page_begin(directory, "result", 1,
+                                                                &budget, &reservation));
+    put(unexpected, "x");
+    assert(!latcd_cache_capacity_poll(&capacity));
+    LatcdPageBudget copied = budget;
+    assert(latcd_cache_capacity_abandon_page(&capacity, &copied) < 0);
+    assert(latcd_cache_capacity_abandon_page(&capacity, &budget) < 0);
+    latcd_cache_capacity_metadata_finish(&reservation, false, false);
+    assert(!budget.inflight && latcd_cache_capacity_scan(&capacity, root, NULL, 0) < 0);
+    assert(!latcd_cache_capacity_abandon_page(&capacity, &budget));
+    assert(!capacity.ready && !capacity.metadata_reserved && !budget.capacity);
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    assert(capacity.ready);
+    close(directory);
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    assert(!unlink(unexpected) && !rmdir(gc) && !rmdir(root));
+    g_free(unexpected); g_free(gc); g_free(root);
 }
 
 static void put_metadata(LatcdMetadataReservation *reservation, const char *path,
@@ -1078,6 +1113,7 @@ int main(void)
     assert(latcd_cache_capacity_page_peak(1, 1, 1, 1, NULL) < 0 && errno == EINVAL);
     test_matching_root();
     test_recovery_gate();
+    test_abandon_bound_page();
     test_recovery_gate_race();
     test_external_metadata_root_creation();
     test_controlled_metadata_directory();
