@@ -4373,7 +4373,7 @@ int latcd_retirement_mount_release(const char *root, const char *id,
     if (!strcmp(lease.state, "ACTIVE")) {
         g_key_file_set_string(record, "mount", "state", "RELEASED");
         if (write_record(store, filename, record)) goto out;
-    }
+    } else if (fsync(store)) goto out;
     if (!mount_lease_directories_valid(root, directory, gc, store, lease_fd)) goto out;
     result = 0;
 out:
