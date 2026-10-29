@@ -43,6 +43,12 @@ int latcd_retirement_retry_select(const LatcdRetirementPageDeadline *entries,
                                   size_t count, const char *after, uint64_t now_us,
                                   LatcdRetirementPageDeadline selected[128],
                                   unsigned *selected_count);
+/* Read and validate all schedule shards before selecting due hints. The
+ * caller owns the cache lease; output does not authorize deletion. */
+int latcd_retirement_retry_snapshot(const char *root, const char *boot,
+                                    uint64_t grace_us, uint64_t now_us, const char *after,
+                                    LatcdRetirementPageDeadline selected[128], unsigned *selected_count,
+                                    char *error, size_t error_size);
 typedef struct LatcdRetirementConsumption {
     uint8_t completed[16];
     bool intent_present;

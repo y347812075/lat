@@ -1417,10 +1417,11 @@ static int retirement_schedule_access(const char *root, const char *boot,
                                     LatcdRetirementPageInventory *inventory,
                                     LatcdPageBudget *budget,
                                     int scheduler,
+                                    GArray *snapshot,
                                     char *error, size_t error_size)
 {
     if (!root || !boot || !g_uuid_string_is_valid(boot) || !grace_us || !now_us ||
-        (!merge && !check_page && (!entry || strnlen(entry->name, sizeof(entry->name)) == sizeof(entry->name) ||
+        (!merge && !check_page && !snapshot && (!entry || strnlen(entry->name, sizeof(entry->name)) == sizeof(entry->name) ||
         !page_object_name_valid(entry->name))) || (!loading && (!entry->enqueued ||
         entry->enqueued > now_us || entry->last_attempt > sequence ||
         entry->busy_count > 7 || (entry->retry_at > now_us &&
@@ -1448,7 +1449,7 @@ static int retirement_schedule_access(const char *root, const char *boot,
     bool page_seen[128] = {0};
     unsigned page_found = 0;
     LatcdRetirementPageDeadline saved = {0};
-    char *filename = merge || check_page ? NULL : g_strconcat(entry->name, ".ini", NULL);
+    char *filename = merge || check_page || snapshot ? NULL : g_strconcat(entry->name, ".ini", NULL);
     GKeyFile *output = g_key_file_new();
     if (!dir || watch < 0 || queue_watch_fd(watch, store,
         IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY |
@@ -1518,6 +1519,15 @@ static int retirement_schedule_access(const char *root, const char *boot,
                 merge->sequence = MAX(merge->sequence, seq);
                 break;
             }
+        }
+        if (valid && snapshot) {
+            LatcdRetirementPageDeadline hint = {0};
+            g_strlcpy(hint.name, name, sizeof(hint.name));
+            hint.enqueued = enqueued;
+            hint.last_attempt = attempted;
+            hint.retry_at = retry;
+            hint.busy_count = busy;
+            g_array_append_val(snapshot, hint);
         }
         if (valid && check_page && page_results) {
             for (unsigned i = 0; i < check_page->count; i++) {
@@ -1613,7 +1623,7 @@ static int retirement_schedule_access(const char *root, const char *boot,
             result = saved_kind ? 0 : 1;
         } else {
             if (found && !merge) { *loaded_entry = saved; *loaded_sequence = saved_sequence; }
-            result = merge || found ? 0 : 1;
+            result = merge || snapshot || found ? 0 : 1;
         }
         goto out;
     }
@@ -1677,7 +1687,7 @@ int latcd_retirement_schedule_store(const char *root, const char *boot,
     int scheduler = scheduler_lock(root, error, error_size);
     if (scheduler < 0) return -1;
     int result = retirement_schedule_access(root, boot, grace_us, now_us, sequence, entry,
-                                      false, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, scheduler, error, error_size);
+                                      false, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, scheduler, NULL, error, error_size);
     close(scheduler);
     return result;
 }
@@ -1692,7 +1702,7 @@ int latcd_retirement_schedule_store_result(const char *root, const char *boot,
     int scheduler = scheduler_lock(root, error, error_size);
     if (scheduler < 0) return -1;
     int result = retirement_schedule_access(root, boot, grace_us, now_us, sequence, entry,
-                                      false, NULL, NULL, NULL, page_identity, kind, NULL, NULL, NULL, NULL, NULL, NULL, NULL, scheduler, error, error_size);
+                                      false, NULL, NULL, NULL, page_identity, kind, NULL, NULL, NULL, NULL, NULL, NULL, NULL, scheduler, NULL, error, error_size);
     close(scheduler);
     return result;
 }
@@ -1758,7 +1768,7 @@ int latcd_retirement_schedule_store_page_result(const char *root, uint64_t now_u
     }
     int result = retirement_schedule_access(root, page->boot, page->grace_us, now_us,
                                       page->sequence, entry, false, NULL, NULL, NULL,
-                                      identity, kind, NULL, NULL, page, NULL, NULL, NULL, NULL, scheduler, error, error_size);
+                                      identity, kind, NULL, NULL, page, NULL, NULL, NULL, NULL, scheduler, NULL, error, error_size);
     close(scheduler);
     return result;
 }
@@ -1774,7 +1784,7 @@ int latcd_retirement_schedule_load_result(const char *root, const char *boot,
         return fail(error, error_size, "invalid retirement result lookup");
     g_strlcpy(query.name, name, sizeof(query.name));
     return retirement_schedule_access(root, boot, grace_us, now_us, 0, &query,
-                                      true, NULL, NULL, NULL, page_identity, 0, kind, NULL, NULL, NULL, NULL, NULL, NULL, -1, error, error_size);
+                                      true, NULL, NULL, NULL, page_identity, 0, kind, NULL, NULL, NULL, NULL, NULL, NULL, -1, NULL, error, error_size);
 }
 
 static int schedule_page_results(const char *root, uint64_t now_us,
@@ -1794,8 +1804,7 @@ static int schedule_page_results(const char *root, uint64_t now_us,
     if (!compatible) return fail(error, error_size, "invalid retirement result page clock or boot");
     uint8_t snapshot[128] = {0};
     int result = retirement_schedule_access(root, page->boot, page->grace_us, now_us, 0, NULL,
-                                      true, NULL, NULL, NULL, identity, 0, NULL, page, page, snapshot, NULL, inventory, NULL, -1,
-                                      error, error_size);
+                                      true, NULL, NULL, NULL, identity, 0, NULL, page, page, snapshot, NULL, inventory, NULL, -1, NULL, error, error_size);
     if (result >= 0 && results) memcpy(results, snapshot, sizeof(snapshot));
     return result;
 }
@@ -2111,7 +2120,7 @@ static int page_budget_result(const char *root, uint64_t now_us,
     if (!result)
         result = retirement_schedule_access(root, page.boot, page.grace_us, now_us,
             page.sequence, entry, false, NULL, NULL, NULL, membership, kind, NULL,
-            NULL, &page, NULL, NULL, NULL, budget, scheduler, error, error_size);
+            NULL, &page, NULL, NULL, NULL, budget, scheduler, NULL, error, error_size);
     if (capacity_root >= 0) close(capacity_root);
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
@@ -2175,7 +2184,7 @@ static int page_commit(const char *root, uint64_t now_us,
     g_free(boot);
     if (!compatible || retirement_schedule_access(root, persisted.boot, persisted.grace_us,
         now_us, 0, NULL, true, NULL, NULL, NULL, actual, 0, NULL, &persisted,
-        &persisted, persisted.results, persisted.entries, NULL, NULL, -1, error, error_size)) goto out;
+        &persisted, persisted.results, persisted.entries, NULL, NULL, -1, NULL, error, error_size)) goto out;
     directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
     struct stat held, path;
@@ -2438,7 +2447,35 @@ int latcd_retirement_schedule_load(const char *root, const char *boot,
     if (sequence) *sequence = 0;
     if (!valid) return fail(error, error_size, "invalid retirement schedule lookup");
     return retirement_schedule_access(root, boot, grace_us, now_us, 0, &query,
-                                      true, sequence, entry, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, -1, error, error_size);
+                                      true, sequence, entry, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, -1, NULL, error, error_size);
+}
+
+static gint retry_hint_compare(gconstpointer a, gconstpointer b)
+{
+    const LatcdRetirementPageDeadline *first = a, *second = b;
+    return strcmp(first->name, second->name);
+}
+
+int latcd_retirement_retry_snapshot(const char *root, const char *boot,
+                                    uint64_t grace_us, uint64_t now_us, const char *after,
+                                    LatcdRetirementPageDeadline selected[128], unsigned *selected_count,
+                                    char *error, size_t error_size)
+{
+    if (!root || !selected || !selected_count) return fail(error, error_size, "invalid retry snapshot output");
+    *selected_count = 0;
+    GArray *hints = g_array_new(FALSE, FALSE, sizeof(LatcdRetirementPageDeadline));
+    int scheduler = scheduler_lock(root, error, error_size);
+    int result = scheduler < 0 ? -1 : retirement_schedule_access(root, boot, grace_us, now_us,
+        0, NULL, true, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, scheduler, hints, error, error_size);
+    if (!result) {
+        g_array_sort(hints, retry_hint_compare);
+        result = latcd_retirement_retry_select((LatcdRetirementPageDeadline *)hints->data,
+                                               hints->len, after, now_us, selected, selected_count);
+    }
+    if (scheduler >= 0) close(scheduler);
+    g_array_free(hints, TRUE);
+    return result ? fail(error, error_size, "retirement retry snapshot unsafe") : 0;
 }
 
 int latcd_retirement_schedule_merge_page(const char *root, const char *boot,
@@ -2457,7 +2494,7 @@ int latcd_retirement_schedule_merge_page(const char *root, const char *boot,
             return fail(error, error_size, "invalid retirement schedule page");
     }
     if (retirement_schedule_access(root, boot, grace_us, now_us, 0, NULL,
-                                   true, NULL, NULL, &next, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, -1, error, error_size)) return -1;
+                                   true, NULL, NULL, &next, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, -1, NULL, error, error_size)) return -1;
     *page = next;
     return 0;
 }
