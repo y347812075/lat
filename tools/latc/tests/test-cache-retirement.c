@@ -1847,6 +1847,13 @@ static void test_schedule_check_page(void)
     assert(!latcd_cache_capacity_poll(&page_capacity) && page_budget.invalid &&
            page_budget.remaining == saved_reservation - 2048 &&
            page_capacity.metadata_committed == committed_before_fault + 1024);
+    uint64_t invalid_remaining = page_budget.remaining;
+    uint64_t invalid_committed = page_capacity.metadata_committed;
+    assert(latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
+           &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(!page_capacity.ready && page_budget.invalid &&
+           page_budget.remaining == invalid_remaining &&
+           page_capacity.metadata_committed == invalid_committed);
     char *fault_name = g_strconcat(page.entries[1].name, ".ini", NULL);
     char *fault_path = g_build_filename(store, fault_name, NULL);
     assert(!access(fault_path, F_OK));
