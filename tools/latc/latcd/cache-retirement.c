@@ -4459,10 +4459,19 @@ int latcd_retirement_queue_diagnostic_retry(LatcdRetirementQueue *queue,
 {
     if (!queue || !hints || !count || count > 128 || queue->diagnostic_cutoff || queue->epoch ||
         queue->cursor || queue->complete) return -1;
+    char *current_boot = NULL;
+    uint64_t now = 0;
+    if (retirement_clock(&current_boot, &now) || !boot || strcmp(boot, current_boot) ||
+        !cutoff || cutoff > now) {
+        g_free(current_boot);
+        return -1;
+    }
+    g_free(current_boot);
     for (unsigned i = 0; i < count; i++) {
         if (strnlen(hints[i].name, sizeof(hints[i].name)) == sizeof(hints[i].name) ||
             !page_object_name_valid(hints[i].name) || !hints[i].enqueued ||
-            hints[i].busy_count > 7 || g_hash_table_contains(queue->retry_hints, hints[i].name)) {
+            hints[i].enqueued > now || hints[i].retry_at > now || hints[i].busy_count > 7 ||
+            g_hash_table_contains(queue->retry_hints, hints[i].name)) {
             g_hash_table_remove_all(queue->retry_hints);
             return -1;
         }

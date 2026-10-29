@@ -6706,6 +6706,9 @@ static void test_page_round_insertions(void)
     snprintf(hints[1].name, sizeof(hints[1].name), "%064x.so", 9999);
     hints[1].enqueued = 90;
     queue = latcd_retirement_queue_new(root, 1);
+    hints[0].retry_at = 201;
+    assert(latcd_retirement_queue_diagnostic_retry(queue, boot, cutoff, hints, 2) < 0);
+    hints[0].retry_at = 199;
     assert(!latcd_retirement_queue_diagnostic_retry(queue, boot, cutoff, hints, 2));
     do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
     while (result > 0);
