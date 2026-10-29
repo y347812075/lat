@@ -21,7 +21,7 @@ mkdir -m 700 -p "$work"
 cleanup_service()
 {
     for pid in "${server_pid:-}" "${owner_pid:-}" "${normal_pid:-}" "${kill_pid:-}" \
-               "${legacy_reader_1:-}" "${legacy_reader_2:-}"; do
+               "${legacy_reader_1:-}" "${legacy_reader_2:-}" "${mount_pid:-}"; do
         [ -n "$pid" ] || continue
         kill -TERM "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
@@ -114,6 +114,25 @@ done
 grep -q "^retry_cursor=$(printf '%064x' 7).so$" "$cache/.gc/retirement-page.ini"
 stop_service
 done
+
+mount_phase=$work/mount-lease-exit
+mkdir -m 700 "$mount_phase" "$mount_phase/cache"
+mount_id=26d7b68c-64f2-4bb7-bcb5-5f6ab4049f11
+"$latcd" gc --hold-mount-lease --cache-dir "$mount_phase/cache" \
+  --lease-id "$mount_id" --scope CACHE >"$mount_phase/stdout" 2>"$mount_phase/stderr" &
+mount_pid=$!
+n=0
+while ! grep -q 'state=ACTIVE' "$mount_phase/stdout" && kill -0 "$mount_pid" 2>/dev/null; do
+    n=$((n + 1)); [ "$n" -lt 500 ] || break; sleep 0.01
+done
+grep -q 'state=ACTIVE' "$mount_phase/stdout"
+kill -TERM "$mount_pid"
+wait "$mount_pid"
+mount_pid=
+mount_record=$mount_phase/cache/.gc/mount-leases/$mount_id.ini
+grep -q '^state=ACTIVE$' "$mount_record"
+"$latcd" gc --release-mount-lease --cache-dir "$mount_phase/cache" --lease-id "$mount_id"
+grep -q '^state=RELEASED$' "$mount_record"
 
 submit_source()
 {

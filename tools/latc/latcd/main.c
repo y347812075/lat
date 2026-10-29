@@ -6352,13 +6352,8 @@ static int run_gc_plan(int argc, char **argv)
             close(lease);
             return 1;
         }
-        int result = latcd_retirement_mount_release(cache, lease_id, lease,
-                                                     error, sizeof(error));
         close(lease);
-        if (result) {
-            fprintf(stderr, "latcd: mount lease release failed: %s\n", error);
-            return 1;
-        }
+        fprintf(stderr, "latcd: mount lease remains active; release after unmount verification\n");
         return 0;
     }
     GError *gerror = NULL;
