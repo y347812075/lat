@@ -1429,6 +1429,11 @@ int latcd_retirement_page_state_resume(const char *root, const char *boot,
     return result;
 }
 
+typedef struct RetrySnapshotEntry {
+    LatcdRetirementPageDeadline hint;
+    uint64_t sequence;
+} RetrySnapshotEntry;
+
 static int retirement_schedule_access(const char *root, const char *boot,
                                     uint64_t grace_us, uint64_t now_us,
                                     uint64_t sequence,
@@ -1549,13 +1554,14 @@ static int retirement_schedule_access(const char *root, const char *boot,
             }
         }
         if (valid && snapshot) {
-            LatcdRetirementPageDeadline hint = {0};
-            g_strlcpy(hint.name, name, sizeof(hint.name));
-            hint.enqueued = enqueued;
-            hint.last_attempt = attempted;
-            hint.retry_at = retry;
-            hint.busy_count = busy;
-            g_array_append_val(snapshot, hint);
+            RetrySnapshotEntry item = {0};
+            g_strlcpy(item.hint.name, name, sizeof(item.hint.name));
+            item.hint.enqueued = enqueued;
+            item.hint.last_attempt = attempted;
+            item.hint.retry_at = retry;
+            item.hint.busy_count = busy;
+            item.sequence = seq;
+            g_array_append_val(snapshot, item);
             *loaded_sequence = MAX(*loaded_sequence, seq);
         }
         if (valid && check_page && page_results) {
@@ -2481,29 +2487,52 @@ int latcd_retirement_schedule_load(const char *root, const char *boot,
 
 static gint retry_hint_compare(gconstpointer a, gconstpointer b)
 {
-    const LatcdRetirementPageDeadline *first = a, *second = b;
-    return strcmp(first->name, second->name);
+    const RetrySnapshotEntry *first = a, *second = b;
+    return strcmp(first->hint.name, second->hint.name);
+}
+
+static int retry_snapshot_select(GArray *snapshot, const char *after, uint64_t now,
+                                 LatcdRetirementPageDeadline selected[128],
+                                 uint64_t sequences[128], unsigned *count)
+{
+    g_array_sort(snapshot, retry_hint_compare);
+    GArray *hints = g_array_sized_new(FALSE, FALSE, sizeof(LatcdRetirementPageDeadline), snapshot->len);
+    for (unsigned i = 0; i < snapshot->len; i++) {
+        RetrySnapshotEntry *entry = &g_array_index(snapshot, RetrySnapshotEntry, i);
+        g_array_append_val(hints, entry->hint);
+    }
+    int result = latcd_retirement_retry_select((LatcdRetirementPageDeadline *)hints->data,
+                                                hints->len, after, now, selected, count);
+    if (!result) {
+        for (unsigned i = 0; i < *count; i++) {
+            for (unsigned j = 0; j < snapshot->len; j++) {
+                RetrySnapshotEntry *entry = &g_array_index(snapshot, RetrySnapshotEntry, j);
+                if (!strcmp(selected[i].name, entry->hint.name)) { sequences[i] = entry->sequence; break; }
+            }
+        }
+    }
+    g_array_free(hints, TRUE);
+    return result;
 }
 
 int latcd_retirement_retry_snapshot(const char *root, const char *boot,
                                     uint64_t grace_us, uint64_t now_us, const char *after,
                                     LatcdRetirementPageDeadline selected[128], unsigned *selected_count,
-                                    uint64_t *sequence,
+                                    uint64_t *sequence, uint64_t selected_sequences[128],
                                     char *error, size_t error_size)
 {
-    if (!root || !selected || !selected_count || !sequence) return fail(error, error_size, "invalid retry snapshot output");
+    if (!root || !selected || !selected_count || !sequence || !selected_sequences) return fail(error, error_size, "invalid retry snapshot output");
     *selected_count = 0;
     *sequence = 0;
+    memset(selected_sequences, 0, 128 * sizeof(*selected_sequences));
     uint64_t scanned_sequence = 0;
-    GArray *hints = g_array_new(FALSE, FALSE, sizeof(LatcdRetirementPageDeadline));
+    GArray *hints = g_array_new(FALSE, FALSE, sizeof(RetrySnapshotEntry));
     int scheduler = scheduler_lock(root, error, error_size);
     int result = scheduler < 0 ? -1 : retirement_schedule_access(root, boot, grace_us, now_us,
         0, NULL, true, &scanned_sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
         NULL, scheduler, hints, error, error_size);
     if (!result) {
-        g_array_sort(hints, retry_hint_compare);
-        result = latcd_retirement_retry_select((LatcdRetirementPageDeadline *)hints->data,
-                                               hints->len, after, now_us, selected, selected_count);
+        result = retry_snapshot_select(hints, after, now_us, selected, selected_sequences, selected_count);
         if (!result) *sequence = scanned_sequence;
     }
     if (scheduler >= 0) close(scheduler);
@@ -4408,6 +4437,7 @@ struct LatcdRetirementQueue {
     unsigned retry_count;
     bool retry_snapshot_bound;
     uint64_t retry_snapshot_time, retry_snapshot_sequence;
+    uint64_t retry_item_sequence[128];
     bool complete, persistence_uncertain;
     char last_source[65];
     LatcdRetirementAttempt active;
@@ -4539,7 +4569,7 @@ int latcd_retirement_queue_retry_begin(LatcdRetirementQueue *queue,
                                            &state, error, error_size) ||
         state.count || state.committed_pending || state.budget_bound || state.consumption_bound ||
         latcd_retirement_retry_snapshot(queue->root, boot, queue->grace, now, state.retry_cursor,
-                                         hints, &count, &sequence, error, error_size)) goto out;
+                                         hints, &count, &sequence, queue->retry_item_sequence, error, error_size)) goto out;
     if (!count) { result = 0; goto out; }
     if (latcd_retirement_queue_diagnostic_retry(queue, boot, state.round_cutoff, hints, count)) goto out;
     queue->round_state = state;
@@ -5066,7 +5096,7 @@ int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
     char *boot = NULL;
     uint64_t now = 0;
     uint64_t sequence = 0;
-    GArray *snapshot = g_array_new(FALSE, FALSE, sizeof(LatcdRetirementPageDeadline));
+    GArray *snapshot = g_array_new(FALSE, FALSE, sizeof(RetrySnapshotEntry));
     struct stat cache, path, transactions, tombstone_stat;
     if (scheduler < 0) goto out;
     root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -5094,7 +5124,7 @@ int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
         const LatcdRetirementPageDeadline *hint = g_hash_table_lookup(queue->retry_hints, queue->retry_order[i]);
         const LatcdRetirementPageDeadline *found = NULL;
         for (unsigned j = 0; j < snapshot->len; j++) {
-            const LatcdRetirementPageDeadline *entry = &g_array_index(snapshot, LatcdRetirementPageDeadline, j);
+            const LatcdRetirementPageDeadline *entry = &g_array_index(snapshot, RetrySnapshotEntry, j).hint;
             if (!strcmp(entry->name, queue->retry_order[i])) { found = entry; break; }
         }
         if (!hint || !found || found->enqueued != hint->enqueued ||
@@ -5104,9 +5134,9 @@ int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
     if (queue->retry_snapshot_bound) {
         LatcdRetirementPageState current;
         LatcdRetirementPageDeadline selected[128];
+        uint64_t selected_sequences[128] = {0};
         unsigned count = 0;
         bool legacy = false;
-        g_array_sort(snapshot, retry_hint_compare);
         if (page_state_load(queue->root, &current, &legacy, error, error_size) || legacy ||
             current.count || current.committed_pending || current.budget_bound || current.consumption_bound ||
             current.cache_device != queue->round_state.cache_device || current.cache_inode != queue->round_state.cache_inode ||
@@ -5114,11 +5144,12 @@ int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
             current.sequence != queue->round_state.sequence || strcmp(current.boot, queue->round_state.boot) ||
             strcmp(current.committed_cursor, queue->round_state.committed_cursor) ||
             strcmp(current.retry_cursor, queue->round_state.retry_cursor) || sequence != queue->retry_snapshot_sequence ||
-            latcd_retirement_retry_select((LatcdRetirementPageDeadline *)snapshot->data, snapshot->len,
-                current.retry_cursor, queue->retry_snapshot_time, selected, &count) || count != queue->retry_count)
+            retry_snapshot_select(snapshot, current.retry_cursor, queue->retry_snapshot_time,
+                                  selected, selected_sequences, &count) || count != queue->retry_count)
             goto out;
         for (unsigned i = 0; i < count; i++)
-            if (strcmp(selected[i].name, queue->retry_order[i])) goto out;
+            if (strcmp(selected[i].name, queue->retry_order[i]) ||
+                selected_sequences[i] != queue->retry_item_sequence[i]) goto out;
     }
     if (!queue_watch_clean(queue->discovery_watch)) goto out;
     result = 0;

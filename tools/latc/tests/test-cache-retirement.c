@@ -3763,12 +3763,12 @@ static void test_schedule_byte_limit(void)
                                           .retry_at = 201, .busy_count = 2};
     LatcdRetirementPageDeadline selected[128];
     unsigned selected_count;
-    uint64_t snapshot_sequence;
+    uint64_t snapshot_sequence, selected_sequences[128];
     char after[138];
     snprintf(after, sizeof(after), "%064x.so", 4093);
     assert(!latcd_retirement_retry_snapshot(root, boot, 100, 200, after,
-                                            selected, &selected_count, &snapshot_sequence, error, sizeof(error)));
-    assert(selected_count == 128 && snapshot_sequence == 1 && strcmp(selected[0].name, after));
+                                            selected, &selected_count, &snapshot_sequence, selected_sequences, error, sizeof(error)));
+    assert(selected_count == 128 && snapshot_sequence == 1 && selected_sequences[0] == 1 && strcmp(selected[0].name, after));
     snprintf(after, sizeof(after), "%064x.so", 4094);
     assert(!strcmp(selected[0].name, after));
     snprintf(after, sizeof(after), "%064x.so", 1);
@@ -3776,7 +3776,7 @@ static void test_schedule_byte_limit(void)
     char *invalid = g_build_filename(store, "unexpected", NULL);
     put(invalid, "invalid");
     assert(latcd_retirement_retry_snapshot(root, boot, 100, 200, after,
-                                           selected, &selected_count, &snapshot_sequence, error, sizeof(error)) < 0 &&
+                                           selected, &selected_count, &snapshot_sequence, selected_sequences, error, sizeof(error)) < 0 &&
            !selected_count && !snapshot_sequence);
     assert(!unlink(invalid));
     g_free(invalid);
@@ -6806,6 +6806,24 @@ static void test_page_round_insertions(void)
     while (result > 0);
     retry_state.retry_cursor[0] = 0;
     assert(!latcd_retirement_page_state_store(root, &retry_state, error, sizeof(error)));
+    assert(latcd_retirement_queue_retry_revalidate(queue, error, sizeof(error)) < 0);
+    latcd_retirement_queue_free(queue);
+
+    g_strlcpy(retry_state.retry_cursor, hints[0].name, sizeof(retry_state.retry_cursor));
+    assert(!latcd_retirement_page_state_store(root, &retry_state, error, sizeof(error)));
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    shard_name = g_strconcat(hints[1].name, ".ini", NULL);
+    shard_path = g_build_filename(root, ".gc", "retirement-schedule", shard_name, NULL);
+    GKeyFile *modified_shard = g_key_file_new();
+    assert(g_key_file_load_from_file(modified_shard, shard_path, 0, NULL));
+    g_key_file_set_uint64(modified_shard, "schedule", "sequence", 2);
+    char *modified_data = g_key_file_to_data(modified_shard, NULL, NULL);
+    put(shard_path, modified_data);
+    g_free(modified_data); g_key_file_unref(modified_shard);
+    g_free(shard_path); g_free(shard_name);
     assert(latcd_retirement_queue_retry_revalidate(queue, error, sizeof(error)) < 0);
     latcd_retirement_queue_free(queue);
 
