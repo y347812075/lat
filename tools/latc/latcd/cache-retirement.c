@@ -1457,7 +1457,7 @@ int latcd_retirement_page_budget_estimate(const LatcdRetirementPageState *page,
     if (!bytes) { errno = EINVAL; return -1; }
     *bytes = 0;
     if (!page || !results || !inventory || latcd_retirement_page_state_valid(page) ||
-        !page->count || page->committed_pending || inventory->undersized_member ||
+        !page->count || inventory->undersized_member ||
         inventory->occupied_slots > RETIREMENT_SCHEDULE_LIMIT ||
         inventory->occupied_bytes > RETIREMENT_SCHEDULE_BYTES) {
         errno = EINVAL;
@@ -1465,6 +1465,10 @@ int latcd_retirement_page_budget_estimate(const LatcdRetirementPageState *page,
     }
     uint64_t missing = 0, present = 0;
     for (unsigned i = 0; i < page->count; i++) {
+        if (page->committed_pending && results[i] != page->results[i]) {
+            errno = EINVAL;
+            return -1;
+        }
         if (!results[i]) missing++;
         else if (results[i] == LATCD_RETIREMENT_RESULT_DONE ||
                  results[i] == LATCD_RETIREMENT_RESULT_DEFERRED) present++;
@@ -1512,7 +1516,7 @@ int latcd_retirement_page_restore_budget(const char *root, LatcdCacheCapacity *c
     int matching = status < 0 ? -1 : latcd_cache_capacity_open_matching_root(capacity, root, directory);
     if (matching < 0) status = -1;
     else close(matching);
-    if (!status && (legacy || !persisted.budget_bound || !persisted.count || persisted.committed_pending ||
+    if (!status && (legacy || !persisted.budget_bound || !persisted.count ||
         retirement_clock(&boot, &now) ||
         latcd_retirement_page_state_compatible(&persisted, boot, persisted.grace_us, now) ||
         schedule_page_results(root, now, &persisted, results, &inventory, error, error_size) < 0 ||

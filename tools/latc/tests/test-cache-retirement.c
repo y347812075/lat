@@ -2525,11 +2525,38 @@ static void test_budgeted_page_stage(void)
            budget.remaining == 2 * 65536);
     assert(latcd_cache_capacity_reserve(&recovered, 1, UINT64_MAX, error, sizeof(error)) < 0);
     assert(!latcd_cache_capacity_recovery_finish(&recovered));
+    assert(!latcd_retirement_test_budget_commit(root, 150, &page, &budget, error, sizeof(error)));
     assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
     latcd_cache_capacity_close(&recovered);
     assert(!pthread_mutex_destroy(&recovered.lock));
     char *fragment_name = g_strconcat(page.entries[0].name, ".ini", NULL);
     char *fragment_path = g_build_filename(store, fragment_name, NULL);
+    LatcdCacheCapacity pending = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&pending, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&pending, UINT64_MAX);
+    assert(!latcd_cache_capacity_recovery_begin(&pending));
+    assert(!latcd_retirement_page_restore_budget(root, &pending, UINT64_MAX, &budget,
+                                                  &loaded, error, sizeof(error)));
+    assert(loaded.committed_pending && loaded.results[0] == LATCD_RETIREMENT_RESULT_DONE &&
+           budget.remaining == 2 * 65536);
+    assert(!latcd_cache_capacity_recovery_finish(&pending));
+    assert(!latcd_cache_capacity_test_page_release(&pending, &budget));
+    latcd_cache_capacity_close(&pending);
+    assert(!pthread_mutex_destroy(&pending.lock));
+    char *fragment_data = NULL;
+    assert(g_file_get_contents(fragment_path, &fragment_data, NULL, NULL));
+    assert(!unlink(fragment_path));
+    LatcdCacheCapacity missing = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&missing, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&missing, UINT64_MAX);
+    assert(!latcd_cache_capacity_recovery_begin(&missing));
+    assert(latcd_retirement_page_restore_budget(root, &missing, UINT64_MAX, &budget,
+                                                 &loaded, error, sizeof(error)) < 0);
+    assert(!budget.capacity && !loaded.count && missing.recovery_gate);
+    latcd_cache_capacity_close(&missing);
+    assert(!pthread_mutex_destroy(&missing.lock));
+    put(fragment_path, fragment_data);
+    g_free(fragment_data);
     GKeyFile *fragment = g_key_file_new();
     assert(g_key_file_load_from_file(fragment, fragment_path, 0, NULL));
     g_key_file_set_uint64(fragment, "schedule", "sequence", page.sequence + 1);
