@@ -1262,11 +1262,15 @@ static int retirement_schedule_access(const char *root, const char *boot,
         if (!strcmp(item->d_name, ".") || !strcmp(item->d_name, "..")) continue;
         char *raw = NULL;
         size_t size = 0;
+        struct stat record_snapshot;
+        uint8_t record_digest[32];
         GKeyFile *record = g_key_file_new();
         gsize groups_count = 0;
         uint64_t device, inode, grace, seq, enqueued, attempted, retry, busy;
         bool valid = ++count <= RETIREMENT_SCHEDULE_LIMIT &&
-            !read_file(store, item->d_name, 1024, &raw, &size) &&
+            !read_file_snapshot(store, item->d_name, 1024, &raw, &size,
+                                inventory ? &record_snapshot : NULL,
+                                inventory ? record_digest : NULL) &&
             size <= RETIREMENT_SCHEDULE_BYTES - bytes && !memchr(raw, 0, size) &&
             g_key_file_load_from_data(record, raw, size, 0, NULL);
         char **groups = valid ? g_key_file_get_groups(record, &groups_count) : NULL;
@@ -1336,6 +1340,11 @@ static int retirement_schedule_access(const char *root, const char *boot,
                 if (!page_seen[i]) {
                     page_seen[i] = true; page_found++;
                     if (page_results) page_results[i] = !strcmp(saved_result, "done") ? 1 : 2;
+                    if (inventory) {
+                        inventory->members[i].present = true;
+                        inventory->members[i].snapshot = record_snapshot;
+                        memcpy(inventory->members[i].digest, record_digest, 32);
+                    }
                     if (page_schedule) {
                         page_schedule[i].last_attempt = attempted;
                         page_schedule[i].retry_at = retry;

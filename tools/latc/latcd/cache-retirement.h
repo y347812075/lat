@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <sys/stat.h>
 
 typedef struct LatcdRecoveryCursor LatcdRecoveryCursor;
 /* Owner lease required. Acquire after source latch, never wait under cache_lock.
@@ -172,11 +173,18 @@ int latcd_retirement_schedule_page_results(const char *root, uint64_t now_us,
  * lock. Caller holds the owner lease and controls writers. Results are hints,
  * not a capacity reservation or deletion authority; lock is released on return.
  * Result 3 is a conflicting member; undersized_member prevents treating an
- * existing member as a fully charged fixed-size result. Revalidate before use. */
+ * existing member as a fully charged fixed-size result. Member identities are
+ * diagnostic snapshots of matching results only; revalidate before use and
+ * never use them alone as deletion authority. */
 typedef struct LatcdRetirementPageInventory {
     unsigned occupied_slots;
     uint64_t occupied_bytes;
     bool undersized_member;
+    struct {
+        bool present;
+        struct stat snapshot;
+        uint8_t digest[32];
+    } members[128];
 } LatcdRetirementPageInventory;
 int latcd_retirement_page_snapshot(const char *root, uint64_t now_us,
                                     LatcdRetirementPageState *page,

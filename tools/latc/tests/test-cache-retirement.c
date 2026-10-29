@@ -2080,8 +2080,11 @@ static void test_schedule_check_page(void)
     snapshot_swap_store = store; snapshot_swap_gc = gc; snapshot_swap_old = old_gc;
     memset(&snapshot_page, 0xff, sizeof(snapshot_page));
     memset(results, 0xff, sizeof(results));
+    memset(&inventory, 0xff, sizeof(inventory));
     assert(latcd_retirement_page_snapshot(root, 150, &snapshot_page, results, &inventory, error, sizeof(error)) < 0);
-    assert(!snapshot_swap_store && !snapshot_page.count && !results[0]);
+    assert(!snapshot_swap_store && !snapshot_page.count && !results[0] &&
+           !inventory.occupied_slots && !inventory.members[0].present &&
+           !inventory.members[0].snapshot.st_ino && !inventory.members[0].digest[0]);
     assert(!rmdir(gc) && !rename(old_gc, gc));
     scheduler_swap_root = root; scheduler_swap_gc = gc; scheduler_swap_old = old_gc;
     assert(latcd_retirement_page_state_store(root, &page, error, sizeof(error)) < 0);
@@ -2139,6 +2142,22 @@ static void test_schedule_check_page(void)
     assert(latcd_retirement_page_snapshot(root, 150, &snapshot_page, results, &inventory, error, sizeof(error)) == 1);
     assert(results[0] == LATCD_RETIREMENT_RESULT_DONE && !results[1]);
     assert(inventory.occupied_slots == 1 && inventory.occupied_bytes == 1024 && !inventory.undersized_member);
+    assert(inventory.members[0].present && !inventory.members[1].present);
+    char *inventory_name = g_strconcat(page.entries[0].name, ".ini", NULL);
+    char *inventory_path = g_build_filename(store, inventory_name, NULL);
+    char *inventory_data = NULL;
+    gsize inventory_size;
+    struct stat inventory_stat;
+    assert(!stat(inventory_path, &inventory_stat) &&
+           inventory_stat.st_ino == inventory.members[0].snapshot.st_ino &&
+           g_file_get_contents(inventory_path, &inventory_data, &inventory_size, NULL));
+    char *inventory_hash = g_compute_checksum_for_data(G_CHECKSUM_SHA256,
+                           (const guchar *)inventory_data, inventory_size);
+    char inventory_actual[65];
+    for (unsigned i = 0; i < 32; i++)
+        snprintf(inventory_actual + i * 2, 3, "%02x", inventory.members[0].digest[i]);
+    assert(!strcmp(inventory_hash, inventory_actual));
+    g_free(inventory_hash); g_free(inventory_data); g_free(inventory_path); g_free(inventory_name);
     assert(!latcd_retirement_page_budget_estimate(&snapshot_page, results, &inventory, &estimate) &&
            estimate == 1024 + 2 * 65536);
     char *short_name = g_strconcat(page.entries[0].name, ".ini", NULL);
