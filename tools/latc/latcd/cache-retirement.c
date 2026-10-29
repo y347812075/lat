@@ -752,6 +752,79 @@ static void page_identity_string(GChecksum *checksum, const char *value)
     g_checksum_update(checksum, (const guchar *)value, length);
 }
 
+int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
+                                          uint8_t digest[32])
+{
+    if (!digest) return -1;
+    memset(digest, 0, 32);
+    if (!page || !page->cache_device || !page->cache_inode || !page->grace_us ||
+        !page->round_cutoff || page->round_cutoff > page->snapshot_time ||
+        strnlen(page->boot, sizeof(page->boot)) != 36 || !g_uuid_string_is_valid(page->boot) ||
+        strnlen(page->committed_cursor, sizeof(page->committed_cursor)) == sizeof(page->committed_cursor) ||
+        (page->committed_cursor[0] && !page_object_name_valid(page->committed_cursor)) ||
+        strnlen(page->retry_cursor, sizeof(page->retry_cursor)) == sizeof(page->retry_cursor) ||
+        (page->retry_cursor[0] && !page_object_name_valid(page->retry_cursor)) ||
+        strnlen(page->end_cursor, sizeof(page->end_cursor)) == sizeof(page->end_cursor) ||
+        !page->count || page->count > 128) return -1;
+    bool wrapped = false;
+    for (unsigned i = 0; i < page->count; i++) {
+        const LatcdRetirementRetryItem *item = &page->items[i];
+        const LatcdRetirementPageDeadline *hint = &item->hint, *aggregate = &item->aggregate;
+        if (strnlen(hint->name, sizeof(hint->name)) == sizeof(hint->name) ||
+            !page_object_name_valid(hint->name) || !hint->enqueued ||
+            hint->enqueued > page->snapshot_time || hint->last_attempt > item->shard_sequence ||
+            item->shard_sequence > page->snapshot_sequence || !item->shard_sequence_bound ||
+            hint->retry_at > page->snapshot_time || hint->busy_count > 7 || hint->deadline) return -1;
+        if (i && strcmp(page->items[i - 1].hint.name, hint->name) >= 0) {
+            if (wrapped || !page->retry_cursor[0]) return -1;
+            wrapped = true;
+        }
+        if (page->retry_cursor[0] &&
+            (wrapped ? strcmp(hint->name, page->retry_cursor) > 0 :
+                       strcmp(hint->name, page->retry_cursor) <= 0)) {
+            if (i || strcmp(hint->name, page->retry_cursor) > 0) return -1;
+            wrapped = true;
+        }
+        if (item->matched) {
+            if (strnlen(aggregate->name, sizeof(aggregate->name)) == sizeof(aggregate->name) ||
+                strcmp(aggregate->name, hint->name) || !aggregate->deadline ||
+                aggregate->enqueued != hint->enqueued || aggregate->last_attempt != hint->last_attempt ||
+                aggregate->retry_at != hint->retry_at || aggregate->busy_count != hint->busy_count) return -1;
+        } else if (aggregate->name[0] || aggregate->deadline || aggregate->enqueued ||
+                   aggregate->last_attempt || aggregate->retry_at || aggregate->busy_count) return -1;
+    }
+    if (strcmp(page->end_cursor, page->items[page->count - 1].hint.name)) return -1;
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    static const char domain[] = "latcd-retirement-retry-page-v1";
+    g_checksum_update(checksum, (const guchar *)domain, sizeof(domain));
+    page_identity_u64(checksum, page->cache_device);
+    page_identity_u64(checksum, page->cache_inode);
+    page_identity_string(checksum, page->boot);
+    page_identity_u64(checksum, page->grace_us);
+    page_identity_u64(checksum, page->round_cutoff);
+    page_identity_u64(checksum, page->snapshot_time);
+    page_identity_u64(checksum, page->snapshot_sequence);
+    page_identity_string(checksum, page->committed_cursor);
+    page_identity_string(checksum, page->retry_cursor);
+    page_identity_string(checksum, page->end_cursor);
+    page_identity_u64(checksum, page->count);
+    for (unsigned i = 0; i < page->count; i++) {
+        const LatcdRetirementRetryItem *item = &page->items[i];
+        page_identity_string(checksum, item->hint.name);
+        page_identity_u64(checksum, item->hint.enqueued);
+        page_identity_u64(checksum, item->hint.last_attempt);
+        page_identity_u64(checksum, item->hint.retry_at);
+        page_identity_u64(checksum, item->hint.busy_count);
+        page_identity_u64(checksum, item->shard_sequence);
+        page_identity_u64(checksum, item->matched);
+        page_identity_u64(checksum, item->aggregate.deadline);
+    }
+    gsize length = 32;
+    g_checksum_get_digest(checksum, digest, &length);
+    g_checksum_free(checksum);
+    return length == 32 ? 0 : -1;
+}
+
 int latcd_retirement_page_identity(const LatcdRetirementPageState *state,
                                    uint8_t digest[32])
 {

@@ -3768,6 +3768,48 @@ static void test_schedule_merge_multiple(void)
     g_free(bad); g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
 }
 
+static void test_retry_page_identity(void)
+{
+    LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
+    uint8_t original[32], changed[32];
+    page->cache_device = 1; page->cache_inode = 2; page->grace_us = 10;
+    page->round_cutoff = 100; page->snapshot_time = 200; page->snapshot_sequence = 150;
+    strcpy(page->boot, "01234567-89ab-cdef-0123-456789abcdef");
+    snprintf(page->retry_cursor, sizeof(page->retry_cursor), "%064x.so", 2);
+    page->count = 3;
+    const unsigned names[] = {3, 4, 1};
+    for (unsigned i = 0; i < page->count; i++) {
+        LatcdRetirementRetryItem *item = &page->items[i];
+        snprintf(item->hint.name, sizeof(item->hint.name), "%064x.so", names[i]);
+        item->hint.enqueued = 50; item->hint.last_attempt = 90; item->hint.retry_at = 180;
+        item->hint.busy_count = 1; item->shard_sequence = 100 + i;
+        item->shard_sequence_bound = true;
+    }
+    page->items[1].matched = true;
+    page->items[1].aggregate = page->items[1].hint;
+    page->items[1].aggregate.deadline = 190;
+    strcpy(page->end_cursor, page->items[2].hint.name);
+    assert(!latcd_retirement_retry_page_identity(page, original));
+    page->items[0].shard_sequence++;
+    assert(!latcd_retirement_retry_page_identity(page, changed) && memcmp(original, changed, 32));
+    page->items[0].shard_sequence--;
+    page->items[1].aggregate.deadline++;
+    assert(!latcd_retirement_retry_page_identity(page, changed) && memcmp(original, changed, 32));
+    page->items[1].aggregate.deadline--;
+    page->items[0].shard_sequence_bound = false;
+    assert(latcd_retirement_retry_page_identity(page, changed) < 0);
+    page->items[0].shard_sequence_bound = true;
+    page->items[0].aggregate.deadline = 1;
+    assert(latcd_retirement_retry_page_identity(page, changed) < 0);
+    page->items[0].aggregate.deadline = 0;
+    page->items[1].aggregate.enqueued++;
+    assert(latcd_retirement_retry_page_identity(page, changed) < 0);
+    page->items[1].aggregate.enqueued--;
+    strcpy(page->items[2].hint.name, page->items[0].hint.name);
+    assert(latcd_retirement_retry_page_identity(page, changed) < 0);
+    g_free(page);
+}
+
 static void test_retry_select(void)
 {
     LatcdRetirementPageDeadline *entries = g_new0(LatcdRetirementPageDeadline, 4096);
@@ -7515,6 +7557,7 @@ int main(int argc, char **argv)
     test_budgeted_crash("renamed", true, false, true);
     test_budgeted_crash("directory-synced", true, false, true);
     test_schedule_store();
+    test_retry_page_identity();
     test_retry_select();
     test_schedule_max_record();
     test_schedule_merge_multiple();

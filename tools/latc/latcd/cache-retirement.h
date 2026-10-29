@@ -44,6 +44,16 @@ typedef struct LatcdRetirementRetryItem {
     bool shard_sequence_bound;
     bool matched;
 } LatcdRetirementRetryItem;
+/* Immutable input to a retry checkpoint. It is not removal authority. */
+typedef struct LatcdRetirementRetryPage {
+    uint64_t cache_device, cache_inode, grace_us, round_cutoff;
+    uint64_t snapshot_time, snapshot_sequence;
+    char boot[37], committed_cursor[138], retry_cursor[138], end_cursor[138];
+    unsigned count;
+    LatcdRetirementRetryItem items[128];
+} LatcdRetirementRetryPage;
+int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
+                                        uint8_t digest[32]);
 /* Select due hints in name order after a separate retry cursor, wrapping once.
  * This is a scheduling hint only; transaction rediscovery is still required. */
 int latcd_retirement_retry_select(const LatcdRetirementPageDeadline *entries,
