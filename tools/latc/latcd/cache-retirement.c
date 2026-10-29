@@ -2932,6 +2932,54 @@ int latcd_retirement_retry_snapshot(const char *root, const char *boot,
                           sequence, selected_sequences, NULL, error, error_size);
 }
 
+static int retry_validate_snapshot(const LatcdRetirementRetryPage *page, GArray *snapshot,
+                                   uint64_t now, bool *replaced)
+{
+    uint8_t digests[128][32] = {{0}};
+    uint64_t sequences[128] = {0}; unsigned count = 0;
+    LatcdRetirementPageDeadline selected[128];
+    if (replaced) *replaced = false;
+    if (page->completed) return -1;
+    if (page->intent_present) {
+        uint64_t retry = 0; uint8_t target[1024];
+        GKeyFile *intent = g_key_file_new();
+        bool valid = page->intent_size == sizeof(target) &&
+            g_key_file_load_from_data(intent, (char *)page->intent_data, page->intent_size, 0, NULL) &&
+            record_uint64(intent, "schedule", "retry_at", &retry) && retry >= RETIREMENT_BUSY_MIN_US;
+        g_key_file_unref(intent);
+        LatcdRetirementRetryPage *original = g_memdup2(page, sizeof(*page));
+        original->intent_present = false; original->intent_size = 0; original->intent_original_size = 0;
+        memset(original->replacement_digest[0], 0, 32);
+        valid = valid && retry - RETIREMENT_BUSY_MIN_US <= now &&
+            !latcd_retirement_retry_prepare_unmatched(original, (char *)page->intent_original,
+                page->intent_original_size, retry - RETIREMENT_BUSY_MIN_US, target) &&
+            !memcmp(target, page->intent_data, sizeof(target));
+        g_free(original);
+        if (!valid) return -1;
+        bool found = false;
+        for (unsigned i = 0; i < snapshot->len; i++) {
+            RetrySnapshotEntry *entry = &g_array_index(snapshot, RetrySnapshotEntry, i);
+            if (strcmp(entry->hint.name, page->items[0].hint.name)) continue;
+            bool is_original = !memcmp(entry->digest, page->items[0].shard_digest, 32);
+            bool is_replacement = !memcmp(entry->digest, page->replacement_digest[0], 32);
+            if (found || entry->sequence != page->items[0].shard_sequence ||
+                (!is_original && !is_replacement)) return -1;
+            found = true;
+            if (replaced) *replaced = is_replacement;
+            entry->hint = page->items[0].hint;
+            memcpy(entry->digest, page->items[0].shard_digest, 32);
+        }
+        if (!found) return -1;
+    }
+    if (retry_snapshot_select(snapshot, page->retry_cursor, page->snapshot_time,
+                              selected, sequences, digests, &count) || count != page->count) return -1;
+    for (unsigned i = 0; i < count; i++)
+        if (strcmp(selected[i].name, page->items[i].hint.name) ||
+            sequences[i] != page->items[i].shard_sequence ||
+            memcmp(digests[i], page->items[i].shard_digest, 32)) return -1;
+    return 0;
+}
+
 int latcd_retirement_retry_page_restore_budget(const char *root,
     LatcdCacheCapacity *capacity, uint64_t limit, uint64_t expected_grace_us,
     LatcdPageBudget *budget, LatcdRetirementRetryPage *page,
@@ -2944,9 +2992,7 @@ int latcd_retirement_retry_page_restore_budget(const char *root,
     int directory = -1, gc = -1, store = -1, matching = -1, result = -1;
     char *boot = NULL;
     uint64_t now = 0, sequence = 0, bytes = 0;
-    uint8_t identity[32], digests[128][32] = {{0}};
-    uint64_t sequences[128] = {0}; unsigned count = 0;
-    LatcdRetirementPageDeadline selected[128];
+    uint8_t identity[32];
     LatcdRetirementRetryPage *persisted = g_new0(LatcdRetirementRetryPage, 1);
     GArray *snapshot = g_array_new(FALSE, FALSE, sizeof(RetrySnapshotEntry));
     struct stat held, path;
@@ -2966,46 +3012,10 @@ int latcd_retirement_retry_page_restore_budget(const char *root,
         retirement_schedule_access(root, boot, expected_grace_us, now, 0, NULL, true,
             &sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
             NULL, scheduler, snapshot, error, error_size) ||
-        sequence != persisted->snapshot_sequence) goto out;
-    if (persisted->intent_present) {
-        uint64_t retry = 0; uint8_t target[1024];
-        GKeyFile *intent = g_key_file_new();
-        bool valid = persisted->intent_size == sizeof(target) &&
-            g_key_file_load_from_data(intent, (char *)persisted->intent_data, persisted->intent_size, 0, NULL) &&
-            record_uint64(intent, "schedule", "retry_at", &retry) && retry >= RETIREMENT_BUSY_MIN_US;
-        g_key_file_unref(intent);
-        LatcdRetirementRetryPage *original = g_memdup2(persisted, sizeof(*persisted));
-        original->intent_present = false; original->intent_size = 0; original->intent_original_size = 0;
-        memset(original->replacement_digest[0], 0, 32);
-        valid = valid && retry - RETIREMENT_BUSY_MIN_US <= now &&
-            !latcd_retirement_retry_prepare_unmatched(original, (char *)persisted->intent_original,
-                persisted->intent_original_size,
-                retry - RETIREMENT_BUSY_MIN_US, target) &&
-            !memcmp(target, persisted->intent_data, sizeof(target));
-        g_free(original);
-        if (!valid) goto out;
-        bool found = false;
-        for (unsigned i = 0; i < snapshot->len; i++) {
-            RetrySnapshotEntry *entry = &g_array_index(snapshot, RetrySnapshotEntry, i);
-            if (strcmp(entry->hint.name, persisted->items[0].hint.name)) continue;
-            if (found || entry->sequence != persisted->items[0].shard_sequence ||
-                (memcmp(entry->digest, persisted->items[0].shard_digest, 32) &&
-                 memcmp(entry->digest, persisted->replacement_digest[0], 32))) goto out;
-            found = true;
-            entry->hint = persisted->items[0].hint;
-            memcpy(entry->digest, persisted->items[0].shard_digest, 32);
-        }
-        if (!found) goto out;
-    }
-    if (retry_snapshot_select(snapshot, persisted->retry_cursor, persisted->snapshot_time,
-                              selected, sequences, digests, &count) || count != persisted->count) goto out;
-    for (unsigned i = 0; i < count; i++)
-        if (strcmp(selected[i].name, persisted->items[i].hint.name) ||
-            sequences[i] != persisted->items[i].shard_sequence ||
-            memcmp(digests[i], persisted->items[i].shard_digest, 32)) goto out;
+        sequence != persisted->snapshot_sequence || retry_validate_snapshot(persisted, snapshot, now, NULL)) goto out;
     if (!directory_matches_at(directory, ".gc", gc) || !directory_matches_at(gc, "retirement-schedule", store) ||
         latcd_retirement_retry_page_budget_identity(persisted, identity) ||
-        latcd_cache_capacity_page_peak(count, count, RETIREMENT_SCHEDULE_RECORD_BYTES, RECORD_LIMIT, &bytes) ||
+        latcd_cache_capacity_page_peak(persisted->count, persisted->count, RETIREMENT_SCHEDULE_RECORD_BYTES, RECORD_LIMIT, &bytes) ||
         latcd_cache_capacity_restore_page(capacity, bytes, limit, identity, budget)) goto out;
     *page = *persisted;
     result = 0;
@@ -3079,6 +3089,51 @@ out:
     g_free(boot); g_free(raw); g_free(filename); g_free(data); g_free(page);
     g_array_free(snapshot, TRUE); g_key_file_unref(record);
     return result ? fail(error, error_size, "retry intent unavailable; reload") : 0;
+}
+
+int latcd_retirement_retry_page_apply_unmatched(const char *root, LatcdPageBudget *budget,
+                                                 char *error, size_t error_size)
+{
+    if (!root || !budget || !budget->capacity) return fail(error, error_size, "missing retry budget");
+    int scheduler = scheduler_lock(root, error, error_size);
+    int directory = -1, gc = -1, store = -1, matching = -1, result = -1;
+    char *boot = NULL, *filename = NULL;
+    uint64_t now = 0, sequence = 0; uint8_t identity[32]; bool replaced = false;
+    LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
+    GArray *snapshot = g_array_new(FALSE, FALSE, sizeof(RetrySnapshotEntry));
+    GKeyFile *record = g_key_file_new(); struct stat held, path;
+    if (scheduler < 0) goto out;
+    directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
+    store = gc < 0 ? -1 : open_directory(gc, "retirement-schedule", false);
+    if (!same_directory(scheduler, gc) || store < 0 || fstat(directory, &held) ||
+        lstat(root, &path) || held.st_dev != path.st_dev || held.st_ino != path.st_ino ||
+        !directory_matches_at(directory, ".gc", gc) || !directory_matches_at(gc, "retirement-schedule", store) ||
+        !gc_has_no_partial_records(gc) || !gc_has_no_partial_records(store) ||
+        (matching = latcd_cache_capacity_open_matching_root(budget->capacity, root, directory)) < 0 ||
+        latcd_retirement_retry_page_load(root, page, error, error_size) || !page->intent_present ||
+        latcd_retirement_retry_page_budget_identity(page, identity) || !budget->page_identity_bound ||
+        memcmp(identity, budget->page_identity, 32) || retirement_clock(&boot, &now) ||
+        strcmp(boot, page->boot) || now < page->snapshot_time ||
+        retirement_schedule_access(root, boot, page->grace_us, now, 0, NULL, true,
+            &sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
+            NULL, scheduler, snapshot, error, error_size) || sequence != page->snapshot_sequence ||
+        retry_validate_snapshot(page, snapshot, now, &replaced) ||
+        !directory_matches_at(directory, ".gc", gc) || !directory_matches_at(gc, "retirement-schedule", store)) goto out;
+    if (!replaced) {
+        filename = g_strconcat(page->items[0].hint.name, ".ini", NULL);
+        if (!g_key_file_load_from_data(record, (char *)page->intent_data, page->intent_size, 0, NULL) ||
+            write_record_kind(store, filename, record, true, true, false, budget, NULL)) goto out;
+    }
+    result = 0;
+out:
+    if (matching >= 0) close(matching);
+    if (store >= 0) close(store);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    if (scheduler >= 0) close(scheduler);
+    g_free(boot); g_free(filename); g_free(page); g_array_free(snapshot, TRUE); g_key_file_unref(record);
+    return result ? fail(error, error_size, "retry intent apply unsafe; reload") : 0;
 }
 
 int latcd_retirement_schedule_merge_page(const char *root, const char *boot,

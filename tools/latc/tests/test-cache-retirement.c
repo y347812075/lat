@@ -1765,10 +1765,37 @@ static void test_retry_page_stage(void)
     assert(!latcd_retirement_retry_page_restore_budget(root, &intent_recovered, UINT64_MAX, 100,
                                                        &intent_budget, page, error, sizeof(error)) &&
            page->intent_present && !latcd_cache_capacity_recovery_finish(&intent_recovered));
+    const char *apply_crashes[] = {"file-synced", "renamed"};
+    for (unsigned i = 0; i < G_N_ELEMENTS(apply_crashes); i++) {
+        pid_t child = fork();
+        assert(child >= 0);
+        if (!child) {
+            char *fault = g_strdup_printf("crash:%s", apply_crashes[i]);
+            assert(!setenv("LATCD_TEST_RETIREMENT_IO", fault, 1));
+            latcd_retirement_retry_page_apply_unmatched(root, &intent_budget, error, sizeof(error));
+            _exit(1);
+        }
+        int status;
+        assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+        latcd_cache_capacity_close(&intent_recovered);
+        intent_recovered = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
+        memset(&intent_budget, 0, sizeof(intent_budget));
+        assert(!latcd_cache_capacity_scan(&intent_recovered, root, error, sizeof(error)));
+        assert(!latcd_cache_capacity_recovery_begin(&intent_recovered));
+        latcd_cache_capacity_metadata_bind(&intent_recovered, UINT64_MAX);
+        assert(!latcd_retirement_retry_page_restore_budget(root, &intent_recovered, UINT64_MAX, 100,
+                                                           &intent_budget, page, error, sizeof(error)) &&
+               !latcd_cache_capacity_recovery_finish(&intent_recovered));
+    }
+    assert(!latcd_retirement_retry_page_apply_unmatched(root, &intent_budget, error, sizeof(error)));
+    assert(!latcd_retirement_retry_page_apply_unmatched(root, &intent_budget, error, sizeof(error)));
     latcd_cache_capacity_close(&intent_recovered);
     char *shard_name = g_strconcat(hint.name, ".ini", NULL);
     char *shard_path = g_build_filename(schedule, shard_name, NULL);
-    assert(g_file_set_contents(shard_path, (char *)page->intent_data, page->intent_size, NULL));
+    char *installed = NULL; gsize installed_size = 0;
+    assert(g_file_get_contents(shard_path, &installed, &installed_size, NULL) &&
+           installed_size == page->intent_size && !memcmp(installed, page->intent_data, installed_size));
+    g_free(installed);
     LatcdCacheCapacity replaced = LATCD_CACHE_CAPACITY_INIT;
     LatcdPageBudget replaced_budget = {0};
     assert(!latcd_cache_capacity_scan(&replaced, root, error, sizeof(error)));
@@ -1777,6 +1804,7 @@ static void test_retry_page_stage(void)
     assert(!latcd_retirement_retry_page_restore_budget(root, &replaced, UINT64_MAX, 100,
                                                        &replaced_budget, page, error, sizeof(error)) &&
            page->intent_present && !latcd_cache_capacity_recovery_finish(&replaced));
+    assert(!latcd_retirement_retry_page_apply_unmatched(root, &replaced_budget, error, sizeof(error)));
     latcd_cache_capacity_close(&replaced);
     GKeyFile *shard = g_key_file_new();
     assert(g_key_file_load_from_file(shard, shard_path, 0, NULL));
