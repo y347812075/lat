@@ -188,6 +188,36 @@ static void test_abandon_bound_page(void)
     g_free(unexpected); g_free(gc); g_free(root);
 }
 
+static void test_abort_page_recovery(void)
+{
+    char *root = g_dir_make_tmp("capacity-abort-XXXXXX", NULL);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *unexpected = g_build_filename(gc, "unexpected", NULL);
+    assert(root && !mkdir(gc, 0700));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    latcd_cache_capacity_metadata_bind(&capacity, 100);
+    assert(latcd_cache_capacity_recovery_abort(&capacity) < 0);
+    assert(!latcd_cache_capacity_recovery_begin(&capacity));
+    uint8_t identity[32] = {1};
+    LatcdPageBudget budget = {0};
+    assert(!latcd_cache_capacity_restore_page(&capacity, 10, 100, identity, &budget));
+    put(unexpected, "x");
+    assert(latcd_cache_capacity_recovery_finish(&capacity) < 0);
+    assert(latcd_cache_capacity_abandon_page(&capacity, &budget) < 0);
+    assert(!latcd_cache_capacity_recovery_abort(&capacity));
+    assert(!capacity.ready && !capacity.recovery_gate);
+    assert(latcd_cache_capacity_reserve(&capacity, 1, 100, NULL, 0) < 0);
+    assert(latcd_cache_capacity_scan(&capacity, root, NULL, 0) < 0);
+    assert(!latcd_cache_capacity_abandon_page(&capacity, &budget));
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    assert(capacity.ready);
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    assert(!unlink(unexpected) && !rmdir(gc) && !rmdir(root));
+    g_free(unexpected); g_free(gc); g_free(root);
+}
+
 static void put_metadata(LatcdMetadataReservation *reservation, const char *path,
                          const char *contents)
 {
@@ -1114,6 +1144,7 @@ int main(void)
     test_matching_root();
     test_recovery_gate();
     test_abandon_bound_page();
+    test_abort_page_recovery();
     test_recovery_gate_race();
     test_external_metadata_root_creation();
     test_controlled_metadata_directory();

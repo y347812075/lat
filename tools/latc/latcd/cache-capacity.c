@@ -547,6 +547,22 @@ int latcd_cache_capacity_recovery_finish(LatcdCacheCapacity *capacity)
     return valid ? 0 : -1;
 }
 
+int latcd_cache_capacity_recovery_abort(LatcdCacheCapacity *capacity)
+{
+    if (!capacity) { errno = EINVAL; return -1; }
+    pthread_mutex_lock(&capacity->lock);
+    bool valid = capacity->recovery_gate &&
+        (!capacity->expected_names || !g_hash_table_size(capacity->expected_names)) &&
+        (!capacity->state_expected || !g_hash_table_size(capacity->state_expected));
+    if (valid) {
+        capacity->ready = false;
+        capacity->recovery_gate = false;
+    }
+    pthread_mutex_unlock(&capacity->lock);
+    if (!valid) errno = EBUSY;
+    return valid ? 0 : -1;
+}
+
 static int reserve_bytes(LatcdCacheCapacity *capacity, uint64_t bytes,
                            uint64_t limit, bool transient, char *error, size_t error_size)
 {

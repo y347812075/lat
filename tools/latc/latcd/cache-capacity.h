@@ -54,6 +54,9 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
  * opens admission under the same lock. Failure leaves the gate closed. */
 int latcd_cache_capacity_recovery_begin(LatcdCacheCapacity *capacity);
 int latcd_cache_capacity_recovery_finish(LatcdCacheCapacity *capacity);
+/* Abort startup recovery without opening admission. The owner must discard
+ * outstanding budgets and re-inventory/recover before accepting work. */
+int latcd_cache_capacity_recovery_abort(LatcdCacheCapacity *capacity);
 /* Return a readable directory fd for the inventoried root only when the configured path and
  * caller's directory fd still identify it. Caller owns the returned fd.
  * Startup/shutdown and rescans must not race this operation. */
