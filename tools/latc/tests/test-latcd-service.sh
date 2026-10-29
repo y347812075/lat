@@ -90,9 +90,10 @@ stop_service()
     server_pid=
 }
 
-start_service startup-retry "$latc"
+for retry_mode in fixture intent applied; do
+start_service "startup-retry-$retry_mode" "$latc"
 stop_service
-"$fixture" --startup-retry-fixture "$cache"
+"$fixture" "--startup-retry-$retry_mode" "$cache"
 object=$cache/$(printf '%064x' 7).so
 [ -f "$object" ]
 "$latcd" --serve --socket "$socket" --cache-dir "$cache" \
@@ -112,6 +113,7 @@ done
 [ -f "$object" ]
 grep -q "^retry_cursor=$(printf '%064x' 7).so$" "$cache/.gc/retirement-page.ini"
 stop_service
+done
 
 submit_source()
 {

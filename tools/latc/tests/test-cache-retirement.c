@@ -7208,7 +7208,7 @@ static void publish_page_fixture(const char *root, unsigned id)
     g_free(evidence); g_free(current); g_free(previous); g_free(next_manifest); g_free(src);
 }
 
-static void make_startup_retry_fixture(const char *root)
+static void make_startup_retry_fixture(const char *root, unsigned phase)
 {
     const uint64_t grace = UINT64_C(600) * 1000000;
     char error[256], *boot = NULL;
@@ -7235,6 +7235,10 @@ static void make_startup_retry_fixture(const char *root)
     assert(result < 0);
     assert(!latcd_retirement_queue_retry_page_stage(queue, &capacity, UINT64_MAX,
                                                       &budget, error, sizeof(error)));
+    if (phase)
+        assert(!latcd_retirement_retry_page_begin_deferred(root, &budget, error, sizeof(error)));
+    if (phase > 1)
+        assert(!latcd_retirement_retry_page_apply_unmatched(root, &budget, error, sizeof(error)));
     latcd_retirement_queue_free(queue);
     latcd_cache_capacity_close(&capacity);
     g_free(boot);
@@ -8039,8 +8043,12 @@ static void test_queue_overflow_fixture(void)
 
 int main(int argc, char **argv)
 {
-    if (argc == 3 && !strcmp(argv[1], "--startup-retry-fixture")) {
-        make_startup_retry_fixture(argv[2]);
+    if (argc == 3 && (!strcmp(argv[1], "--startup-retry-fixture") ||
+                      !strcmp(argv[1], "--startup-retry-intent") ||
+                      !strcmp(argv[1], "--startup-retry-applied"))) {
+        unsigned phase = !strcmp(argv[1], "--startup-retry-applied") ? 2 :
+                         !strcmp(argv[1], "--startup-retry-intent") ? 1 : 0;
+        make_startup_retry_fixture(argv[2], phase);
         return 0;
     }
     if (argc == 5 && !strcmp(argv[1], "--loader-pin-probe")) {
