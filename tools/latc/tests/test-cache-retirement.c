@@ -7210,8 +7210,15 @@ static void test_retry_not_due(void)
         _exit(latcd_retirement_retry_page_begin_not_due(root, &budget, error, sizeof(error)) < 0 ? 0 : 1);
     }
     int status; assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
-    assert(!latcd_retirement_retry_page_begin_not_due(root, &budget, error, sizeof(error)));
+    child = fork(); assert(child >= 0);
+    if (!child) {
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", "crash:renamed", 1));
+        latcd_retirement_retry_page_begin_not_due(root, &budget, error, sizeof(error));
+        _exit(1);
+    }
+    assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
     latcd_retirement_queue_free(queue); latcd_cache_capacity_close(&capacity);
+    simulated_boottime_us = 201;
     capacity = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT; memset(&budget, 0, sizeof(budget));
     assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
     assert(!latcd_cache_capacity_recovery_begin(&capacity));
