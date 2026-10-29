@@ -539,6 +539,9 @@ int latcd_retirement_retry_page_begin_unmatched(const char *root,
 /* Apply or idempotently recognize the first unmatched intent; no removal authority. */
 int latcd_retirement_retry_page_apply_unmatched(const char *root,
     struct LatcdPageBudget *budget, char *error, size_t error_size);
+/* Persist completion only after validating the replacement shard. */
+int latcd_retirement_retry_page_finish_unmatched(const char *root,
+    struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Advance only past an entirely unmatched retry batch while preserving every
  * shard. Requires a snapshot-bound monitored scan; never authorizes removal. */
 int latcd_retirement_queue_retry_advance_unmatched(LatcdRetirementQueue *queue,
