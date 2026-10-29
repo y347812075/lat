@@ -22,6 +22,7 @@ static pid_t start_service(const LatcdConfig *config)
     if (!child) {
         char error[256];
         g_assert_cmpint(ensure_private_directory(config->cache_dir, error, sizeof(error)), ==, 0);
+        g_assert_cmpint(prepare_metadata_directories(config->cache_dir), ==, 0);
         g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, config->cache_dir,
                                                 error, sizeof(error)), ==, 0);
         latcd_cache_capacity_metadata_bind(&generation_capacity, config->max_cache_bytes);
@@ -757,7 +758,26 @@ int main(void)
     g_assert_cmpint(latcd_journal_recover(cache, build, codegen, config.max_cache_bytes,
                                          &recovered, error, sizeof(error)), ==, 0);
     g_assert_cmpuint(recovered, ==, 1);
+    int receipt_watch = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    g_assert_cmpint(receipt_watch, >=, 0);
+    char watch_path[64];
+    g_snprintf(watch_path, sizeof(watch_path), "/proc/self/fd/%d", stream_fd);
+    g_assert_cmpint(inotify_add_watch(receipt_watch, watch_path, IN_CREATE | IN_MOVED_TO), >=, 0);
     daemon = start_service(&config);
+    if (faccessat(stream_fd, "received.tbset", F_OK, 0)) {
+        struct pollfd ready = {.fd = receipt_watch, .events = POLLIN};
+        int64_t deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+        while (faccessat(stream_fd, "received.tbset", F_OK, 0)) {
+            int64_t remaining = deadline - g_get_monotonic_time();
+            g_assert_cmpint(remaining, >, 0);
+            int result = poll(&ready, 1, (remaining + 999) / 1000);
+            if (result < 0 && errno == EINTR) continue;
+            g_assert_cmpint(result, >, 0);
+            char events[4096];
+            g_assert_cmpint(read(receipt_watch, events, sizeof(events)), >, 0);
+        }
+    }
+    close(receipt_watch);
     check_collection(&config, stream_fd, &identity);
     g_assert_cmpint(kill(daemon, SIGTERM), ==, 0);
     wait_ok(daemon);

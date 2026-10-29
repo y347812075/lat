@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 int latcd_client_hello(const char *socket_path, const char *build_id,
                         const uint8_t cache_identity[32],
@@ -12,6 +13,26 @@ int latcd_client_hello(const char *socket_path, const char *build_id,
 int latcd_client_open_channel(const char *socket_path, const char *build_id,
                               const uint8_t cache_identity[32],
                               char *error, size_t error_size);
+/* Failure after sending is indeterminate: daemon may already have created it. */
+int latcd_client_channel_prepare_source_lock(int channel_fd, int cache_fd,
+    const uint8_t digest[32], uint64_t request_id, char *error, size_t error_size);
+/* sent is set after the complete request packet is accepted by the socket. */
+int latcd_client_channel_prepare_source_lock_ex(int channel_fd, int cache_fd,
+    const uint8_t digest[32], uint64_t request_id, bool *sent,
+    char *error, size_t error_size);
+typedef struct LatcdClientFdProtection {
+    void (*allocation_lock)(void);
+    void (*unlock)(void);
+    int (*register_locked)(int fd);
+    void (*close_fd)(int fd);
+} LatcdClientFdProtection;
+/* Successful channel is registered and must be released with close_fd. */
+int latcd_client_open_channel_protected(const char *socket_path, const char *build_id,
+    const uint8_t cache_identity[32], const LatcdClientFdProtection *protection,
+    char *error, size_t error_size);
+int latcd_client_channel_prepare_source_lock_protected(int channel_fd, int cache_fd,
+    const uint8_t digest[32], uint64_t request_id, bool *sent,
+    const LatcdClientFdProtection *protection, char *error, size_t error_size);
 int latcd_client_channel_submit_keys_fd(int channel_fd, int source_fd,
                                         int keys_fd, uint32_t priority,
                                         uint64_t request_id, uint64_t sequence,

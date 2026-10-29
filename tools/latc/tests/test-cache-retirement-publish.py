@@ -29,7 +29,7 @@ def run(prefix, guest, work):
                     "-o", str(full_tbset)], check=True, env=env)
     assert set(read_key_set(tbset)[2]) < set(read_key_set(full_tbset)[2]), (
         "replacement scenarios require additional static keys; use x86-cache-retirement fixture")
-    phases = ("prepared", "current", "current-synced", "retired")
+    phases = ("prepared", "current", "current-sync-error", "current-synced", "retired")
     for phase, initial in [(phase, initial) for initial in (False, True) for phase in phases]:
         label = phase + ("-replacement" if initial else "-first")
         directory = work / label
@@ -75,7 +75,11 @@ def run(prefix, guest, work):
                         str(socket), "--tbset", str(full_tbset if initial else tbset), str(guest)], env=env,
                         stdout=client_log, stderr=client_log, timeout=120)
                 assert client.returncode != 0
-                assert daemon.wait(timeout=30) == -signal.SIGKILL
+                daemon_status = daemon.wait(timeout=30)
+                if phase == "current-sync-error":
+                    assert daemon_status != -signal.SIGKILL
+                else:
+                    assert daemon_status == -signal.SIGKILL
             finally:
                 if daemon.poll() is None:
                     daemon.kill()
@@ -185,7 +189,8 @@ def run(prefix, guest, work):
             # A persisted intent must block new loads even after the GC's EX
             # lease is gone. Corrupt intent is equally conservative.
             tombstones = cache / ".gc/tombstones"
-            tombstones.mkdir(mode=0o700)
+            tombstones.mkdir(mode=0o700, exist_ok=True)
+            assert not any(tombstones.iterdir())
             marker = tombstones / json.loads((cache / (source + ".current")).read_bytes())["module"]
             marker.write_bytes(b"deliberately invalid tombstone\n")
             marker.chmod(0o400)
@@ -195,7 +200,6 @@ def run(prefix, guest, work):
             assert blocked.returncode != 42
             assert "tombstoned" in (directory / "tombstone-runner.log").read_text()
             marker.unlink()
-            tombstones.rmdir()
         if old_manifest:
             for role in ("module", "native", "tbset"):
                 assert (cache / json.loads(old_manifest)[role]).is_file()
@@ -203,7 +207,8 @@ def run(prefix, guest, work):
             retired = json.loads(old_manifest)
             active = json.loads(manifest.read_bytes())
             tombstones = cache / ".gc/tombstones"
-            tombstones.mkdir(mode=0o700)
+            tombstones.mkdir(mode=0o700, exist_ok=True)
+            assert not any(tombstones.iterdir())
             shared = set(active[role] for role in ("module", "native", "tbset"))
             removed = set()
             for role in ("module", "native", "tbset"):

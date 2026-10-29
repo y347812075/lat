@@ -8,6 +8,7 @@
 #define fsync coverage_fsync
 #define linkat coverage_linkat
 #define unlinkat coverage_unlinkat
+#define flock coverage_flock
 #define lat_tb_key_set_read_file coverage_tb_key_set_read_file
 #define main latcd_program_main
 #include "../../latcd/main.c"
@@ -22,8 +23,84 @@
 #undef fsync
 #undef linkat
 #undef unlinkat
+#undef flock
 #undef lat_tb_key_set_read_file
 #include <glib/gstdio.h>
+
+extern int flock(int fd, int operation);
+extern int rename(const char *oldpath, const char *newpath);
+static const char *owner_swap_path, *owner_swap_old;
+static bool owner_swap_on_sync;
+int coverage_flock(int fd, int operation)
+{
+    int result = flock(fd, operation);
+    if (!result && owner_swap_path && !owner_swap_on_sync && operation == (LOCK_EX | LOCK_NB)) {
+        g_assert_cmpint(rename(owner_swap_path, owner_swap_old), ==, 0);
+        owner_swap_path = NULL;
+    }
+    return result;
+}
+
+static void test_owner_binding_swap(bool root_swap, bool on_sync)
+{
+    char *root = g_dir_make_tmp("latcd-owner-binding-XXXXXX", NULL);
+    g_assert_nonnull(root);
+    char *lock = g_build_filename(root, ".latcd.lock", NULL);
+    char *old = root_swap ? g_strconcat(root, ".old", NULL) :
+                            g_build_filename(root, ".latcd.lock.old", NULL);
+    owner_swap_path = root_swap ? root : lock;
+    owner_swap_old = old;
+    owner_swap_on_sync = on_sync;
+    LatcdConfig config = {.cache_dir = root, .socket_path = "test"};
+    char error[256];
+    errno = 0;
+    g_assert_cmpint(acquire_cache_owner(&config, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(errno, ==, ESTALE);
+    g_assert_nonnull(strstr(error, "cache owner lock binding changed"));
+    g_assert_null(owner_swap_path);
+    char *old_lock = root_swap ? g_build_filename(old, ".latcd.lock", NULL) : g_strdup(old);
+    struct stat st;
+    g_assert_cmpint(stat(old_lock, &st), ==, 0);
+    if (on_sync) g_assert_cmpint(st.st_size, >, 0);
+    else g_assert_cmpint(st.st_size, ==, 0);
+    g_assert_cmpint(g_unlink(old_lock), ==, 0);
+    g_assert_cmpint(g_rmdir(root_swap ? old : root), ==, 0);
+    owner_swap_old = NULL;
+    owner_swap_on_sync = false;
+    g_free(old_lock); g_free(old); g_free(lock); g_free(root);
+}
+
+static void test_owner_binding_after_acquire(bool root_swap)
+{
+    char *root = g_dir_make_tmp("latcd-owner-recheck-XXXXXX", NULL);
+    g_assert_nonnull(root);
+    char *lock = g_build_filename(root, ".latcd.lock", NULL);
+    char *old = root_swap ? g_strconcat(root, ".old", NULL) :
+                            g_build_filename(root, ".latcd.lock.old", NULL);
+    LatcdConfig config = {.cache_dir = root, .socket_path = "test"};
+    char error[256];
+    int fd = acquire_cache_owner(&config, error, sizeof(error));
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(check_cache_owner_binding(root, fd, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(rename(root_swap ? root : lock, old), ==, 0);
+    if (root_swap) g_assert_cmpint(g_mkdir(root, 0700), ==, 0);
+    else g_assert_true(g_file_set_contents(lock, "", 0, NULL));
+    errno = 0;
+    g_assert_cmpint(check_cache_owner_binding(root, fd, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(errno, ==, ESTALE);
+    close(fd);
+    if (root_swap) {
+        char *old_lock = g_build_filename(old, ".latcd.lock", NULL);
+        g_assert_cmpint(g_unlink(old_lock), ==, 0);
+        g_assert_cmpint(g_rmdir(old), ==, 0);
+        g_free(old_lock);
+    } else {
+        g_assert_cmpint(g_unlink(old), ==, 0);
+        g_assert_cmpint(g_unlink(lock), ==, 0);
+    }
+    g_assert_cmpint(g_rmdir(root), ==, 0);
+    g_free(old); g_free(lock); g_free(root);
+}
 
 extern int lat_tb_key_set_read_file(const char *, const uint8_t [32],
                                     LatTbKeySet *, char *, size_t);
@@ -100,6 +177,10 @@ int coverage_fsync(int fd)
         RECORD_DIRECTORY_SYNC : RECORD_FILE_SYNC;
     if (record_fault(boundary, false)) return -1;
     int result = fsync(fd);
+    if (!result && owner_swap_path && owner_swap_on_sync && S_ISREG(status.st_mode)) {
+        g_assert_cmpint(rename(owner_swap_path, owner_swap_old), ==, 0);
+        owner_swap_path = NULL;
+    }
     if (!result) record_fault(boundary, true);
     return result;
 }
@@ -311,7 +392,7 @@ static void publish_during_digest(int fd)
     close(contender);
     g_assert_cmpint(publish_current_index(cleanup_config, cleanup_hex,
         cleanup_names[0], cleanup_names[1], cleanup_names[2], cleanup_info,
-        5, true, error, sizeof(error)), ==, 0);
+        5, true, NULL, error, sizeof(error)), ==, 0);
     pthread_mutex_unlock(&cache_lock);
 }
 
@@ -416,13 +497,13 @@ static void test_publication_cleanup(void)
     generation_capacity.committed = 100;
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[0],
-        names[1], names[2], &info, 1, true, error, sizeof(error)), ==, 0);
+        names[1], names[2], &info, 1, true, NULL, error, sizeof(error)), ==, 0);
     cleanup_config = &config;
     hook_read_path = module;
     read_hook = cleanup_during_digest;
     /* Covered-TB publication keeps the pair but stages an unreferenced set. */
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[0],
-        names[1], names[5], &info, 2, false, error, sizeof(error)), ==, 0);
+        names[1], names[5], &info, 2, false, NULL, error, sizeof(error)), ==, 0);
     g_assert_null(read_hook);
     /* A newly compiled pair is also unreferenced until manifest commit. */
     char *new_module = g_build_filename(directory, names[3], NULL);
@@ -438,7 +519,7 @@ static void test_publication_cleanup(void)
     hook_read_path = new_module;
     read_hook = cleanup_during_digest;
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[3],
-        names[4], names[5], &info, 3, true, error, sizeof(error)), ==, 0);
+        names[4], names[5], &info, 3, true, NULL, error, sizeof(error)), ==, 0);
     g_assert_null(read_hook);
     /* A path pin constrains internal cleanup, not external replacement. */
     char *new_tbset = g_build_filename(directory, names[5], NULL);
@@ -447,13 +528,13 @@ static void test_publication_cleanup(void)
     hook_mutate = false;
     read_hook = replace_during_read;
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[3],
-        names[4], names[5], &info, 4, true, error, sizeof(error)), ==, -1);
+        names[4], names[5], &info, 4, true, NULL, error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "changed during digest"));
     g_assert_cmpint(g_chmod(new_tbset, 0444), ==, 0);
     cleanup_info = &info;
     read_hook = publish_during_digest;
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[3],
-        names[4], names[5], &info, 4, true, error, sizeof(error)), ==, -1);
+        names[4], names[5], &info, 4, true, NULL, error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "changed during digest"));
     LatcdCurrentManifest latest = {0};
     g_assert_cmpint(current_manifest_read(&config, cleanup_hex, &latest), ==, 0);
@@ -463,7 +544,7 @@ static void test_publication_cleanup(void)
     current_manifest_clear(&latest);
     g_assert_cmpint(g_unlink(new_tbset), ==, 0);
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[3],
-        names[4], names[5], &info, 6, true, error, sizeof(error)), ==, -1);
+        names[4], names[5], &info, 6, true, NULL, error, sizeof(error)), ==, -1);
     pthread_mutex_unlock(&cache_lock);
     cleanup_config = NULL;
     generation_capacity.committed = 0;
@@ -484,6 +565,11 @@ static void test_publication_cleanup(void)
 static void test_incremental_retention(const char *compiler, unsigned mode)
 {
     char *directory = g_dir_make_tmp("latcd-large-coverage-XXXXXX", NULL);
+    latcd_cache_capacity_close(&generation_capacity);
+    g_assert_cmpint(prepare_metadata_directories(directory), ==, 0);
+    char *schedule = g_build_filename(directory, ".gc", "retirement-schedule", NULL);
+    g_assert_true(g_file_test(schedule, G_FILE_TEST_IS_DIR));
+    g_free(schedule);
     char hex[65];
     uint8_t digest[32];
     memset(digest, 0x11, 32);
@@ -541,11 +627,18 @@ static void test_incremental_retention(const char *compiler, unsigned mode)
     g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory,
         error, sizeof(error)), ==, 0);
     latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
+    int cache_fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    g_assert_cmpint(cache_fd, >=, 0);
+    int gc_fd = latcd_cache_capacity_open_metadata_directory(cache_fd, ".gc");
+    g_assert_cmpint(gc_fd, >=, 0);
+    int schedule_fd = latcd_cache_capacity_open_metadata_directory(gc_fd, "retirement-schedule");
+    g_assert_cmpint(schedule_fd, >=, 0);
+    close(schedule_fd); close(gc_fd); close(cache_fd);
     LatAotModuleInfoV2 info;
     g_assert_cmpint(lat_aot_v2_module_inspect_file(old, &info, error, sizeof(error)), ==, 0);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
-        input_name, &info, 1, true, error, sizeof(error)), ==, 0);
+        input_name, &info, 1, true, NULL, error, sizeof(error)), ==, 0);
     pthread_mutex_unlock(&cache_lock);
     if (mode == 3) {
         g_assert_cmpint(g_unlink(native), ==, 0);
@@ -714,13 +807,86 @@ static void test_compiler_input_recovery(void)
     g_assert_cmpuint(generation_capacity.recovered_reserved, ==, 0);
     g_assert_cmpuint(g_hash_table_size(generation_capacity.unknown_tasks), ==, 1);
     g_assert_cmpint(latcd_cache_capacity_reserve(&generation_capacity, 1, UINT64_MAX, NULL, 0), ==, -1);
+    char *interleaved_tasks = g_build_filename(directory, ".gc", "tasks", NULL);
+    LatcdBudgetRecovery interleaved = {.scanning_tasks = true,
+                                       .cursor = opendir(interleaved_tasks)};
+    g_free(interleaved_tasks);
+    g_assert_nonnull(interleaved.cursor);
+    unsigned interleaved_visited;
+    int scan;
     g_assert_cmpint(record_compiler_budget(&config, id, &budget_task, 12345), ==, 0);
+    do {
+        scan = restore_compiler_budgets_step(&config, &interleaved, 1, &interleaved_visited,
+                                              error, sizeof(error));
+    } while (scan == 1);
+    g_assert_cmpint(scan, ==, -1);
+    g_assert_null(interleaved.cursor);
+    g_assert_cmpuint(generation_capacity.recovered_reserved, ==, 0);
     g_assert_cmpint(restore_compiler_budgets(&config, error, sizeof(error)), ==, 0);
     g_assert_cmpuint(generation_capacity.recovered_reserved, ==, 12345);
     g_assert_cmpuint(g_hash_table_size(generation_capacity.unknown_tasks), ==, 0);
     g_assert_cmpint(restore_compiler_budgets(&config, error, sizeof(error)), ==, 0);
     g_assert_cmpuint(generation_capacity.recovered_reserved, ==, 12345);
     char *name = g_strdup_printf("%s.ini", id);
+    LatcdBudgetRecovery swapped = {0};
+    unsigned swapped_visited;
+    g_assert_cmpint(restore_compiler_budgets_step(&config, &swapped, 1, &swapped_visited,
+                                                   error, sizeof(error)), ==, 1);
+    char *budget_dir = g_build_filename(directory, ".gc", "compiler-budgets", NULL);
+    char *budget_dir_old = g_strconcat(budget_dir, "-old", NULL);
+    g_assert_cmpint(g_rename(budget_dir, budget_dir_old), ==, 0);
+    g_assert_cmpint(g_mkdir(budget_dir, 0700), ==, 0);
+    g_assert_cmpint(restore_compiler_budgets_step(&config, &swapped, 1, &swapped_visited,
+                                                   error, sizeof(error)), ==, -1);
+    g_assert_null(swapped.cursor);
+    g_assert_cmpint(g_rmdir(budget_dir), ==, 0);
+    g_assert_cmpint(g_rename(budget_dir_old, budget_dir), ==, 0);
+    g_free(budget_dir_old); g_free(budget_dir);
+    char *budget_identity_path = g_build_filename(directory, ".gc", "compiler-budgets", name, NULL);
+    char *budget_backup = g_strconcat(budget_identity_path, ".backup", NULL);
+    LatcdBudgetSnapshot *identity = g_new0(LatcdBudgetSnapshot, 1);
+    g_assert_cmpint(stat(budget_identity_path, &identity->budget), ==, 0);
+    g_assert_cmpint(fstat(task, &identity->task), ==, 0);
+    char *budget_data = NULL;
+    gsize budget_size;
+    g_assert_true(g_file_get_contents(budget_identity_path, &budget_data, &budget_size, NULL));
+    g_assert_cmpint(g_rename(budget_identity_path, budget_backup), ==, 0);
+    g_assert_true(g_file_set_contents(budget_identity_path, budget_data, budget_size, NULL));
+    g_assert_cmpint(g_chmod(budget_identity_path, 0400), ==, 0);
+    char *tasks_path = g_build_filename(directory, ".gc", "tasks", NULL);
+    LatcdBudgetRecovery replaced = {.scanning_tasks = true, .cursor = opendir(tasks_path),
+        .snapshots = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free)};
+    g_assert_nonnull(replaced.cursor);
+    g_hash_table_insert(replaced.snapshots, g_strdup(id), identity);
+    do {
+        scan = restore_compiler_budgets_step(&config, &replaced, 1, &interleaved_visited,
+                                              error, sizeof(error));
+    } while (scan == 1);
+    g_assert_cmpint(scan, ==, -1);
+    g_assert_null(replaced.snapshots);
+    g_assert_cmpint(g_unlink(budget_identity_path), ==, 0);
+    g_assert_cmpint(g_rename(budget_backup, budget_identity_path), ==, 0);
+    for (unsigned missing = 0; missing < 2; missing++) {
+        LatcdBudgetSnapshot *saved = g_new0(LatcdBudgetSnapshot, 1);
+        g_assert_cmpint(stat(budget_identity_path, &saved->budget), ==, 0);
+        g_assert_cmpint(fstat(task, &saved->task), ==, 0);
+        char *task_path = g_build_filename(tasks_path, name, NULL);
+        char *removed = missing ? task_path : budget_identity_path;
+        char *backup = g_strconcat(removed, ".missing", NULL);
+        g_assert_cmpint(g_rename(removed, backup), ==, 0);
+        LatcdBudgetRecovery vanished = {.scanning_tasks = true, .cursor = opendir(tasks_path),
+            .snapshots = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free)};
+        g_assert_nonnull(vanished.cursor);
+        g_hash_table_insert(vanished.snapshots, g_strdup(id), saved);
+        do {
+            scan = restore_compiler_budgets_step(&config, &vanished, 1, &interleaved_visited,
+                                                  error, sizeof(error));
+        } while (scan == 1);
+        g_assert_cmpint(scan, ==, -1);
+        g_assert_cmpint(g_rename(backup, removed), ==, 0);
+        g_free(backup); g_free(task_path);
+    }
+    g_free(tasks_path); g_free(budget_data); g_free(budget_backup); g_free(budget_identity_path);
     char *release = g_build_filename(directory, ".gc", "compiler-releases", name, NULL);
     g_assert_cmpint(recover_compiler_inputs(&config, error, sizeof(error)), ==, 0);
     g_assert_false(g_file_test(release, G_FILE_TEST_EXISTS));
@@ -1014,7 +1180,8 @@ static void test_persistent_state_capacity(void)
     g_assert_true(g_file_set_contents(native, "native", 6, NULL));
     g_assert_cmpint(g_chmod(native, 0444), ==, 0);
     LatTbKey keys[] = {{.guest_rva = 0x100, .flags = 3},
-                      {.guest_rva = 0x200, .flags = 3}};
+                      {.guest_rva = 0x200, .flags = 3},
+                      {.guest_rva = 0x300, .flags = 3}};
     LatTbKeySet set = {.keys = keys, .count = 1, .sequence = 1};
     memcpy(set.source_sha256, digest, 32);
     int fd = open(input, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
@@ -1027,8 +1194,9 @@ static void test_persistent_state_capacity(void)
     g_assert_cmpint(lat_aot_v2_module_inspect_file(module, &info, error, sizeof(error)), ==, 0);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, module_name, native_name,
-        "", &info, 1, true, error, sizeof(error)), ==, 0);
+        "", &info, 1, true, NULL, error, sizeof(error)), ==, 0);
     pthread_mutex_unlock(&cache_lock);
+    g_assert_cmpint(prepare_metadata_directories(directory), ==, 0);
     g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory, error, sizeof(error)), ==, 0);
     uint64_t initial = generation_capacity.state_committed;
     uint64_t exact = initial + generation_capacity.committed + generation_capacity.metadata_committed;
@@ -1039,7 +1207,7 @@ static void test_persistent_state_capacity(void)
     g_assert_true(g_file_get_contents(canonical, &key_before, &key_before_size, NULL));
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, module_name, native_name,
-        "", &info, 2, true, error, sizeof(error)), ==, -1);
+        "", &info, 2, true, NULL, error, sizeof(error)), ==, -1);
     pthread_mutex_unlock(&cache_lock);
     g_assert_nonnull(strstr(error, "capacity:"));
     g_assert_true(g_file_get_contents(manifest, &after, NULL, NULL));
@@ -1066,13 +1234,46 @@ static void test_persistent_state_capacity(void)
     publish_source_identity(&config, &identity, digest);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, module_name, native_name,
-        "", &info, 2, true, error, sizeof(error)), ==, 0);
+        "", &info, 2, true, NULL, error, sizeof(error)), ==, 0);
     pthread_mutex_unlock(&cache_lock);
     g_assert_cmpuint(generation_capacity.state_committed, ==, initial + sizeof(LatTbKey) + 65);
     g_assert_cmpuint(generation_capacity.state_reserved, ==, 0);
     uint64_t final = generation_capacity.state_committed;
     g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory, error, sizeof(error)), ==, 0);
     g_assert_cmpuint(generation_capacity.state_committed, ==, final);
+    set.count = 3;
+    g_assert_cmpint(lat_tb_key_set_write_fd(fd, &set, error, sizeof(error)), ==, 0);
+    record_boundary = RECORD_DIRECTORY_SYNC;
+    record_hits = 0;
+    next = NULL;
+    g_assert_cmpint(merge_tbset(&config, digest, input, &next, NULL, error, sizeof(error)), ==, -1);
+    g_assert_null(next);
+    g_assert_cmpuint(record_hits, ==, 1);
+    g_assert_false(latcd_cache_capacity_poll(&generation_capacity));
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory, error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(generation_capacity.state_committed, ==, final + sizeof(LatTbKey));
+    record_boundary = RECORD_DIRECTORY_SYNC;
+    record_hits = 0;
+    publish_source_identity(&config, &identity, digest);
+    g_assert_cmpuint(record_hits, ==, 1);
+    g_assert_false(latcd_cache_capacity_poll(&generation_capacity));
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory, error, sizeof(error)), ==, 0);
+    char *tasks_path = g_build_filename(directory, ".gc", "tasks", NULL);
+    int tasks_fd = open(tasks_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    g_assert_cmpint(tasks_fd, >=, 0);
+    char *task_id = g_uuid_string_random();
+    GKeyFile *task_record = g_key_file_new();
+    g_key_file_set_string(task_record, "test", "value", "record");
+    record_boundary = RECORD_DIRECTORY_SYNC;
+    record_hits = 0;
+    g_assert_cmpint(persist_task_record(tasks_fd, task_id, task_record), ==, -1);
+    g_assert_cmpuint(record_hits, ==, 1);
+    g_assert_false(latcd_cache_capacity_poll(&generation_capacity));
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory, error, sizeof(error)), ==, 0);
+    char *task_name = g_strdup_printf("%s.ini", task_id);
+    g_assert_cmpint(faccessat(tasks_fd, task_name, F_OK, 0), ==, 0);
+    g_free(task_name); g_key_file_unref(task_record); g_free(task_id);
+    close(tasks_fd); g_free(tasks_path);
     latcd_cache_capacity_close(&generation_capacity);
     close(fd);
     g_free(before); g_free(key_before); g_free(canonical);
@@ -1089,6 +1290,12 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc == 1) {
+        test_owner_binding_swap(false, false);
+        test_owner_binding_swap(true, false);
+        test_owner_binding_swap(false, true);
+        test_owner_binding_swap(true, true);
+        test_owner_binding_after_acquire(false);
+        test_owner_binding_after_acquire(true);
         test_persistent_state_capacity();
         test_copy_root_recovery();
         test_compiler_input_recovery();
@@ -1152,6 +1359,7 @@ int main(int argc, char **argv)
     digest_hex(digest, hex);
     char *directory = g_dir_make_tmp("latcd-coverage-XXXXXX", NULL);
     g_assert_nonnull(directory);
+    g_assert_cmpint(prepare_metadata_directories(directory), ==, 0);
     char *temporary = g_build_filename(directory, ".tmp", NULL);
     g_assert_cmpint(g_mkdir(temporary, 0700), ==, 0);
     char *old_name = g_strdup_printf("%s.so", hex);
@@ -1183,7 +1391,7 @@ int main(int argc, char **argv)
                                                  error, sizeof(error)), ==, 0);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
-        tbset_name, &info, 1, true, error, sizeof(error)), ==, 0);
+        tbset_name, &info, 1, true, NULL, error, sizeof(error)), ==, 0);
     LatcdCurrentManifest paired = {0};
     g_assert_cmpint(current_manifest_read(&config, hex, &paired), ==, 0);
     char *pair_native = NULL, *pair_module = NULL;
@@ -1274,7 +1482,7 @@ int main(int argc, char **argv)
     hook_mutate = false;
     read_hook = replace_during_read;
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
-        tbset_name, &info, 2, true, error, sizeof(error)), ==, -1);
+        tbset_name, &info, 2, true, NULL, error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "changed during digest"));
     gchar *concurrent_manifest = NULL;
     g_assert_true(g_file_get_contents(manifest, &concurrent_manifest, NULL, NULL));
@@ -1285,25 +1493,25 @@ int main(int argc, char **argv)
     g_free(selected_manifest);
     read_hook = assert_unlocked_read;
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
-        tbset_name, &info, 1, true, error, sizeof(error)), ==, 0);
+        tbset_name, &info, 1, true, NULL, error, sizeof(error)), ==, 0);
     char *historical_name = g_strdup_printf("%s-historical.so", hex);
     char *historical_path = g_build_filename(directory, historical_name, NULL);
     daemon_fixture(historical_path, keys, 2);
     g_assert_cmpint(publish_current_index(&config, hex, historical_name, native_name,
-        tbset_name, &info, 1, false, error, sizeof(error)), ==, 0);
+        tbset_name, &info, 1, false, NULL, error, sizeof(error)), ==, 0);
     g_assert_cmpint(current_manifest_read(&config, hex, &paired), ==, 0);
     g_assert_null(paired.module_sha256);
     g_assert_null(paired.native_sha256);
     current_manifest_clear(&paired);
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
-        tbset_name, &info, 1, true, error, sizeof(error)), ==, 0);
+        tbset_name, &info, 1, true, NULL, error, sizeof(error)), ==, 0);
     g_unlink(historical_path);
     g_free(historical_name);
     g_free(historical_path);
     gchar *before = NULL, *after = NULL;
     g_assert_true(g_file_get_contents(manifest, &before, NULL, NULL));
     g_assert_cmpint(publish_current_index(&config, hex, new_name, native_name,
-        tbset_name, &info, 2, true, error, sizeof(error)), ==, -1);
+        tbset_name, &info, 2, true, NULL, error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "replacement loses module coverage"));
     g_assert_true(g_file_get_contents(manifest, &after, NULL, NULL));
     g_assert_cmpstr(before, ==, after);
@@ -1409,7 +1617,7 @@ int main(int argc, char **argv)
     daemon_fixture(new_path, keys, 3);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, new_name, native_name,
-        tbset_name, &info, 2, true, error, sizeof(error)), ==, 0);
+        tbset_name, &info, 2, true, NULL, error, sizeof(error)), ==, 0);
     pthread_mutex_unlock(&cache_lock);
     g_assert_true(g_file_get_contents(manifest, &after, NULL, NULL));
     g_assert_nonnull(strstr(after, new_name));
@@ -1422,7 +1630,7 @@ int main(int argc, char **argv)
     daemon_fixture(old_path, keys, 3);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
-        "", &info, 2, true, error, sizeof(error)), ==, 0);
+        "", &info, 2, true, NULL, error, sizeof(error)), ==, 0);
     pthread_mutex_unlock(&cache_lock);
     g_assert_cmpint(g_unlink(native_path), ==, 0);
     g_free(before);

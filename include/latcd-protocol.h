@@ -37,6 +37,8 @@ enum LatcdOperation {
      * and sequence is the executable RVA. Daemon commits flags CODE64|PARALLEL.
      */
     LATCD_OP_APPEND_JOURNAL = 11,
+    /* Authenticated channel: cache directory fd and sealed 32-byte digest fd. */
+    LATCD_OP_PREPARE_SOURCE_LOCK = 12,
 };
 
 enum LatcdStatus {

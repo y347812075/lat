@@ -2687,10 +2687,11 @@ static void close_protected_cache_fd(int fd)
     }
 }
 
-static int source_latch_test_barrier(char *error, size_t error_size)
+static int source_latch_test_barrier(const char *ready_name, const char *release_name,
+                                     char *error, size_t error_size)
 {
-    const char *ready = getenv("LATX_AOT_V2_TEST_SOURCE_LATCH_READY");
-    const char *release = getenv("LATX_AOT_V2_TEST_SOURCE_LATCH_RELEASE");
+    const char *ready = getenv(ready_name);
+    const char *release = getenv(release_name);
     if (!ready || !*ready || !release || !*release) return 0;
     int fd = open(ready, O_WRONLY | O_CREAT | O_EXCL |
                   O_CLOEXEC | O_NOFOLLOW, 0600);
@@ -2713,6 +2714,65 @@ static int source_latch_test_barrier(char *error, size_t error_size)
     return 0;
 }
 
+static int open_manifest_source_lock(const char *cache, const char *source_hex,
+                                     const uint8_t digest[32],
+                                     char *error, size_t error_size)
+{
+    int fd = lat_aot_v2_cache_source_lock_existing(
+        cache, source_hex, LOCK_SH, true, error, error_size);
+    if (fd >= 0 || errno != ENOENT) return fd;
+    if (source_latch_test_barrier("LATX_AOT_V2_TEST_LOCK_MISSING_READY",
+                                  "LATX_AOT_V2_TEST_LOCK_MISSING_RELEASE",
+                                  error, error_size)) return -1;
+
+    const LatcdClientFdProtection protection = {
+        lat_aot_v2_internal_fd_allocation_lock,
+        lat_aot_v2_internal_fd_unlock,
+        lat_aot_v2_internal_fd_register_locked,
+        close_internal_fd,
+    };
+    lat_aot_v2_internal_fd_allocation_lock();
+    int root = open(cache, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (root >= 0 && lat_aot_v2_internal_fd_register_locked(root)) {
+        int saved = errno;
+        close(root);
+        root = -1;
+        errno = saved;
+    }
+    lat_aot_v2_internal_fd_unlock();
+    if (root < 0) {
+        snprintf(error, error_size, "cannot open cache root: %s", strerror(errno));
+        return -1;
+    }
+
+    int channel = lat_aot_open_existing_channel_protected(
+        &protection, error, error_size);
+    if (channel >= 0) {
+        static _Atomic uint64_t sequence;
+        uint64_t request = ((uint64_t)getpid() << 32) ^
+                           (atomic_fetch_add(&sequence, 1) + 1);
+        bool sent;
+        latcd_client_channel_prepare_source_lock_protected(
+            channel, root, digest, request, &sent, &protection, error, error_size);
+        close_internal_fd(channel);
+    }
+    close_internal_fd(root);
+
+    int64_t deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    do {
+        fd = lat_aot_v2_cache_source_lock_existing(
+            cache, source_hex, LOCK_SH, true, error, error_size);
+        if (fd >= 0 || errno != ENOENT) return fd;
+        fd = lat_aot_v2_cache_source_lock_offline(
+            cache, source_hex, LOCK_SH, true, error, error_size);
+        if (fd >= 0 || (errno != EWOULDBLOCK && errno != EAGAIN)) return fd;
+        g_usleep(10000);
+    } while (g_get_monotonic_time() < deadline);
+    errno = EWOULDBLOCK;
+    snprintf(error, error_size, "cache owner remained busy while preparing source latch");
+    return -1;
+}
+
 static int open_manifest_module(const char *cache, const char *source_hex,
                                 const LatAotExpectedV2 *expected,
                                 LatAotV2RuntimeModule **opened,
@@ -2721,8 +2781,17 @@ static int open_manifest_module(const char *cache, const char *source_hex,
 {
     *opened = NULL;
     *retry_manifest = false;
-    int source_lock = lat_aot_v2_cache_source_lock(
-        cache, source_hex, LOCK_SH, true, error, error_size);
+    char *index_name = g_strdup_printf("%s.current", source_hex);
+    char *index_path = g_build_filename(cache, index_name, NULL);
+    struct stat index_status;
+    int missing = lstat(index_path, &index_status) && errno == ENOENT;
+    g_free(index_path);
+    g_free(index_name);
+    if (missing) return source_latch_test_barrier(
+        "LATX_AOT_V2_TEST_MISSING_READY", "LATX_AOT_V2_TEST_MISSING_RELEASE",
+        error, error_size);
+    int source_lock = open_manifest_source_lock(
+        cache, source_hex, expected->source_sha256, error, error_size);
     if (source_lock < 0) return -1;
     GPtrArray *basenames = read_module_manifest(
         cache, source_hex, error, error_size);
@@ -2732,7 +2801,9 @@ static int open_manifest_module(const char *cache, const char *source_hex,
         errno = saved_errno;
         return saved_errno == ENOENT ? 0 : -1;
     }
-    if (source_latch_test_barrier(error, error_size)) {
+    if (source_latch_test_barrier("LATX_AOT_V2_TEST_SOURCE_LATCH_READY",
+                                  "LATX_AOT_V2_TEST_SOURCE_LATCH_RELEASE",
+                                  error, error_size)) {
         int saved_errno = errno;
         close_protected_cache_fd(source_lock);
         errno = saved_errno;

@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/stat.h>
 
 typedef struct LatcdCacheCapacity {
     pthread_mutex_t lock;
@@ -46,6 +47,11 @@ typedef struct LatcdCacheCapacity {
  * newly created directories and directory blocks are not fully accounted. */
 int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
                               char *error, size_t error_size);
+/* Return a readable directory fd for the inventoried root only when the configured path and
+ * caller's directory fd still identify it. Caller owns the returned fd.
+ * Startup/shutdown and rescans must not race this operation. */
+int latcd_cache_capacity_open_matching_root(LatcdCacheCapacity *capacity,
+                                            const char *root, int caller_fd);
 int latcd_cache_capacity_reserve(LatcdCacheCapacity *capacity, uint64_t bytes,
                                  uint64_t limit, char *error, size_t error_size);
 /* Release only after cleanup proved removal. Otherwise commit conservatively. */
@@ -58,6 +64,7 @@ void latcd_cache_capacity_finish_transient(LatcdCacheCapacity *capacity, uint64_
                                            bool retained);
 /* Restore persistent task reservations before serving; release by exact task id. */
 int latcd_cache_capacity_restore_task(LatcdCacheCapacity *capacity, const char *id, uint64_t bytes);
+bool latcd_cache_capacity_task_restored(LatcdCacheCapacity *capacity, const char *id);
 void latcd_cache_capacity_unknown_task(LatcdCacheCapacity *capacity, const char *id);
 void latcd_cache_capacity_release_task(LatcdCacheCapacity *capacity, const char *id);
 /* Serialized journal owner reconciles full durable quota while releasing only
@@ -69,15 +76,60 @@ int latcd_cache_capacity_journal(LatcdCacheCapacity *capacity, uint64_t total,
  * Covers lifecycle .gc and persistent state regular-file writers, not directory
  * blocks or external writer charges. close() unbinds after service threads stop. */
 void latcd_cache_capacity_metadata_bind(LatcdCacheCapacity *capacity, uint64_t limit);
+/* Open or create a private metadata directory with monitored creation. */
+int latcd_cache_capacity_open_metadata_directory(int parent, const char *name);
+typedef struct LatcdPageBudget {
+    LatcdCacheCapacity *capacity;
+    uint64_t remaining;
+    unsigned inflight;
+    bool invalid;
+    bool page_identity_bound;
+    uint8_t page_identity[32];
+} LatcdPageBudget;
+/* Compute a conservative serial-write peak after existing files have been
+ * inventoried. missing is the number of new result files, not page size;
+ * every other result must already occupy at least result_bytes. The caller
+ * must validate this and all slot identities under the scheduling lock.
+ * Includes full checkpoint growth plus a serial replacement retry peak.
+ * This neither reserves capacity nor validates the persisted page or slots. */
+int latcd_cache_capacity_page_peak(uint64_t missing, uint64_t free_slots,
+                                   uint64_t result_bytes, uint64_t checkpoint_bytes,
+                                   uint64_t *bytes);
 typedef struct LatcdMetadataReservation {
     LatcdCacheCapacity *capacity;
     uint64_t bytes, previous;
     bool state;
+    bool previous_present;
+    struct stat previous_snapshot;
+    bool installed_snapshot_present;
+    struct stat installed_snapshot;
     int directory;
     char *name;
     char *staging;
+#ifdef LATCD_CAPACITY_TESTING
+    LatcdPageBudget *page_budget;
+#endif
 } LatcdMetadataReservation;
+#ifdef LATCD_CAPACITY_TESTING
+extern void (*latcd_capacity_test_before_lock_create)(void);
+extern void (*latcd_capacity_test_before_lock_finish)(void);
+/* Callers serialize use across distinct capacity instances and keep storage
+ * alive through release and all in-flight reservations. */
+int latcd_cache_capacity_test_page_reserve(LatcdCacheCapacity *capacity, uint64_t bytes,
+                                            uint64_t limit, LatcdPageBudget *budget);
+int latcd_cache_capacity_test_page_begin(int directory, const char *name, uint64_t bytes,
+                                         LatcdPageBudget *budget, LatcdMetadataReservation *reservation);
+int latcd_cache_capacity_test_page_release(LatcdCacheCapacity *capacity, LatcdPageBudget *budget);
+int latcd_cache_capacity_test_page_abandon(LatcdCacheCapacity *capacity, LatcdPageBudget *budget);
+#endif
 int latcd_cache_capacity_metadata_begin(int directory, const char *name, uint64_t bytes,
+    LatcdMetadataReservation *reservation);
+/* Create or open a zero-length metadata lock. A concurrent creator or an
+ * uncertain installation closes capacity admission; external writers are not
+ * authorized by this process-local protocol. */
+int latcd_cache_capacity_open_metadata_lock(int directory, const char *name);
+/* Only for completion of a previously persisted recovery record. */
+int latcd_cache_capacity_metadata_recovery_begin(int directory, const char *name, uint64_t bytes,
     LatcdMetadataReservation *reservation);
 /* Scheduling hints are not committed transaction recovery: never allow their
  * replacement to bypass a closed index or the metadata limit. */
@@ -98,6 +150,10 @@ void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
  * and closes admission; owner lease and controlled namespace are required. */
 int latcd_cache_capacity_metadata_remove(int directory, const char *name,
                                          uint64_t device, uint64_t inode);
+/* Also bind removal to the snapshot observed while validating record contents. */
+/* Failure can follow unlink; re-inventory and reload before retrying. */
+int latcd_cache_capacity_metadata_remove_checked(int directory, const char *name,
+                                                 const struct stat *expected);
 /* Ordinary persistent state has no committed-transaction over-limit exception.
  * Allowed directories: root (only SHA.current), .tbsets, .identities.
  * Caller serializes same-record replacement through finish. Uses metadata bind. */

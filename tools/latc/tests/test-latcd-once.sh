@@ -128,6 +128,33 @@ mkdir -m 700 "$cache"
 published_cache=$cache
 source_sha=$(sha256sum "$guest" | cut -d ' ' -f 1)
 tbset_sha=$(sha256sum "$guest_tbset" | cut -d ' ' -f 1)
+miss_cache=$work/miss-cache
+mkdir -m 700 "$miss_cache"
+LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2=1 LATX_AOT_V2_CACHE_DIR="$miss_cache" \
+LATX_AOT_V2_AUTOSTART=0 LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 \
+LATX_AOT_V2_TEST_MISSING_READY="$work/miss.ready" \
+LATX_AOT_V2_TEST_MISSING_RELEASE="$work/miss.release" \
+  timeout 60 "$runner" "$guest" >"$work/miss.stdout" 2>"$work/miss.stderr" &
+miss_pid=$!
+n=0
+while [ ! -e "$work/miss.ready" ] && kill -0 "$miss_pid" 2>/dev/null; do
+  n=$((n + 1)); test "$n" -lt 3000; sleep 0.01
+done
+test -e "$work/miss.ready"
+test ! -e "$miss_cache/.gc/source-locks/$source_sha.lock"
+start_once "$work/miss-publish.sock" "$miss_cache" "$latc"
+submit_once "$work/miss-publish.sock" "$guest" "$guest_tbset" "$work/miss-publish.client"
+wait "$server_pid"
+test -f "$miss_cache/$source_sha.current"
+touch "$work/miss.release"
+wait "$miss_pid"
+grep -q 'module=missing' "$work/miss.stderr"
+LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$miss_cache" \
+LATX_AOT_V2_AUTOSTART=0 LATX_AOT_V2_STRICT=1 LATX_AOT_V2_REPORT=1 \
+LATC_DISABLE_PRETRANSLATE=1 LATC_STRICT_AOT=1 \
+  timeout 60 "$runner" "$guest" >"$work/miss-warm.stdout" 2>"$work/miss-warm.stderr"
+grep -q 'module=registered' "$work/miss-warm.stderr"
+cache=$published_cache
 module_name=$source_sha-$tbset_sha.so
 cp /bin/true "$cache/$module_name"
 bad_module_sha=$(sha256sum "$cache/$module_name" | cut -d ' ' -f 1)
@@ -205,6 +232,53 @@ fi
 touch "$latch_release"
 wait "$latch_pid"
 flock -n "$source_latch" -c true
+
+# Legacy caches can contain current without a source latch. Offline warm
+# execution must recreate it and still load under the latch.
+rm "$source_latch"
+LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$cache" \
+LATX_AOT_V2_AUTOSTART=0 LATX_AOT_V2_STRICT=1 LATX_AOT_V2_REPORT=1 \
+LATC_DISABLE_PRETRANSLATE=1 LATC_STRICT_AOT=1 \
+  timeout 60 "$runner" "$guest" >"$work/legacy-lock.stdout" 2>"$work/legacy-lock.stderr"
+test -f "$source_latch"
+grep -q 'module=registered' "$work/legacy-lock.stderr"
+
+# Two offline readers rebuilding a missing latch must converge on one inode
+# and hold shared locks before either is allowed to finish loading.
+rm "$source_latch"
+for reader in 1 2; do
+  LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$cache" \
+  LATX_AOT_V2_AUTOSTART=0 LATX_AOT_V2_STRICT=1 LATX_AOT_V2_REPORT=1 \
+  LATX_AOT_V2_TEST_SOURCE_LATCH_READY="$work/legacy-$reader.ready" \
+  LATX_AOT_V2_TEST_SOURCE_LATCH_RELEASE="$work/legacy-$reader.release" \
+  LATC_DISABLE_PRETRANSLATE=1 LATC_STRICT_AOT=1 \
+    timeout 60 "$runner" "$guest" >"$work/legacy-$reader.stdout" \
+    2>"$work/legacy-$reader.stderr" &
+  eval "legacy_pid_$reader=$!"
+done
+for reader in 1 2; do
+  eval "reader_pid=\$legacy_pid_$reader"
+  n=0
+  while [ ! -e "$work/legacy-$reader.ready" ] && kill -0 "$reader_pid" 2>/dev/null; do
+    n=$((n + 1)); test "$n" -lt 3000; sleep 0.01
+  done
+  test -e "$work/legacy-$reader.ready"
+done
+if flock -n "$source_latch" -c true; then
+  echo "concurrent legacy readers did not hold source latch" >&2
+  exit 1
+fi
+touch "$work/legacy-1.release"
+wait "$legacy_pid_1"
+if flock -n "$source_latch" -c true; then
+  echo "remaining legacy reader lost source latch" >&2
+  exit 1
+fi
+touch "$work/legacy-2.release"
+wait "$legacy_pid_2"
+flock -n "$source_latch" -c true
+grep -q 'module=registered' "$work/legacy-1.stderr"
+grep -q 'module=registered' "$work/legacy-2.stderr"
 
 start_once "$work/hit.sock" "$cache" "$script_dir/fake-latc-fail.sh"
 submit_once "$work/hit.sock" "$guest" "$guest_tbset" "$work/hit.client"

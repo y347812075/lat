@@ -1672,20 +1672,21 @@ int main(void)
     g_free(assembly);
     assembly = NULL;
     if (!g_file_get_contents(assembly_path, &assembly, NULL, NULL) ||
-        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_log2)") ||
-        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_pow)") ||
-        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_sincos)") ||
-        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_fprem)") ||
-        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_fbst_st0)") ||
-        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_aesenc_xmm)") ||
-        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_aesenclast_xmm)") ||
-        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_sha1nexte)") ||
-        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_sha256rnds2_xmm0)") ||
-        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_raise_int)") ||
-        !strstr(assembly, "%got_pc_hi20(lat_aot_runtime_xgetbv)") ||
+        !strstr(assembly, "la.global $t0,lat_aot_runtime_log2\n") ||
+        !strstr(assembly, "la.global $t0,lat_aot_runtime_pow\n") ||
+        !strstr(assembly, "la.global $t0,lat_aot_runtime_sincos\n") ||
+        !strstr(assembly, "la.global $t0,lat_aot_runtime_fprem\n") ||
+        !strstr(assembly, "la.global $t0,lat_aot_runtime_fbst_st0\n") ||
+        !strstr(assembly, "la.global $t0,lat_aot_runtime_aesenc_xmm\n") ||
+        !strstr(assembly, "la.global $t0,lat_aot_runtime_aesenclast_xmm\n") ||
+        !strstr(assembly, "la.global $t0,lat_aot_runtime_sha1nexte\n") ||
+        !strstr(assembly, "la.global $t0,lat_aot_runtime_sha256rnds2_xmm0\n") ||
+        !strstr(assembly, "la.global $t0,lat_aot_runtime_raise_int\n") ||
+        !strstr(assembly, "la.global $t0,lat_aot_runtime_xgetbv\n") ||
         !strstr(assembly, "b .Llat_aot_runtime_target_1\n") ||
-        !strstr(assembly, "ld.d $t0,$t0,%got_pc_lo12(lat_aot_runtime_epilogue_ret_id_1)\n") ||
+        !strstr(assembly, "la.global $t0,lat_aot_runtime_epilogue_ret_id_1\n") ||
         !strstr(assembly, "jirl $zero,$t0,0\n") ||
+        strstr(assembly, "%got_pc_hi20(") ||
         strstr(assembly, "b lat_aot_runtime_")) {
         fprintf(stderr, "host math AOT runtime trampolines were not emitted\n");
         g_free(assembly);

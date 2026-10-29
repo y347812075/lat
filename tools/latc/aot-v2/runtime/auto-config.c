@@ -214,10 +214,18 @@ static bool hello(void)
                               cache && *cache ? digest : NULL, error, sizeof(error));
 }
 
-int lat_aot_open_channel(char *error, size_t error_size)
+int lat_aot_open_existing_channel(char *error, size_t error_size)
 {
-    if (!lat_aot_ensure_daemon()) {
-        snprintf(error, error_size, "latcd unavailable before namespace change");
+    return lat_aot_open_existing_channel_protected(NULL, error, error_size);
+}
+
+int lat_aot_open_existing_channel_protected(
+    const struct LatcdClientFdProtection *protection,
+    char *error, size_t error_size)
+{
+    if (!enabled || !socket_path || !*socket_path) {
+        errno = EINVAL;
+        snprintf(error, error_size, "latcd is not configured");
         return -1;
     }
     uint8_t digest[32];
@@ -226,8 +234,17 @@ int lat_aot_open_channel(char *error, size_t error_size)
                  strerror(errno));
         return -1;
     }
-    return latcd_client_open_channel(socket_path, LATC_BUILD_ID,
-        cache && *cache ? digest : NULL, error, error_size);
+    return latcd_client_open_channel_protected(socket_path, LATC_BUILD_ID,
+        cache && *cache ? digest : NULL, protection, error, error_size);
+}
+
+int lat_aot_open_channel(char *error, size_t error_size)
+{
+    if (!lat_aot_ensure_daemon()) {
+        snprintf(error, error_size, "latcd unavailable before namespace change");
+        return -1;
+    }
+    return lat_aot_open_existing_channel(error, error_size);
 }
 
 bool lat_aot_ensure_daemon(void)

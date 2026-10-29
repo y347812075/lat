@@ -2,6 +2,254 @@
 #include "../../latcd/main.c"
 #undef main
 #include "latcd-client.h"
+#include "internal-fd-registry.h"
+#include <sys/mman.h>
+
+static int protected_fds[3], protected_count, fail_registration;
+static int register_test_fd(int fd)
+{
+    if (fail_registration && protected_count == fail_registration - 1) {
+        errno = ENOMEM;
+        return -1;
+    }
+    if (lat_aot_v2_internal_fd_register_locked(fd)) return -1;
+    protected_fds[protected_count++] = fd;
+    return 0;
+}
+static void close_test_fd(int fd)
+{
+    lat_aot_v2_internal_fd_lock();
+    g_assert_cmpint(lat_aot_v2_internal_fd_unregister_close_locked(fd), ==, 0);
+    lat_aot_v2_internal_fd_unlock();
+}
+static const LatcdClientFdProtection test_protection = {
+    .allocation_lock = lat_aot_v2_internal_fd_allocation_lock,
+    .unlock = lat_aot_v2_internal_fd_unlock,
+    .register_locked = register_test_fd,
+    .close_fd = close_test_fd,
+};
+
+typedef struct ProtectedRequestTest { int channel, cache, result; bool sent; } ProtectedRequestTest;
+static void *protected_request_thread(void *opaque)
+{
+    ProtectedRequestTest *test = opaque;
+    uint8_t digest[32] = {0};
+    test->result = latcd_client_channel_prepare_source_lock_protected(test->channel,
+        test->cache, digest, 11, &test->sent, &test_protection, NULL, 0);
+    return NULL;
+}
+
+static void test_protected_lock_request(void)
+{
+    int sockets[2];
+    g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets), ==, 0);
+    int cache = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    g_assert_cmpint(cache, >=, 0);
+    uint8_t digest[32] = {0};
+    char error[256];
+    bool sent;
+    for (int fail = 1; fail <= 3; fail++) {
+        protected_count = 0; fail_registration = fail;
+        g_assert_cmpint(latcd_client_channel_prepare_source_lock_protected(sockets[0], cache,
+            digest, fail, &sent, &test_protection, error, sizeof(error)), ==, -1);
+        g_assert_false(sent);
+        for (int i = 0; i < protected_count; i++)
+            g_assert_false(lat_aot_v2_internal_fd_is_protected(protected_fds[i]));
+    }
+    fail_registration = 0; protected_count = 0;
+    g_assert_cmpint(setenv("LATX_AOT_V2_HELLO_TIMEOUT_MS", "20", 1), ==, 0);
+    g_assert_cmpint(latcd_client_channel_prepare_source_lock_protected(sockets[0], cache,
+        digest, 10, &sent, &test_protection, error, sizeof(error)), ==, -1);
+    g_assert_true(sent);
+    g_assert_cmpint(errno, ==, ETIMEDOUT);
+    g_assert_cmpint(protected_count, ==, 3);
+    for (int i = 0; i < protected_count; i++)
+        g_assert_false(lat_aot_v2_internal_fd_is_protected(protected_fds[i]));
+    unsetenv("LATX_AOT_V2_HELLO_TIMEOUT_MS");
+    close(cache); close(sockets[0]); close(sockets[1]);
+
+    g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets), ==, 0);
+    cache = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    g_assert_cmpint(cache, >=, 0);
+    protected_count = 0;
+    ProtectedRequestTest request_test = {.channel = sockets[0], .cache = cache};
+    pthread_t thread;
+    g_assert_cmpint(pthread_create(&thread, NULL, protected_request_thread, &request_test), ==, 0);
+    LatcdRequestV2 request;
+    int root_fd, digest_fd, reply_fd;
+    g_assert_cmpint(latcd_receive_channel_request(sockets[1], &request, &root_fd,
+        &digest_fd, &reply_fd, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(protected_count, ==, 3);
+    g_assert_true(lat_aot_v2_internal_fd_is_protected(protected_fds[1]));
+    g_assert_cmpint(lat_aot_v2_internal_fd_close_guest(protected_fds[1]), ==, -1);
+    g_assert_cmpint(errno, ==, EACCES);
+    close(root_fd); close(digest_fd); close(reply_fd);
+    g_assert_cmpint(pthread_join(thread, NULL), ==, 0);
+    g_assert_true(request_test.sent);
+    g_assert_cmpint(request_test.result, ==, -1);
+    close(cache); close(sockets[0]); close(sockets[1]);
+}
+
+static void timeout_signal_handler(int signal_number) { (void)signal_number; }
+
+static void *interrupt_waiter(void *opaque)
+{
+    pthread_t *target = opaque;
+    for (unsigned i = 0; i < 100; i++) {
+        g_usleep(5000);
+        pthread_kill(*target, SIGUSR1);
+    }
+    return NULL;
+}
+
+static void test_lock_timeout_interrupted(void)
+{
+    struct sigaction action = {.sa_handler = timeout_signal_handler}, previous;
+    sigemptyset(&action.sa_mask);
+    g_assert_cmpint(sigaction(SIGUSR1, &action, &previous), ==, 0);
+    int sockets[2];
+    g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets), ==, 0);
+    int cache = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    g_assert_cmpint(cache, >=, 0);
+    uint8_t digest[32] = {0};
+    char error[256];
+    bool sent = false;
+    g_assert_cmpint(setenv("LATX_AOT_V2_HELLO_TIMEOUT_MS", "80", 1), ==, 0);
+    pthread_t target = pthread_self(), sender;
+    g_assert_cmpint(pthread_create(&sender, NULL, interrupt_waiter, &target), ==, 0);
+    int64_t start = g_get_monotonic_time();
+    g_assert_cmpint(latcd_client_channel_prepare_source_lock_ex(sockets[0], cache,
+        digest, 55, &sent, error, sizeof(error)), ==, -1);
+    int saved = errno;
+    int64_t elapsed = g_get_monotonic_time() - start;
+    g_assert_true(sent);
+    g_assert_cmpint(saved, ==, ETIMEDOUT);
+    g_assert_cmpint(elapsed, <, 400000);
+    g_assert_cmpint(pthread_join(sender, NULL), ==, 0);
+    g_assert_cmpint(sigaction(SIGUSR1, &previous, NULL), ==, 0);
+    unsetenv("LATX_AOT_V2_HELLO_TIMEOUT_MS");
+    close(cache); close(sockets[0]); close(sockets[1]);
+}
+
+static void test_offline_daemon_owner_race(void)
+{
+    char *root = g_dir_make_tmp("latcd-offline-owner-XXXXXX", NULL);
+    g_assert_nonnull(root);
+    const char *source = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    int source_fd = lat_aot_v2_cache_source_lock(root, source, LOCK_EX, false, NULL, 0);
+    g_assert_cmpint(source_fd, >=, 0);
+    char *owner_path = g_build_filename(root, ".latcd.lock", NULL);
+    LatcdConfig config = {.cache_dir = root, .socket_path = "offline-owner-test"};
+    char error[256];
+    for (unsigned protected = 0; protected < 2; protected++) {
+        g_assert_cmpint(lat_aot_v2_cache_source_lock_offline(root, source, LOCK_SH,
+            protected, error, sizeof(error)), ==, -1);
+        g_assert_cmpint(errno, ==, EWOULDBLOCK);
+    }
+    int owner = acquire_cache_owner(&config, error, sizeof(error));
+    g_assert_cmpint(owner, >=, 0);
+    close(source_fd);
+    const char *other = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    g_assert_cmpint(lat_aot_v2_cache_source_lock_offline(root, other, LOCK_SH,
+        false, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(errno, ==, EWOULDBLOCK);
+    char *other_name = g_strconcat(other, ".lock", NULL);
+    char *other_path = g_build_filename(root, ".gc", "source-locks", other_name, NULL);
+    g_assert_cmpint(access(other_path, F_OK), ==, -1);
+    g_assert_cmpint(errno, ==, ENOENT);
+    g_free(other_path); g_free(other_name);
+    close(owner);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *locks = g_build_filename(gc, "source-locks", NULL);
+    char *name = g_strconcat(source, ".lock", NULL);
+    char *lock = g_build_filename(locks, name, NULL);
+    g_assert_cmpint(unlink(lock), ==, 0);
+    g_assert_cmpint(rmdir(locks), ==, 0);
+    g_assert_cmpint(rmdir(gc), ==, 0);
+    g_assert_cmpint(unlink(owner_path), ==, 0);
+    g_assert_cmpint(rmdir(root), ==, 0);
+    g_free(lock); g_free(name); g_free(locks); g_free(gc); g_free(owner_path); g_free(root);
+}
+
+static void test_lock_request_sent_state(void)
+{
+    int sockets[2];
+    g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets), ==, 0);
+    int cache = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    g_assert_cmpint(cache, >=, 0);
+    uint8_t digest[32] = {0};
+    char error[256];
+    bool sent = false;
+    g_assert_cmpint(setenv("LATX_AOT_V2_HELLO_TIMEOUT_MS", "20", 1), ==, 0);
+    g_assert_cmpint(latcd_client_channel_prepare_source_lock_ex(sockets[0], cache,
+        digest, 1, &sent, error, sizeof(error)), ==, -1);
+    g_assert_true(sent);
+    g_assert_cmpint(errno, ==, ETIMEDOUT);
+    close(sockets[1]);
+    sent = true;
+    g_assert_cmpint(latcd_client_channel_prepare_source_lock_ex(sockets[0], cache,
+        digest, 2, &sent, error, sizeof(error)), ==, -1);
+    g_assert_false(sent);
+    close(sockets[0]); close(cache);
+    unsetenv("LATX_AOT_V2_HELLO_TIMEOUT_MS");
+}
+
+static void test_prepare_source_lock_request(void)
+{
+    char *root = g_dir_make_tmp("latcd-lock-request-XXXXXX", NULL);
+    char *other = g_dir_make_tmp("latcd-lock-other-XXXXXX", NULL);
+    g_assert_nonnull(root);
+    g_assert_nonnull(other);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *locks = g_build_filename(gc, "source-locks", NULL);
+    g_assert_cmpint(mkdir(gc, 0700), ==, 0);
+    g_assert_cmpint(mkdir(locks, 0700), ==, 0);
+    uint8_t digest[32] = {1};
+    char hex[65];
+    digest_hex(digest, hex);
+    char *current_name = g_strconcat(hex, ".current", NULL);
+    char *current = g_build_filename(root, current_name, NULL);
+    g_assert_true(g_file_set_contents(current, "{}", 2, NULL));
+    g_assert_cmpint(chmod(current, 0600), ==, 0);
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, root, NULL, 0), ==, 0);
+    latcd_cache_capacity_metadata_bind(&generation_capacity, 1048576);
+    int cache = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int wrong = open(other, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int data = memfd_create("source-digest", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    g_assert_cmpint(cache, >=, 0);
+    g_assert_cmpint(wrong, >=, 0);
+    g_assert_cmpint(data, >=, 0);
+    g_assert_cmpint(write(data, digest, sizeof(digest)), ==, sizeof(digest));
+    LatcdConfig config = {.cache_dir = root};
+    LatcdResponseV2 response;
+    response_init(&response, 1);
+    prepare_source_lock_request(&config, cache, data, &response);
+    g_assert_cmpint(response.status, ==, LATCD_STATUS_BAD_REQUEST);
+    g_assert_cmpint(fcntl(data, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW), ==, 0);
+    response_init(&response, 2);
+    prepare_source_lock_request(&config, wrong, data, &response);
+    g_assert_cmpint(response.status, ==, LATCD_STATUS_IO_ERROR);
+    g_assert_true(latcd_cache_capacity_poll(&generation_capacity));
+    for (unsigned i = 0; i < 2; i++) {
+        response_init(&response, 3 + i);
+        prepare_source_lock_request(&config, cache, data, &response);
+        g_assert_cmpint(response.status, ==, LATCD_STATUS_OK);
+        g_assert_cmpmem(response.source_sha256, 32, digest, 32);
+        g_assert_true(latcd_cache_capacity_poll(&generation_capacity));
+    }
+    close(data); close(wrong); close(cache);
+    latcd_cache_capacity_close(&generation_capacity);
+    char *lock_name = g_strconcat(hex, ".lock", NULL);
+    char *lock = g_build_filename(locks, lock_name, NULL);
+    g_assert_cmpint(unlink(lock), ==, 0);
+    g_assert_cmpint(unlink(current), ==, 0);
+    g_assert_cmpint(rmdir(locks), ==, 0);
+    g_assert_cmpint(rmdir(gc), ==, 0);
+    g_assert_cmpint(rmdir(root), ==, 0);
+    g_assert_cmpint(rmdir(other), ==, 0);
+    g_free(lock); g_free(lock_name); g_free(current); g_free(current_name);
+    g_free(locks); g_free(gc); g_free(root); g_free(other);
+}
 
 static void wait_child(pid_t child)
 {
@@ -129,6 +377,11 @@ static void test_active_source_reuse(const char *directory, const char *source_p
 
 int main(void)
 {
+    test_protected_lock_request();
+    test_lock_timeout_interrupted();
+    test_offline_daemon_owner_race();
+    test_lock_request_sent_state();
+    test_prepare_source_lock_request();
     test_flush_snapshot();
     char *directory = g_dir_make_tmp("latcd-channel-XXXXXX", NULL);
     g_assert_nonnull(directory);
@@ -162,6 +415,17 @@ int main(void)
     gsize size = sizeof(digest);
     g_checksum_get_digest(checksum, digest, &size);
     g_checksum_free(checksum);
+    char hex[65];
+    digest_hex(digest, hex);
+    g_assert_cmpint(mkdir(cache, 0700), ==, 0);
+    char *gc_dir = g_build_filename(cache, ".gc", NULL);
+    char *lock_dir = g_build_filename(gc_dir, "source-locks", NULL);
+    char *current_name = g_strconcat(hex, ".current", NULL);
+    char *current = g_build_filename(cache, current_name, NULL);
+    g_assert_cmpint(mkdir(gc_dir, 0700), ==, 0);
+    g_assert_cmpint(mkdir(lock_dir, 0700), ==, 0);
+    g_assert_true(g_file_set_contents(current, "{}", 2, NULL));
+    g_assert_cmpint(chmod(current, 0600), ==, 0);
     LatcdConfig config = {
         .socket_path = socket_path, .cache_dir = cache, .stats_path = stats,
         .workers = 1, .flush_only = true, .idle_seconds = 1,
@@ -172,6 +436,9 @@ int main(void)
     g_assert_cmpint(daemon, >=, 0);
     if (!daemon) {
         close(source);
+        g_assert_cmpint(prepare_metadata_directories(cache), ==, 0);
+        g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, cache, NULL, 0), ==, 0);
+        latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
         _exit(run_service(&config));
     }
     for (unsigned i = 0; i < 500 && access(socket_path, F_OK); i++) {
@@ -191,9 +458,70 @@ int main(void)
     g_assert_cmpint(latcd_client_open_channel(socket_path, LATC_BUILD_ID,
         wrong, error, sizeof(error)), ==, -1);
     g_assert_cmpint(errno, ==, EPROTO);
+    protected_count = 0; fail_registration = 1;
+    g_assert_cmpint(latcd_client_open_channel_protected(socket_path, LATC_BUILD_ID,
+        cache_digest, &test_protection, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(errno, ==, ENOMEM);
+    fail_registration = 0; protected_count = 0;
+    g_assert_cmpint(latcd_client_open_channel_protected(socket_path, "wrong-build",
+        cache_digest, &test_protection, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(errno, ==, EPROTO);
+    g_assert_cmpint(protected_count, ==, 1);
+    g_assert_false(lat_aot_v2_internal_fd_is_protected(protected_fds[0]));
+    protected_count = 0;
+    int protected_channel = latcd_client_open_channel_protected(socket_path, LATC_BUILD_ID,
+        cache_digest, &test_protection, error, sizeof(error));
+    g_assert_cmpint(protected_channel, >=, 0);
+    g_assert_true(lat_aot_v2_internal_fd_is_protected(protected_channel));
+    g_assert_cmpint(lat_aot_v2_internal_fd_close_guest(protected_channel), ==, -1);
+    g_assert_cmpint(errno, ==, EACCES);
+    close_test_fd(protected_channel);
     int channel = latcd_client_open_channel(socket_path, LATC_BUILD_ID,
                                              cache_digest, error, sizeof(error));
     g_assert_cmpint(channel, >=, 0);
+    int cache_fd = open(cache, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int wrong_fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    g_assert_cmpint(cache_fd, >=, 0);
+    g_assert_cmpint(wrong_fd, >=, 0);
+    g_assert_cmpint(latcd_client_channel_prepare_source_lock(channel, wrong_fd, digest,
+        701, error, sizeof(error)), ==, -1);
+    int start[2];
+    g_assert_cmpint(pipe(start), ==, 0);
+    pid_t lock_children[4];
+    for (unsigned i = 0; i < G_N_ELEMENTS(lock_children); i++) {
+        lock_children[i] = fork();
+        g_assert_cmpint(lock_children[i], >=, 0);
+        if (!lock_children[i]) {
+            char byte;
+            close(start[1]);
+            if (read(start[0], &byte, 1) != 1) _exit(1);
+            _exit(latcd_client_channel_prepare_source_lock(channel, cache_fd, digest,
+                702 + i, error, sizeof(error)) ? 2 : 0);
+        }
+    }
+    close(start[0]);
+    g_assert_cmpint(write(start[1], "xxxx", 4), ==, 4);
+    close(start[1]);
+    for (unsigned i = 0; i < G_N_ELEMENTS(lock_children); i++) wait_child(lock_children[i]);
+    int data = memfd_create("lost-lock-reply", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    int replies[2];
+    g_assert_cmpint(data, >=, 0);
+    g_assert_cmpint(write(data, digest, sizeof(digest)), ==, sizeof(digest));
+    g_assert_cmpint(fcntl(data, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK), ==, 0);
+    g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                               0, replies), ==, 0);
+    LatcdRequestV2 abandoned = {.magic = LATCD_REQUEST_MAGIC,
+        .version = LATCD_PROTOCOL_VERSION, .size = sizeof(abandoned),
+        .operation = LATCD_OP_PREPARE_SOURCE_LOCK, .request_id = 710};
+    g_assert_cmpint(latcd_send_channel_request(channel, cache_fd, data, replies[1],
+        &abandoned, error, sizeof(error)), ==, 0);
+    close(data); close(replies[0]); close(replies[1]);
+    g_assert_cmpint(latcd_client_channel_prepare_source_lock(channel, cache_fd, digest,
+        711, error, sizeof(error)), ==, 0);
+    char *lock_name = g_strconcat(hex, ".lock", NULL);
+    char *lock_path = g_build_filename(lock_dir, lock_name, NULL);
+    g_assert_cmpint(access(lock_path, F_OK), ==, 0);
+    close(cache_fd); close(wrong_fd);
     int admitted[LATCD_MAX_CHANNELS - 1];
     for (unsigned i = 0; i < G_N_ELEMENTS(admitted); i++) {
         admitted[i] = latcd_client_open_channel(socket_path, LATC_BUILD_ID,
@@ -249,8 +577,6 @@ int main(void)
         }
     }
     for (unsigned i = 0; i < 4; i++) wait_child(children[i]);
-    char hex[65];
-    digest_hex(digest, hex);
     char *canonical = g_strdup_printf("%s/.tbsets/%s.tbset", cache, hex);
     LatTbKeySet accepted = {0};
     g_assert_cmpint(lat_tb_key_set_read_file(canonical, digest, &accepted,
@@ -266,6 +592,8 @@ int main(void)
         source, LATCD_PRIORITY_LIBRARY, 200, 200, error, sizeof(error)), ==, -1);
     close(channel);
     close(source);
+    g_free(lock_path); g_free(lock_name); g_free(current); g_free(current_name);
+    g_free(lock_dir); g_free(gc_dir);
     g_free(canonical);
     g_free(source_path);
     g_free(cache);

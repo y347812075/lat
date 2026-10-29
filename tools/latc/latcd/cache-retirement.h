@@ -39,10 +39,16 @@ typedef struct LatcdRetirementPageDeadline {
 typedef struct LatcdRetirementPageState {
     uint64_t cache_device, cache_inode, grace_us, round_cutoff;
     char boot[37];
+    char committed_cursor[138];
     char cursor[138];
     uint64_t sequence;
+    /* When set, cursor is the committed end; committed_cursor is its start.
+     * The full page remains until a future verified reclamation protocol. */
+    bool committed_pending;
     unsigned count;
     LatcdRetirementPageDeadline entries[128];
+    /* Result types are populated only for a committed pending page. */
+    uint8_t results[128];
 } LatcdRetirementPageState;
 /* Select the next stable-name page from a caller-provided sorted list. Names
  * must be valid object basenames. This is scheduling only, never admission. */
@@ -60,13 +66,26 @@ int latcd_retirement_page_names(const char *const *names, size_t count,
 /* Validate an in-memory page state. This does not serialize, discover, or
  * authorize deletion; count is bounded and entries must be unique/sorted. */
 int latcd_retirement_page_state_valid(const LatcdRetirementPageState *state);
-/* Owner lease required. Persist/read only the bounded scheduler page state;
- * this is not discovery completeness, reference proof, or deletion authority. */
+/* Deterministic page membership identity only; never grants deletion or commit. */
+int latcd_retirement_page_identity(const LatcdRetirementPageState *state,
+                                   uint8_t digest[32]);
+/* Separate budget identity includes schedule sequence and member enqueue times.
+ * It identifies an in-flight page only and does not reserve capacity. */
+int latcd_retirement_page_budget_identity(const LatcdRetirementPageState *state,
+                                          uint8_t digest[32]);
+#ifdef LATCD_RETIREMENT_TESTING
+/* Unrestricted fixture writer, excluded from production builds. */
 int latcd_retirement_page_state_store(const char *root,
                                       const LatcdRetirementPageState *state,
                                       char *error, size_t error_size);
+#endif
+/* Read only bounded scheduling state, not deletion authority. */
 int latcd_retirement_page_state_load(const char *root, LatcdRetirementPageState *state,
                                      char *error, size_t error_size);
+/* Stage an in-flight page from an existing empty checkpoint. The caller must
+ * hold the owner lease and control the namespace; this is not admission. */
+int latcd_retirement_page_stage(const char *root, const LatcdRetirementPageState *page,
+                                char *error, size_t error_size);
 /* Owner lease required. Create an initial empty round only when no page state
  * exists, holding roots EX through clock sampling and durable storage. On any
  * error reload the state before retrying; an interrupted rename may persist.
@@ -83,6 +102,109 @@ int latcd_retirement_page_state_compatible(const LatcdRetirementPageState *state
 int latcd_retirement_page_state_resume(const char *root, const char *boot,
                                        uint64_t grace_us, uint64_t now_us, LatcdRetirementPageState *state,
                                        char *error, size_t error_size);
+#ifdef LATCD_RETIREMENT_TESTING
+/* Fixture writers do not enforce a persisted in-flight page. */
+int latcd_retirement_schedule_store(const char *root, const char *boot,
+                                    uint64_t grace_us, uint64_t now_us,
+                                    uint64_t sequence,
+                                    const LatcdRetirementPageDeadline *entry,
+                                    char *error, size_t error_size);
+#endif
+typedef enum LatcdRetirementResultKind {
+    LATCD_RETIREMENT_RESULT_DONE = 1,
+    LATCD_RETIREMENT_RESULT_DEFERRED = 2,
+} LatcdRetirementResultKind;
+#ifdef LATCD_RETIREMENT_TESTING
+int latcd_retirement_schedule_store_result(const char *root, const char *boot,
+                                    uint64_t grace_us, uint64_t now_us, uint64_t sequence,
+                                    const LatcdRetirementPageDeadline *entry,
+                                    const uint8_t page_identity[32],
+                                    LatcdRetirementResultKind kind,
+                                    char *error, size_t error_size);
+#endif
+/* Require a matching persisted in-flight page and member under scheduler lock.
+ * Owner lease and controlled access remain required. */
+int latcd_retirement_schedule_store_page_result(const char *root, uint64_t now_us,
+                                    const LatcdRetirementPageState *page,
+                                    const LatcdRetirementPageDeadline *entry,
+                                    LatcdRetirementResultKind kind,
+                                    char *error, size_t error_size);
+/* Returns 0 for a matching v2 result, 1 for absent/v1/other page, -1 on
+ * unsafe storage. Results are hints only, not commit or deletion authority. */
+int latcd_retirement_schedule_load_result(const char *root, const char *boot,
+                                    uint64_t grace_us, uint64_t now_us, const char *name,
+                                    const uint8_t page_identity[32],
+                                    LatcdRetirementResultKind *kind,
+                                    char *error, size_t error_size);
+/* Single monitored scan of all page members. Returns 0 only when all have a
+ * matching result, 1 if any are absent, -1 if unsafe. No commit authority. */
+int latcd_retirement_schedule_check_page(const char *root, uint64_t now_us,
+                                    const LatcdRetirementPageState *page,
+                                    char *error, size_t error_size);
+/* Diagnostic snapshot only: 0 absent, 1 done, 2 deferred, 3 other record.
+ * Cleared on error.
+ * Caller must revalidate under its scheduling lease before using any result. */
+int latcd_retirement_schedule_page_results(const char *root, uint64_t now_us,
+                                    const LatcdRetirementPageState *page,
+                                    uint8_t results[128], char *error, size_t error_size);
+/* Snapshot the current persisted page and its results under the scheduling
+ * lock. Caller holds the owner lease and controls writers. Results are hints,
+ * not a capacity reservation or deletion authority; lock is released on return.
+ * Result 3 is a conflicting member; undersized_member prevents treating an
+ * existing member as a fully charged fixed-size result. Revalidate before use. */
+typedef struct LatcdRetirementPageInventory {
+    unsigned occupied_slots;
+    uint64_t occupied_bytes;
+    bool undersized_member;
+} LatcdRetirementPageInventory;
+int latcd_retirement_page_snapshot(const char *root, uint64_t now_us,
+                                    LatcdRetirementPageState *page,
+                                    uint8_t results[128], LatcdRetirementPageInventory *inventory,
+                                    char *error, size_t error_size);
+/* Estimate only; snapshot must be revalidated under the scheduling lock before
+ * reserving. Conflicting or undersized members cannot be recovered this way. */
+int latcd_retirement_page_budget_estimate(const LatcdRetirementPageState *page,
+                                    const uint8_t results[128],
+                                    const LatcdRetirementPageInventory *inventory,
+                                    uint64_t *bytes);
+#if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
+extern void (*latcd_retirement_test_before_settlement)(void);
+struct LatcdCacheCapacity;
+struct LatcdPageBudget;
+/* Test-only handoff; caller owns the lease and serializes budget lifetime. */
+int latcd_retirement_test_page_reserve(const char *root, uint64_t now_us,
+                                    struct LatcdCacheCapacity *capacity, uint64_t limit,
+                                    struct LatcdPageBudget *budget, uint8_t identity[32],
+                                    char *error, size_t error_size);
+int latcd_retirement_test_page_budget_matches(const char *root, const uint8_t identity[32],
+                                    char *error, size_t error_size);
+int latcd_retirement_test_budget_result(const char *root, uint64_t now_us,
+                                    const uint8_t identity[32], struct LatcdPageBudget *budget,
+                                    const LatcdRetirementPageDeadline *entry,
+                                    LatcdRetirementResultKind kind, char *error, size_t error_size);
+int latcd_retirement_test_budget_commit(const char *root, uint64_t now_us,
+                                    const LatcdRetirementPageState *page, struct LatcdPageBudget *budget,
+                                    char *error, size_t error_size);
+#endif
+/* Experimental scheduling checkpoint only. Caller must hold an owner lease
+ * and controlled access; never authorizes deletion or discovery completeness.
+ * Reload after every error because rename may already have succeeded. */
+int latcd_retirement_page_commit(const char *root, uint64_t now_us,
+                                    const LatcdRetirementPageState *page,
+                                    char *error, size_t error_size);
+/* Read one hint after validating the entire bounded store. Returns 1 if
+ * absent, 0 if found, -1 if unsafe. Output is cleared on failure/absence. */
+int latcd_retirement_schedule_load(const char *root, const char *boot,
+                                   uint64_t grace_us, uint64_t now_us,
+                                   const char *name, uint64_t *sequence,
+                                   LatcdRetirementPageDeadline *entry,
+                                   char *error, size_t error_size);
+/* Merge hints into an already discovered diagnostic page, atomically in
+ * memory. Deadlines remain those from discovery; this never permits deletion. */
+int latcd_retirement_schedule_merge_page(const char *root, const char *boot,
+                                         uint64_t grace_us, uint64_t now_us,
+                                         LatcdRetirementPageState *page,
+                                         char *error, size_t error_size);
 /* Build a bounded page plan from the complete sorted candidate key set. The
  * input remains intact for later pages; entries outside the page are omitted. */
 int latcd_retirement_page_plan(const char *const *names, size_t count,
@@ -210,7 +332,7 @@ typedef struct LatcdRetirementQueueStats {
     unsigned ready, deferred;
     uint64_t next_deadline_us, oldest_due_wait_us;
     uint64_t next_attempt_us;
-    bool complete;
+    bool complete, aggregating;
 } LatcdRetirementQueueStats;
 
 /* Single I/O worker owns this diagnostic queue under the management lease.
@@ -218,16 +340,17 @@ typedef struct LatcdRetirementQueueStats {
  * Creates the private transaction store if absent before monitored discovery.
  * Retains original enqueue time across sweeps; fully object-bound UNLINKED /
  * MISSING receipts remove completed names only after absence is rechecked.
- * No deletion or timer handoff; missing alone never completes a candidate. */
+ * No deletion or timer handoff; missing alone never completes a candidate.
+ * A yielded execution must be completed or cancelled before scanning. */
 LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grace_us);
 /* Configure a diagnostic bounded-round discovery before scanning. The cutoff
  * must have been sampled under roots EX. This does not enable consumption or
  * persist progress; callers must rescan after any failure. */
 int latcd_retirement_queue_diagnostic_round(LatcdRetirementQueue *queue,
     const char *boot, uint64_t cutoff, const char *after);
-/* Resume diagnostic discovery from an empty initial round only. Nonempty v2
- * pages do not prove completion and must not advance discovery. Owner lease
- * required; missing or incompatible state is never treated as a new round. */
+/* Resume diagnostic discovery after the committed cursor. Any in-flight page
+ * is ignored and rediscovered; a v2 page never proves completion.
+ * Owner lease required; missing or incompatible state is not a new round. */
 int latcd_retirement_queue_diagnostic_resume(LatcdRetirementQueue *queue,
                                               char *error, size_t error_size);
 /* Diagnostic only: number of selected keys retained, at most 128.
@@ -260,6 +383,11 @@ int latcd_retirement_queue_take(LatcdRetirementQueue *queue, uint64_t now_us,
 int latcd_retirement_queue_defer(LatcdRetirementQueue *queue,
                                  const LatcdRetirementAttempt *attempt,
                                  uint64_t now_us, bool busy);
+/* Owner lease and a complete bounded discovery are required. On write failure
+ * the attempt remains active and the queue must be discarded and reloaded. */
+int latcd_retirement_queue_defer_persist(LatcdRetirementQueue *queue,
+    const LatcdRetirementAttempt *attempt, uint64_t now_us, bool busy,
+    char *error, size_t error_size);
 
 /* Internal single-candidate consumer; SAME external owner/domain/access/mount/
  * full-reference-graph guarantees as tombstone_delete_due_report are required.
@@ -268,7 +396,8 @@ int latcd_retirement_queue_defer(LatcdRetirementQueue *queue,
  * is resumed, never overwritten. Returns 1 completed, 0 no ready candidate,
  * -1 deferred/error. Attempt is released on every selected path. Completion
  * remains queued until a later sweep verifies bound receipt plus absence.
- * Caller checkpoints after completion/deferral; no CLI/daemon caller enabled. */
+ * Completion/deferral is checkpointed before releasing the attempt; on error
+ * discard and reload the queue. No CLI/daemon caller enabled. */
 int latcd_retirement_queue_execute_one(LatcdRetirementQueue *queue,
     LatcdRetirementDeletionReport *report, char *error, size_t error_size);
 
@@ -280,8 +409,9 @@ int latcd_retirement_queue_execute_one(LatcdRetirementQueue *queue,
 int latcd_retirement_queue_execute_step(LatcdRetirementQueue *queue,
     uint64_t hash_bytes, uint64_t time_us, uint64_t *hashed_bytes,
     LatcdRetirementDeletionReport *report, char *error, size_t error_size);
-/* Releases resumable state/pin and busy-defers its attempt; no unlink. Queue
- * destruction also releases pins. Persistent intent is never rolled back. */
+/* Releases resumable state/pin and persistently busy-defers its attempt; no
+ * unlink. On failure discard and reload the queue. Queue destruction also
+ * releases pins. Persistent intent is never rolled back. */
 int latcd_retirement_queue_cancel(LatcdRetirementQueue *queue,
                                   char *error, size_t error_size);
 

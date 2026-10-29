@@ -73,6 +73,7 @@ static int expected_descriptors(const LatcdRequestV2 *request)
     if (request->operation == LATCD_OP_COLLECT_JOURNALS) return 0;
     if (request->operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY) return 2;
     if (request->operation == LATCD_OP_APPEND_JOURNAL) return 2;
+    if (request->operation == LATCD_OP_PREPARE_SOURCE_LOCK) return 2;
     return -1;
 }
 

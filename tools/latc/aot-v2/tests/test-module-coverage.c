@@ -17,6 +17,27 @@
 #include <unistd.h>
 
 static uint8_t command_codegen[32];
+#ifdef MODULE_SNAPSHOT_TESTING
+static int snapshot_mutation_fd = -1;
+static bool snapshot_truncate;
+
+ssize_t __real_pread(int fd, void *buffer, size_t count, off_t offset);
+ssize_t __wrap_pread(int fd, void *buffer, size_t count, off_t offset)
+{
+    ssize_t result = __real_pread(fd, buffer, count, offset);
+    if (result > 0 && snapshot_mutation_fd >= 0) {
+        int writable = snapshot_mutation_fd;
+        snapshot_mutation_fd = -1;
+        if (snapshot_truncate) {
+            g_assert_cmpint(ftruncate(writable, 0), ==, 0);
+        } else {
+            unsigned char byte = 0xff;
+            g_assert_cmpint(pwrite(writable, &byte, 1, 0), ==, 1);
+        }
+    }
+    return result;
+}
+#endif
 
 static void write_module(const char *path, const LatAotTbV2 *tbs, size_t count,
                          int identity_change)
@@ -323,6 +344,46 @@ int main(int argc, char **argv)
                         {.guest_rva = 0x200, .flags = 3},
                         {.guest_rva = 0x300, .flags = 3}};
     write_module(old, tbs, 2, 0);
+    int inspect_fd = open(old, O_RDONLY | O_CLOEXEC);
+    g_assert_cmpint(inspect_fd, >=, 0);
+    char *renamed = g_build_filename(directory, "renamed.so", NULL);
+    g_assert_cmpint(rename(old, renamed), ==, 0);
+    LatAotModuleInfoV2 fd_info;
+    g_assert_cmpint(lat_aot_v2_module_inspect_fd(inspect_fd, 4096, &fd_info, error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(fd_info.tb_count, ==, 2);
+    g_assert_cmpint(lat_aot_v2_module_inspect_fd(-1, 4096, &fd_info, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(lat_aot_v2_module_inspect_fd(inspect_fd, 1, &fd_info, error, sizeof(error)), ==, -1);
+    int directory_fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    g_assert_cmpint(directory_fd, >=, 0);
+    g_assert_cmpint(lat_aot_v2_module_inspect_fd(directory_fd, 4096, &fd_info, error, sizeof(error)), ==, -1);
+    close(directory_fd);
+    g_assert_cmpint(chmod(renamed, 0666), ==, 0);
+    g_assert_cmpint(lat_aot_v2_module_inspect_fd(inspect_fd, 4096, &fd_info, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(chmod(renamed, 0444), ==, 0);
+    close(inspect_fd);
+    g_assert_cmpint(rename(renamed, old), ==, 0);
+    g_free(renamed);
+#ifdef MODULE_SNAPSHOT_TESTING
+    for (int truncate = 0; truncate <= 1; truncate++) {
+        g_assert_cmpint(chmod(old, 0600), ==, 0);
+        int writable = open(old, O_WRONLY | O_CLOEXEC);
+        inspect_fd = open(old, O_RDONLY | O_CLOEXEC);
+        g_assert_cmpint(writable, >=, 0);
+        g_assert_cmpint(inspect_fd, >=, 0);
+        struct timespec times[2] = {{.tv_nsec = UTIME_OMIT}, {.tv_sec = 1}};
+        g_assert_cmpint(futimens(writable, times), ==, 0);
+        g_assert_cmpint(chmod(old, 0444), ==, 0);
+        snapshot_truncate = truncate;
+        snapshot_mutation_fd = writable;
+        g_assert_cmpint(lat_aot_v2_module_inspect_fd(inspect_fd, 4096, &fd_info,
+                                                    error, sizeof(error)), ==, -1);
+        g_assert_cmpint(snapshot_mutation_fd, ==, -1);
+        g_assert_nonnull(strstr(error, "module changed while reading"));
+        close(inspect_fd);
+        close(writable);
+        write_module(old, tbs, 2, 0);
+    }
+#endif
     write_module(next, tbs, 3, 0);
     g_assert_cmpint(lat_aot_v2_module_validate_replacement_file(
         old, next, error, sizeof(error)), ==, 0);

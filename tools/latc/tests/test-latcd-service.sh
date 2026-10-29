@@ -19,11 +19,15 @@ mkdir -m 700 -p "$work"
 
 cleanup_service()
 {
-    for pid in "${server_pid:-}" "${owner_pid:-}" "${normal_pid:-}" "${kill_pid:-}"; do
+    for pid in "${server_pid:-}" "${owner_pid:-}" "${normal_pid:-}" "${kill_pid:-}" \
+               "${legacy_reader_1:-}" "${legacy_reader_2:-}"; do
         [ -n "$pid" ] || continue
         kill -TERM "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     done
+    if [ -n "${direct_hidden:-}" ] && [ -e "$direct_hidden" ]; then
+        mv "$direct_hidden" "$direct_current"
+    fi
 }
 trap cleanup_service EXIT
 trap 'exit 130' INT
@@ -1023,4 +1027,299 @@ actual = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
 assert actual == expected, (actual, expected)
 PY
 stop_service
+start_service legacy-lock-prepare "$latc"
+submit_source "$socket" "$guest" "$phase/submit.client"
+"$latcd" --flush-source --socket "$socket" "$guest" >"$phase/flush.client"
+legacy_cache=$cache
+legacy_sha=$(sha256sum "$guest" | cut -d ' ' -f 1)
+stop_service
+python3 - "$legacy_cache" "$legacy_sha" "$phase/legacy-snapshot.json" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+cache, source, output = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+manifest_path = cache / f"{source}.current"
+manifest = json.loads(manifest_path.read_text())
+paths = [manifest_path] + [cache / manifest[name] for name in ("module", "native", "tbset")]
+output.write_text(json.dumps({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}))
+PY
+legacy_snapshot=$phase/legacy-snapshot.json
+rm "$legacy_cache/.gc/source-locks/$legacy_sha.lock"
+legacy_phase=$work/legacy-lock-online
+mkdir -m 700 "$legacy_phase"
+socket=$legacy_phase/latcd.sock
+stats=$legacy_phase/stats.json
+"$latcd" --serve --socket "$socket" --cache-dir "$legacy_cache" \
+  --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+  --stats "$stats" --workers 1 >"$legacy_phase/server.stdout" 2>"$legacy_phase/server.stderr" &
+server_pid=$!
+n=0
+while [ ! -S "$socket" ] && kill -0 "$server_pid" 2>/dev/null; do
+    n=$((n + 1)); test "$n" -lt 500; sleep 0.01
+done
+test -S "$socket"
+wait_stats 's["generation_capacity_ready"]'
+for reader in 1 2; do
+LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$legacy_cache" \
+LATX_AOT_V2_LATCD_SOCKET="$socket" \
+LATX_AOT_V2_AUTOSTART=0 LATX_AOT_V2_STRICT=1 LATX_AOT_V2_REPORT=1 \
+LATX_AOT_V2_TEST_LOCK_MISSING_READY="$legacy_phase/missing-$reader.ready" \
+LATX_AOT_V2_TEST_LOCK_MISSING_RELEASE="$legacy_phase/missing.release" \
+LATX_AOT_V2_TEST_SOURCE_LATCH_READY="$legacy_phase/reader-$reader.ready" \
+LATX_AOT_V2_TEST_SOURCE_LATCH_RELEASE="$legacy_phase/reader-$reader.release" \
+LATC_DISABLE_PRETRANSLATE=1 LATC_STRICT_AOT=1 \
+  timeout 60 "$runner" "$guest" >"$legacy_phase/reader-$reader.stdout" \
+    2>"$legacy_phase/reader-$reader.stderr" &
+eval "legacy_reader_$reader=$!"
+done
+for reader in 1 2; do
+  eval "reader_pid=\$legacy_reader_$reader"
+  n=0
+  while [ ! -e "$legacy_phase/missing-$reader.ready" ] && kill -0 "$reader_pid" 2>/dev/null; do
+    n=$((n + 1)); test "$n" -lt 3000; sleep 0.01
+  done
+  test -e "$legacy_phase/missing-$reader.ready"
+done
+test ! -e "$legacy_cache/.gc/source-locks/$legacy_sha.lock"
+touch "$legacy_phase/missing.release"
+for reader in 1 2; do
+  eval "reader_pid=\$legacy_reader_$reader"
+  n=0
+  while [ ! -e "$legacy_phase/reader-$reader.ready" ] && kill -0 "$reader_pid" 2>/dev/null; do
+    n=$((n + 1)); test "$n" -lt 3000; sleep 0.01
+  done
+  test -e "$legacy_phase/reader-$reader.ready"
+done
+legacy_latch=$legacy_cache/.gc/source-locks/$legacy_sha.lock
+if flock -n "$legacy_latch" -c true; then
+    echo "online readers did not hold the source latch" >&2
+    exit 1
+fi
+for reader in 1 2; do
+  touch "$legacy_phase/reader-$reader.release"
+  eval "reader_pid=\$legacy_reader_$reader"
+  set +e
+  wait "$reader_pid"
+  runner_status=$?
+  set -e
+  test "$runner_status" -eq 42
+  grep -q 'module=registered' "$legacy_phase/reader-$reader.stderr"
+  eval "legacy_reader_$reader="
+done
+flock -n "$legacy_latch" -c true
+wait_stats 's["generation_capacity_ready"]'
+cp "$guest" "$legacy_phase/new-source.elf"
+printf x >>"$legacy_phase/new-source.elf"
+submit_source "$socket" "$legacy_phase/new-source.elf" "$legacy_phase/new-source.client"
+"$latcd" --flush-source --socket "$socket" "$legacy_phase/new-source.elf" \
+  >"$legacy_phase/new-source-flush.client"
+grep -q '^status=0$' "$legacy_phase/new-source-flush.client"
+wait_stats 's["generation_capacity_ready"]'
+python3 - "$legacy_cache" "$legacy_snapshot" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+cache, snapshot = map(Path, sys.argv[1:])
+expected = json.loads(snapshot.read_text())
+assert {name: hashlib.sha256((cache / name).read_bytes()).hexdigest()
+        for name in expected} == expected
+PY
+stop_service
+rm "$legacy_latch"
+drop_phase=$work/legacy-lock-drop-reply
+mkdir -m 700 "$drop_phase"
+socket=$drop_phase/latcd.sock
+stats=$drop_phase/stats.json
+LATCD_TEST_DROP_SOURCE_LOCK_REPLY=1 "$latcd" --serve --socket "$socket" --cache-dir "$legacy_cache" \
+  --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+  --stats "$stats" --workers 1 >"$drop_phase/server.stdout" 2>"$drop_phase/server.stderr" &
+server_pid=$!
+n=0
+while [ ! -S "$socket" ] && kill -0 "$server_pid" 2>/dev/null; do
+    n=$((n + 1)); test "$n" -lt 500; sleep 0.01
+done
+test -S "$socket"
+wait_stats 's["generation_capacity_ready"]'
+set +e
+LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$legacy_cache" \
+LATX_AOT_V2_LATCD_SOCKET="$socket" LATX_AOT_V2_AUTOSTART=0 \
+LATX_AOT_V2_STRICT=1 LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 \
+LATC_STRICT_AOT=1 timeout 60 "$runner" "$guest" >"$drop_phase/runner.stdout" 2>"$drop_phase/runner.stderr"
+runner_status=$?
+set -e
+test "$runner_status" -eq 42
+test -f "$legacy_latch"
+grep -q 'module=registered' "$drop_phase/runner.stderr"
+grep -q 'test dropped source lock reply' "$drop_phase/server.stderr"
+submit_source "$socket" "$legacy_phase/new-source.elf" "$drop_phase/new-source.client"
+"$latcd" --flush-source --socket "$socket" "$legacy_phase/new-source.elf" >"$drop_phase/flush.client"
+grep -q '^status=0$' "$drop_phase/flush.client"
+wait_stats 's["generation_capacity_ready"]'
+stop_service
+rm "$legacy_latch"
+for crash_point in before after; do
+crash_phase=$work/legacy-lock-request-crash-$crash_point
+mkdir -m 700 "$crash_phase"
+socket=$crash_phase/latcd.sock
+stats=$crash_phase/stats.json
+if [ "$crash_point" = before ]; then
+    crash_variable=LATCD_TEST_CRASH_BEFORE_SOURCE_LOCK=1
+    expected_crash=86
+    crash_message='test crash before source lock creation'
+else
+    crash_variable=LATCD_TEST_CRASH_CREATED_LOCK=$legacy_sha.lock
+    expected_crash=87
+    crash_message='test crash after source lock creation'
+fi
+env "$crash_variable" "$latcd" --serve --socket "$socket" --cache-dir "$legacy_cache" \
+  --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+  --stats "$stats" --workers 1 >"$crash_phase/server.stdout" 2>"$crash_phase/server.stderr" &
+server_pid=$!
+n=0
+while [ ! -S "$socket" ] && kill -0 "$server_pid" 2>/dev/null; do
+    n=$((n + 1)); test "$n" -lt 500; sleep 0.01
+done
+test -S "$socket"
+wait_stats 's["generation_capacity_ready"]'
+set +e
+LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$legacy_cache" \
+LATX_AOT_V2_LATCD_SOCKET="$socket" LATX_AOT_V2_AUTOSTART=0 \
+LATX_AOT_V2_STRICT=1 LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 \
+LATC_STRICT_AOT=1 timeout 60 "$runner" "$guest" >"$crash_phase/runner.stdout" 2>"$crash_phase/runner.stderr"
+runner_status=$?
+wait "$server_pid"
+crash_status=$?
+set -e
+server_pid=
+test "$crash_status" -eq "$expected_crash"
+grep -q "$crash_message" "$crash_phase/server.stderr"
+test "$runner_status" -eq 42
+test -f "$legacy_latch"
+grep -q 'module=registered' "$crash_phase/runner.stderr"
+socket=$crash_phase/restart.sock
+stats=$crash_phase/restart-stats.json
+"$latcd" --serve --socket "$socket" --cache-dir "$legacy_cache" \
+  --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+  --stats "$stats" --workers 1 >"$crash_phase/restart.stdout" 2>"$crash_phase/restart.stderr" &
+server_pid=$!
+n=0
+while [ ! -S "$socket" ] && kill -0 "$server_pid" 2>/dev/null; do
+    n=$((n + 1)); test "$n" -lt 500; sleep 0.01
+done
+test -S "$socket"
+wait_stats 's["generation_capacity_ready"]'
+submit_source "$socket" "$legacy_phase/new-source.elf" "$crash_phase/restart.client"
+"$latcd" --flush-source --socket "$socket" "$legacy_phase/new-source.elf" >"$crash_phase/restart-flush.client"
+grep -q '^status=0$' "$crash_phase/restart-flush.client"
+wait_stats 's["generation_capacity_ready"]'
+stop_service
+rm "$legacy_latch"
+done
+offline_phase=$work/legacy-lock-daemon-exit
+mkdir -m 700 "$offline_phase"
+socket=$offline_phase/latcd.sock
+stats=$offline_phase/stats.json
+"$latcd" --serve --socket "$socket" --cache-dir "$legacy_cache" \
+  --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+  --stats "$stats" --workers 1 >"$offline_phase/server.stdout" 2>"$offline_phase/server.stderr" &
+server_pid=$!
+n=0
+while [ ! -S "$socket" ] && kill -0 "$server_pid" 2>/dev/null; do
+    n=$((n + 1)); test "$n" -lt 500; sleep 0.01
+done
+test -S "$socket"
+wait_stats 's["generation_capacity_ready"]'
+LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$legacy_cache" \
+LATX_AOT_V2_LATCD_SOCKET="$socket" LATX_AOT_V2_AUTOSTART=0 \
+LATX_AOT_V2_STRICT=1 LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 \
+LATC_STRICT_AOT=1 LATX_AOT_V2_TEST_LOCK_MISSING_READY="$offline_phase/missing.ready" \
+LATX_AOT_V2_TEST_LOCK_MISSING_RELEASE="$offline_phase/missing.release" \
+  timeout 60 "$runner" "$guest" >"$offline_phase/runner.stdout" 2>"$offline_phase/runner.stderr" &
+legacy_reader_1=$!
+n=0
+while [ ! -e "$offline_phase/missing.ready" ] && kill -0 "$legacy_reader_1" 2>/dev/null; do
+    n=$((n + 1)); test "$n" -lt 3000; sleep 0.01
+done
+test -e "$offline_phase/missing.ready"
+test ! -e "$legacy_latch"
+stop_service
+touch "$offline_phase/missing.release"
+set +e
+wait "$legacy_reader_1"
+runner_status=$?
+set -e
+legacy_reader_1=
+test "$runner_status" -eq 42
+test -f "$legacy_latch"
+grep -q 'module=registered' "$offline_phase/runner.stderr"
+restart_phase=$work/legacy-lock-restart
+mkdir -m 700 "$restart_phase"
+socket=$restart_phase/latcd.sock
+stats=$restart_phase/stats.json
+"$latcd" --serve --socket "$socket" --cache-dir "$legacy_cache" \
+  --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+  --stats "$stats" --workers 1 >"$restart_phase/server.stdout" 2>"$restart_phase/server.stderr" &
+server_pid=$!
+n=0
+while [ ! -S "$socket" ] && kill -0 "$server_pid" 2>/dev/null; do
+    n=$((n + 1)); test "$n" -lt 500; sleep 0.01
+done
+test -S "$socket"
+wait_stats 's["generation_capacity_ready"]'
+submit_source "$socket" "$legacy_phase/new-source.elf" "$restart_phase/new-source.client"
+"$latcd" --flush-source --socket "$socket" "$legacy_phase/new-source.elf" \
+  >"$restart_phase/new-source-flush.client"
+grep -q '^status=0$' "$restart_phase/new-source-flush.client"
+python3 - "$legacy_cache" "$legacy_snapshot" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+cache, snapshot = map(Path, sys.argv[1:])
+expected = json.loads(snapshot.read_text())
+assert {name: hashlib.sha256((cache / name).read_bytes()).hexdigest()
+        for name in expected} == expected
+PY
+stop_service
+direct_phase=$work/legacy-direct-no-current
+mkdir -m 700 "$direct_phase"
+direct_current=$legacy_cache/$legacy_sha.current
+direct_hidden=$direct_phase/current.saved
+direct_module=$(python3 - "$direct_current" "$legacy_cache" <<'PY'
+import json, sys
+from pathlib import Path
+print(Path(sys.argv[2]) / json.loads(Path(sys.argv[1]).read_text())["module"])
+PY
+)
+mv "$direct_current" "$direct_hidden"
+rm "$legacy_latch"
+socket=$direct_phase/latcd.sock
+stats=$direct_phase/stats.json
+"$latcd" --serve --socket "$socket" --cache-dir "$legacy_cache" \
+  --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+  --stats "$stats" --workers 1 >"$direct_phase/server.stdout" 2>"$direct_phase/server.stderr" &
+server_pid=$!
+n=0
+while [ ! -S "$socket" ] && kill -0 "$server_pid" 2>/dev/null; do
+    n=$((n + 1)); test "$n" -lt 500; sleep 0.01
+done
+test -S "$socket"
+wait_stats 's["generation_capacity_ready"]'
+set +e
+LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$legacy_cache" \
+LATX_AOT_V2_LATCD_SOCKET="$socket" LATX_AOT_V2_AUTOSTART=0 \
+LATX_AOT_V2_MODULE="$direct_module" LATX_AOT_V2_SOURCE="$guest" \
+LATX_AOT_V2_STRICT=1 LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 \
+LATC_STRICT_AOT=1 timeout 60 "$runner" "$guest" >"$direct_phase/runner.stdout" 2>"$direct_phase/runner.stderr"
+runner_status=$?
+set -e
+test "$runner_status" -eq 42
+grep -q 'registered module with' "$direct_phase/runner.stderr"
+test -f "$legacy_latch"
+wait_stats 'not s["generation_capacity_ready"]'
+stop_service
+mv "$direct_hidden" "$direct_current"
+direct_hidden=
 echo "test-latcd-service: PASS"

@@ -100,6 +100,27 @@ static int module_inspect_memory(const unsigned char *file, size_t size,
     return 0;
 }
 
+static GMappedFile *module_map_fd(int fd, char *error, size_t error_size)
+{
+    struct stat status;
+    if (fstat(fd, &status) || status.st_size < (off_t)sizeof(Elf64_Ehdr)) {
+        fail(error, error_size, "cannot stat AOT ELF");
+        return NULL;
+    }
+    if (!S_ISREG(status.st_mode) || (status.st_mode & (S_IWGRP | S_IWOTH))) {
+        fail(error, error_size, "AOT ELF permissions are unsafe");
+        return NULL;
+    }
+    GError *mapping_error = NULL;
+    GMappedFile *mapping = g_mapped_file_new_from_fd(fd, FALSE, &mapping_error);
+    if (!mapping) {
+        fail(error, error_size, "cannot map AOT module: %s",
+             mapping_error ? mapping_error->message : "unknown error");
+        g_clear_error(&mapping_error);
+    }
+    return mapping;
+}
+
 static GMappedFile *module_map(const char *path, char *error, size_t error_size)
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -107,26 +128,49 @@ static GMappedFile *module_map(const char *path, char *error, size_t error_size)
         fail(error, error_size, "cannot open AOT module: %s", strerror(errno));
         return NULL;
     }
-    struct stat status;
-    if (fstat(fd, &status) || status.st_size < (off_t)sizeof(Elf64_Ehdr)) {
-        close(fd);
-        fail(error, error_size, "cannot stat AOT ELF");
-        return NULL;
-    }
-    if (!S_ISREG(status.st_mode) || (status.st_mode & (S_IWGRP | S_IWOTH))) {
-        close(fd);
-        fail(error, error_size, "AOT ELF permissions are unsafe");
-        return NULL;
-    }
-    GError *mapping_error = NULL;
-    GMappedFile *mapping = g_mapped_file_new_from_fd(fd, FALSE, &mapping_error);
+    GMappedFile *mapping = module_map_fd(fd, error, error_size);
     close(fd);
-    if (!mapping) {
-        fail(error, error_size, "cannot map AOT module: %s",
-             mapping_error ? mapping_error->message : "unknown error");
-        g_clear_error(&mapping_error);
-    }
     return mapping;
+}
+
+int lat_aot_v2_module_inspect_fd(int fd, size_t max_size, LatAotModuleInfoV2 *info,
+                                 char *error, size_t error_size)
+{
+    struct stat before, after;
+    int flags = fd < 0 ? -1 : fcntl(fd, F_GETFL);
+    if (!info || flags < 0 || (flags & O_ACCMODE) != O_RDONLY ||
+        fstat(fd, &before) || !S_ISREG(before.st_mode) ||
+        (before.st_mode & (S_IWGRP | S_IWOTH)) ||
+        before.st_size < (off_t)sizeof(Elf64_Ehdr) ||
+        (uintmax_t)before.st_size > max_size) {
+        return fail(error, error_size, "invalid or unsafe module descriptor");
+    }
+    size_t size = (size_t)before.st_size;
+    unsigned char *data = g_try_malloc(size);
+    if (!data) return fail(error, error_size, "cannot allocate module snapshot");
+    size_t offset = 0;
+    while (offset < size) {
+        ssize_t count = pread(fd, data + offset, size - offset, (off_t)offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            g_free(data);
+            return fail(error, error_size, "cannot read module snapshot");
+        }
+        offset += count;
+    }
+    if (fstat(fd, &after) || before.st_dev != after.st_dev ||
+        before.st_ino != after.st_ino || before.st_mode != after.st_mode ||
+        before.st_uid != after.st_uid || before.st_nlink != after.st_nlink ||
+        before.st_size != after.st_size ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec || before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec || before.st_ctim.tv_nsec != after.st_ctim.tv_nsec) {
+        g_free(data);
+        errno = ESTALE;
+        return fail(error, error_size, "module changed while reading");
+    }
+    int result = module_inspect_memory(data, size, info, error, error_size);
+    g_free(data);
+    return result;
 }
 
 int lat_aot_v2_module_inspect_file(const char *path,

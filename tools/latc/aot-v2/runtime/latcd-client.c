@@ -7,14 +7,17 @@
 #include "lat-key-journal.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 static int fail(char *error, size_t error_size, const char *format, ...)
@@ -39,7 +42,8 @@ static int latcd_client_operation_timeout(uint32_t operation)
     } else if (operation == LATCD_OP_APPEND_JOURNAL) {
         name = "LATX_AOT_V2_JOURNAL_TIMEOUT_MS";
         fallback = 5000;
-    } else if (operation == LATCD_OP_HELLO) {
+    } else if (operation == LATCD_OP_HELLO ||
+               operation == LATCD_OP_PREPARE_SOURCE_LOCK) {
         name = "LATX_AOT_V2_HELLO_TIMEOUT_MS";
         fallback = 3000;
     } else {
@@ -56,23 +60,29 @@ static int latcd_client_operation_timeout(uint32_t operation)
     return fallback;
 }
 
-static int connect_daemon(const char *socket_path,
+static int connect_daemon_protected(const char *socket_path,
+                           const LatcdClientFdProtection *protection,
                            char *error, size_t error_size)
 {
     if (!socket_path || !*socket_path) {
         errno = EINVAL;
         return fail(error, error_size, "invalid latcd client arguments");
     }
+    if (protection) protection->allocation_lock();
     int socket_fd = socket(AF_UNIX,
                            SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (socket_fd < 0) {
+        int saved = errno; if (protection) protection->unlock(); errno = saved;
         return fail(error, error_size, "cannot create latcd socket: %s",
                     strerror(errno));
     }
     struct sockaddr_un address = { .sun_family = AF_UNIX };
     int directory_fd;
     if (latcd_socket_address(socket_path, &address, &directory_fd, error, error_size)) {
+        int saved = errno;
         close(socket_fd);
+        if (protection) protection->unlock();
+        errno = saved;
         return -1;
     }
     int connected = connect(socket_fd, (const void *)&address, sizeof(address));
@@ -81,21 +91,32 @@ static int connect_daemon(const char *socket_path,
     if (connected) {
         int saved = connect_error;
         close(socket_fd);
+        if (protection) protection->unlock();
         errno = saved;
         return fail(error, error_size, "cannot connect to latcd: %s",
                     strerror(saved));
     }
+    if (protection && protection->register_locked(socket_fd)) {
+        int saved = errno; close(socket_fd); protection->unlock(); errno = saved;
+        return fail(error, error_size, "cannot protect latcd socket: %s", strerror(errno));
+    }
+    if (protection) protection->unlock();
     struct ucred credentials;
     socklen_t credentials_size = sizeof(credentials);
     if (getsockopt(socket_fd, SOL_SOCKET, SO_PEERCRED, &credentials,
                    &credentials_size) ||
         credentials_size != sizeof(credentials) ||
         credentials.uid != geteuid()) {
-        close(socket_fd);
+        if (protection) protection->close_fd(socket_fd); else close(socket_fd);
         errno = EPERM;
         return fail(error, error_size, "latcd peer is not the current user");
     }
     return socket_fd;
+}
+
+static int connect_daemon(const char *socket_path, char *error, size_t error_size)
+{
+    return connect_daemon_protected(socket_path, NULL, error, error_size);
 }
 
 static int receive_response(int socket_fd, uint32_t operation,
@@ -107,10 +128,21 @@ static int receive_response(int socket_fd, uint32_t operation,
     if (directory_fd) *directory_fd = -1;
     struct pollfd event = { .fd = socket_fd, .events = POLLIN };
     int timeout = latcd_client_operation_timeout(operation);
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now))
+        return fail(error, error_size, "cannot read request clock: %s", strerror(errno));
+    int64_t deadline = (int64_t)now.tv_sec * 1000000000 + now.tv_nsec +
+                       (int64_t)timeout * 1000000;
     int ready;
-    do {
+    for (;;) {
         ready = poll(&event, 1, timeout);
-    } while (ready < 0 && errno == EINTR);
+        if (ready >= 0 || errno != EINTR) break;
+        if (clock_gettime(CLOCK_MONOTONIC, &now))
+            return fail(error, error_size, "cannot read request clock: %s", strerror(errno));
+        int64_t remaining = deadline - ((int64_t)now.tv_sec * 1000000000 + now.tv_nsec);
+        if (remaining <= 0) { ready = 0; break; }
+        timeout = (int)((remaining + 999999) / 1000000);
+    }
     if (ready <= 0 || !(event.revents & POLLIN)) {
         int saved = ready == 0 ? ETIMEDOUT :
                     (ready < 0 ? errno : ECONNRESET);
@@ -178,15 +210,17 @@ static int exchange(const char *socket_path, int source_fd, int keys_fd,
     return result;
 }
 
-int latcd_client_open_channel(const char *socket_path, const char *build_id,
-                              const uint8_t cache_identity[32],
-                              char *error, size_t error_size)
+int latcd_client_open_channel_protected(const char *socket_path, const char *build_id,
+    const uint8_t cache_identity[32], const LatcdClientFdProtection *protection,
+    char *error, size_t error_size)
 {
-    if (!build_id || !*build_id) {
+    if (!build_id || !*build_id || (protection &&
+        (!protection->allocation_lock || !protection->unlock ||
+         !protection->register_locked || !protection->close_fd))) {
         errno = EINVAL;
         return fail(error, error_size, "missing channel build identity");
     }
-    int channel = connect_daemon(socket_path, error, error_size);
+    int channel = connect_daemon_protected(socket_path, protection, error, error_size);
     if (channel < 0) {
         return -1;
     }
@@ -199,11 +233,105 @@ int latcd_client_open_channel(const char *socket_path, const char *build_id,
         receive_response(channel, LATCD_OP_HELLO, request.request_id, build_id,
                           cache_identity, NULL, NULL, error, error_size)) {
         int saved = errno;
-        close(channel);
+        if (protection) protection->close_fd(channel); else close(channel);
         errno = saved;
         return -1;
     }
     return channel;
+}
+
+int latcd_client_open_channel(const char *socket_path, const char *build_id,
+                              const uint8_t cache_identity[32],
+                              char *error, size_t error_size)
+{
+    return latcd_client_open_channel_protected(socket_path, build_id, cache_identity,
+                                               NULL, error, error_size);
+}
+
+int latcd_client_channel_prepare_source_lock_protected(int channel_fd, int cache_fd,
+    const uint8_t digest[32], uint64_t request_id, bool *sent,
+    const LatcdClientFdProtection *protection, char *error, size_t error_size)
+{
+    if (sent) *sent = false;
+    if (channel_fd < 0 || cache_fd < 0 || !digest || (protection &&
+        (!protection->allocation_lock || !protection->unlock ||
+         !protection->register_locked || !protection->close_fd))) {
+        errno = EINVAL;
+        return fail(error, error_size, "invalid source lock request");
+    }
+    if (protection) protection->allocation_lock();
+    int data = memfd_create("latcd-source-digest", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (data >= 0 && protection && protection->register_locked(data)) {
+        int saved = errno; close(data); data = -1; errno = saved;
+    }
+    int saved = errno;
+    if (protection) protection->unlock();
+    errno = saved;
+    if (data < 0) return fail(error, error_size, "cannot create digest descriptor: %s", strerror(errno));
+    ssize_t written;
+    do { written = write(data, digest, 32); } while (written < 0 && errno == EINTR);
+    if (written != 32 || fcntl(data, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK)) {
+        int saved = written >= 0 && written != 32 ? EIO : errno;
+        if (protection) protection->close_fd(data); else close(data);
+        errno = saved;
+        return fail(error, error_size, "cannot seal source digest: %s", strerror(errno));
+    }
+    int replies[2];
+    if (protection) protection->allocation_lock();
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, replies)) {
+        int saved = errno;
+        if (protection) protection->unlock();
+        if (protection) protection->close_fd(data); else close(data);
+        errno = saved;
+        return fail(error, error_size, "cannot create lock reply: %s", strerror(errno));
+    }
+    if (protection && protection->register_locked(replies[0])) {
+        int saved = errno; close(replies[0]); close(replies[1]); protection->unlock();
+        protection->close_fd(data); errno = saved;
+        return fail(error, error_size, "cannot protect lock reply: %s", strerror(errno));
+    }
+    if (protection && protection->register_locked(replies[1])) {
+        int saved = errno; close(replies[1]); protection->unlock();
+        protection->close_fd(replies[0]); protection->close_fd(data); errno = saved;
+        return fail(error, error_size, "cannot protect lock reply: %s", strerror(errno));
+    }
+    if (protection) protection->unlock();
+    LatcdRequestV2 request = {
+        .magic = LATCD_REQUEST_MAGIC, .version = LATCD_PROTOCOL_VERSION,
+        .size = sizeof(request), .operation = LATCD_OP_PREPARE_SOURCE_LOCK,
+        .request_id = request_id,
+    };
+    int result = latcd_send_channel_request(channel_fd, cache_fd, data, replies[1],
+                                             &request, error, error_size);
+    if (!result && sent) *sent = true;
+    if (protection) { protection->close_fd(data); protection->close_fd(replies[1]); }
+    else { close(data); close(replies[1]); }
+    LatcdResponseV2 response;
+    if (!result) result = receive_response(replies[0], request.operation, request_id,
+                                            NULL, NULL, &response, NULL, error, error_size);
+    if (!result && memcmp(response.source_sha256, digest, 32)) {
+        errno = EPROTO;
+        result = fail(error, error_size, "source lock response digest mismatch");
+    }
+    saved = errno;
+    if (protection) protection->close_fd(replies[0]); else close(replies[0]);
+    errno = saved;
+    return result;
+}
+
+int latcd_client_channel_prepare_source_lock_ex(int channel_fd, int cache_fd,
+    const uint8_t digest[32], uint64_t request_id, bool *sent,
+    char *error, size_t error_size)
+{
+    return latcd_client_channel_prepare_source_lock_protected(channel_fd, cache_fd,
+        digest, request_id, sent, NULL, error, error_size);
+}
+
+int latcd_client_channel_prepare_source_lock(int channel_fd, int cache_fd,
+    const uint8_t digest[32], uint64_t request_id, char *error, size_t error_size)
+{
+    return latcd_client_channel_prepare_source_lock_ex(channel_fd, cache_fd,
+        digest, request_id, NULL, error, error_size);
 }
 
 int latcd_client_channel_submit_keys_fd(int channel_fd, int source_fd,

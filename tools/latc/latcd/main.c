@@ -228,7 +228,13 @@ typedef struct LatcdBudgetRecovery {
     DIR *cursor;
     bool scanning_tasks;
     unsigned visited;
+    GHashTable *snapshots;
+    bool directories_bound;
+    struct stat root_identity, gc_identity, tasks_identity, budgets_identity;
 } LatcdBudgetRecovery;
+typedef struct LatcdBudgetSnapshot {
+    struct stat budget, task;
+} LatcdBudgetSnapshot;
 static LatcdBudgetRecovery compiler_budget_recovery;
 static pthread_mutex_t retirement_queue_lock = PTHREAD_MUTEX_INITIALIZER;
 static LatcdRetirementQueueStats retirement_queue_stats;
@@ -580,6 +586,28 @@ static int ensure_private_directory(const char *path, char *error,
     return 0;
 }
 
+static bool cache_owner_bound(const char *path, int directory, int fd)
+{
+    struct stat root, root_path, held, lock_path;
+    return !fstat(directory, &root) && !lstat(path, &root_path) &&
+        root.st_dev == root_path.st_dev && root.st_ino == root_path.st_ino &&
+        !fstat(fd, &held) && !fstatat(directory, ".latcd.lock", &lock_path, AT_SYMLINK_NOFOLLOW) &&
+        held.st_dev == lock_path.st_dev && held.st_ino == lock_path.st_ino &&
+        S_ISREG(held.st_mode) && held.st_uid == geteuid() && held.st_nlink == 1 &&
+        !(held.st_mode & 0077);
+}
+
+/* A binding check detects replacement but cannot exclude a later replacement. */
+static int check_cache_owner_binding(const char *path, int fd, char *error, size_t error_size)
+{
+    int directory = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool bound = directory >= 0 && cache_owner_bound(path, directory, fd);
+    if (directory >= 0) close(directory);
+    if (bound) return 0;
+    errno = ESTALE;
+    return fail(error, error_size, "cache owner lock binding changed: %s", path);
+}
+
 static int acquire_cache_owner(const LatcdConfig *config, char *error,
                                size_t error_size)
 {
@@ -587,10 +615,13 @@ static int acquire_cache_owner(const LatcdConfig *config, char *error,
         return -1;
     }
     char *path = g_build_filename(config->cache_dir, ".latcd.lock", NULL);
-    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    int directory = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = directory < 0 ? -1 : openat(directory, ".latcd.lock",
+                                        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (fd < 0) {
         fail(error, error_size, "cannot open cache owner lock %s: %s", path,
              strerror(errno));
+        if (directory >= 0) close(directory);
         g_free(path);
         return -1;
     }
@@ -601,6 +632,7 @@ static int acquire_cache_owner(const LatcdConfig *config, char *error,
         fail(error, error_size,
              "cache owner lock is not a private user-owned file: %s", path);
         close(fd);
+        close(directory);
         g_free(path);
         return -1;
     }
@@ -614,6 +646,15 @@ static int acquire_cache_owner(const LatcdConfig *config, char *error,
                  config->cache_dir, strerror(errno));
         }
         close(fd);
+        close(directory);
+        g_free(path);
+        return -1;
+    }
+    if (!cache_owner_bound(config->cache_dir, directory, fd)) {
+        errno = ESTALE;
+        fail(error, error_size, "cache owner lock binding changed: %s", path);
+        close(fd);
+        close(directory);
         g_free(path);
         return -1;
     }
@@ -625,11 +666,22 @@ static int acquire_cache_owner(const LatcdConfig *config, char *error,
         fail(error, error_size, "cannot record cache owner in %s: %s", path,
              strerror(errno));
         close(fd);
+        close(directory);
+        g_free(owner);
+        g_free(path);
+        return -1;
+    }
+    if (!cache_owner_bound(config->cache_dir, directory, fd)) {
+        errno = ESTALE;
+        fail(error, error_size, "cache owner lock binding changed: %s", path);
+        close(fd);
+        close(directory);
         g_free(owner);
         g_free(path);
         return -1;
     }
     g_free(owner);
+    close(directory);
     g_free(path);
     return fd;
 }
@@ -877,7 +929,7 @@ static void publish_source_identity(const LatcdConfig *config,
             fd = -1;
             if (!leftover && !rename(temporary, final)) {
                 installed = true;
-                sync_directory(directory, error, sizeof(error));
+                if (sync_directory(directory, error, sizeof(error))) leftover = true;
             }
         }
         if (fd >= 0 && close(fd)) leftover = true;
@@ -1102,7 +1154,8 @@ static int merge_tbset(const LatcdConfig *config, const uint8_t digest[32],
     }
 merged_done:
     if (result && temporary && unlink(temporary) && errno != ENOENT) leftover = true;
-    latcd_cache_capacity_metadata_finish(&reservation, installed, leftover);
+    latcd_cache_capacity_metadata_finish(&reservation, installed,
+                                         leftover || (installed && result));
     pthread_mutex_unlock(&cache_lock);
     lat_tb_key_set_destroy(&incoming_set);
     lat_tb_key_set_destroy(&existing);
@@ -1279,8 +1332,7 @@ static int pin_compiler_inputs(const char *const paths[4], int pins[4],
 
 static int open_task_directory(int parent, const char *name)
 {
-    if (mkdirat(parent, name, 0700) && errno != EEXIST) return -1;
-    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = latcd_cache_capacity_open_metadata_directory(parent, name);
     struct stat st;
     if (fd < 0) return -1;
     if (fstat(fd, &st) || st.st_uid != geteuid() || (st.st_mode & 0077) ||
@@ -1289,6 +1341,61 @@ static int open_task_directory(int parent, const char *name)
         return -1;
     }
     return fd;
+}
+
+static int prepare_source_lock_at(int root, const char *source)
+{
+    int gc = open_task_directory(root, ".gc");
+    int locks = gc < 0 ? -1 : open_task_directory(gc, "source-locks");
+    char name[80];
+    snprintf(name, sizeof(name), "%s.lock", source);
+    int lock = locks < 0 ? -1 : latcd_cache_capacity_open_metadata_lock(locks, name);
+    int saved = errno;
+    if (lock >= 0) close(lock);
+    if (locks >= 0) close(locks);
+    if (gc >= 0) close(gc);
+    errno = saved;
+    return lock < 0 ? -1 : 0;
+}
+
+static int prepare_source_lock_directories(const char *cache_dir, const char *source)
+{
+    int root = open(cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (root < 0) return -1;
+    int result = prepare_source_lock_at(root, source);
+    int saved = errno;
+    close(root);
+    errno = saved;
+    return result;
+}
+
+static int prepare_metadata_directories(const char *cache_dir)
+{
+    static const char *const names[] = {
+        "source-locks", "tasks", "compiler-budgets", "compiler-releases",
+        "compiler-output-releases", "copy-releases", "copy-receipts",
+        "copy-handoffs", "transactions", "tombstones", "holds", "mount-leases",
+        "retirement-schedule"
+    };
+    int root = open(cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = root < 0 ? -1 : open_task_directory(root, ".gc");
+    int result = gc < 0 ? -1 : 0;
+    static const char *const state_names[] = {".tbsets", ".identities"};
+    for (size_t i = 0; !result && i < G_N_ELEMENTS(state_names); i++) {
+        int fd = open_task_directory(root, state_names[i]);
+        if (fd < 0) result = -1;
+        else close(fd);
+    }
+    for (size_t i = 0; !result && i < G_N_ELEMENTS(names); i++) {
+        int fd = open_task_directory(gc, names[i]);
+        if (fd < 0) result = -1;
+        else close(fd);
+    }
+    int saved = errno;
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    errno = saved;
+    return result;
 }
 
 static void task_object_identity(GKeyFile *record, const char *group,
@@ -1339,7 +1446,7 @@ static int persist_task_record(int directory, const char *id, GKeyFile *record)
     snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", lease);
     if (linkat(AT_FDCWD, descriptor, directory, name, AT_SYMLINK_FOLLOW)) goto failed;
     installed = true;
-    if (fsync(directory)) goto failed;
+    if (fsync(directory)) { leftover = true; goto failed; }
     if (inject && !strcmp(point, "linked")) raise(SIGKILL);
     int readonly = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat writer, reader;
@@ -1522,6 +1629,13 @@ static int record_compiler_budget(const LatcdConfig *config, const char *id,
     return lease < 0 ? -1 : 0;
 }
 
+static bool budget_directory_identity(int fd, const struct stat *identity)
+{
+    struct stat current;
+    return fd >= 0 && !fstat(fd, &current) && S_ISDIR(current.st_mode) &&
+        current.st_dev == identity->st_dev && current.st_ino == identity->st_ino;
+}
+
 static int restore_compiler_budgets_step(const LatcdConfig *config,
     LatcdBudgetRecovery *work, unsigned budget, unsigned *visited,
     char *error, size_t error_size)
@@ -1536,6 +1650,20 @@ static int restore_compiler_budgets_step(const LatcdConfig *config,
     int64_t started = g_get_monotonic_time();
     struct stat cache;
     if (budgets < 0 || tasks < 0 || fstat(root, &cache)) goto out;
+    if (!work->directories_bound) {
+        if (fstat(gc, &work->gc_identity) || fstat(tasks, &work->tasks_identity) ||
+            fstat(budgets, &work->budgets_identity)) goto out;
+        work->root_identity = cache;
+        work->directories_bound = true;
+    }
+    if (!budget_directory_identity(root, &work->root_identity) ||
+        !budget_directory_identity(gc, &work->gc_identity) ||
+        !budget_directory_identity(tasks, &work->tasks_identity) ||
+        !budget_directory_identity(budgets, &work->budgets_identity) ||
+        (directory && !budget_directory_identity(dirfd(directory), work->scanning_tasks ?
+                                                  &work->tasks_identity : &work->budgets_identity))) goto out;
+    if (!work->snapshots)
+        work->snapshots = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     if (!directory) {
         int scan = openat(work->scanning_tasks ? tasks : budgets, ".",
                           O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -1593,6 +1721,9 @@ static int restore_compiler_budgets_step(const LatcdConfig *config,
         if (fd >= 0) close(fd);
         g_key_file_free(record);
         if (!valid) break;
+        LatcdBudgetSnapshot *snapshot = g_new(LatcdBudgetSnapshot, 1);
+        *snapshot = (LatcdBudgetSnapshot){ .budget = before, .task = task };
+        g_hash_table_replace(work->snapshots, g_strdup(id), snapshot);
     }
     if (!work->scanning_tasks && !result) {
         closedir(directory);
@@ -1612,7 +1743,10 @@ static int restore_compiler_budgets_step(const LatcdConfig *config,
                 g_get_monotonic_time() - started >= 10000)) { result = 1; break; }
             errno = 0;
             struct dirent *entry = readdir(directory);
-            if (!entry) { result = errno ? -1 : 0; break; }
+            if (!entry) {
+                result = errno || g_hash_table_size(work->snapshots) ? -1 : 0;
+                break;
+            }
             const char *name = entry->d_name;
             if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
             result = -1;
@@ -1625,10 +1759,18 @@ static int restore_compiler_budgets_step(const LatcdConfig *config,
             if (!g_uuid_string_is_valid(id)) break;
             struct stat budget;
             if (!fstatat(budgets, name, &budget, AT_SYMLINK_NOFOLLOW)) {
+                LatcdBudgetSnapshot *snapshot = g_hash_table_lookup(work->snapshots, id);
+                struct stat task;
+                if (!snapshot || !latcd_cache_capacity_task_restored(&generation_capacity, id) ||
+                    !metadata_equal(&snapshot->budget, &budget) ||
+                    fstatat(tasks, name, &task, AT_SYMLINK_NOFOLLOW) ||
+                    !metadata_equal(&snapshot->task, &task)) break;
+                g_hash_table_remove(work->snapshots, id);
                 result = 0;
-                continue; /* Already validated and charged in the first pass. */
+                continue;
             }
-            if (errno != ENOENT) break;
+            if (errno != ENOENT || g_hash_table_contains(work->snapshots, id) ||
+                latcd_cache_capacity_task_restored(&generation_capacity, id)) break;
             int fd = openat(tasks, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
             struct stat before, after;
             char data[65536];
@@ -1666,8 +1808,23 @@ static int restore_compiler_budgets_step(const LatcdConfig *config,
         }
     }
 out:
+    if (result >= 0) {
+        int verify_root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int verify_gc = verify_root < 0 ? -1 : open_task_directory(verify_root, ".gc");
+        int verify_tasks = verify_gc < 0 ? -1 : open_task_directory(verify_gc, "tasks");
+        int verify_budgets = verify_gc < 0 ? -1 : open_task_directory(verify_gc, "compiler-budgets");
+        if (!budget_directory_identity(verify_root, &work->root_identity) ||
+            !budget_directory_identity(verify_gc, &work->gc_identity) ||
+            !budget_directory_identity(verify_tasks, &work->tasks_identity) ||
+            !budget_directory_identity(verify_budgets, &work->budgets_identity)) result = -1;
+        if (verify_budgets >= 0) close(verify_budgets);
+        if (verify_tasks >= 0) close(verify_tasks);
+        if (verify_gc >= 0) close(verify_gc);
+        if (verify_root >= 0) close(verify_root);
+    }
     work->cursor = result == 1 ? directory : NULL;
     if (result != 1 && directory) closedir(directory);
+    if (result != 1) g_clear_pointer(&work->snapshots, g_hash_table_unref);
     if (budgets >= 0) close(budgets);
     if (tasks >= 0) close(tasks);
     if (gc >= 0) close(gc);
@@ -2039,6 +2196,8 @@ static void *compiler_input_recovery_worker(void *opaque)
                 int result = restore_compiler_budgets_step(work->config,
                     &compiler_budget_recovery, 32, &visited, error, sizeof(error));
                 if (result <= 0) {
+                    if (!result && !latcd_cache_capacity_poll(&generation_capacity))
+                        result = fail(error, sizeof(error), "capacity index invalid after compiler budget recovery");
                     atomic_store(&compiler_budget_recovery_state, result < 0 ? -1 : 1);
                     if (result < 0) fprintf(stderr, "latcd: %s\n", error);
                 }
@@ -2699,7 +2858,8 @@ static int snapshot_current_pair(const LatcdConfig *config,
     char hex[65];
     digest_hex(digest, hex);
     pthread_mutex_unlock(&cache_lock);
-    int source_gate = lat_aot_v2_cache_source_lock(config->cache_dir, hex,
+    int source_gate = prepare_source_lock_directories(config->cache_dir, hex) ? -1 :
+        lat_aot_v2_cache_source_lock(config->cache_dir, hex,
         LOCK_SH | LOCK_NB, false, error, error_size);
     pthread_mutex_lock(&cache_lock);
     if (source_gate < 0) return -1;
@@ -2853,9 +3013,10 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
                                  const char *tbset_name,
                                  const LatAotModuleInfoV2 *info,
                                  uint64_t published_sequence,
-                                 bool new_pair,
+                                 bool new_pair, bool *published,
                                  char *error, size_t error_size)
 {
+    if (published) *published = false;
     int source_lock_fd = -1;
     char *candidate = g_build_filename(config->cache_dir, module_name, NULL);
     int validation = validate_current_replacement(config, hex, candidate,
@@ -2914,7 +3075,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
             }
         }
     }
-    source_lock_fd = lat_aot_v2_cache_source_lock(
+    source_lock_fd = prepare_source_lock_directories(config->cache_dir, hex) ? -1 : lat_aot_v2_cache_source_lock(
         config->cache_dir, hex, LOCK_EX, false, error, error_size);
     LatcdRetirementPublication *publication = source_lock_fd < 0 ? NULL :
         latcd_retirement_publication_open(config->cache_dir, error, error_size);
@@ -3055,9 +3216,15 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
                           strerror(errno));
         } else {
             installed = true;
+            if (published) *published = true;
             if (crash && !strcmp(crash, "current")) raise(SIGKILL);
-            if (!sync_directory(config->cache_dir, error, error_size) &&
-                   crash && !strcmp(crash, "current-synced")) {
+            if (crash && !strcmp(crash, "current-sync-error")) {
+                errno = EIO;
+                result = fail(error, error_size, "injected current directory sync failure");
+            } else {
+                result = sync_directory(config->cache_dir, error, error_size);
+            }
+            if (!result && crash && !strcmp(crash, "current-synced")) {
                 raise(SIGKILL);
             }
         }
@@ -3065,8 +3232,9 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     if (result) {
         if (unlink(temporary) && errno != ENOENT) leftover = true;
     }
-    latcd_cache_capacity_metadata_finish(&reservation, installed, leftover);
-    if (prepared) {
+    latcd_cache_capacity_metadata_finish(&reservation, installed,
+                                         leftover || (installed && result));
+    if (prepared && !result) {
         char retirement_error[256] = {0};
         if (latcd_retirement_publication_finish(publication,
                                     retirement_error, sizeof(retirement_error))) {
@@ -3272,9 +3440,11 @@ static int publish_covered_tbset(const LatcdConfig *config,
             goto out;
         }
     }
+    bool current_installed = false;
     if (publish_current_index(config, source_hex, manifest.module,
                               manifest.native, tbset_name, &info,
-                              published_sequence, false, error, sizeof(error))) {
+                              published_sequence, false, &current_installed, error, sizeof(error))) {
+        if (current_installed) { tbset_staged = false; capacity_retained = true; }
         current_manifest_clear(&manifest);
         pthread_mutex_unlock(&cache_lock);
         goto out;
@@ -3492,7 +3662,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     if (cache_hit) {
         int publish_result = publish_current_index(
             config, hex, module_name, native_name, tbset_name, &info,
-            published_sequence, false, error, sizeof(error));
+            published_sequence, false, NULL, error, sizeof(error));
         if (publish_result) {
             pthread_mutex_unlock(&cache_lock);
             goto out;
@@ -3769,10 +3939,15 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         pthread_mutex_unlock(&cache_lock);
         goto out;
     }
+    bool current_installed = false;
     int publish_result = publish_current_index(
         config, hex, module_name, native_name, tbset_name, &info,
-        published_sequence, true, error, sizeof(error));
+        published_sequence, true, &current_installed, error, sizeof(error));
     if (publish_result) {
+        if (current_installed) {
+            module_staged = native_staged = tbset_staged = false;
+            capacity_retained = true;
+        }
         pthread_mutex_unlock(&cache_lock);
         goto out;
     }
@@ -4397,6 +4572,48 @@ static void response_init(LatcdResponseV2 *response, uint64_t request_id)
     response->version = LATCD_PROTOCOL_VERSION;
     response->size = sizeof(*response);
     response->request_id = request_id;
+}
+
+static void prepare_source_lock_request(const LatcdConfig *config, int cache_fd,
+                                        int digest_fd, LatcdResponseV2 *response)
+{
+    struct stat digest_st, manifest;
+    uint8_t digest[32];
+    int seals = fcntl(digest_fd, F_GET_SEALS);
+    if (seals < 0 || (seals & (F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW)) !=
+        (F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW) ||
+        fstat(digest_fd, &digest_st) || !S_ISREG(digest_st.st_mode) ||
+        digest_st.st_size != sizeof(digest) ||
+        pread(digest_fd, digest, sizeof(digest), 0) != sizeof(digest)) {
+        response->status = LATCD_STATUS_BAD_REQUEST;
+        g_strlcpy(response->message, "invalid source digest descriptor", sizeof(response->message));
+        return;
+    }
+    int root = latcd_cache_capacity_open_matching_root(&generation_capacity,
+                                                        config->cache_dir, cache_fd);
+    if (root < 0) goto io_error;
+    char hex[65], name[80];
+    digest_hex(digest, hex);
+    snprintf(name, sizeof(name), "%s.current", hex);
+    if (fstatat(root, name, &manifest, AT_SYMLINK_NOFOLLOW) ||
+        !S_ISREG(manifest.st_mode) || manifest.st_uid != geteuid() ||
+        manifest.st_nlink != 1 || (manifest.st_mode & 0022)) {
+        close(root);
+        response->status = LATCD_STATUS_BAD_SOURCE;
+        g_strlcpy(response->message, "source current is absent or unsafe", sizeof(response->message));
+        return;
+    }
+    int result = prepare_source_lock_at(root, hex);
+    int verified = latcd_cache_capacity_open_matching_root(&generation_capacity,
+                                                            config->cache_dir, root);
+    close(root);
+    if (verified >= 0) close(verified);
+    if (result || verified < 0) goto io_error;
+    memcpy(response->source_sha256, digest, sizeof(digest));
+    return;
+io_error:
+    response->status = LATCD_STATUS_IO_ERROR;
+    g_strlcpy(response->message, "cannot prepare monitored source lock", sizeof(response->message));
 }
 
 static LatcdSourceState *source_state_locked(LatcdService *service,
@@ -5682,7 +5899,13 @@ static int run_service(const LatcdConfig *config)
             }
             LatcdResponseV2 response;
             response_init(&response, request.request_id);
-            if (request.operation == LATCD_OP_REGISTER_JOURNAL ||
+            if (request.operation == LATCD_OP_PREPARE_SOURCE_LOCK) {
+                if (getenv("LATCD_TEST_CRASH_BEFORE_SOURCE_LOCK")) {
+                    fprintf(stderr, "latcd: test crash before source lock creation\n");
+                    _exit(86);
+                }
+                prepare_source_lock_request(config, source, tbset, &response);
+            } else if (request.operation == LATCD_OP_REGISTER_JOURNAL ||
                 request.operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY) {
                 register_journal(config, source, tbset, &request, &response, &directory);
             } else if (request.operation == LATCD_OP_APPEND_JOURNAL) {
@@ -5700,7 +5923,13 @@ static int run_service(const LatcdConfig *config)
                                       &request, &response);
             }
             /* A client that abandons its reply must not block the service. */
-            latcd_send_response_fd(reply, &response, directory, NULL, 0);
+            if (request.operation == LATCD_OP_PREPARE_SOURCE_LOCK &&
+                response.status == LATCD_STATUS_OK &&
+                getenv("LATCD_TEST_DROP_SOURCE_LOCK_REPLY")) {
+                fprintf(stderr, "latcd: test dropped source lock reply\n");
+            } else {
+                latcd_send_response_fd(reply, &response, directory, NULL, 0);
+            }
             if (directory >= 0) close(directory);
             close(reply);
             if (source >= 0) close(source);
@@ -6366,6 +6595,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "latcd: %s\n", error);
         return 1;
     }
+    if (check_cache_owner_binding(config.cache_dir, cache_owner, error, sizeof(error))) {
+        fprintf(stderr, "latcd: %s\n", error);
+        close(cache_owner);
+        return 1;
+    }
     int domain = latcd_cache_domain_validate(config.cache_dir, cache_domain_id,
                                               error, sizeof(error));
     if (domain < 0) {
@@ -6385,17 +6619,35 @@ int main(int argc, char **argv)
     int recovery = recover_lifecycle(config.cache_dir, false, error, sizeof(error));
     if (!recovery) recovery = recover_lifecycle(config.cache_dir, true, error, sizeof(error));
     if (!recovery && !serve) recovery = recover_compiler_inputs(&config, error, sizeof(error));
+    if (!recovery && check_cache_owner_binding(config.cache_dir, cache_owner, error, sizeof(error)))
+        recovery = -1;
     if (recovery) {
         if (recovery < 0) fprintf(stderr, "latcd: %s\n", error);
         else fprintf(stderr, "latcd: recovery deferred by stop request\n");
         close(cache_owner);
         return recovery < 0 ? 1 : 0;
     }
+    if (prepare_metadata_directories(config.cache_dir)) {
+        fprintf(stderr, "latcd: cannot prepare metadata directories: %s\n", strerror(errno));
+        close(cache_owner);
+        return 1;
+    }
     if (latcd_cache_capacity_scan(&generation_capacity, config.cache_dir, error, sizeof(error))) {
         fprintf(stderr, "latcd: %s\n", error);
         close(cache_owner);
         return 1;
     }
+    int budget_root = open(config.cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int indexed_root = budget_root < 0 ? -1 :
+        latcd_cache_capacity_open_matching_root(&generation_capacity, config.cache_dir, budget_root);
+    if (budget_root >= 0) close(budget_root);
+    if (indexed_root < 0) {
+        fprintf(stderr, "latcd: capacity root changed before budget recovery\n");
+        latcd_cache_capacity_close(&generation_capacity);
+        close(cache_owner);
+        return 1;
+    }
+    close(indexed_root);
     latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
     unsigned budget_visited;
     int budget_result;
@@ -6403,10 +6655,13 @@ int main(int argc, char **argv)
         budget_result = restore_compiler_budgets_step(&config, &compiler_budget_recovery,
             32, &budget_visited, error, sizeof(error));
     } while (!serve && budget_result == 1 && !stop_requested);
+    if (!budget_result && !latcd_cache_capacity_poll(&generation_capacity))
+        budget_result = fail(error, sizeof(error), "capacity index invalid after compiler budget recovery");
     atomic_store(&compiler_budget_recovery_state, budget_result < 0 ? -1 : budget_result == 0);
     if (budget_result < 0 || stop_requested) {
         fprintf(stderr, "latcd: %s\n", stop_requested ? "budget recovery deferred by stop request" : error);
         if (compiler_budget_recovery.cursor) closedir(compiler_budget_recovery.cursor);
+        g_clear_pointer(&compiler_budget_recovery.snapshots, g_hash_table_unref);
         latcd_cache_capacity_close(&generation_capacity);
         close(cache_owner);
         return 1;
@@ -6419,6 +6674,7 @@ int main(int argc, char **argv)
     }
     int result = serve ? run_service(&config) : run_once(&config);
     if (compiler_budget_recovery.cursor) closedir(compiler_budget_recovery.cursor);
+    g_clear_pointer(&compiler_budget_recovery.snapshots, g_hash_table_unref);
     latcd_cache_capacity_close(&generation_capacity);
     close(cache_owner);
     return result;

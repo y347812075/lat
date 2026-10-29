@@ -117,9 +117,13 @@ $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
 		$(BUILD)/latcd/parson/parson.o \
 		$(BUILD)/aot-v2/runtime/cache-domain.o
 
-$(BUILD)/tests/test-cache-capacity: tests/test-cache-capacity.c $(BUILD)/latcd/cache-capacity.o
+$(BUILD)/tests/cache-capacity-testing.o: latcd/cache-capacity.c latcd/cache-capacity.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread -Wl,--wrap=unlinkat -Wl,--wrap=fsync
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DLATCD_CAPACITY_TESTING -MMD -MP -c -o $@ $<
+
+$(BUILD)/tests/test-cache-capacity: tests/test-cache-capacity.c $(BUILD)/tests/cache-capacity-testing.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DLATCD_CAPACITY_TESTING -o $@ $^ $(LDLIBS) -pthread -Wl,--wrap=unlinkat -Wl,--wrap=fsync
 
 $(BUILD)/tests/test-capacity-watch-race: tests/test-capacity-watch-race.c latcd/cache-capacity.c latcd/cache-capacity.h
 	@mkdir -p $(dir $@)
@@ -132,15 +136,20 @@ test-cache-capacity: $(BUILD)/tests/test-cache-capacity $(BUILD)/tests/test-capa
 
 test: test-cache-capacity
 
+$(BUILD)/tests/cache-retirement-testing.o: latcd/cache-retirement.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DLATCD_RETIREMENT_TESTING -DLATCD_CAPACITY_TESTING -MMD -MP -c -o $@ $<
+
 $(BUILD)/tests/test-cache-retirement: tests/test-cache-retirement.c \
-		$(BUILD)/latcd/cache-capacity.o \
-		$(BUILD)/latcd/cache-retirement.o $(BUILD)/latcd/parson/parson.o \
+		$(BUILD)/tests/cache-capacity-testing.o \
+		$(BUILD)/tests/cache-retirement-testing.o $(BUILD)/latcd/parson/parson.o \
 		$(BUILD)/aot-v2/runtime/cache-domain.o \
 		$(BUILD)/aot-v2/runtime/cache-lifecycle.o \
 		$(BUILD)/aot-v2/runtime/internal-fd-registry.o
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread \
-	  -Wl,--wrap=clock_gettime -Wl,--wrap=g_file_get_contents -Wl,--wrap=g_get_monotonic_time
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DLATCD_RETIREMENT_TESTING -DLATCD_CAPACITY_TESTING -o $@ $^ $(LDLIBS) -pthread \
+  -Wl,--wrap=clock_gettime -Wl,--wrap=g_file_get_contents -Wl,--wrap=g_get_monotonic_time \
+  -Wl,--wrap=lat_aot_v2_cache_source_lock -Wl,--wrap=lat_aot_v2_cache_lock_fd -Wl,--wrap=readdir -Wl,--wrap=lstat -Wl,--wrap=fstatat
 
 .PHONY: test-cache-retirement
 test-cache-retirement: $(BUILD)/tests/test-cache-retirement
@@ -744,7 +753,7 @@ $(BUILD)/tests/test-module-coverage: aot-v2/tests/test-module-coverage.c \
 		$(BUILD)/aot-v2/runtime/elf-validate.o \
 		$(BUILD)/aot-v2/common/tb-key-set.o
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iaot-v2/tests -o $@ $^ $(LDLIBS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DMODULE_SNAPSHOT_TESTING -Iaot-v2/tests -o $@ $^ $(LDLIBS) -Wl,--wrap=pread
 
 $(BUILD)/tests/test-aot-recover-tu: tests/test-aot-recover-tu.c \
 		../../target/i386/latx/include/aot_recover_tu.h
@@ -1462,6 +1471,7 @@ clean:
 
 -include $(CFG_OBJ:.o=.d) $(BUILD)/compiler/latc.d \
 	$(wildcard $(BUILD)/latcd/*.d) \
+	$(BUILD)/tests/cache-retirement-testing.d \
 	$(BUILD)/compiler/tbset.d $(BUILD)/format/bundle.d \
 	$(BUILD)/native/format/native-tu-plan.d \
 	$(BUILD)/native/format/native-tu-audit.d \

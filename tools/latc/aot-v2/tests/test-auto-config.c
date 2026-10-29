@@ -2,12 +2,18 @@
 #define _GNU_SOURCE
 #endif
 #include "auto-config.h"
+#include "latcd-client.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+static void allocation_lock(void) {}
+static void allocation_unlock(void) {}
+static int register_fd(int fd) { (void)fd; return 0; }
+static void close_fd(int fd) { close(fd); }
 
 static void run_case(int number)
 {
@@ -45,7 +51,7 @@ static void run_case(int number)
         setenv("LATX_AOT_V2_CACHE_DIR", "", 1);
         setenv("LATX_AOT_V2_LATCD_SOCKET", "/unused/socket", 1);
     }
-    setenv("LATX_AOT_V2_AUTOSTART", "0", 1);
+    setenv("LATX_AOT_V2_AUTOSTART", number == 12 ? "1" : "0", 1);
     lat_aot_config_environment();
     if (number == 7) lat_aot_config_option("LATX_AOT_V2", "0");
     char error[256];
@@ -78,7 +84,14 @@ static void run_case(int number)
         if (v2 && number != 6 && number != 8 && number != 11) {
             assert(lat_aot_socket_path());
             assert(strlen(lat_aot_socket_path()) < 108);
-            assert(!lat_aot_ensure_daemon());
+            if (number != 12) assert(!lat_aot_ensure_daemon());
+            assert(lat_aot_open_existing_channel(error, sizeof(error)) < 0);
+            const LatcdClientFdProtection protection = {
+                allocation_lock, allocation_unlock, register_fd, close_fd
+            };
+            assert(lat_aot_open_existing_channel_protected(
+                       &protection, error, sizeof(error)) < 0);
+            assert(access(lat_aot_socket_path(), F_OK) != 0);
         }
     }
 }
@@ -95,7 +108,7 @@ int main(void)
     unsetenv("XDG_CACHE_HOME");
     unsetenv("XDG_STATE_HOME");
     unsetenv("XDG_RUNTIME_DIR");
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < 13; i++) {
         pid_t child = fork();
         assert(child >= 0);
         if (!child) { run_case(i); _exit(0); }

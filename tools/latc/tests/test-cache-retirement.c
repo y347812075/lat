@@ -5,6 +5,8 @@
 #include "../aot-v2/runtime/cache-lifecycle.h"
 
 #include <assert.h>
+#include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <glib.h>
 #include <signal.h>
@@ -23,6 +25,125 @@ static unsigned clock_fault;
 static int64_t monotonic_tick;
 static uint64_t simulated_boottime_us;
 static const char *clock_swap_path, *clock_swap_old;
+static const char *lock_swap_root, *lock_swap_old, *lock_swap_new;
+static bool lock_swap_after;
+static const char *lock_wrong_root;
+static const char *schedule_scan_mutation;
+static const char *schedule_mutation_file;
+static const char *snapshot_swap_store, *snapshot_swap_gc, *snapshot_swap_old;
+static const char *roots_swap_path, *roots_swap_old;
+static const char *page_lstat_swap_path, *page_lstat_swap_old, *page_lstat_swap_new;
+static const char *scheduler_swap_root, *scheduler_swap_gc, *scheduler_swap_old;
+static bool scheduler_swap_after_binding;
+static const char *settlement_unexpected;
+static void invalidate_settlement(void)
+{
+    int fd = open(settlement_unexpected, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    assert(fd >= 0 && !close(fd));
+    latcd_retirement_test_before_settlement = NULL;
+}
+int __real_fstatat(int directory, const char *name, struct stat *status, int flags);
+int __wrap_fstatat(int directory, const char *name, struct stat *status, int flags)
+{
+    int result = __real_fstatat(directory, name, status, flags);
+    if (!result && scheduler_swap_after_binding && !strcmp(name, ".gc")) {
+        assert(!rename(scheduler_swap_gc, scheduler_swap_old));
+        assert(!mkdir(scheduler_swap_gc, 0700));
+        scheduler_swap_after_binding = false;
+    }
+    return result;
+}
+int __real_lstat(const char *path, struct stat *status);
+int __wrap_lstat(const char *path, struct stat *status)
+{
+    int result = __real_lstat(path, status);
+    if (!result && scheduler_swap_root && !strcmp(path, scheduler_swap_root)) {
+        assert(!rename(scheduler_swap_gc, scheduler_swap_old));
+        assert(!mkdir(scheduler_swap_gc, 0700));
+        scheduler_swap_root = NULL;
+    }
+    if (!result && page_lstat_swap_path && !strcmp(path, page_lstat_swap_path)) {
+        assert(!rename(page_lstat_swap_path, page_lstat_swap_old));
+        assert(!rename(page_lstat_swap_new, page_lstat_swap_path));
+        page_lstat_swap_path = NULL;
+    }
+    return result;
+}
+int __real_lat_aot_v2_cache_lock_fd(int fd, int operation, char *error, size_t error_size);
+int __wrap_lat_aot_v2_cache_lock_fd(int fd, int operation, char *error, size_t error_size)
+{
+    int result = __real_lat_aot_v2_cache_lock_fd(fd, operation, error, error_size);
+    if (!result && roots_swap_path && operation == (LOCK_SH | LOCK_NB)) {
+        assert(!rename(roots_swap_path, roots_swap_old));
+        assert(!mkdir(roots_swap_path, 0700));
+        roots_swap_path = NULL;
+    }
+    return result;
+}
+struct dirent *__real_readdir(DIR *directory);
+struct dirent *__wrap_readdir(DIR *directory)
+{
+    struct dirent *entry = __real_readdir(directory);
+    if (!entry && snapshot_swap_store) {
+        struct stat held, target;
+        if (!fstat(dirfd(directory), &held) && !stat(snapshot_swap_store, &target) &&
+            held.st_dev == target.st_dev && held.st_ino == target.st_ino) {
+            assert(!rename(snapshot_swap_gc, snapshot_swap_old));
+            assert(!mkdir(snapshot_swap_gc, 0700));
+            snapshot_swap_store = NULL;
+        }
+    }
+    if (!entry && schedule_scan_mutation) {
+        struct stat held, target;
+        if (!fstat(dirfd(directory), &held) && !stat(schedule_scan_mutation, &target) &&
+            held.st_dev == target.st_dev && held.st_ino == target.st_ino) {
+            if (schedule_mutation_file) {
+                assert(!chmod(schedule_mutation_file, 0600));
+                int fd = open(schedule_mutation_file, O_WRONLY);
+                assert(fd >= 0 && pwrite(fd, "X", 1, 0) == 1);
+                assert(!fchmod(fd, 0400));
+                close(fd);
+                schedule_mutation_file = NULL;
+            } else {
+                int fd = openat(dirfd(directory), ".test-mutation", O_CREAT | O_EXCL | O_WRONLY, 0600);
+                assert(fd >= 0);
+                close(fd);
+                assert(!unlinkat(dirfd(directory), ".test-mutation", 0));
+            }
+            schedule_scan_mutation = NULL;
+        }
+    }
+    return entry;
+}
+int __real_lat_aot_v2_cache_source_lock(const char *, const char *, int, bool, char *, size_t);
+int __wrap_lat_aot_v2_cache_source_lock(const char *root, const char *source_hex,
+    int operation, bool protect, char *error, size_t error_size)
+{
+    if (lock_swap_root && !lock_swap_after) {
+        assert(!strcmp(root, lock_swap_root));
+        assert(!rename(lock_swap_root, lock_swap_old));
+        assert(!rename(lock_swap_new, lock_swap_root));
+        lock_swap_root = NULL;
+    }
+    int fd = __real_lat_aot_v2_cache_source_lock(root, source_hex, operation, protect,
+                                                 error, error_size);
+    if (fd >= 0 && lock_wrong_root) {
+        int wrong = __real_lat_aot_v2_cache_source_lock(lock_wrong_root, source_hex,
+            operation, protect, error, error_size);
+        assert(wrong >= 0);
+        close(fd);
+        fd = wrong;
+        lock_wrong_root = NULL;
+    }
+    if (fd >= 0 && lock_swap_root && lock_swap_after) {
+        assert(!strcmp(root, lock_swap_root));
+        assert(!rename(lock_swap_root, lock_swap_old));
+        assert(!rename(lock_swap_new, lock_swap_root));
+        lock_swap_root = NULL;
+        lock_swap_after = false;
+    }
+    return fd;
+}
 int __real_clock_gettime(clockid_t id, struct timespec *value);
 gint64 __real_g_get_monotonic_time(void);
 gboolean __real_g_file_get_contents(const gchar *name, gchar **contents,
@@ -180,6 +301,38 @@ static void test_crash(int phase, bool initial)
     remove_root(root);
     g_free(root);
     g_free(current);
+}
+
+static void test_recovery_capacity_admission(int outcome)
+{
+    char *root = root_new(), *current = current_path(root), error[256];
+    put(current, old);
+    LatcdRetirementPublication *publication =
+        latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication && !latcd_retirement_publication_prepare(publication,
+        source, next, strlen(next), NULL, error, sizeof(error)));
+    latcd_retirement_publication_close(publication);
+    if (outcome == 0) put(current, next);
+    if (outcome == 2) put(current, "unexpected manifest\n");
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    latcd_cache_capacity_unknown_task(&capacity, "recovery-admission-test");
+    unsigned recovered = 0;
+    int result = latcd_retirement_recover(root, &recovered, error, sizeof(error));
+    if (outcome == 0) {
+        assert(!result && recovered == 1);
+        assert_state(root, "RETIRED");
+        assert(!latcd_cache_capacity_poll(&capacity));
+    } else {
+        assert(result < 0);
+        assert_state(root, "PREPARED");
+    }
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    remove_root(root);
+    g_free(current);
+    g_free(root);
 }
 
 static void test_oversized_prepared(void)
@@ -929,6 +1082,18 @@ static void test_round_cursor(void)
         .entries = {{"a", 10, 1, 0, 0, 0}, {"b", 20, 1, 0, 0, 0}}
     };
     assert(latcd_retirement_page_state_valid(&state) == 0);
+    LatcdRetirementPageState unterminated = state;
+    memset(unterminated.boot, 'a', sizeof(unterminated.boot));
+    assert(latcd_retirement_page_state_valid(&unterminated) < 0);
+    unterminated = state;
+    memset(unterminated.cursor, 'a', sizeof(unterminated.cursor));
+    assert(latcd_retirement_page_state_valid(&unterminated) < 0);
+    unterminated = state;
+    memset(unterminated.committed_cursor, 'a', sizeof(unterminated.committed_cursor));
+    assert(latcd_retirement_page_state_valid(&unterminated) < 0);
+    unterminated = state;
+    memset(unterminated.entries[0].name, 'a', sizeof(unterminated.entries[0].name));
+    assert(latcd_retirement_page_state_valid(&unterminated) < 0);
     state.round_cutoff = 0;
     assert(latcd_retirement_page_state_valid(&state) < 0);
     state.round_cutoff = 4;
@@ -948,8 +1113,65 @@ static void test_round_cursor(void)
                                              sizeof(page_error)) == 0);
     assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
                                             sizeof(page_error)) == 0);
+    g_strlcpy(state.committed_cursor, "0", sizeof(state.committed_cursor));
+    assert(!latcd_retirement_page_state_store(page_root, &state, page_error, sizeof(page_error)));
+    assert(!latcd_retirement_page_state_load(page_root, &loaded, page_error, sizeof(page_error)));
+    assert(!strcmp(loaded.committed_cursor, "0"));
+    g_strlcpy(state.committed_cursor, "a", sizeof(state.committed_cursor));
+    assert(latcd_retirement_page_state_store(page_root, &state, page_error, sizeof(page_error)) < 0);
+    state.committed_cursor[0] = 0;
+    assert(!latcd_retirement_page_state_store(page_root, &state, page_error, sizeof(page_error)));
+    GKeyFile *v4 = g_key_file_new();
+    assert(g_key_file_load_from_file(v4, page_path, 0, NULL));
+    g_key_file_set_string(v4, "page", "pending", "2");
+    char *bad_pending = g_key_file_to_data(v4, NULL, NULL);
+    put(page_path, bad_pending);
+    g_free(bad_pending);
+    assert(latcd_retirement_page_state_load(page_root, &loaded, page_error, sizeof(page_error)) < 0);
+    g_key_file_set_string(v4, "page", "pending", "true");
+    bad_pending = g_key_file_to_data(v4, NULL, NULL);
+    put(page_path, bad_pending);
+    g_free(bad_pending);
+    assert(latcd_retirement_page_state_load(page_root, &loaded, page_error, sizeof(page_error)) < 0);
+    g_key_file_set_integer(v4, "page", "version", 4);
+    for (unsigned i = 0; i < state.count; i++) {
+        char group[32]; snprintf(group, sizeof(group), "entry%u", i);
+        assert(g_key_file_remove_key(v4, group, "result", NULL));
+    }
+    g_key_file_set_integer(v4, "page", "pending", 1);
+    char *v4_data = g_key_file_to_data(v4, NULL, NULL);
+    put(page_path, v4_data);
+    g_free(v4_data);
+    assert(latcd_retirement_page_state_load(page_root, &loaded, page_error, sizeof(page_error)) < 0);
+    g_key_file_set_integer(v4, "page", "pending", 0);
+    v4_data = g_key_file_to_data(v4, NULL, NULL);
+    put(page_path, v4_data);
+    g_free(v4_data);
+    assert(!latcd_retirement_page_state_load(page_root, &loaded, page_error, sizeof(page_error)) &&
+           !loaded.committed_pending && loaded.count == state.count);
+    g_key_file_set_integer(v4, "page", "version", 3);
+    assert(g_key_file_remove_key(v4, "page", "pending", NULL));
+    char *v3_data = g_key_file_to_data(v4, NULL, NULL);
+    put(page_path, v3_data);
+    g_free(v3_data);
+    assert(!latcd_retirement_page_state_load(page_root, &loaded, page_error, sizeof(page_error)) &&
+           !loaded.committed_pending && loaded.count == state.count);
+    g_key_file_unref(v4);
+    assert(!latcd_retirement_page_state_store(page_root, &state, page_error, sizeof(page_error)));
     GKeyFile *legacy = g_key_file_new();
     assert(g_key_file_load_from_file(legacy, page_path, 0, NULL));
+    g_key_file_set_integer(legacy, "page", "version", 2);
+    assert(g_key_file_remove_key(legacy, "page", "pending", NULL));
+    for (unsigned i = 0; i < state.count; i++) {
+        char group[32]; snprintf(group, sizeof(group), "entry%u", i);
+        assert(g_key_file_remove_key(legacy, group, "result", NULL));
+    }
+    assert(g_key_file_remove_key(legacy, "page", "committed_cursor", NULL));
+    char *v2_data = g_key_file_to_data(legacy, NULL, NULL);
+    put(page_path, v2_data);
+    g_free(v2_data);
+    assert(!latcd_retirement_page_state_load(page_root, &loaded, page_error, sizeof(page_error)));
+    assert(!loaded.committed_cursor[0]);
     g_key_file_set_integer(legacy, "page", "version", 1);
     assert(g_key_file_remove_key(legacy, "page", "round_cutoff", NULL));
     char *legacy_data = g_key_file_to_data(legacy, NULL, NULL);
@@ -976,7 +1198,23 @@ static void test_round_cursor(void)
     assert(latcd_retirement_page_state_compatible(&loaded, state.boot, state.grace_us, 4) == 1);
     loaded.entries[0].retry_at = 0;
     assert(latcd_retirement_page_state_resume(page_root, state.boot, state.grace_us,
-                                              4, &loaded, page_error, sizeof(page_error)) == 0);
+                                              4, &loaded, page_error, sizeof(page_error)) < 0);
+    assert(!loaded.round_cutoff && !loaded.count);
+    char *first_object = g_strconcat(source, ".native", NULL);
+    char *second_object = g_strconcat(source, ".so", NULL);
+    g_strlcpy(state.entries[0].name, first_object, sizeof(state.entries[0].name));
+    g_strlcpy(state.entries[1].name, second_object, sizeof(state.entries[1].name));
+    g_strlcpy(state.cursor, second_object, sizeof(state.cursor));
+    assert(!latcd_retirement_page_state_store(page_root, &state, page_error, sizeof(page_error)));
+    assert(!latcd_retirement_page_state_resume(page_root, state.boot, state.grace_us,
+                                               4, &loaded, page_error, sizeof(page_error)));
+    g_strlcpy(state.committed_cursor, "0invalid", sizeof(state.committed_cursor));
+    assert(!latcd_retirement_page_state_store(page_root, &state, page_error, sizeof(page_error)));
+    assert(latcd_retirement_page_state_resume(page_root, state.boot, state.grace_us,
+                                              4, &loaded, page_error, sizeof(page_error)) < 0);
+    assert(!loaded.round_cutoff && !loaded.count);
+    state.committed_cursor[0] = 0;
+    g_free(first_object); g_free(second_object);
     state.entries[0].enqueued = 5;
     assert(!latcd_retirement_page_state_store(page_root, &state, page_error, sizeof(page_error)));
     assert(latcd_retirement_page_state_resume(page_root, state.boot, state.grace_us,
@@ -1011,6 +1249,16 @@ static void test_round_cursor(void)
     g_strlcpy(plan_cursor, plan.cursor, sizeof(plan_cursor));
     assert(latcd_retirement_page_plan(plan_names, 130, plan_cursor, plan_schedule, 130, &plan) == 1);
     assert(plan.count == 2 && !strcmp(plan.cursor, "object-129"));
+    assert(latcd_retirement_page_plan(plan_names, 130, NULL, plan_schedule, 1, &plan) < 0);
+    assert(!plan.count && !plan.cursor[0] && !plan.entries[0].name[0]);
+    memset(&plan, 0x5a, sizeof(plan));
+    const char *invalid_plan[] = {"z", "a"};
+    assert(latcd_retirement_page_plan(invalid_plan, 2, NULL, plan_schedule, 2, &plan) < 0);
+    assert(!plan.count && !plan.cursor[0] && !plan.entries[0].name[0]);
+    LatcdRetirementPageDeadline duplicate[] = {plan_schedule[0], plan_schedule[0]};
+    duplicate[1].retry_at = 100;
+    assert(latcd_retirement_page_plan(plan_names, 1, NULL, duplicate, 2, &plan) < 0);
+    assert(!plan.count && !plan.cursor[0] && !plan.entries[0].name[0]);
     g_ptr_array_unref(many);
     state.cache_inode++;
     assert(latcd_retirement_page_state_store(page_root, &state, page_error,
@@ -1024,9 +1272,10 @@ static void test_round_cursor(void)
     assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
                                             sizeof(page_error)) < 0);
     state.cache_inode = page_cache.st_ino;
-    state.cursor[0] = 'c';
+    char cursor_first = state.cursor[0];
+    state.cursor[0] = cursor_first == 'c' ? 'd' : 'c';
     assert(latcd_retirement_page_state_valid(&state) < 0);
-    state.cursor[0] = 'b';
+    state.cursor[0] = cursor_first;
     assert(latcd_retirement_page_state_store(page_root, &state, page_error,
                                              sizeof(page_error)) == 0);
     GKeyFile *extra = g_key_file_new();
@@ -1134,6 +1383,19 @@ static void test_page_round_begin(const char *point, bool crash)
         assert(latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)) < 0);
         assert(!state.round_cutoff);
         close(shared);
+        LatcdRetirementPublication *publication =
+            latcd_retirement_publication_open(root, error, sizeof(error));
+        assert(publication);
+        assert(latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)) < 0);
+        assert(!latcd_retirement_publication_prepare(publication, source, next, strlen(next), NULL,
+                                                     error, sizeof(error)));
+        assert(latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)) < 0);
+        char *current = current_path(root);
+        put(current, next);
+        assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
+        assert(latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)) < 0);
+        latcd_retirement_publication_close(publication);
+        g_free(current);
         assert(!latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)));
         assert(state.round_cutoff == 1234 && state.grace_us == 100 && !state.count);
         assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
@@ -1169,6 +1431,1452 @@ static void test_page_round_begin(const char *point, bool crash)
             assert(latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)) < 0);
     }
     simulated_boottime_us = 0;
+    remove_root(root); g_free(root);
+}
+
+static void test_page_identity(void)
+{
+    LatcdRetirementPageState state = {.cache_device = 1, .cache_inode = 2,
+        .grace_us = 3, .round_cutoff = 4, .sequence = 5, .count = 1};
+    g_strlcpy(state.boot, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sizeof(state.boot));
+    snprintf(state.entries[0].name, sizeof(state.entries[0].name), "%s.so", source);
+    g_strlcpy(state.cursor, state.entries[0].name, sizeof(state.cursor));
+    state.entries[0].deadline = 6;
+    state.entries[0].enqueued = 1;
+    uint8_t identity[32], other[32];
+    assert(!latcd_retirement_page_identity(&state, identity));
+    const uint8_t expected[32] = {
+        0x85, 0x65, 0x1a, 0x93, 0x33, 0xe3, 0xc6, 0xb1,
+        0x6a, 0x2e, 0x7d, 0x50, 0xca, 0x8f, 0xa7, 0xa5,
+        0x4c, 0x82, 0x37, 0x6d, 0xc3, 0xf4, 0x94, 0x4b,
+        0x0a, 0xd8, 0x09, 0xa4, 0x9b, 0x6f, 0x89, 0xc7,
+    };
+    assert(!memcmp(identity, expected, sizeof(expected)));
+    uint8_t budget_identity[32], budget_other[32];
+    assert(!latcd_retirement_page_budget_identity(&state, budget_identity));
+    assert(!latcd_retirement_page_budget_identity(&state, budget_other) &&
+           !memcmp(budget_identity, budget_other, 32));
+    state.sequence++;
+    assert(!latcd_retirement_page_budget_identity(&state, budget_other) &&
+           memcmp(budget_identity, budget_other, 32));
+    state.sequence--;
+    state.entries[0].enqueued++;
+    assert(!latcd_retirement_page_budget_identity(&state, budget_other) &&
+           memcmp(budget_identity, budget_other, 32));
+    state.entries[0].enqueued--;
+    state.committed_pending = true;
+    memset(budget_other, 0xff, sizeof(budget_other));
+    assert(latcd_retirement_page_budget_identity(&state, budget_other) < 0);
+    for (unsigned i = 0; i < sizeof(budget_other); i++) assert(!budget_other[i]);
+    state.committed_pending = false;
+    state.sequence = 8; state.entries[0].last_attempt = 7;
+    state.entries[0].retry_at = 9; state.entries[0].busy_count = 1;
+    assert(!latcd_retirement_page_identity(&state, other) && !memcmp(identity, other, 32));
+    state.entries[0].deadline++;
+    assert(!latcd_retirement_page_identity(&state, other) && memcmp(identity, other, 32));
+    state.entries[0].deadline--;
+    state.round_cutoff++;
+    assert(!latcd_retirement_page_identity(&state, other) && memcmp(identity, other, 32));
+    state.round_cutoff--;
+    state.cache_inode++;
+    assert(!latcd_retirement_page_identity(&state, other) && memcmp(identity, other, 32));
+    state.cache_inode--;
+    state.grace_us++;
+    assert(!latcd_retirement_page_identity(&state, other) && memcmp(identity, other, 32));
+    state.grace_us--;
+    state.boot[0] = 'b';
+    assert(!latcd_retirement_page_identity(&state, other) && memcmp(identity, other, 32));
+    state.boot[0] = 'a';
+    state.count = 2;
+    snprintf(state.entries[1].name, sizeof(state.entries[1].name), "%s.tbset", source);
+    state.entries[1].deadline = 6; state.entries[1].enqueued = 1;
+    g_strlcpy(state.cursor, state.entries[1].name, sizeof(state.cursor));
+    assert(!latcd_retirement_page_identity(&state, other) && memcmp(identity, other, 32));
+    state.count = 1;
+    g_strlcpy(state.cursor, state.entries[0].name, sizeof(state.cursor));
+    state.entries[0].name[0] = 'z';
+    memset(other, 1, sizeof(other));
+    assert(latcd_retirement_page_identity(&state, other) < 0);
+    for (unsigned i = 0; i < sizeof(other); i++) assert(!other[i]);
+}
+
+static void test_schedule_store(void)
+{
+    char *root = root_new(), error[256];
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    char *boot = NULL;
+    gsize size;
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, &size, NULL));
+    g_strchomp(boot);
+    LatcdRetirementPageDeadline entry = { .enqueued = 100, .last_attempt = 1,
+                                           .retry_at = 200, .busy_count = 1 };
+    snprintf(entry.name, sizeof(entry.name), "%s.so", source);
+    assert(!latcd_retirement_schedule_store(root, boot, 100, 150, 1, &entry, error, sizeof(error)));
+    LatcdRetirementPageDeadline loaded;
+    uint64_t loaded_sequence;
+    assert(!latcd_retirement_schedule_load(root, boot, 100, 150, entry.name,
+                                           &loaded_sequence, &loaded, error, sizeof(error)));
+    assert(loaded_sequence == 1 && !strcmp(loaded.name, entry.name) &&
+           loaded.enqueued == 100 && loaded.last_attempt == 1 &&
+           loaded.retry_at == 200 && loaded.busy_count == 1);
+    LatcdRetirementPageState page = {.count = 1};
+    page.entries[0] = entry;
+    page.entries[0].deadline = 900;
+    page.entries[0].enqueued = 150;
+    assert(!latcd_retirement_schedule_merge_page(root, boot, 100, 150, &page, error, sizeof(error)));
+    assert(page.entries[0].deadline == 900 && page.entries[0].enqueued == 100 &&
+           page.entries[0].retry_at == 200 && page.sequence == 1);
+    LatcdRetirementPageState snapshot = page;
+    assert(latcd_retirement_schedule_merge_page(root, boot, 101, 150, &page, error, sizeof(error)) < 0);
+    assert(!memcmp(&page, &snapshot, sizeof(page)));
+    schedule_scan_mutation = store;
+    assert(latcd_retirement_schedule_merge_page(root, boot, 100, 150, &page, error, sizeof(error)) < 0);
+    assert(!schedule_scan_mutation && !memcmp(&page, &snapshot, sizeof(page)));
+    assert(!latcd_retirement_schedule_load(root, boot, 100, 150, loaded.name,
+                                           &loaded_sequence, &loaded, error, sizeof(error)));
+    assert(loaded_sequence == 1 && !strcmp(loaded.name, entry.name));
+    memset(loaded.name, 'a', sizeof(loaded.name));
+    loaded_sequence = 99;
+    assert(latcd_retirement_schedule_load(root, boot, 100, 150, loaded.name,
+                                           &loaded_sequence, &loaded, error, sizeof(error)) < 0);
+    assert(!loaded_sequence && !loaded.name[0]);
+    char *missing = g_strdup_printf("%064x.so", 1);
+    assert(latcd_retirement_schedule_load(root, boot, 100, 150, missing,
+                                           &loaded_sequence, &loaded, error, sizeof(error)) == 1);
+    assert(!loaded_sequence && !loaded.name[0]);
+    assert(latcd_retirement_schedule_load(root, boot, 101, 150, entry.name,
+                                           &loaded_sequence, &loaded, error, sizeof(error)) < 0);
+    assert(!loaded_sequence && !loaded.name[0]);
+    g_free(missing);
+    char *filename = g_strconcat(entry.name, ".ini", NULL);
+    char *path = g_build_filename(store, filename, NULL), *before = NULL, *after = NULL;
+    struct stat shard_stat;
+    assert(!stat(path, &shard_stat) && shard_stat.st_size == 1024);
+    assert(g_file_get_contents(path, &before, NULL, NULL));
+    entry.busy_count = 2;
+    entry.last_attempt = 2;
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:file-synced", 1));
+    errno = 0;
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry, error, sizeof(error)) < 0);
+    assert(errno == EIO);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    assert(g_file_get_contents(path, &after, NULL, NULL) && !strcmp(before, after));
+    g_free(after);
+    assert(latcd_retirement_schedule_store(root, boot, 101, 150, 1, &entry, error, sizeof(error)) < 0);
+    char *other_boot = g_uuid_string_random();
+    assert(latcd_retirement_schedule_store(root, other_boot, 100, 150, 1, &entry, error, sizeof(error)) < 0);
+    g_free(other_boot);
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:renamed", 1));
+    errno = 0;
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry, error, sizeof(error)) < 0);
+    assert(errno == EIO);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    GKeyFile *renamed = g_key_file_new();
+    assert(g_key_file_load_from_file(renamed, path, 0, NULL));
+    assert(g_key_file_get_uint64(renamed, "schedule", "last_attempt", NULL) == 2);
+    assert(g_key_file_get_uint64(renamed, "schedule", "busy_count", NULL) == 2);
+    g_key_file_unref(renamed);
+    assert(!latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry, error, sizeof(error)));
+    entry.retry_at = 151;
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry, error, sizeof(error)) < 0);
+    entry.retry_at = 200;
+    assert(!latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry, error, sizeof(error)));
+    g_free(before);
+    assert(g_file_get_contents(path, &before, NULL, NULL));
+    entry.last_attempt = 3;
+    schedule_scan_mutation = store;
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 3, &entry, error, sizeof(error)) < 0);
+    assert(!schedule_scan_mutation);
+    assert(g_file_get_contents(path, &after, NULL, NULL) && !strcmp(before, after));
+    g_free(after);
+    assert(!latcd_retirement_schedule_store(root, boot, 100, 150, 3, &entry, error, sizeof(error)));
+    entry.last_attempt = 4;
+    schedule_scan_mutation = store;
+    schedule_mutation_file = path;
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 4, &entry, error, sizeof(error)) < 0);
+    assert(!schedule_scan_mutation && !schedule_mutation_file);
+    assert(g_file_get_contents(path, &after, NULL, NULL) && after[0] == 'X');
+    g_free(after);
+    put(path, before);
+    entry.last_attempt = 0;
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 1, &entry, error, sizeof(error)) < 0);
+    entry.last_attempt = 2;
+    entry.enqueued = 99;
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 1, &entry, error, sizeof(error)) < 0);
+    entry.enqueued = 100;
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 0, &entry, error, sizeof(error)) < 0);
+    LatcdRetirementPageDeadline invalid = entry;
+    memset(invalid.name, 'a', sizeof(invalid.name));
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 1, &invalid, error, sizeof(error)) < 0);
+    char *bad = g_build_filename(store, "unknown", NULL);
+    put(bad, "invalid\n");
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 1, &entry, error, sizeof(error)) < 0);
+    assert(latcd_retirement_schedule_load(root, boot, 100, 150, entry.name,
+                                           &loaded_sequence, &loaded, error, sizeof(error)) < 0);
+    assert(!loaded_sequence && !loaded.name[0]);
+    g_free(bad); g_free(before); g_free(path); g_free(filename); g_free(boot);
+    g_free(store); g_free(gc); remove_root(root); g_free(root);
+}
+
+static void test_schedule_result_upgrade(void)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    LatcdRetirementPageDeadline entry = {.enqueued = 100, .last_attempt = 1,
+                                         .retry_at = 200, .busy_count = 1};
+    snprintf(entry.name, sizeof(entry.name), "%s.so", source);
+    uint8_t identity[32] = {1};
+    assert(!latcd_retirement_schedule_store(root, boot, 100, 150, 1, &entry, error, sizeof(error)));
+    LatcdRetirementResultKind kind = LATCD_RETIREMENT_RESULT_DONE;
+    assert(latcd_retirement_schedule_load_result(root, boot, 100, 150, entry.name, identity,
+                                                  &kind, error, sizeof(error)) == 1 && !kind);
+    char *filename = g_strconcat(entry.name, ".ini", NULL);
+    char *path = g_build_filename(store, filename, NULL), *before = NULL, *after = NULL;
+    assert(g_file_get_contents(path, &before, NULL, NULL));
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:file-synced", 1));
+    assert(latcd_retirement_schedule_store_result(root, boot, 100, 150, 1, &entry, identity,
+           LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)) < 0);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    assert(g_file_get_contents(path, &after, NULL, NULL) && !strcmp(before, after));
+    g_free(after);
+    assert(!latcd_retirement_schedule_store_result(root, boot, 100, 150, 1, &entry, identity,
+           LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
+    assert(!latcd_retirement_schedule_load_result(root, boot, 100, 150, entry.name, identity,
+                                                   &kind, error, sizeof(error)) &&
+           kind == LATCD_RETIREMENT_RESULT_DEFERRED);
+    uint8_t other[32] = {2};
+    assert(latcd_retirement_schedule_load_result(root, boot, 100, 150, entry.name, other,
+                                                  &kind, error, sizeof(error)) == 1 && !kind);
+    schedule_scan_mutation = store;
+    kind = LATCD_RETIREMENT_RESULT_DONE;
+    assert(latcd_retirement_schedule_load_result(root, boot, 100, 150, entry.name, identity,
+                                                  &kind, error, sizeof(error)) < 0 && !kind);
+    LatcdRetirementPageDeadline loaded;
+    uint64_t sequence;
+    assert(!latcd_retirement_schedule_load(root, boot, 100, 150, entry.name,
+                                           &sequence, &loaded, error, sizeof(error)));
+    assert(sequence == 1 && loaded.enqueued == 100 && loaded.retry_at == 200 && loaded.busy_count == 1);
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 1, &entry, error, sizeof(error)) < 0);
+    GKeyFile *record = g_key_file_new();
+    assert(g_key_file_load_from_file(record, path, 0, NULL));
+    char *digest = g_key_file_get_string(record, "schedule", "page_identity", NULL);
+    char *result = g_key_file_get_string(record, "schedule", "result", NULL);
+    assert(digest && strlen(digest) == 64 && !strncmp(digest, "01", 2));
+    assert(result && !strcmp(result, "deferred"));
+    g_free(digest); g_free(result); g_key_file_unref(record);
+    put(path, "[schedule]\nversion=2\n");
+    kind = LATCD_RETIREMENT_RESULT_DONE;
+    assert(latcd_retirement_schedule_load_result(root, boot, 100, 150, entry.name, identity,
+                                                  &kind, error, sizeof(error)) < 0 && !kind);
+    g_free(before); g_free(path); g_free(filename); g_free(boot);
+    g_free(store); g_free(gc); remove_root(root); g_free(root);
+}
+
+static void test_schedule_check_page(void)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    struct stat st;
+    assert(!stat(root, &st));
+    LatcdRetirementPageState page = {.cache_device = st.st_dev, .cache_inode = st.st_ino,
+        .grace_us = 100, .round_cutoff = 120, .sequence = 1, .count = 2};
+    g_strlcpy(page.boot, boot, sizeof(page.boot));
+    for (unsigned i = 0; i < page.count; i++) {
+        snprintf(page.entries[i].name, sizeof(page.entries[i].name), "%064x.so", i + 1);
+        page.entries[i].deadline = 140;
+        page.entries[i].enqueued = 100;
+        page.entries[i].last_attempt = 1;
+    }
+    page.entries[1].retry_at = 200;
+    page.entries[1].busy_count = 2;
+    g_strlcpy(page.cursor, page.entries[1].name, sizeof(page.cursor));
+    uint8_t identity[32];
+    assert(!latcd_retirement_page_identity(&page, identity));
+    assert(latcd_retirement_schedule_check_page(root, 150, &page, error, sizeof(error)) == 1);
+    uint8_t results[128];
+    memset(results, 0xff, sizeof(results));
+    assert(latcd_retirement_schedule_page_results(root, 150, &page, results, error, sizeof(error)) == 1);
+    for (unsigned i = 0; i < sizeof(results); i++) assert(!results[i]);
+    char *replacement = root_new();
+    char *replacement_gc = g_build_filename(replacement, ".gc", NULL);
+    char *replacement_store = g_build_filename(replacement_gc, "retirement-schedule", NULL);
+    char *old_root = g_strconcat(root, ".old", NULL);
+    char *filename = g_strconcat(page.entries[0].name, ".ini", NULL);
+    assert(!mkdir(replacement_gc, 0700) && !mkdir(replacement_store, 0700));
+    page_lstat_swap_path = root; page_lstat_swap_old = old_root; page_lstat_swap_new = replacement;
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(!page_lstat_swap_path);
+    char *new_record = g_build_filename(root, ".gc", "retirement-schedule", filename, NULL);
+    char *old_record = g_build_filename(old_root, ".gc", "retirement-schedule", filename, NULL);
+    assert(access(new_record, F_OK) && access(old_record, F_OK));
+    assert(!rename(root, replacement) && !rename(old_root, root));
+    remove_root(replacement);
+    g_free(old_record); g_free(new_record); g_free(filename); g_free(old_root);
+    g_free(replacement_store); g_free(replacement_gc); g_free(replacement);
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
+    LatcdRetirementPageState snapshot_page;
+    LatcdRetirementPageInventory inventory;
+    assert(latcd_retirement_page_snapshot(root, 150, &snapshot_page, results, &inventory, error, sizeof(error)) == 1);
+    assert(snapshot_page.count == 2 && !results[0] && !results[1]);
+    assert(!inventory.occupied_slots && !inventory.occupied_bytes && !inventory.undersized_member);
+    LatcdCacheCapacity page_capacity = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget page_budget = {0};
+    uint8_t budget_binding[32];
+    char *other_root = root_new();
+    LatcdCacheCapacity other_capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&other_capacity, other_root, error, sizeof(error)));
+    assert(latcd_retirement_test_page_reserve(root, 150, &other_capacity, UINT64_MAX,
+                                               &page_budget, budget_binding, error, sizeof(error)) < 0);
+    assert(!page_budget.capacity && !other_capacity.metadata_reserved);
+    latcd_cache_capacity_close(&other_capacity);
+    assert(!pthread_mutex_destroy(&other_capacity.lock));
+    remove_root(other_root); g_free(other_root);
+    assert(!latcd_cache_capacity_scan(&page_capacity, root, error, sizeof(error)));
+    assert(latcd_retirement_test_page_reserve(root, 150, &page_capacity, 1, &page_budget, budget_binding, error, sizeof(error)) < 0);
+    assert(!page_budget.capacity && !page_capacity.metadata_reserved);
+    assert(!latcd_retirement_test_page_reserve(root, 150, &page_capacity, UINT64_MAX, &page_budget, budget_binding, error, sizeof(error)));
+    assert(page_budget.remaining == 2 * 1024 + 2 * 65536 &&
+           page_capacity.metadata_reserved == page_budget.remaining);
+    uint8_t saved_binding[32];
+    memcpy(saved_binding, budget_binding, sizeof(saved_binding));
+    uint64_t saved_reservation = page_budget.remaining;
+    assert(latcd_retirement_test_page_reserve(root, 150, &page_capacity, UINT64_MAX,
+                                               &page_budget, budget_binding, error, sizeof(error)) < 0);
+    assert(errno == EBUSY && !memcmp(saved_binding, budget_binding, sizeof(saved_binding)) &&
+           page_budget.remaining == saved_reservation && page_capacity.metadata_reserved == saved_reservation);
+    assert(!latcd_retirement_test_page_budget_matches(root, budget_binding, error, sizeof(error)));
+    LatcdRetirementPageState changed_binding = page;
+    changed_binding.sequence++;
+    latcd_cache_capacity_metadata_bind(&page_capacity, UINT64_MAX);
+    assert(!latcd_retirement_page_state_store(root, &changed_binding, error, sizeof(error)));
+    assert(latcd_retirement_test_page_budget_matches(root, budget_binding, error, sizeof(error)) < 0);
+    assert(latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
+           &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(page_budget.remaining == saved_reservation && page_capacity.ready);
+    uint8_t changed_identity[32];
+    assert(!latcd_retirement_page_budget_identity(&changed_binding, changed_identity));
+    assert(latcd_retirement_test_budget_result(root, 150, changed_identity, &page_budget,
+           &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(page_budget.remaining == saved_reservation && page_capacity.ready);
+    assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
+    assert(!latcd_retirement_test_page_budget_matches(root, budget_binding, error, sizeof(error)));
+    int budget_scheduler = open(gc, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    assert(budget_scheduler >= 0 && !flock(budget_scheduler, LOCK_EX | LOCK_NB));
+    assert(latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
+           &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(page_budget.remaining == saved_reservation && page_capacity.ready);
+    close(budget_scheduler);
+    LatcdRetirementPageDeadline nonmember = page.entries[0];
+    nonmember.enqueued++;
+    assert(latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
+           &nonmember, LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(page_budget.remaining == saved_reservation && page_capacity.ready);
+    char *not_written = g_strconcat(page.entries[0].name, ".ini", NULL);
+    char *not_written_path = g_build_filename(store, not_written, NULL);
+    assert(access(not_written_path, F_OK) && errno == ENOENT);
+    g_free(not_written_path); g_free(not_written);
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:file-synced", 1));
+    assert(latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
+           &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    assert(page_budget.remaining == saved_reservation && page_capacity.ready);
+    assert(!latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
+           &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
+    assert(page_budget.remaining == saved_reservation - 1024 && page_capacity.ready);
+    assert(!latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
+           &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
+    assert(page_budget.remaining == saved_reservation - 1024 && page_capacity.ready);
+    uint64_t committed_before_fault = page_capacity.metadata_committed;
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:renamed", 1));
+    assert(latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
+           &page.entries[1], LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)) < 0);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    assert(!latcd_cache_capacity_poll(&page_capacity) && page_budget.invalid &&
+           page_budget.remaining == saved_reservation - 2048 &&
+           page_capacity.metadata_committed == committed_before_fault + 1024);
+    char *fault_name = g_strconcat(page.entries[1].name, ".ini", NULL);
+    char *fault_path = g_build_filename(store, fault_name, NULL);
+    assert(!access(fault_path, F_OK));
+    assert(!latcd_cache_capacity_test_page_abandon(&page_capacity, &page_budget));
+    latcd_cache_capacity_close(&page_capacity);
+    assert(!latcd_cache_capacity_scan(&page_capacity, root, error, sizeof(error)));
+    assert(page_capacity.metadata_committed == committed_before_fault + 1024);
+    latcd_cache_capacity_close(&page_capacity);
+    assert(!unlink(fault_path));
+    assert(!latcd_cache_capacity_scan(&page_capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&page_capacity, UINT64_MAX);
+    assert(!latcd_retirement_test_page_reserve(root, 150, &page_capacity, UINT64_MAX,
+                                               &page_budget, budget_binding, error, sizeof(error)));
+    /* Re-inventory charged the surviving result; only the missing result and
+     * checkpoint/retry headroom need a fresh reservation. */
+    assert(page_budget.remaining == 1024 + 2 * 65536 &&
+           page_capacity.metadata_reserved == page_budget.remaining);
+    uint64_t recovered_committed = page_capacity.metadata_committed;
+    assert(!latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
+           &page.entries[1], LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
+    assert(page_budget.remaining == 2 * 65536 &&
+           page_capacity.metadata_committed == recovered_committed + 1024);
+    assert(!latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
+           &page.entries[1], LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
+    assert(page_budget.remaining == 2 * 65536 &&
+           page_capacity.metadata_committed == recovered_committed + 1024);
+    uint64_t checkpoint_budget = page_budget.remaining;
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:file-synced", 1));
+    assert(latcd_retirement_test_budget_commit(root, 150, &page, &page_budget,
+                                                error, sizeof(error)) < 0);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    assert(page_capacity.ready && page_budget.remaining == checkpoint_budget);
+    LatcdRetirementPageState checkpoint;
+    assert(!latcd_retirement_page_state_load(root, &checkpoint, error, sizeof(error)) &&
+           !checkpoint.committed_pending);
+    assert(!latcd_retirement_test_budget_commit(root, 150, &page, &page_budget,
+                                                 error, sizeof(error)));
+    assert(!latcd_retirement_page_state_load(root, &checkpoint, error, sizeof(error)) &&
+           checkpoint.committed_pending && page_capacity.ready);
+    assert(latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
+           &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(latcd_retirement_test_budget_commit(root, 150, &page, &page_budget,
+                                                error, sizeof(error)) < 0);
+    assert(!latcd_cache_capacity_test_page_release(&page_capacity, &page_budget));
+    assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
+    assert(!latcd_retirement_test_page_reserve(root, 150, &page_capacity, UINT64_MAX,
+                                               &page_budget, budget_binding, error, sizeof(error)));
+    char *unexpected = g_build_filename(gc, "unexpected-settlement", NULL);
+    settlement_unexpected = unexpected;
+    latcd_retirement_test_before_settlement = invalidate_settlement;
+    errno = ENOENT;
+    assert(latcd_retirement_test_budget_commit(root, 150, &page, &page_budget,
+                                                error, sizeof(error)) < 0);
+    assert(errno == EIO);
+    assert(!latcd_retirement_test_before_settlement && !latcd_cache_capacity_poll(&page_capacity) &&
+           page_budget.invalid);
+    assert(!latcd_retirement_page_state_load(root, &checkpoint, error, sizeof(error)) &&
+           checkpoint.committed_pending);
+    assert(!latcd_cache_capacity_test_page_abandon(&page_capacity, &page_budget));
+    latcd_cache_capacity_close(&page_capacity);
+    assert(!unlink(unexpected));
+    g_free(unexpected);
+    assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
+    assert(!latcd_cache_capacity_scan(&page_capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&page_capacity, UINT64_MAX);
+    assert(!latcd_retirement_test_page_reserve(root, 150, &page_capacity, UINT64_MAX,
+                                               &page_budget, budget_binding, error, sizeof(error)));
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:renamed", 1));
+    assert(latcd_retirement_test_budget_commit(root, 150, &page, &page_budget,
+                                                error, sizeof(error)) < 0);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    assert(!latcd_cache_capacity_poll(&page_capacity) && page_budget.invalid);
+    assert(!latcd_retirement_page_state_load(root, &checkpoint, error, sizeof(error)) &&
+           checkpoint.committed_pending);
+    assert(!latcd_cache_capacity_test_page_abandon(&page_capacity, &page_budget));
+    latcd_cache_capacity_close(&page_capacity);
+    assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
+    assert(!latcd_cache_capacity_scan(&page_capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&page_capacity, UINT64_MAX);
+    assert(!latcd_retirement_test_page_reserve(root, 150, &page_capacity, UINT64_MAX,
+                                               &page_budget, budget_binding, error, sizeof(error)));
+    g_free(fault_path); g_free(fault_name);
+    char *budget_result_name = g_strconcat(page.entries[0].name, ".ini", NULL);
+    char *budget_result_path = g_build_filename(store, budget_result_name, NULL);
+    char *recovered_name = g_strconcat(page.entries[1].name, ".ini", NULL);
+    char *recovered_path = g_build_filename(store, recovered_name, NULL);
+    assert(!latcd_cache_capacity_test_page_release(&page_capacity, &page_budget));
+    /* Fixture cleanup is external to the budget protocol. */
+    latcd_cache_capacity_close(&page_capacity);
+    assert(!unlink(budget_result_path));
+    assert(!unlink(recovered_path));
+    pid_t budget_child = fork();
+    assert(budget_child >= 0);
+    if (!budget_child) {
+        LatcdCacheCapacity crash_capacity = LATCD_CACHE_CAPACITY_INIT;
+        LatcdPageBudget crash_budget = {0};
+        uint8_t crash_binding[32];
+        assert(!latcd_cache_capacity_scan(&crash_capacity, root, error, sizeof(error)));
+        latcd_cache_capacity_metadata_bind(&crash_capacity, UINT64_MAX);
+        assert(!latcd_retirement_test_page_reserve(root, 150, &crash_capacity, UINT64_MAX,
+                                                   &crash_budget, crash_binding, error, sizeof(error)));
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", "crash:renamed", 1));
+        latcd_retirement_test_budget_result(root, 150, crash_binding, &crash_budget,
+            &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error));
+        _exit(1);
+    }
+    int budget_status;
+    assert(waitpid(budget_child, &budget_status, 0) == budget_child);
+    assert(WIFSIGNALED(budget_status) && WTERMSIG(budget_status) == SIGKILL);
+    assert(!latcd_cache_capacity_scan(&page_capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&page_capacity, UINT64_MAX);
+    assert(!latcd_retirement_test_page_reserve(root, 150, &page_capacity, UINT64_MAX,
+                                               &page_budget, budget_binding, error, sizeof(error)));
+    assert(page_budget.remaining == 1024 + 2 * 65536 &&
+           page_capacity.metadata_reserved == page_budget.remaining);
+    assert(!latcd_cache_capacity_test_page_release(&page_capacity, &page_budget));
+    latcd_cache_capacity_close(&page_capacity);
+    assert(!unlink(budget_result_path));
+    g_free(recovered_path); g_free(recovered_name);
+    assert(!latcd_cache_capacity_scan(&page_capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&page_capacity, UINT64_MAX);
+    assert(!latcd_retirement_test_page_reserve(root, 150, &page_capacity, UINT64_MAX,
+                                               &page_budget, budget_binding, error, sizeof(error)));
+    g_free(budget_result_path); g_free(budget_result_name);
+    char *match_old_gc = g_strconcat(gc, ".match-old", NULL);
+    scheduler_swap_gc = gc; scheduler_swap_old = match_old_gc;
+    scheduler_swap_after_binding = true;
+    assert(latcd_retirement_test_page_budget_matches(root, budget_binding, error, sizeof(error)) < 0);
+    assert(!scheduler_swap_after_binding);
+    assert(!rmdir(gc) && !rename(match_old_gc, gc));
+    g_free(match_old_gc);
+    /* An unexpected namespace replacement invalidates the capacity index. */
+    assert(!latcd_cache_capacity_poll(&page_capacity));
+    assert(!latcd_cache_capacity_test_page_abandon(&page_capacity, &page_budget));
+    latcd_cache_capacity_close(&page_capacity);
+    assert(!latcd_cache_capacity_scan(&page_capacity, root, error, sizeof(error)));
+    char *reservation_old_gc = g_strconcat(gc, ".reservation-old", NULL);
+    snapshot_swap_store = store; snapshot_swap_gc = gc; snapshot_swap_old = reservation_old_gc;
+    assert(latcd_retirement_test_page_reserve(root, 150, &page_capacity, UINT64_MAX,
+                                               &page_budget, budget_binding, error, sizeof(error)) < 0);
+    assert(!snapshot_swap_store && !page_budget.capacity && !page_capacity.metadata_reserved);
+    assert(!rmdir(gc) && !rename(reservation_old_gc, gc));
+    g_free(reservation_old_gc);
+    latcd_cache_capacity_close(&page_capacity);
+    assert(!pthread_mutex_destroy(&page_capacity.lock));
+    uint64_t estimate = 0;
+    assert(!latcd_retirement_page_budget_estimate(&snapshot_page, results, &inventory, &estimate));
+    assert(estimate == 2 * 1024 + 2 * 65536);
+    LatcdRetirementPageInventory full = {.occupied_slots = 4095, .occupied_bytes = 4095 * 1024};
+    assert(latcd_retirement_page_budget_estimate(&snapshot_page, results, &full, &estimate) < 0 &&
+           errno == ENOSPC && !estimate);
+    results[0] = 3;
+    assert(latcd_retirement_page_budget_estimate(&snapshot_page, results, &inventory, &estimate) < 0 &&
+           errno == EINVAL && !estimate);
+    results[0] = 0;
+    char *old_gc = g_strconcat(gc, ".old", NULL);
+    snapshot_swap_store = store; snapshot_swap_gc = gc; snapshot_swap_old = old_gc;
+    memset(&snapshot_page, 0xff, sizeof(snapshot_page));
+    memset(results, 0xff, sizeof(results));
+    assert(latcd_retirement_page_snapshot(root, 150, &snapshot_page, results, &inventory, error, sizeof(error)) < 0);
+    assert(!snapshot_swap_store && !snapshot_page.count && !results[0]);
+    assert(!rmdir(gc) && !rename(old_gc, gc));
+    scheduler_swap_root = root; scheduler_swap_gc = gc; scheduler_swap_old = old_gc;
+    assert(latcd_retirement_page_state_store(root, &page, error, sizeof(error)) < 0);
+    assert(!scheduler_swap_root);
+    char *new_page = g_build_filename(gc, "retirement-page.ini", NULL);
+    assert(access(new_page, F_OK));
+    assert(!rmdir(gc) && !rename(old_gc, gc));
+    scheduler_swap_gc = gc; scheduler_swap_old = old_gc; scheduler_swap_after_binding = true;
+    assert(latcd_retirement_page_state_store(root, &page, error, sizeof(error)) < 0);
+    assert(!scheduler_swap_after_binding && access(new_page, F_OK));
+    assert(!rmdir(gc) && !rename(old_gc, gc));
+    g_free(new_page); g_free(old_gc);
+    int scheduler = open(gc, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    assert(scheduler >= 0 && !flock(scheduler, LOCK_EX | LOCK_NB));
+    memset(&snapshot_page, 0xff, sizeof(snapshot_page));
+    memset(results, 0xff, sizeof(results));
+    assert(latcd_retirement_page_snapshot(root, 150, &snapshot_page, results, &inventory, error, sizeof(error)) < 0);
+    assert(!snapshot_page.count && !results[0]);
+    assert(latcd_retirement_page_state_store(root, &page, error, sizeof(error)) < 0);
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 1, &page.entries[0],
+                                           error, sizeof(error)) < 0);
+    assert(latcd_retirement_schedule_store_result(root, boot, 100, 150, 1, &page.entries[0],
+            identity, LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    close(scheduler);
+    LatcdRetirementPageState changed = page;
+    changed.entries[0].deadline++;
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &changed, &changed.entries[0],
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    changed = page;
+    changed.sequence++;
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &changed, &changed.entries[0],
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    changed = page;
+    changed.entries[0].enqueued++;
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &changed, &changed.entries[0],
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    changed = page;
+    changed.entries[1].enqueued++;
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &changed, &changed.entries[0],
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    LatcdRetirementPageDeadline outsider = page.entries[0];
+    outsider.deadline++;
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &outsider,
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    snprintf(outsider.name, sizeof(outsider.name), "%064x.so", 3);
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &outsider,
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
+    assert(latcd_retirement_schedule_check_page(root, 150, &page, error, sizeof(error)) == 1);
+    assert(latcd_retirement_schedule_page_results(root, 150, &page, results, error, sizeof(error)) == 1);
+    assert(results[0] == LATCD_RETIREMENT_RESULT_DONE && !results[1]);
+    assert(latcd_retirement_page_snapshot(root, 150, &snapshot_page, results, &inventory, error, sizeof(error)) == 1);
+    assert(results[0] == LATCD_RETIREMENT_RESULT_DONE && !results[1]);
+    assert(inventory.occupied_slots == 1 && inventory.occupied_bytes == 1024 && !inventory.undersized_member);
+    assert(!latcd_retirement_page_budget_estimate(&snapshot_page, results, &inventory, &estimate) &&
+           estimate == 1024 + 2 * 65536);
+    char *short_name = g_strconcat(page.entries[0].name, ".ini", NULL);
+    char *short_path = g_build_filename(store, short_name, NULL);
+    char *full_record = NULL;
+    gsize full_size;
+    assert(g_file_get_contents(short_path, &full_record, &full_size, NULL) && full_size == 1024);
+    char *padding = strchr(full_record, '#');
+    assert(padding && padding > full_record);
+    assert(!chmod(short_path, 0600));
+    assert(g_file_set_contents(short_path, full_record, padding - full_record, NULL));
+    assert(!chmod(short_path, 0400));
+    assert(latcd_retirement_page_snapshot(root, 150, &snapshot_page, results, &inventory, error, sizeof(error)) == 1);
+    assert(inventory.occupied_slots == 1 && inventory.occupied_bytes < 1024 && inventory.undersized_member);
+    assert(latcd_retirement_page_budget_estimate(&snapshot_page, results, &inventory, &estimate) < 0 &&
+           errno == EINVAL && !estimate);
+    assert(!chmod(short_path, 0600));
+    assert(g_file_set_contents(short_path, full_record, full_size, NULL));
+    assert(!chmod(short_path, 0400));
+    g_free(full_record); g_free(short_path); g_free(short_name);
+    assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
+    LatcdRetirementPageState uncommitted;
+    assert(!latcd_retirement_page_state_load(root, &uncommitted, error, sizeof(error)) &&
+           !uncommitted.committed_cursor[0] && uncommitted.count == 2);
+    LatcdRetirementPageDeadline deferred = page.entries[1];
+    deferred.last_attempt = 1; deferred.retry_at = 250; deferred.busy_count = 3;
+    assert(!latcd_retirement_schedule_store_page_result(root, 150, &page, &deferred,
+            LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
+    assert(!latcd_retirement_schedule_check_page(root, 150, &page, error, sizeof(error)));
+    assert(!latcd_retirement_schedule_page_results(root, 150, &page, results, error, sizeof(error)));
+    assert(results[0] == LATCD_RETIREMENT_RESULT_DONE && results[1] == LATCD_RETIREMENT_RESULT_DEFERRED);
+    memset(results, 0xff, sizeof(results));
+    assert(latcd_retirement_schedule_page_results(root, 0, &page, results, error, sizeof(error)) < 0);
+    for (unsigned i = 0; i < sizeof(results); i++) assert(!results[i]);
+    char *legacy_path = g_build_filename(gc, "retirement-page.ini", NULL);
+    GKeyFile *legacy = g_key_file_new();
+    assert(g_key_file_load_from_file(legacy, legacy_path, 0, NULL));
+    g_key_file_set_integer(legacy, "page", "version", 2);
+    assert(g_key_file_remove_key(legacy, "page", "pending", NULL));
+    for (unsigned i = 0; i < page.count; i++) {
+        char group[32]; snprintf(group, sizeof(group), "entry%u", i);
+        assert(g_key_file_remove_key(legacy, group, "result", NULL));
+    }
+    assert(g_key_file_remove_key(legacy, "page", "committed_cursor", NULL));
+    char *legacy_data = g_key_file_to_data(legacy, NULL, NULL);
+    put(legacy_path, legacy_data);
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
+    char *after_legacy = NULL;
+    assert(g_file_get_contents(legacy_path, &after_legacy, NULL, NULL));
+    assert(!strcmp(legacy_data, after_legacy));
+    g_free(after_legacy); g_free(legacy_data); g_key_file_unref(legacy); g_free(legacy_path);
+    assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
+    scheduler = open(gc, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    assert(scheduler >= 0 && !flock(scheduler, LOCK_EX | LOCK_NB));
+    assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_page_state_load(root, &uncommitted, error, sizeof(error)) &&
+           uncommitted.count == page.count && !uncommitted.committed_cursor[0] &&
+           !strcmp(uncommitted.cursor, page.cursor));
+    close(scheduler);
+    char *corrupt = g_build_filename(store, "unknown.ini", NULL);
+    put(corrupt, "invalid\n");
+    memset(results, 0xff, sizeof(results));
+    assert(latcd_retirement_schedule_page_results(root, 150, &page, results, error, sizeof(error)) < 0);
+    for (unsigned i = 0; i < sizeof(results); i++) assert(!results[i]);
+    assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_page_state_load(root, &uncommitted, error, sizeof(error)) &&
+           uncommitted.count == page.count && !uncommitted.committed_cursor[0] &&
+           !strcmp(uncommitted.cursor, page.cursor));
+    assert(!unlink(corrupt));
+    g_free(corrupt);
+    changed = page;
+    changed.entries[0].enqueued++;
+    assert(latcd_retirement_page_commit(root, 150, &changed, error, sizeof(error)) < 0);
+    assert(latcd_retirement_schedule_check_page(root, 150, &changed, error, sizeof(error)) == 1);
+    assert(latcd_retirement_schedule_page_results(root, 150, &changed, results, error, sizeof(error)) == 1);
+    assert(results[0] == 3 && results[1] == LATCD_RETIREMENT_RESULT_DEFERRED);
+    assert(!latcd_retirement_page_state_store(root, &changed, error, sizeof(error)));
+    assert(latcd_retirement_page_commit(root, 150, &changed, error, sizeof(error)) < 0);
+    changed = page;
+    changed.sequence++;
+    assert(latcd_retirement_schedule_check_page(root, 150, &changed, error, sizeof(error)) == 1);
+    assert(!latcd_retirement_page_state_store(root, &changed, error, sizeof(error)));
+    assert(latcd_retirement_page_commit(root, 150, &changed, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
+    simulated_boottime_us = 149;
+    assert(latcd_retirement_schedule_check_page(root, 150, &page, error, sizeof(error)) < 0);
+    simulated_boottime_us = 150;
+    char saved_boot[37];
+    memcpy(saved_boot, page.boot, sizeof(saved_boot));
+    g_strlcpy(page.boot, "00000000-0000-4000-8000-000000000000", sizeof(page.boot));
+    assert(latcd_retirement_schedule_check_page(root, 150, &page, error, sizeof(error)) < 0);
+    memcpy(page.boot, saved_boot, sizeof(page.boot));
+    simulated_boottime_us = 0;
+    page.entries[0].deadline++;
+    assert(latcd_retirement_schedule_check_page(root, 150, &page, error, sizeof(error)) == 1);
+    page.entries[0].deadline--;
+    page.cache_inode++;
+    assert(latcd_retirement_schedule_check_page(root, 150, &page, error, sizeof(error)) < 0);
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    page.cache_inode--;
+    schedule_scan_mutation = store;
+    assert(latcd_retirement_schedule_check_page(root, 150, &page, error, sizeof(error)) < 0);
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    uint64_t initial_metadata = capacity.metadata_committed;
+    latcd_cache_capacity_metadata_bind(&capacity, initial_metadata);
+    errno = 0;
+    assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
+    assert(errno == ENOSPC && capacity.ready &&
+           capacity.metadata_committed == initial_metadata && !capacity.metadata_reserved);
+    assert(!latcd_retirement_page_state_load(root, &uncommitted, error, sizeof(error)) &&
+           uncommitted.count == page.count && !uncommitted.committed_cursor[0] &&
+           !strcmp(uncommitted.cursor, page.cursor));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    assert(!latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)));
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    const char *commit_faults[] = {"file-synced", "renamed"};
+    for (unsigned i = 0; i < G_N_ELEMENTS(commit_faults); i++) {
+        for (unsigned crash = 0; crash < 2; crash++) {
+            assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
+            pid_t child = fork();
+            assert(child >= 0);
+            if (!child) {
+                char *fault = g_strdup_printf("%s:%s", crash ? "crash" : "error",
+                                              commit_faults[i]);
+                assert(!setenv("LATCD_TEST_RETIREMENT_IO", fault, 1));
+                assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
+                assert(!crash);
+                _exit(0);
+            }
+            int status;
+            assert(waitpid(child, &status, 0) == child);
+            assert(crash ? WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL :
+                           WIFEXITED(status) && !WEXITSTATUS(status));
+            assert(!latcd_retirement_page_state_load(root, &uncommitted, error, sizeof(error)));
+            if (!uncommitted.committed_pending) {
+                assert(uncommitted.count == page.count && !uncommitted.committed_cursor[0] &&
+                       !strcmp(uncommitted.cursor, page.cursor));
+                assert(!latcd_retirement_schedule_check_page(root, 150, &uncommitted,
+                                                             error, sizeof(error)));
+                assert(!latcd_retirement_page_commit(root, 150, &uncommitted, error, sizeof(error)));
+            } else {
+                assert(uncommitted.count == page.count &&
+                       !strcmp(uncommitted.cursor, page.cursor));
+                assert(uncommitted.results[0] == LATCD_RETIREMENT_RESULT_DONE &&
+                       uncommitted.results[1] == LATCD_RETIREMENT_RESULT_DEFERRED &&
+                       uncommitted.entries[1].last_attempt == deferred.last_attempt &&
+                       uncommitted.entries[1].retry_at == deferred.retry_at &&
+                       uncommitted.entries[1].busy_count == deferred.busy_count);
+                assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
+            }
+        }
+    }
+    assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
+    assert(!latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)));
+    assert(!latcd_retirement_page_state_load(root, &uncommitted, error, sizeof(error)) &&
+           uncommitted.committed_pending && uncommitted.count == page.count &&
+           !strcmp(uncommitted.cursor, page.cursor) && !uncommitted.committed_cursor[0]);
+    assert(uncommitted.results[0] == LATCD_RETIREMENT_RESULT_DONE &&
+           uncommitted.results[1] == LATCD_RETIREMENT_RESULT_DEFERRED);
+    assert(uncommitted.entries[1].last_attempt == deferred.last_attempt &&
+           uncommitted.entries[1].retry_at == deferred.retry_at &&
+           uncommitted.entries[1].busy_count == deferred.busy_count);
+    char *pending_path = g_build_filename(gc, "retirement-page.ini", NULL), *pending_raw = NULL;
+    assert(g_file_get_contents(pending_path, &pending_raw, NULL, NULL));
+    GKeyFile *bad_page = g_key_file_new();
+    assert(g_key_file_load_from_file(bad_page, pending_path, 0, NULL));
+    for (unsigned bad = 0; bad < 3; bad++) {
+        if (!bad) assert(g_key_file_remove_key(bad_page, "entry1", "result", NULL));
+        else g_key_file_set_integer(bad_page, "entry1", "result", bad == 1 ? 0 : 3);
+        char *data = g_key_file_to_data(bad_page, NULL, NULL);
+        put(pending_path, data);
+        g_free(data);
+        LatcdRetirementPageState invalid;
+        assert(latcd_retirement_page_state_load(root, &invalid, error, sizeof(error)) < 0);
+    }
+    put(pending_path, pending_raw);
+    assert(!latcd_retirement_page_state_load(root, &uncommitted, error, sizeof(error)) &&
+           uncommitted.committed_pending);
+    g_key_file_unref(bad_page); g_free(pending_raw); g_free(pending_path);
+    assert(!latcd_retirement_schedule_check_page(root, 150, &uncommitted, error, sizeof(error)));
+    char *deferred_name = g_strconcat(page.entries[1].name, ".ini", NULL);
+    char *deferred_path = g_build_filename(store, deferred_name, NULL), *saved_shard = NULL;
+    assert(g_file_get_contents(deferred_path, &saved_shard, NULL, NULL));
+    GKeyFile *altered = g_key_file_new();
+    assert(g_key_file_load_from_file(altered, deferred_path, 0, NULL));
+    g_key_file_set_uint64(altered, "schedule", "retry_at", deferred.retry_at + 1);
+    char *altered_data = g_key_file_to_data(altered, NULL, NULL);
+    put(deferred_path, altered_data);
+    assert(latcd_retirement_schedule_check_page(root, 150, &uncommitted, error, sizeof(error)) == 1);
+    g_free(altered_data);
+    g_key_file_set_uint64(altered, "schedule", "retry_at", deferred.retry_at);
+    g_key_file_set_string(altered, "schedule", "result", "done");
+    altered_data = g_key_file_to_data(altered, NULL, NULL);
+    put(deferred_path, altered_data);
+    assert(latcd_retirement_schedule_check_page(root, 150, &uncommitted, error, sizeof(error)) == 1);
+    put(deferred_path, saved_shard);
+    assert(!latcd_retirement_schedule_check_page(root, 150, &uncommitted, error, sizeof(error)));
+    assert(!unlink(deferred_path));
+    assert(latcd_retirement_schedule_check_page(root, 150, &uncommitted, error, sizeof(error)) == 1);
+    put(deferred_path, saved_shard);
+    assert(!latcd_retirement_schedule_check_page(root, 150, &uncommitted, error, sizeof(error)));
+    g_free(altered_data); g_key_file_unref(altered); g_free(saved_shard);
+    g_free(deferred_path); g_free(deferred_name);
+    uint8_t pending_identity[32];
+    assert(!latcd_retirement_page_identity(&uncommitted, pending_identity) &&
+           !memcmp(identity, pending_identity, sizeof(identity)));
+    for (unsigned i = 0; i < page.count; i++)
+        assert(!strcmp(uncommitted.entries[i].name, page.entries[i].name) &&
+               uncommitted.entries[i].deadline == page.entries[i].deadline &&
+               uncommitted.entries[i].enqueued == page.entries[i].enqueued);
+    assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
+    assert(latcd_retirement_page_stage(root, &page, error, sizeof(error)) < 0);
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    LatcdRetirementPageState rejected_round, retained_pending;
+    assert(latcd_retirement_page_round_begin(root, 100, &rejected_round,
+                                             error, sizeof(error)) < 0);
+    assert(!latcd_retirement_page_state_load(root, &retained_pending, error, sizeof(error)));
+    uint8_t retained_identity[32];
+    assert(retained_pending.committed_pending &&
+           !latcd_retirement_page_identity(&retained_pending, retained_identity) &&
+           !memcmp(identity, retained_identity, sizeof(identity)));
+    assert(retained_pending.results[1] == uncommitted.results[1] &&
+           retained_pending.entries[1].enqueued == uncommitted.entries[1].enqueued &&
+           retained_pending.entries[1].last_attempt == uncommitted.entries[1].last_attempt &&
+           retained_pending.entries[1].retry_at == uncommitted.entries[1].retry_at &&
+           retained_pending.entries[1].busy_count == uncommitted.entries[1].busy_count);
+    LatcdRetirementPageState next = page;
+    next.round_cutoff++;
+    next.sequence++;
+    next.entries[0].enqueued = next.entries[1].enqueued = 149;
+    assert(!latcd_retirement_schedule_merge_page(root, boot, 100, 150, &next,
+                                                 error, sizeof(error)));
+    assert(next.entries[0].enqueued == 100 && next.entries[1].enqueued == 100);
+    assert(next.entries[1].last_attempt == 1 && next.entries[1].retry_at == 250 &&
+           next.entries[1].busy_count == 3);
+    assert(!latcd_retirement_page_state_store(root, &next, error, sizeof(error)));
+    assert(latcd_retirement_schedule_check_page(root, 150, &next, error, sizeof(error)) == 1);
+    assert(latcd_retirement_page_commit(root, 150, &next, error, sizeof(error)) < 0);
+    for (unsigned i = 0; i < next.count; i++)
+        assert(!latcd_retirement_schedule_store_page_result(root, 150, &next,
+                &next.entries[i], LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
+    LatcdRetirementPageDeadline carried;
+    uint64_t carried_sequence;
+    assert(!latcd_retirement_schedule_load(root, boot, 100, 150, next.entries[1].name,
+                                            &carried_sequence, &carried, error, sizeof(error)));
+    assert(carried_sequence == next.sequence && carried.enqueued == 100 &&
+           carried.last_attempt == 1 && carried.retry_at == 250 && carried.busy_count == 3);
+    assert(!latcd_retirement_schedule_check_page(root, 150, &next, error, sizeof(error)));
+    assert(!latcd_retirement_page_commit(root, 150, &next, error, sizeof(error)));
+    g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
+}
+
+static void test_page_stage(void)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    struct stat cache;
+    assert(!stat(root, &cache));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    LatcdRetirementPageState empty = {.cache_device = cache.st_dev, .cache_inode = cache.st_ino,
+        .grace_us = 100, .round_cutoff = 120, .sequence = 3};
+    g_strlcpy(empty.boot, boot, sizeof(empty.boot));
+    LatcdRetirementPageState page = empty;
+    page.count = 1;
+    snprintf(page.entries[0].name, sizeof(page.entries[0].name), "%064x.so", 1);
+    page.entries[0].deadline = 140;
+    page.entries[0].enqueued = 100;
+    g_strlcpy(page.cursor, page.entries[0].name, sizeof(page.cursor));
+    assert(latcd_retirement_page_stage(root, &page, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
+    char *legacy_path = g_build_filename(root, ".gc", "retirement-page.ini", NULL);
+    GKeyFile *legacy = g_key_file_new();
+    assert(g_key_file_load_from_file(legacy, legacy_path, 0, NULL));
+    g_key_file_set_integer(legacy, "page", "version", 2);
+    assert(g_key_file_remove_key(legacy, "page", "pending", NULL));
+    assert(g_key_file_remove_key(legacy, "page", "committed_cursor", NULL));
+    char *legacy_data = g_key_file_to_data(legacy, NULL, NULL);
+    put(legacy_path, legacy_data);
+    LatcdRetirementPageState legacy_loaded;
+    assert(!latcd_retirement_page_state_load(root, &legacy_loaded, error, sizeof(error)));
+    assert(latcd_retirement_page_stage(root, &page, error, sizeof(error)) < 0);
+    g_free(legacy_data); g_key_file_unref(legacy); g_free(legacy_path);
+    assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
+    simulated_boottime_us = 119;
+    assert(latcd_retirement_page_stage(root, &page, error, sizeof(error)) < 0);
+    simulated_boottime_us = 150;
+    LatcdRetirementPageState future = page;
+    future.entries[0].enqueued = 151;
+    assert(latcd_retirement_page_stage(root, &future, error, sizeof(error)) < 0);
+    LatcdRetirementPageState wrong_boot = page;
+    g_strlcpy(wrong_boot.boot, "00000000-0000-4000-8000-000000000000", sizeof(wrong_boot.boot));
+    LatcdRetirementPageState wrong_empty = empty;
+    g_strlcpy(wrong_empty.boot, wrong_boot.boot, sizeof(wrong_empty.boot));
+    assert(!latcd_retirement_page_state_store(root, &wrong_empty, error, sizeof(error)));
+    assert(latcd_retirement_page_stage(root, &wrong_boot, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
+    LatcdRetirementPageState changed = page;
+    changed.round_cutoff++;
+    assert(latcd_retirement_page_stage(root, &changed, error, sizeof(error)) < 0);
+    changed = page;
+    changed.sequence--;
+    assert(latcd_retirement_page_stage(root, &changed, error, sizeof(error)) < 0);
+    changed = page;
+    snprintf(changed.committed_cursor, sizeof(changed.committed_cursor), "%064x.so", 0);
+    assert(latcd_retirement_page_stage(root, &changed, error, sizeof(error)) < 0);
+    LatcdRetirementPageState loaded;
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+           !loaded.count && loaded.sequence == empty.sequence);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    int scheduler = open(gc, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    assert(scheduler >= 0 && !flock(scheduler, LOCK_EX | LOCK_NB));
+    assert(latcd_retirement_page_stage(root, &page, error, sizeof(error)) < 0);
+    close(scheduler);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && !loaded.count);
+    char *old_gc = g_strconcat(gc, ".old", NULL);
+    scheduler_swap_gc = gc; scheduler_swap_old = old_gc; scheduler_swap_after_binding = true;
+    assert(latcd_retirement_page_stage(root, &page, error, sizeof(error)) < 0);
+    assert(!scheduler_swap_after_binding);
+    char *new_page = g_build_filename(gc, "retirement-page.ini", NULL);
+    assert(access(new_page, F_OK));
+    assert(!rmdir(gc) && !rename(old_gc, gc));
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && !loaded.count);
+    g_free(new_page); g_free(old_gc); g_free(gc);
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    uint64_t metadata = capacity.metadata_committed;
+    latcd_cache_capacity_metadata_bind(&capacity, metadata);
+    errno = 0;
+    assert(latcd_retirement_page_stage(root, &page, error, sizeof(error)) < 0);
+    assert(errno == ENOSPC && capacity.ready && capacity.metadata_committed == metadata &&
+           !capacity.metadata_reserved);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && !loaded.count);
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    const char *faults[] = {"file-synced", "renamed"};
+    for (unsigned i = 0; i < G_N_ELEMENTS(faults); i++) {
+        for (unsigned crash = 0; crash < 2; crash++) {
+            assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
+            pid_t child = fork();
+            assert(child >= 0);
+            if (!child) {
+                char *fault = g_strdup_printf("%s:%s", crash ? "crash" : "error", faults[i]);
+                assert(!setenv("LATCD_TEST_RETIREMENT_IO", fault, 1));
+                assert(latcd_retirement_page_stage(root, &page, error, sizeof(error)) < 0);
+                assert(!crash);
+                _exit(0);
+            }
+            int status;
+            assert(waitpid(child, &status, 0) == child);
+            assert(crash ? WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL :
+                           WIFEXITED(status) && !WEXITSTATUS(status));
+            assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+                   !loaded.committed_cursor[0] && loaded.sequence == empty.sequence);
+            if (!loaded.count) {
+                assert(!loaded.cursor[0]);
+                assert(!latcd_retirement_page_stage(root, &page, error, sizeof(error)));
+            } else {
+                assert(loaded.count == 1 && !strcmp(loaded.cursor, page.cursor) &&
+                       !strcmp(loaded.entries[0].name, page.entries[0].name) &&
+                       loaded.entries[0].deadline == page.entries[0].deadline &&
+                       loaded.entries[0].enqueued == page.entries[0].enqueued);
+                assert(latcd_retirement_page_stage(root, &page, error, sizeof(error)) < 0);
+            }
+        }
+    }
+    assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
+    assert(!latcd_retirement_page_stage(root, &page, error, sizeof(error)));
+    assert(latcd_retirement_page_stage(root, &page, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+           loaded.count == 1 && !strcmp(loaded.cursor, page.cursor));
+    simulated_boottime_us = 0;
+    g_free(boot); remove_root(root); g_free(root);
+}
+
+static void test_schedule_max_record(void)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    LatcdRetirementPageDeadline entry = {.enqueued = UINT64_MAX,
+        .last_attempt = UINT64_MAX, .retry_at = UINT64_MAX, .busy_count = 7};
+    snprintf(entry.name, sizeof(entry.name), "%s-%s.native", source, source);
+    assert(!latcd_retirement_schedule_store(root, boot, UINT64_MAX, UINT64_MAX,
+                                            UINT64_MAX, &entry, error, sizeof(error)));
+    char *filename = g_strconcat(entry.name, ".ini", NULL);
+    char *path = g_build_filename(store, filename, NULL);
+    struct stat st;
+    assert(!stat(path, &st) && st.st_size == 1024);
+    uint64_t sequence = 0;
+    LatcdRetirementPageDeadline loaded;
+    assert(!latcd_retirement_schedule_load(root, boot, UINT64_MAX, UINT64_MAX,
+                                           entry.name, &sequence, &loaded, error, sizeof(error)));
+    assert(sequence == UINT64_MAX && !strcmp(loaded.name, entry.name) &&
+           loaded.enqueued == UINT64_MAX && loaded.last_attempt == UINT64_MAX &&
+           loaded.retry_at == UINT64_MAX && loaded.busy_count == 7);
+    g_free(path); g_free(filename); g_free(boot); g_free(store); g_free(gc);
+    remove_root(root); g_free(root);
+}
+
+static void test_schedule_merge_multiple(void)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    LatcdRetirementPageState page = {.count = 3};
+    for (unsigned i = 0; i < 3; i++) {
+        snprintf(page.entries[i].name, sizeof(page.entries[i].name), "%064x.so", i + 1);
+        page.entries[i].deadline = 1000 + i;
+        page.entries[i].enqueued = 150;
+    }
+    for (unsigned i = 0; i < 3; i += 2) {
+        LatcdRetirementPageDeadline hint = page.entries[i];
+        hint.enqueued = 100 + i;
+        hint.last_attempt = i + 1;
+        hint.retry_at = 200 + i;
+        hint.busy_count = i + 1;
+        assert(!latcd_retirement_schedule_store(root, boot, 100, 150, i + 1,
+                                                &hint, error, sizeof(error)));
+    }
+    assert(!latcd_retirement_schedule_merge_page(root, boot, 100, 150, &page, error, sizeof(error)));
+    assert(page.sequence == 3 && page.entries[0].enqueued == 100 &&
+           page.entries[0].retry_at == 200 && page.entries[1].enqueued == 150 &&
+           !page.entries[1].retry_at && page.entries[2].enqueued == 102 &&
+           page.entries[2].retry_at == 202);
+    for (unsigned i = 0; i < 3; i++) assert(page.entries[i].deadline == 1000 + i);
+    LatcdRetirementPageState snapshot = page;
+    char *bad = g_build_filename(store, "unrelated", NULL);
+    put(bad, "invalid\n");
+    assert(latcd_retirement_schedule_merge_page(root, boot, 100, 150, &page, error, sizeof(error)) < 0);
+    assert(!memcmp(&page, &snapshot, sizeof(page)));
+    g_free(bad); g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
+}
+
+static void test_schedule_byte_limit(void)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    struct stat cache;
+    assert(!stat(root, &cache));
+    for (unsigned i = 1; i <= 4095; i++) {
+        char *name = g_strdup_printf("%064x.so", i);
+        char *filename = g_strconcat(name, ".ini", NULL);
+        char *path = g_build_filename(store, filename, NULL);
+        char *record = g_strdup_printf("[schedule]\nversion=1\ndevice=%" G_GUINT64_FORMAT
+            "\ninode=%" G_GUINT64_FORMAT "\nboot=%s\ngrace=100\nname=%s\n"
+            "sequence=1\nenqueued=100\nlast_attempt=1\nretry_at=200\nbusy_count=1\n",
+            (guint64)cache.st_dev, (guint64)cache.st_ino, boot, name);
+        size_t length = strlen(record);
+        assert(length < 1022);
+        char *data = g_malloc(1025);
+        memcpy(data, record, length);
+        data[length] = '#';
+        memset(data + length + 1, 'x', 1022 - length);
+        data[1023] = '\n'; data[1024] = 0;
+        assert(g_file_set_contents(path, data, 1024, NULL) && !chmod(path, 0400));
+        g_free(data); g_free(record); g_free(path); g_free(filename); g_free(name);
+    }
+    LatcdRetirementPageDeadline entry = {.enqueued = 100, .last_attempt = 2,
+                                          .retry_at = 201, .busy_count = 2};
+    snprintf(entry.name, sizeof(entry.name), "%064x.so", 4096);
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry, error, sizeof(error)) < 0);
+    snprintf(entry.name, sizeof(entry.name), "%064x.so", 4095);
+    assert(!latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry, error, sizeof(error)));
+    LatcdRetirementPageDeadline loaded;
+    uint64_t sequence;
+    assert(!latcd_retirement_schedule_load(root, boot, 100, 150, entry.name,
+                                           &sequence, &loaded, error, sizeof(error)));
+    assert(sequence == 2 && loaded.last_attempt == 2 && loaded.busy_count == 2);
+    for (unsigned i = 4094; i >= 4085; i--) {
+        snprintf(entry.name, sizeof(entry.name), "%064x.so", i);
+        assert(!latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry,
+                                                error, sizeof(error)));
+    }
+    uint64_t total = 0;
+    GDir *directory = g_dir_open(store, 0, NULL);
+    assert(directory);
+    const char *name;
+    while ((name = g_dir_read_name(directory))) {
+        char *path = g_build_filename(store, name, NULL);
+        struct stat st;
+        assert(!stat(path, &st) && st.st_size >= 0);
+        total += st.st_size;
+        g_free(path);
+    }
+    g_dir_close(directory);
+    assert(total <= UINT64_C(4) * 1024 * 1024 - 1024);
+    g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
+}
+
+static void test_schedule_growth_limit(void)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    struct stat cache;
+    assert(!stat(root, &cache));
+    for (unsigned i = 1; i <= 4096; i++) {
+        char *name = g_strdup_printf("%064x.so", i);
+        char *filename = g_strconcat(name, ".ini", NULL);
+        char *path = g_build_filename(store, filename, NULL);
+        char *record = g_strdup_printf("[schedule]\nversion=1\ndevice=%" G_GUINT64_FORMAT
+            "\ninode=%" G_GUINT64_FORMAT "\nboot=%s\ngrace=100\nname=%s\n"
+            "sequence=1\nenqueued=100\nlast_attempt=1\nretry_at=200\nbusy_count=1\n",
+            (guint64)cache.st_dev, (guint64)cache.st_ino, boot, name);
+        size_t length = strlen(record);
+        size_t target = i == 4095 ? length : i == 4096 ? 1024 - length : 1024;
+        assert(target >= length + (i == 4095 ? 0 : 2));
+        char *data = g_malloc(target + 1);
+        memcpy(data, record, length);
+        if (target > length) {
+            data[length] = '#';
+            memset(data + length + 1, 'x', target - length - 2);
+            data[target - 1] = '\n';
+        }
+        data[target] = 0;
+        assert(g_file_set_contents(path, data, target, NULL) && !chmod(path, 0400));
+        g_free(data); g_free(record); g_free(path); g_free(filename); g_free(name);
+    }
+    LatcdRetirementPageDeadline entry = {.enqueued = 100, .last_attempt = 100,
+                                          .retry_at = 201, .busy_count = 2};
+    snprintf(entry.name, sizeof(entry.name), "%064x.so", 4095);
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 100, &entry, error, sizeof(error)) < 0);
+    LatcdRetirementPageDeadline loaded;
+    uint64_t sequence;
+    assert(!latcd_retirement_schedule_load(root, boot, 100, 150, entry.name,
+                                           &sequence, &loaded, error, sizeof(error)));
+    assert(sequence == 1 && loaded.last_attempt == 1 && loaded.busy_count == 1);
+    snprintf(entry.name, sizeof(entry.name), "%064x.so", 4094);
+    assert(!latcd_retirement_schedule_store(root, boot, 100, 150, 100, &entry,
+                                            error, sizeof(error)));
+    assert(!latcd_retirement_schedule_load(root, boot, 100, 150, entry.name,
+                                           &sequence, &loaded, error, sizeof(error)));
+    assert(sequence == 100 && loaded.last_attempt == 100 && loaded.busy_count == 2);
+    char *filename = g_strconcat(entry.name, ".ini", NULL);
+    char *path = g_build_filename(store, filename, NULL);
+    struct stat shard_stat;
+    assert(!stat(path, &shard_stat) && shard_stat.st_size == 1024);
+    g_free(path); g_free(filename);
+    g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
+}
+
+static void test_schedule_count_limit(void)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    struct stat cache;
+    assert(!stat(root, &cache));
+    for (unsigned i = 1; i <= 4096; i++) {
+        char *name = g_strdup_printf("%064x.so", i);
+        char *filename = g_strconcat(name, ".ini", NULL);
+        char *path = g_build_filename(store, filename, NULL);
+        char *data = g_strdup_printf("[schedule]\nversion=1\ndevice=%" G_GUINT64_FORMAT
+            "\ninode=%" G_GUINT64_FORMAT "\nboot=%s\ngrace=100\nname=%s\n"
+            "sequence=1\nenqueued=100\nlast_attempt=1\nretry_at=200\nbusy_count=1\n",
+            (guint64)cache.st_dev, (guint64)cache.st_ino, boot, name);
+        assert(g_file_set_contents(path, data, -1, NULL) && !chmod(path, 0400));
+        g_free(data); g_free(path); g_free(filename); g_free(name);
+    }
+    LatcdRetirementPageDeadline entry = {.enqueued = 100, .last_attempt = 2,
+                                          .retry_at = 201, .busy_count = 2};
+    snprintf(entry.name, sizeof(entry.name), "%064x.so", 4097);
+    assert(latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry, error, sizeof(error)) < 0);
+    snprintf(entry.name, sizeof(entry.name), "%064x.so", 4096);
+    assert(!latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry, error, sizeof(error)));
+    LatcdRetirementPageDeadline loaded;
+    uint64_t sequence;
+    assert(!latcd_retirement_schedule_load(root, boot, 100, 150, entry.name,
+                                           &sequence, &loaded, error, sizeof(error)));
+    assert(sequence == 2 && loaded.last_attempt == 2 && loaded.busy_count == 2);
+    LatcdRetirementPageState page = {.cache_device = cache.st_dev, .cache_inode = cache.st_ino,
+        .grace_us = 100, .round_cutoff = 120, .sequence = 2, .count = 1};
+    g_strlcpy(page.boot, boot, sizeof(page.boot));
+    snprintf(page.entries[0].name, sizeof(page.entries[0].name), "%064x.so", 4097);
+    page.entries[0].deadline = 140;
+    page.entries[0].enqueued = 100;
+    g_strlcpy(page.cursor, page.entries[0].name, sizeof(page.cursor));
+    assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+            LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)) < 0);
+    assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
+    LatcdRetirementPageState persisted;
+    assert(!latcd_retirement_page_state_load(root, &persisted, error, sizeof(error)) &&
+           persisted.count == 1 && !persisted.committed_cursor[0] &&
+           !strcmp(persisted.cursor, page.cursor));
+    assert(!latcd_retirement_schedule_load(root, boot, 100, 150, entry.name,
+                                           &sequence, &loaded, error, sizeof(error)));
+    assert(sequence == 2 && loaded.last_attempt == 2 && loaded.retry_at == 201 &&
+           loaded.busy_count == 2);
+    g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
+}
+
+static void test_schedule_capacity(void)
+{
+    char *root = root_new(), error[256];
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    char *boot = NULL;
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    LatcdRetirementPageDeadline entry = {.enqueued = 100, .last_attempt = 1,
+                                          .retry_at = 200, .busy_count = 1};
+    snprintf(entry.name, sizeof(entry.name), "%s.so", source);
+    assert(!latcd_retirement_schedule_store(root, boot, 100, 150, 1, &entry, error, sizeof(error)));
+    char *filename = g_strconcat(entry.name, ".ini", NULL);
+    char *path = g_build_filename(store, filename, NULL), *before = NULL, *after = NULL;
+    assert(g_file_get_contents(path, &before, NULL, NULL));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    uint64_t initial = capacity.metadata_committed;
+    assert(initial > 0);
+    latcd_cache_capacity_metadata_bind(&capacity, initial);
+    entry.last_attempt = 2;
+    uint8_t identity[32] = {1};
+    errno = 0;
+    assert(latcd_retirement_schedule_store_result(root, boot, 100, 150, 2, &entry, identity,
+           LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)) < 0);
+    assert(errno == ENOSPC && capacity.ready && capacity.metadata_committed == initial &&
+           !capacity.metadata_reserved);
+    assert(g_file_get_contents(path, &after, NULL, NULL) && !strcmp(before, after));
+    g_free(after);
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:file-synced", 1));
+    assert(latcd_retirement_schedule_store_result(root, boot, 100, 150, 2, &entry, identity,
+           LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)) < 0);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    assert(latcd_cache_capacity_poll(&capacity) && capacity.metadata_committed == initial &&
+           !capacity.metadata_reserved);
+    assert(g_file_get_contents(path, &after, NULL, NULL) && !strcmp(before, after));
+    g_free(after);
+    assert(!latcd_retirement_schedule_store_result(root, boot, 100, 150, 2, &entry, identity,
+           LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
+    assert(latcd_cache_capacity_poll(&capacity) && capacity.metadata_committed == initial &&
+           !capacity.metadata_reserved);
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:renamed", 1));
+    assert(latcd_retirement_schedule_store_result(root, boot, 100, 150, 2, &entry, identity,
+           LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    assert(!latcd_cache_capacity_poll(&capacity) && capacity.metadata_committed == initial &&
+           !capacity.metadata_reserved);
+    LatcdRetirementResultKind kind = 0;
+    assert(!latcd_retirement_schedule_load_result(root, boot, 100, 150, entry.name, identity,
+                                                  &kind, error, sizeof(error)) &&
+           kind == LATCD_RETIREMENT_RESULT_DONE);
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    LatcdCacheCapacity restarted = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&restarted, root, error, sizeof(error)) &&
+           restarted.metadata_committed == initial && latcd_cache_capacity_poll(&restarted));
+    latcd_cache_capacity_close(&restarted);
+    assert(!pthread_mutex_destroy(&restarted.lock));
+    g_free(before); g_free(path); g_free(filename); g_free(boot);
+    g_free(store); g_free(gc); remove_root(root); g_free(root);
+}
+
+static void test_schedule_crash(bool renamed, bool result_record)
+{
+    char *root = root_new(), error[256];
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    char *boot = NULL;
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    LatcdRetirementPageDeadline entry = {.enqueued = 100, .last_attempt = 1,
+                                          .retry_at = 200, .busy_count = 1};
+    snprintf(entry.name, sizeof(entry.name), "%s.so", source);
+    assert(!latcd_retirement_schedule_store(root, boot, 100, 150, 1, &entry, error, sizeof(error)));
+    char *filename = g_strconcat(entry.name, ".ini", NULL);
+    char *path = g_build_filename(store, filename, NULL), *before = NULL, *after = NULL;
+    assert(g_file_get_contents(path, &before, NULL, NULL));
+    entry.last_attempt = 2;
+    entry.busy_count = 2;
+    uint8_t identity[32] = {1};
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", renamed ? "crash:renamed" : "crash:file-synced", 1));
+        if (result_record)
+            latcd_retirement_schedule_store_result(root, boot, 100, 150, 2, &entry, identity,
+                LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error));
+        else
+            latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry, error, sizeof(error));
+        _exit(1);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    assert(g_file_get_contents(path, &after, NULL, NULL));
+    if (renamed) {
+        assert(strcmp(before, after));
+        if (result_record) {
+            LatcdRetirementResultKind kind = 0;
+            assert(!latcd_retirement_schedule_load_result(root, boot, 100, 150, entry.name,
+                                                          identity, &kind, error, sizeof(error)) &&
+                   kind == LATCD_RETIREMENT_RESULT_DEFERRED);
+        } else {
+            assert(!latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry, error, sizeof(error)));
+        }
+    } else {
+        assert(!strcmp(before, after));
+        assert(latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry, error, sizeof(error)) < 0);
+        LatcdRetirementPageDeadline loaded;
+        uint64_t sequence = 99;
+        memset(&loaded, 0xff, sizeof(loaded));
+        assert(latcd_retirement_schedule_load(root, boot, 100, 150, entry.name,
+                                               &sequence, &loaded, error, sizeof(error)) < 0);
+        assert(!sequence && !loaded.name[0]);
+        LatcdRetirementResultKind kind = LATCD_RETIREMENT_RESULT_DONE;
+        assert(latcd_retirement_schedule_load_result(root, boot, 100, 150, entry.name,
+                                                     identity, &kind, error, sizeof(error)) < 0 && !kind);
+        LatcdRetirementPageState page = {.count = 1};
+        page.entries[0] = entry;
+        page.entries[0].deadline = 1000;
+        LatcdRetirementPageState snapshot = page;
+        assert(latcd_retirement_schedule_merge_page(root, boot, 100, 150, &page,
+                                                     error, sizeof(error)) < 0);
+        assert(!memcmp(&page, &snapshot, sizeof(page)));
+        GDir *directory = g_dir_open(store, 0, NULL);
+        assert(directory);
+        unsigned temporary = 0;
+        char *staging = NULL;
+        const char *name;
+        while ((name = g_dir_read_name(directory))) {
+            if (g_str_has_prefix(name, ".write-")) {
+                temporary++;
+                staging = g_strdup(name);
+            }
+        }
+        assert(temporary == 1);
+        g_dir_close(directory);
+        struct stat original, pending;
+        char *staging_path = g_build_filename(store, staging, NULL);
+        assert(!stat(path, &original) && !stat(staging_path, &pending));
+        LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+        assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+        assert(capacity.metadata_committed == (uint64_t)(original.st_size + pending.st_size));
+        latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+        int store_fd = open(store, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        assert(store_fd >= 0);
+        assert(!latcd_cache_capacity_metadata_remove(store_fd, staging, pending.st_dev, pending.st_ino));
+        assert(capacity.metadata_committed == (uint64_t)original.st_size);
+        assert(!latcd_retirement_schedule_load(root, boot, 100, 150, entry.name,
+                                               &sequence, &loaded, error, sizeof(error)));
+        assert(sequence == 1 && loaded.last_attempt == 1 && loaded.busy_count == 1);
+        assert(latcd_retirement_schedule_load_result(root, boot, 100, 150, entry.name,
+                                                     identity, &kind, error, sizeof(error)) == 1 && !kind);
+        assert(!latcd_retirement_schedule_store(root, boot, 100, 150, 2, &entry, error, sizeof(error)));
+        close(store_fd);
+        latcd_cache_capacity_close(&capacity);
+        assert(!pthread_mutex_destroy(&capacity.lock));
+        g_free(staging_path); g_free(staging);
+    }
+    g_free(after); g_free(before); g_free(path); g_free(filename); g_free(boot);
+    g_free(store); g_free(gc); remove_root(root); g_free(root);
+}
+
+static void test_recovery_round_barrier(void)
+{
+    char *root = root_new(), error[256];
+    LatcdRetirementPublication *publication =
+        latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication);
+    assert(!latcd_retirement_publication_prepare(publication, source, next, strlen(next),
+                                                 NULL, error, sizeof(error)));
+    char *current = current_path(root);
+    put(current, next);
+    latcd_retirement_publication_close(publication);
+    char *path = single_record(root), *before = NULL, *after = NULL;
+    gsize before_size, after_size;
+    assert(g_file_get_contents(path, &before, &before_size, NULL));
+    LatcdRecoveryCursor *cursor = latcd_recovery_open(root, false, error, sizeof(error));
+    assert(cursor);
+    int exclusive = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error));
+    assert(exclusive >= 0);
+    LatcdRecoveryProgress progress;
+    assert(latcd_recovery_step(cursor, 32, 65536, 100000, &progress,
+                               error, sizeof(error)) < 0);
+    assert(g_file_get_contents(path, &after, &after_size, NULL));
+    assert(before_size == after_size && !memcmp(before, after, before_size));
+    close(exclusive);
+    simulated_boottime_us = 1234;
+    int result;
+    do {
+        result = latcd_recovery_step(cursor, 32, 65536, 100000, &progress,
+                                     error, sizeof(error));
+    } while (result > 0);
+    assert(!result);
+    GKeyFile *record = g_key_file_new();
+    assert(g_key_file_load_from_file(record, path, 0, NULL));
+    char *state = g_key_file_get_string(record, "transaction", "state", NULL);
+    assert(!g_strcmp0(state, "RETIRED"));
+    assert(g_key_file_get_uint64(record, "transaction", "retired_boottime_us", NULL) == 1234);
+    g_free(state); g_key_file_unref(record);
+    simulated_boottime_us = 0;
+    latcd_recovery_close(cursor);
+    g_free(before); g_free(after); g_free(path); g_free(current);
+    remove_root(root); g_free(root);
+}
+
+static void test_recovery_lock_directory_swap(void)
+{
+    char *root = root_new(), error[256];
+    LatcdRetirementPublication *publication =
+        latcd_retirement_publication_open(root, error, sizeof(error));
+    assert(publication && !latcd_retirement_publication_prepare(publication, source,
+        next, strlen(next), NULL, error, sizeof(error)));
+    char *current = current_path(root);
+    put(current, next);
+    latcd_retirement_publication_close(publication);
+    char *record = single_record(root), *before = NULL, *after = NULL;
+    gsize before_size, after_size;
+    assert(g_file_get_contents(record, &before, &before_size, NULL));
+    LatcdRecoveryCursor *cursor = latcd_recovery_open(root, false, error, sizeof(error));
+    assert(cursor);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *old = g_build_filename(root, ".gc-old", NULL);
+    roots_swap_path = gc; roots_swap_old = old;
+    LatcdRecoveryProgress progress;
+    assert(latcd_recovery_step(cursor, 32, 65536, 100000, &progress,
+                               error, sizeof(error)) < 0);
+    assert(!roots_swap_path);
+    assert(!rmdir(gc) && !rename(old, gc));
+    roots_swap_old = NULL;
+    assert(g_file_get_contents(record, &after, &after_size, NULL));
+    assert(before_size == after_size && !memcmp(before, after, before_size));
+    assert(latcd_recovery_step(cursor, 32, 65536, 100000, &progress,
+                               error, sizeof(error)) < 0);
+    latcd_recovery_close(cursor);
+    g_free(before); g_free(after); g_free(record); g_free(current); g_free(gc); g_free(old);
     remove_root(root); g_free(root);
 }
 
@@ -1210,12 +2918,13 @@ static void test_page_state_write_fault(const char *point, bool crash)
     assert(!stat(root, &cache));
     LatcdRetirementPageState state = {
         .cache_device = cache.st_dev, .cache_inode = cache.st_ino, .grace_us = 1, .round_cutoff = 2,
-        .boot = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", .cursor = "a", .count = 1,
-        .entries = {{"a", 10, 1, 0, 0, 0}}
+        .boot = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", .cursor = "b", .count = 1,
+        .committed_cursor = "0", .entries = {{"b", 10, 1, 0, 0, 0}}
     };
     assert(!latcd_retirement_page_state_store(root, &state, error, sizeof(error)));
     state.entries[0].deadline = 20;
     state.round_cutoff = 3;
+    g_strlcpy(state.committed_cursor, "a", sizeof(state.committed_cursor));
     pid_t child = fork();
     assert(child >= 0);
     if (!child) {
@@ -1231,8 +2940,12 @@ static void test_page_state_write_fault(const char *point, bool crash)
     else assert(WIFEXITED(status) && !WEXITSTATUS(status));
     LatcdRetirementPageState loaded;
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
-    assert(loaded.count == 1 && ((loaded.entries[0].deadline == 10 && loaded.round_cutoff == 2) ||
-                                 (loaded.entries[0].deadline == 20 && loaded.round_cutoff == 3)));
+    assert(loaded.count == 1 && !strcmp(loaded.cursor, "b") &&
+           !strcmp(loaded.entries[0].name, "b") &&
+           ((loaded.entries[0].deadline == 10 && loaded.round_cutoff == 2 &&
+             !strcmp(loaded.committed_cursor, "0")) ||
+            (loaded.entries[0].deadline == 20 && loaded.round_cutoff == 3 &&
+             !strcmp(loaded.committed_cursor, "a"))));
     path = g_build_filename(root, ".gc", "retirement-page.ini", NULL);
     assert(g_file_test(path, G_FILE_TEST_IS_REGULAR));
     g_free(path); remove_root(root); g_free(root);
@@ -1246,6 +2959,39 @@ static void assert_tombstone_status(const char *marker, const char *expected)
     assert(!g_strcmp0(value, expected));
     g_free(value);
     g_key_file_unref(record);
+}
+
+static void test_tombstone_capacity_admission(bool missing)
+{
+    char *root = root_new(), *name = g_strdup_printf("%s.native", source);
+    char *path = g_build_filename(root, name, NULL), error[256];
+    char *marker = g_build_filename(root, ".gc", "tombstones", name, NULL);
+    put(path, "retired immutable native\n");
+    const char *names[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    assert(evidence && fd >= 0 && !latcd_retirement_tombstone(root, source, name,
+        fd, evidence, error, sizeof(error)));
+    close(fd);
+    if (missing) assert(!unlink(path));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    latcd_cache_capacity_unknown_task(&capacity, "tombstone-admission-test");
+    unsigned recovered = 0;
+    int result = latcd_tombstone_recover(root, &recovered, error, sizeof(error));
+    if (missing) {
+        assert(!result && recovered == 1);
+        assert_tombstone_status(marker, "MISSING");
+        assert(!latcd_cache_capacity_poll(&capacity));
+    } else {
+        assert(result < 0);
+        assert(!access(path, F_OK));
+    }
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    g_free(evidence); g_free(marker); g_free(path); g_free(name);
+    remove_root(root); g_free(root);
 }
 
 static void test_tombstone_recovery(int mutation)
@@ -1743,6 +3489,40 @@ static void test_recovery_entry_budget(void)
     g_free(store); remove_root(root); g_free(root);
 }
 
+static void test_delete_lock_domain_swap(void)
+{
+    char *root = root_new(), *other = root_new(), error[256];
+    char *moved = g_strconcat(root, "-moved", NULL);
+    char *name = g_strconcat(source, ".native", NULL);
+    char *path = g_build_filename(root, name, NULL);
+    char *other_path = g_build_filename(other, name, NULL);
+    put(path, "original object\n");
+    put(other_path, "replacement object\n");
+    const char *names[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(evidence && fd >= 0 && !latcd_retirement_tombstone(root, source, name,
+        fd, evidence, error, sizeof(error)));
+    close(fd);
+    int lock = lat_aot_v2_cache_source_lock(other, source, LOCK_EX | LOCK_NB,
+                                             false, error, sizeof(error));
+    assert(lock >= 0);
+    close(lock);
+    lock = latcd_retirement_roots_lock(other, LOCK_EX | LOCK_NB, error, sizeof(error));
+    assert(lock >= 0);
+    close(lock);
+    lock_swap_root = root; lock_swap_old = moved; lock_swap_new = other;
+    LatcdRetirementDeletionReport report;
+    assert(latcd_tombstone_delete_report(root, name, &report, error, sizeof(error)) < 0);
+    assert(!lock_swap_root && !report.object_unlinked);
+    char *original = g_build_filename(moved, name, NULL);
+    assert(!access(original, F_OK) && !access(path, F_OK));
+    assert(!rename(root, other) && !rename(moved, root));
+    remove_root(other); remove_root(root);
+    g_free(original); g_free(evidence); g_free(other_path); g_free(path);
+    g_free(name); g_free(moved); g_free(other); g_free(root);
+}
+
 static void test_partial_generation_delete(void)
 {
     char *root = root_new(), error[256];
@@ -1780,6 +3560,73 @@ static void test_partial_generation_delete(void)
     assert(!access(paths[2], F_OK));
     for (size_t i = 0; i < 3; i++) { g_free(paths[i]); g_free(names[i]); }
     remove_root(root); g_free(root);
+}
+
+static void test_bound_new_hold_directory(void)
+{
+    char *root = root_new(), error[256];
+    char *name = g_strconcat(source, ".native", NULL);
+    char *path = g_build_filename(root, name, NULL);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *holds = g_build_filename(gc, "holds", NULL);
+    char *locks = g_build_filename(gc, "source-locks", NULL);
+    char *id = g_uuid_string_random();
+    put(path, "held immutable object\n");
+    assert(!mkdir(gc, 0700) && !mkdir(holds, 0700) && !mkdir(locks, 0700));
+    int source_lock = lat_aot_v2_cache_source_lock(root, source, LOCK_EX | LOCK_NB,
+                                                    false, error, sizeof(error));
+    assert(source_lock >= 0);
+    close(source_lock);
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    assert(latcd_retirement_hold(root, source, name, id, "ROLLBACK", false,
+                                 error, sizeof(error)) < 0);
+    char *object_holds = g_build_filename(holds, name, NULL);
+    assert(access(object_holds, F_OK) < 0 && errno == ENOENT);
+    assert(latcd_cache_capacity_poll(&capacity));
+    assert(!access(path, F_OK));
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    assert(!mkdir(object_holds, 0700));
+    char *tombstones = g_build_filename(gc, "tombstones", NULL);
+    assert(!mkdir(tombstones, 0700));
+    int roots = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error));
+    assert(roots >= 0);
+    close(roots);
+    LatcdCacheCapacity prepared = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&prepared, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&prepared, UINT64_MAX);
+    assert(!latcd_retirement_hold(root, source, name, id, "ROLLBACK", false,
+                                  error, sizeof(error)));
+    assert(latcd_cache_capacity_poll(&prepared) && prepared.metadata_committed > 0);
+    const char *names[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+    int object_fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(evidence && object_fd >= 0);
+    assert(latcd_retirement_tombstone(root, source, name, object_fd, evidence,
+                                      error, sizeof(error)));
+    close(object_fd);
+    uint64_t recorded = prepared.metadata_committed;
+    latcd_cache_capacity_close(&prepared);
+    assert(!pthread_mutex_destroy(&prepared.lock));
+    LatcdCacheCapacity restarted = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&restarted, root, error, sizeof(error)));
+    assert(restarted.metadata_committed == recorded);
+    latcd_cache_capacity_metadata_bind(&restarted, UINT64_MAX);
+    assert(!latcd_retirement_hold(root, source, name, id, "ROLLBACK", true,
+                                  error, sizeof(error)));
+    assert(latcd_cache_capacity_poll(&restarted) && restarted.metadata_committed > 0);
+    object_fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(object_fd >= 0);
+    assert(!latcd_retirement_tombstone(root, source, name, object_fd, evidence,
+                                       error, sizeof(error)));
+    close(object_fd);
+    g_free(evidence);
+    latcd_cache_capacity_close(&restarted);
+    assert(!pthread_mutex_destroy(&restarted.lock));
+    remove_root(root);
+    g_free(tombstones); g_free(object_holds); g_free(id); g_free(locks); g_free(holds); g_free(gc); g_free(path); g_free(name); g_free(root);
 }
 
 static void test_explicit_holds(void)
@@ -1909,6 +3756,38 @@ static LatcdRetirementQueueStats sweep_queue(LatcdRetirementQueue *queue)
     return stats;
 }
 
+static void test_queue_root_replacement(bool replace, bool execute)
+{
+    char *root = root_new(), error[256];
+    char *old = g_strconcat(root, "-old", NULL);
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 0);
+    LatcdRetirementQueueStats stats = sweep_queue(queue);
+    assert(stats.complete);
+    assert(!rename(root, old));
+    if (replace) assert(!mkdir(root, 0700));
+    if (execute) {
+        uint64_t hashed;
+        LatcdRetirementDeletionReport report;
+        assert(latcd_retirement_queue_execute_step(queue, 65536, 1000000, &hashed,
+                                                   &report, error, sizeof(error)) < 0);
+        assert(!hashed && !report.object_unlinked);
+    } else {
+        assert(latcd_retirement_queue_checkpoint(queue, error, sizeof(error)) < 0);
+    }
+    LatcdRetirementAttempt attempt;
+    assert(latcd_retirement_queue_take(queue, UINT64_MAX, &attempt) < 0);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    assert(access(gc, F_OK) < 0 && errno == ENOENT);
+    assert(latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error)) < 0);
+    assert(!stats.complete);
+    if (replace) assert(!rmdir(root));
+    assert(!rename(old, root));
+    assert(latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error)) < 0);
+    latcd_retirement_queue_free(queue);
+    remove_root(root);
+    g_free(gc); g_free(old); g_free(root);
+}
+
 static void test_queue_consumer(unsigned mutation, bool bounded)
 {
     char *root = root_new(), error[256];
@@ -1974,7 +3853,7 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
         g_free(duplicate); g_free(duplicate_file); g_free(duplicate_id);
         g_key_file_unref(record); g_free(path);
     }
-    if (mutation >= 15) {
+    if (mutation >= 15 && mutation <= 22) {
         if (mutation == 16) {
             const char *single[] = {names[0]};
             char *captured = latcd_retirement_capture_objects(root, source, single, 1);
@@ -2011,9 +3890,9 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
         assert(g_key_file_get_uint64(record, "transaction", "retired_boottime_us", NULL) == simulated_boottime_us);
         g_key_file_unref(record); g_free(path);
     }
-    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, mutation >= 15 ? 1000000 : 0);
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, mutation >= 15 && mutation <= 22 ? 1000000 : 0);
     LatcdRetirementQueueStats stats = sweep_queue(queue);
-    if (mutation >= 15) {
+    if (mutation >= 15 && mutation <= 22) {
         uint64_t deadline = simulated_boottime_us + 1000000;
         assert(stats.complete && stats.candidates == 3 && !stats.ready &&
                stats.next_deadline_us == deadline);
@@ -2032,8 +3911,55 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
         simulated_boottime_us = deadline;
         stats = sweep_queue(queue);
     }
-    assert(stats.complete && stats.ready == 3);
     int pins[3] = {-1, -1, -1}, gate = -1;
+    assert(stats.complete && stats.ready == 3);
+    if (mutation == 25) {
+        char *other = root_new();
+        lock_wrong_root = other;
+        LatcdRetirementDeletionReport report;
+        assert(latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error)) < 0);
+        assert(!lock_wrong_root && !report.object_unlinked);
+        for (unsigned i = 0; i < 3; i++) {
+            char *marker = g_build_filename(root, ".gc", "tombstones", names[i], NULL);
+            assert(!access(paths[i], F_OK));
+            assert(access(marker, F_OK) < 0 && errno == ENOENT);
+            g_free(marker);
+        }
+        latcd_retirement_queue_free(queue);
+        queue = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_restore(queue, error, sizeof(error)));
+        stats = sweep_queue(queue);
+        assert(stats.complete && stats.candidates == 3);
+        remove_root(other); g_free(other);
+        goto cleanup;
+    }
+    if (mutation == 24) {
+        char *other = root_new(), *moved = g_strconcat(root, "-moved", NULL);
+        for (unsigned i = 0; i < 3; i++) {
+            char *p = g_build_filename(other, names[i], NULL);
+            put(p, "replacement object\n");
+            g_free(p);
+        }
+        int fd = lat_aot_v2_cache_source_lock(other, source, LOCK_EX | LOCK_NB,
+                                               false, error, sizeof(error));
+        assert(fd >= 0); close(fd);
+        lock_swap_root = root; lock_swap_old = moved; lock_swap_new = other;
+        lock_swap_after = true;
+        LatcdRetirementDeletionReport report;
+        assert(latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error)) < 0);
+        assert(!lock_swap_root && !report.object_unlinked);
+        for (unsigned i = 0; i < 3; i++) {
+            char *original = g_build_filename(moved, names[i], NULL);
+            char *replacement = g_build_filename(root, names[i], NULL);
+            char *marker = g_build_filename(root, ".gc", "tombstones", names[i], NULL);
+            assert(!access(original, F_OK) && !access(replacement, F_OK));
+            assert(access(marker, F_OK) < 0 && errno == ENOENT);
+            g_free(original); g_free(replacement); g_free(marker);
+        }
+        assert(!rename(root, other) && !rename(moved, root));
+        remove_root(other); g_free(other); g_free(moved);
+        goto cleanup;
+    }
     if (bounded) {
         LatcdRetirementDeletionReport report;
         uint64_t hashed = UINT64_MAX;
@@ -2047,14 +3973,149 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
     if (mutation == 13) {
         LatcdRetirementDeletionReport report;
         uint64_t hashed = UINT64_MAX;
+        struct timespec fixed_clock;
+        assert(!clock_gettime(CLOCK_BOOTTIME, &fixed_clock));
+        simulated_boottime_us = (uint64_t)fixed_clock.tv_sec * 1000000 + fixed_clock.tv_nsec / 1000;
+        assert(!latcd_retirement_queue_checkpoint(queue, error, sizeof(error)));
         monotonic_tick = __real_g_get_monotonic_time();
         assert(latcd_retirement_queue_execute_step(queue, 65536, 1000000, &hashed,
             &report, error, sizeof(error)) == 2 && !hashed && !report.object_unlinked);
         monotonic_tick = 0;
-        assert(!latcd_retirement_queue_cancel(queue, error, sizeof(error)));
+        assert(latcd_retirement_queue_step(queue, 1, 10000, &stats,
+                                           error, sizeof(error)) < 0);
+        char *scheduler_path = g_build_filename(root, ".gc", "retirement-scheduler.ini", NULL);
+        char *old_scheduler = NULL, *new_scheduler = NULL;
+        gsize old_size = 0, new_size = 0;
+        assert(g_file_get_contents(scheduler_path, &old_scheduler, &old_size, NULL));
+        pid_t baseline = fork();
+        assert(baseline >= 0);
+        if (!baseline) {
+            assert(!latcd_retirement_queue_cancel(queue, error, sizeof(error)));
+            _exit(0);
+        }
+        int baseline_status;
+        assert(waitpid(baseline, &baseline_status, 0) == baseline);
+        assert(WIFEXITED(baseline_status) && !WEXITSTATUS(baseline_status));
+        assert(g_file_get_contents(scheduler_path, &new_scheduler, &new_size, NULL));
+        assert(old_size != new_size || memcmp(old_scheduler, new_scheduler, old_size));
+        const char *faults[] = {"created", "partial-write", "written", "chmod",
+                                "file-synced", "closed", "renamed", "directory-synced"};
+        for (unsigned fi = 0; fi < G_N_ELEMENTS(faults); fi++) {
+            for (unsigned crash = 0; crash < 2; crash++) {
+                put(scheduler_path, old_scheduler);
+                pid_t child = fork();
+                assert(child >= 0);
+                if (!child) {
+                    char *fault = g_strdup_printf("%s:%s", crash ? "crash" : "error", faults[fi]);
+                    assert(!setenv("LATCD_TEST_RETIREMENT_IO", fault, 1));
+                    assert(latcd_retirement_queue_cancel(queue, error, sizeof(error)) < 0);
+                    assert(!crash);
+                    LatcdRetirementAttempt blocked;
+                    assert(latcd_retirement_queue_take(queue, UINT64_MAX, &blocked) < 0);
+                    _exit(0);
+                }
+                int status;
+                assert(waitpid(child, &status, 0) == child);
+                assert(crash ? WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL :
+                               WIFEXITED(status) && !WEXITSTATUS(status));
+                char *actual_scheduler = NULL;
+                gsize actual_size = 0;
+                assert(g_file_get_contents(scheduler_path, &actual_scheduler, &actual_size, NULL));
+                assert((actual_size == old_size && !memcmp(actual_scheduler, old_scheduler, old_size)) ||
+                       (actual_size == new_size && !memcmp(actual_scheduler, new_scheduler, new_size)));
+                g_free(actual_scheduler);
+                LatcdRetirementQueue *restart = latcd_retirement_queue_new(root, 0);
+                assert(!latcd_retirement_queue_restore(restart, error, sizeof(error)));
+                LatcdRetirementAttempt not_discovered;
+                assert(!latcd_retirement_queue_take(restart, UINT64_MAX, &not_discovered));
+                LatcdRetirementQueueStats restarted = sweep_queue(restart);
+                assert(restarted.complete && restarted.candidates == 3);
+                latcd_retirement_queue_free(restart);
+                for (unsigned i = 0; i < 6; i++) assert(!access(paths[i], F_OK));
+            }
+        }
+        g_free(old_scheduler); g_free(new_scheduler); g_free(scheduler_path);
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:created", 1));
+        assert(latcd_retirement_queue_cancel(queue, error, sizeof(error)) < 0);
+        assert(!unsetenv("LATCD_TEST_RETIREMENT_IO"));
+        assert(latcd_retirement_queue_cancel(queue, error, sizeof(error)) < 0);
+        LatcdRetirementAttempt failed_attempt;
+        assert(latcd_retirement_queue_take(queue, UINT64_MAX, &failed_attempt) < 0);
+        assert(latcd_retirement_queue_step(queue, 1, 10000, &stats,
+                                           error, sizeof(error)) < 0);
+        latcd_retirement_queue_free(queue);
+        queue = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_restore(queue, error, sizeof(error)));
+        assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &failed_attempt));
+        stats = sweep_queue(queue);
+        assert(stats.complete);
         goto cleanup;
     }
-    if (mutation >= 8 && mutation < 13) {
+    if (mutation == 22) {
+        int held[3];
+        for (unsigned i = 0; i < 3; i++) {
+            held[i] = open(paths[i], O_RDONLY | O_CLOEXEC);
+            assert(held[i] >= 0 && !flock(held[i], LOCK_SH | LOCK_NB));
+        }
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:completion-clock", 1));
+        LatcdRetirementDeletionReport report;
+        assert(latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error)) < 0);
+        assert(!report.object_unlinked && !report.receipt_durable);
+        assert(!unsetenv("LATCD_TEST_RETIREMENT_IO"));
+        LatcdRetirementAttempt blocked;
+        assert(latcd_retirement_queue_take(queue, UINT64_MAX, &blocked) < 0);
+        assert(latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error)) < 0);
+        for (unsigned i = 0; i < 3; i++) close(held[i]);
+        latcd_retirement_queue_free(queue);
+        queue = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_restore(queue, error, sizeof(error)));
+        assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &blocked));
+        stats = sweep_queue(queue);
+        assert(stats.complete && stats.candidates == 3);
+        for (unsigned i = 0; i < 6; i++) assert(!access(paths[i], F_OK));
+        goto cleanup;
+    }
+    if (mutation == 18 || mutation == 19 || mutation == 21) {
+        assert(!latcd_retirement_queue_checkpoint(queue, error, sizeof(error)));
+        if (mutation == 18) {
+            pid_t child = fork();
+            assert(child >= 0);
+            if (!child) {
+                assert(!setenv("LATCD_TEST_RETIREMENT_IO", "crash:before-scheduler-checkpoint", 1));
+                LatcdRetirementDeletionReport report;
+                latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error));
+                _exit(1);
+            }
+            int status;
+            assert(waitpid(child, &status, 0) == child);
+            assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+        } else {
+            assert(!setenv("LATCD_TEST_RETIREMENT_IO", mutation == 21 ?
+                "error:completion-clock" : "error:before-scheduler-checkpoint", 1));
+            LatcdRetirementDeletionReport report;
+            assert(latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error)) < 0);
+            assert(report.object_unlinked && report.namespace_durable && report.receipt_durable);
+            assert(!unsetenv("LATCD_TEST_RETIREMENT_IO"));
+            LatcdRetirementAttempt blocked;
+            assert(latcd_retirement_queue_take(queue, UINT64_MAX, &blocked) < 0);
+            assert(latcd_retirement_queue_cancel(queue, error, sizeof(error)) < 0);
+            assert(latcd_retirement_queue_step(queue, 1, 10000, &stats,
+                                               error, sizeof(error)) < 0);
+        }
+        unsigned missing = 0;
+        for (unsigned i = 0; i < 3; i++) missing += access(paths[i], F_OK) != 0;
+        assert(missing == 1);
+        for (unsigned i = 3; i < 6; i++) assert(!access(paths[i], F_OK));
+        latcd_retirement_queue_free(queue);
+        queue = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_restore(queue, error, sizeof(error)));
+        LatcdRetirementAttempt not_discovered;
+        assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &not_discovered));
+        stats = sweep_queue(queue);
+        assert(stats.complete && stats.candidates == 2);
+        goto cleanup;
+    }
+    if ((mutation >= 8 && mutation < 13) || mutation == 20 || mutation == 23) {
         LatcdRetirementDeletionReport report;
         uint64_t hashed;
         assert(latcd_retirement_queue_execute_step(queue, 3, 1000000, &hashed,
@@ -2078,7 +4139,41 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
             close(fd);
         }
         assert(pinned < 3);
-        if (mutation == 8) {
+        if (mutation == 23) {
+            char *old_root = g_strconcat(root, "-moved", NULL);
+            assert(!rename(root, old_root) && !mkdir(root, 0700));
+            assert(latcd_retirement_queue_execute_step(queue, 3, 1000000, &hashed,
+                &report, error, sizeof(error)) < 0);
+            assert(!hashed && !report.object_unlinked);
+            LatcdRetirementAttempt blocked;
+            assert(latcd_retirement_queue_take(queue, UINT64_MAX, &blocked) < 0);
+            char *old_object = g_build_filename(old_root, names[pinned], NULL);
+            int fd = open(old_object, O_RDONLY | O_CLOEXEC);
+            assert(fd >= 0 && !flock(fd, LOCK_EX | LOCK_NB));
+            close(fd);
+            assert(!rmdir(root) && !rename(old_root, root));
+            latcd_retirement_queue_free(queue);
+            queue = latcd_retirement_queue_new(root, 0);
+            assert(!latcd_retirement_queue_restore(queue, error, sizeof(error)));
+            stats = sweep_queue(queue);
+            assert(stats.complete && stats.candidates == 3);
+            g_free(old_object); g_free(old_root);
+        } else if (mutation == 20) {
+            clock_fault = 1;
+            assert(latcd_retirement_queue_cancel(queue, error, sizeof(error)) < 0);
+            clock_fault = 0;
+            LatcdRetirementAttempt blocked;
+            assert(latcd_retirement_queue_cancel(queue, error, sizeof(error)) < 0);
+            assert(latcd_retirement_queue_take(queue, UINT64_MAX, &blocked) < 0);
+            assert(latcd_retirement_queue_step(queue, 1, 10000, &stats,
+                                               error, sizeof(error)) < 0);
+            latcd_retirement_queue_free(queue);
+            queue = latcd_retirement_queue_new(root, 0);
+            assert(!latcd_retirement_queue_restore(queue, error, sizeof(error)));
+            assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &blocked));
+            stats = sweep_queue(queue);
+            assert(stats.complete && stats.candidates == 3);
+        } else if (mutation == 8) {
             assert(!latcd_retirement_queue_cancel(queue, error, sizeof(error)));
             assert(!latcd_retirement_queue_cancel(queue, error, sizeof(error)));
             assert(!latcd_retirement_queue_checkpoint(queue, error, sizeof(error)));
@@ -2100,6 +4195,19 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
             } while (result == 2);
             clock_fault = 0;
             assert(result < 0);
+            if (mutation == 12) {
+                LatcdRetirementAttempt blocked;
+                assert(latcd_retirement_queue_take(queue, UINT64_MAX, &blocked) < 0);
+                assert(latcd_retirement_queue_step(queue, 1, 10000, &stats,
+                                                   error, sizeof(error)) < 0);
+                assert(latcd_retirement_queue_checkpoint(queue, error, sizeof(error)) < 0);
+                latcd_retirement_queue_free(queue);
+                queue = latcd_retirement_queue_new(root, 0);
+                assert(!latcd_retirement_queue_restore(queue, error, sizeof(error)));
+                assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &blocked));
+                stats = sweep_queue(queue);
+                assert(stats.complete && stats.candidates == 3);
+            }
         }
         for (unsigned i = 0; i < 6; i++) {
             assert(!access(paths[i], F_OK));
@@ -2401,7 +4509,145 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         assert(!clock_gettime(CLOCK_BOOTTIME, &clock));
         uint64_t actual_now = (uint64_t)clock.tv_sec * 1000000 + clock.tv_nsec / 1000;
         assert(latcd_retirement_queue_take(restored, actual_now, &probe) == 1);
-        assert(!latcd_retirement_queue_defer(restored, &probe, actual_now, true));
+        assert(latcd_retirement_queue_defer_persist(restored, &probe, UINT64_MAX, true,
+                                                   error, sizeof(error)) < 0);
+        assert(latcd_retirement_queue_defer_persist(restored, &probe, 0, true,
+                                                   error, sizeof(error)) < 0);
+        LatcdRetirementAttempt invalid_clock_attempt;
+        assert(latcd_retirement_queue_take(restored, actual_now, &invalid_clock_attempt) < 0);
+        char *capacity_checkpoint = g_build_filename(root, ".gc", "retirement-scheduler.ini", NULL);
+        char *capacity_before = NULL, *capacity_after = NULL;
+        gsize capacity_before_size, capacity_after_size;
+        assert(g_file_get_contents(capacity_checkpoint, &capacity_before, &capacity_before_size, NULL));
+        for (unsigned fault = 1; fault <= 8; fault++) {
+            clock_fault = fault;
+            assert(latcd_retirement_queue_defer_persist(restored, &probe, actual_now, true,
+                                                       error, sizeof(error)) < 0);
+            clock_fault = 0;
+            assert(latcd_retirement_queue_take(restored, actual_now, &invalid_clock_attempt) < 0);
+            assert(g_file_get_contents(capacity_checkpoint, &capacity_after, &capacity_after_size, NULL));
+            assert(capacity_before_size == capacity_after_size &&
+                   !memcmp(capacity_before, capacity_after, capacity_before_size));
+            g_free(capacity_after);
+            capacity_after = NULL;
+        }
+        pid_t capacity_child = fork();
+        assert(capacity_child >= 0);
+        if (!capacity_child) {
+            LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+            assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+            latcd_cache_capacity_metadata_bind(&capacity, 1);
+            assert(latcd_retirement_queue_defer_persist(restored, &probe, actual_now, true,
+                                                       error, sizeof(error)) < 0);
+            LatcdRetirementAttempt blocked;
+            assert(latcd_retirement_queue_take(restored, actual_now, &blocked) < 0);
+            assert(latcd_retirement_queue_checkpoint(restored, error, sizeof(error)) < 0);
+            latcd_cache_capacity_close(&capacity);
+            assert(!pthread_mutex_destroy(&capacity.lock));
+            _exit(0);
+        }
+        int capacity_status;
+        assert(waitpid(capacity_child, &capacity_status, 0) == capacity_child);
+        assert(WIFEXITED(capacity_status) && !WEXITSTATUS(capacity_status));
+        assert(g_file_get_contents(capacity_checkpoint, &capacity_after, &capacity_after_size, NULL));
+        assert(capacity_before_size == capacity_after_size &&
+               !memcmp(capacity_before, capacity_after, capacity_before_size));
+        g_free(capacity_before); g_free(capacity_after); g_free(capacity_checkpoint);
+        LatcdRetirementQueue *capacity_restart = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_restore(capacity_restart, error, sizeof(error)));
+        latcd_retirement_queue_free(capacity_restart);
+        const char *persist_faults[] = {"created", "partial-write", "written", "chmod",
+                                        "file-synced", "closed", "renamed", "directory-synced"};
+        for (unsigned fi = 0; fi < G_N_ELEMENTS(persist_faults); fi++) {
+            for (unsigned crash = 0; crash < 2; crash++) {
+                assert(!latcd_retirement_queue_checkpoint(queue, error, sizeof(error)));
+                pid_t child = fork();
+                assert(child >= 0);
+                if (!child) {
+                    char *fault = g_strdup_printf("%s:%s", crash ? "crash" : "error", persist_faults[fi]);
+                    assert(!setenv("LATCD_TEST_RETIREMENT_IO", fault, 1));
+                    assert(latcd_retirement_queue_defer_persist(restored, &probe, actual_now, true,
+                                                               error, sizeof(error)) < 0);
+                    assert(!crash);
+                    assert(latcd_retirement_queue_defer(restored, &probe, actual_now, true) < 0);
+                    _exit(0);
+                }
+                int status;
+                assert(waitpid(child, &status, 0) == child);
+                assert(crash ? WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL :
+                               WIFEXITED(status) && !WEXITSTATUS(status));
+                char *scheduler = g_build_filename(root, ".gc", "retirement-scheduler.ini", NULL);
+                GKeyFile *saved = g_key_file_new();
+                assert(g_key_file_load_from_file(saved, scheduler, 0, NULL));
+                uint64_t retry = g_key_file_get_uint64(saved, probe.name, "retry_at", NULL);
+                assert(retry == 0 || retry == actual_now + UINT64_C(60000000));
+                g_key_file_unref(saved);
+                g_free(scheduler);
+                LatcdRetirementQueue *reloaded = latcd_retirement_queue_new(root, 0);
+                assert(!latcd_retirement_queue_restore(reloaded, error, sizeof(error)));
+                do {
+                    queued = latcd_retirement_queue_step(reloaded, 1, 10000, &stats,
+                                                         error, sizeof(error));
+                    assert(queued >= 0);
+                } while (queued);
+                bool saw_probe = false;
+                LatcdRetirementAttempt observed;
+                while (latcd_retirement_queue_take(reloaded, actual_now, &observed) == 1) {
+                    if (!strcmp(observed.name, probe.name)) saw_probe = true;
+                    assert(!latcd_retirement_queue_defer(reloaded, &observed, actual_now, true));
+                }
+                assert(saw_probe == (retry == 0));
+                latcd_retirement_queue_free(reloaded);
+            }
+        }
+        pid_t persistence_child = fork();
+        assert(persistence_child >= 0);
+        if (!persistence_child) {
+            assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:renamed", 1));
+            assert(latcd_retirement_queue_defer_persist(restored, &probe, actual_now, true,
+                                                       error, sizeof(error)) < 0);
+            assert(latcd_retirement_queue_defer(restored, &probe, actual_now, true) < 0);
+            assert(!unsetenv("LATCD_TEST_RETIREMENT_IO"));
+            LatcdRetirementAttempt blocked_attempt;
+            assert(latcd_retirement_queue_take(restored, actual_now, &blocked_attempt) < 0);
+            assert(latcd_retirement_queue_defer_persist(restored, &probe, actual_now, true,
+                                                       error, sizeof(error)) < 0);
+            assert(latcd_retirement_queue_checkpoint(restored, error, sizeof(error)) < 0);
+            LatcdRetirementQueueStats blocked_stats;
+            assert(latcd_retirement_queue_step(restored, 1, 10000, &blocked_stats,
+                                               error, sizeof(error)) < 0);
+            assert(!blocked_stats.complete);
+            _exit(0);
+        }
+        int persistence_status;
+        assert(waitpid(persistence_child, &persistence_status, 0) == persistence_child);
+        assert(WIFEXITED(persistence_status) && !WEXITSTATUS(persistence_status));
+        LatcdRetirementQueue *after_fault = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_restore(after_fault, error, sizeof(error)));
+        do {
+            queued = latcd_retirement_queue_step(after_fault, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        LatcdRetirementAttempt after_fault_attempt;
+        while (latcd_retirement_queue_take(after_fault, actual_now, &after_fault_attempt) == 1) {
+            assert(strcmp(after_fault_attempt.name, probe.name));
+            assert(!latcd_retirement_queue_defer(after_fault, &after_fault_attempt, actual_now, true));
+        }
+        latcd_retirement_queue_free(after_fault);
+        assert(!latcd_retirement_queue_defer_persist(restored, &probe, actual_now, true,
+                                                    error, sizeof(error)));
+        LatcdRetirementQueue *crash_restart = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_restore(crash_restart, error, sizeof(error)));
+        do {
+            queued = latcd_retirement_queue_step(crash_restart, 1, 10000, &stats, error, sizeof(error));
+            assert(queued >= 0);
+        } while (queued);
+        LatcdRetirementAttempt crash_attempt;
+        while (latcd_retirement_queue_take(crash_restart, actual_now, &crash_attempt) == 1) {
+            assert(strcmp(crash_attempt.name, probe.name));
+            assert(!latcd_retirement_queue_defer(crash_restart, &crash_attempt, actual_now, true));
+        }
+        latcd_retirement_queue_free(crash_restart);
         assert(!latcd_retirement_queue_checkpoint(restored, error, sizeof(error)));
         latcd_retirement_queue_free(restored);
         restored = latcd_retirement_queue_new(root, 0);
@@ -2700,7 +4946,7 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         do {
             queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
             assert(queued == 1 && !stats.complete);
-        } while (stats.visited);
+        } while (!stats.aggregating);
         put(marker, receipt);
         do {
             queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
@@ -2718,7 +4964,7 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         do {
             queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
             assert(queued == 1 && !stats.complete);
-        } while (stats.visited);
+        } while (!stats.aggregating);
         assert(!unlink(marker));
         do {
             queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
@@ -2735,7 +4981,7 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
             do {
                 queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
                 assert(queued == 1 && !stats.complete);
-            } while (stats.visited);
+            } while (!stats.aggregating);
             char *directory = g_path_get_dirname(marker);
             char *moved = g_strconcat(directory, ".moved", NULL);
             if (!change) put(marker, receipt);
@@ -3063,7 +5309,7 @@ static void test_queue_empty_store(void)
     do {
         result = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
         assert(result == 1 && !stats.complete);
-    } while (stats.visited);
+    } while (!stats.aggregating);
     put(entry, "invalid\n");
     assert(!unlink(entry));
     do {
@@ -3234,7 +5480,7 @@ static void test_queue_overflow_fixture(void)
         changed_result = latcd_retirement_queue_step(changed_page, 1, 10000,
                                                      &changed_stats, error, sizeof(error));
         assert(changed_result == 1);
-    } while (changed_stats.visited);
+    } while (!changed_stats.aggregating);
     assert(!unlink(marker));
     do {
         changed_result = latcd_retirement_queue_step(changed_page, 32, 10000,
@@ -3256,7 +5502,7 @@ static void test_queue_overflow_fixture(void)
     char *original_path = g_build_filename(store, original_name, NULL);
     GKeyFile *duplicate = g_key_file_new();
     assert(g_key_file_load_from_file(duplicate, original_path, 0, NULL));
-    g_key_file_set_uint64(duplicate, "transaction", "retired_boottime_us", 200);
+    g_key_file_set_uint64(duplicate, "transaction", "retired_boottime_us", 201);
     char *duplicate_data = g_key_file_to_data(duplicate, NULL, NULL);
     char *duplicate_id = g_uuid_string_random();
     char *duplicate_name = g_strconcat(duplicate_id, ".ini", NULL);
@@ -3265,6 +5511,7 @@ static void test_queue_overflow_fixture(void)
     put(duplicate_path, duplicate_data);
     g_free(duplicate_data); g_key_file_unref(duplicate);
     g_dir_close(directory); g_free(original_path);
+    simulated_boottime_us = 201;
     LatcdRetirementQueue *diagnostic = latcd_retirement_queue_new(root, 0);
     assert(!latcd_retirement_queue_diagnostic_round(diagnostic, boot, cutoff, NULL));
     LatcdRetirementQueueStats diagnostic_stats;
@@ -3300,16 +5547,174 @@ static void test_queue_overflow_fixture(void)
     first_page.grace_us = 100;
     first_page.round_cutoff = cutoff;
     g_strlcpy(first_page.boot, boot, sizeof(first_page.boot));
-    assert(!latcd_retirement_page_state_store(root, &first_page, error, sizeof(error)));
+    LatcdRetirementPageState stage_empty = first_page;
+    stage_empty.count = 0;
+    stage_empty.cursor[0] = 0;
+    assert(!latcd_retirement_page_state_store(root, &stage_empty, error, sizeof(error)));
+    pid_t stage_child = fork();
+    assert(stage_child >= 0);
+    if (!stage_child) {
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", "crash:renamed", 1));
+        latcd_retirement_page_stage(root, &first_page, error, sizeof(error));
+        _exit(1);
+    }
+    int stage_status;
+    assert(waitpid(stage_child, &stage_status, 0) == stage_child &&
+           WIFSIGNALED(stage_status) && WTERMSIG(stage_status) == SIGKILL);
     diagnostic = latcd_retirement_queue_new(root, 101);
     assert(latcd_retirement_queue_diagnostic_resume(diagnostic, error, sizeof(error)) < 0);
     assert(!latcd_retirement_queue_take(diagnostic, UINT64_MAX, &diagnostic_attempt));
     latcd_retirement_queue_free(diagnostic);
     diagnostic = latcd_retirement_queue_new(root, 100);
-    assert(latcd_retirement_queue_diagnostic_resume(diagnostic, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_queue_diagnostic_resume(diagnostic, error, sizeof(error)));
+    do {
+        diagnostic_result = latcd_retirement_queue_step(diagnostic, 32, 10000,
+                                                         &diagnostic_stats, error, sizeof(error));
+    } while (diagnostic_result > 0);
+    assert(diagnostic_result < 0 && !diagnostic_stats.complete);
+    assert(!latcd_retirement_queue_aggregated_page(diagnostic, &second_page));
+    assert(second_page.count == first_page.count);
+    for (unsigned i = 0; i < first_page.count; i++) {
+        assert(!strcmp(first_page.entries[i].name, second_page.entries[i].name));
+        assert(first_page.entries[i].deadline + 100 == second_page.entries[i].deadline);
+    }
+    char *schedule_dir = g_build_filename(root, ".gc", "retirement-schedule", NULL);
+    assert(!mkdir(schedule_dir, 0700));
+    for (unsigned i = 0; i < first_page.count; i++) {
+        int stored = latcd_retirement_schedule_store_page_result(root, 201, &first_page,
+                &first_page.entries[i], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error));
+        if (stored) fprintf(stderr, "page result %u: %s enqueued=%" G_GUINT64_FORMAT "\n",
+                            i, error, first_page.entries[i].enqueued);
+        assert(!stored);
+    }
+    pid_t commit_child = fork();
+    assert(commit_child >= 0);
+    if (!commit_child) {
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", "crash:file-synced", 1));
+        latcd_retirement_page_commit(root, 201, &first_page, error, sizeof(error));
+        _exit(1);
+    }
+    int commit_status;
+    assert(waitpid(commit_child, &commit_status, 0) == commit_child &&
+           WIFSIGNALED(commit_status) && WTERMSIG(commit_status) == SIGKILL);
+    LatcdRetirementQueue *rediscovery = latcd_retirement_queue_new(root, 100);
+    assert(!latcd_retirement_queue_diagnostic_resume(rediscovery, error, sizeof(error)));
+    LatcdRetirementQueueStats rediscovery_stats;
+    int rediscovery_result;
+    do {
+        rediscovery_result = latcd_retirement_queue_step(rediscovery, 32, 10000,
+                                                         &rediscovery_stats, error, sizeof(error));
+    } while (rediscovery_result > 0);
+    LatcdRetirementPageState rediscovered;
+    assert(rediscovery_result < 0 && !rediscovery_stats.complete &&
+           !latcd_retirement_queue_aggregated_page(rediscovery, &rediscovered) &&
+           rediscovered.count == first_page.count);
+    for (unsigned i = 0; i < first_page.count; i++)
+        assert(!strcmp(rediscovered.entries[i].name, first_page.entries[i].name));
+    latcd_retirement_queue_free(rediscovery);
+    commit_child = fork();
+    assert(commit_child >= 0);
+    if (!commit_child) {
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", "crash:renamed", 1));
+        latcd_retirement_page_commit(root, 201, &first_page, error, sizeof(error));
+        _exit(1);
+    }
+    assert(waitpid(commit_child, &commit_status, 0) == commit_child &&
+           WIFSIGNALED(commit_status) && WTERMSIG(commit_status) == SIGKILL);
+    LatcdRetirementPageState committed;
+    assert(!latcd_retirement_page_state_load(root, &committed, error, sizeof(error)) &&
+           committed.committed_pending && committed.count == first_page.count &&
+           !strcmp(committed.cursor, first_page.cursor));
+    rediscovery = latcd_retirement_queue_new(root, 100);
+    assert(!latcd_retirement_queue_diagnostic_resume(rediscovery, error, sizeof(error)));
+    do {
+        rediscovery_result = latcd_retirement_queue_step(rediscovery, 32, 10000,
+                                                         &rediscovery_stats, error, sizeof(error));
+    } while (rediscovery_result > 0);
+    assert(rediscovery_result < 0 && !rediscovery_stats.complete &&
+           !latcd_retirement_queue_aggregated_page(rediscovery, &rediscovered) &&
+           rediscovered.count == expected->len - first_page.count);
+    for (unsigned i = 0; i < rediscovered.count; i++)
+        assert(!strcmp(rediscovered.entries[i].name, expected->pdata[first_page.count + i]));
+    latcd_retirement_queue_free(rediscovery);
+    assert(!latcd_retirement_page_state_store(root, &first_page, error, sizeof(error)));
+    for (unsigned i = 0; i < first_page.count; i++) {
+        char *filename = g_strconcat(first_page.entries[i].name, ".ini", NULL);
+        char *path = g_build_filename(schedule_dir, filename, NULL);
+        assert(!unlink(path));
+        g_free(path); g_free(filename);
+    }
+    for (unsigned i = 0; i < second_page.count; i += second_page.count - 1) {
+        LatcdRetirementPageDeadline hint = second_page.entries[i];
+        hint.enqueued = 150;
+        hint.last_attempt = i ? 2 : 1;
+        hint.retry_at = 250 + i;
+        hint.busy_count = i ? 2 : 1;
+        assert(!latcd_retirement_schedule_store(root, boot, 100, 201, hint.last_attempt,
+                                                &hint, error, sizeof(error)));
+    }
+    LatcdRetirementPageState unmerged = second_page;
+    assert(!latcd_retirement_schedule_merge_page(root, boot, 100, 201, &second_page,
+                                                 error, sizeof(error)));
+    for (unsigned i = 0; i < second_page.count; i++)
+        assert(second_page.entries[i].deadline == unmerged.entries[i].deadline);
+    assert(second_page.entries[0].enqueued == 150 && second_page.entries[0].retry_at == 250 &&
+           second_page.entries[127].retry_at == 377 && second_page.sequence == 2);
+    g_free(schedule_dir);
     assert(!latcd_retirement_queue_take(diagnostic, UINT64_MAX, &diagnostic_attempt));
     latcd_retirement_queue_free(diagnostic);
+    char *legacy_page_path = g_build_filename(root, ".gc", "retirement-page.ini", NULL);
+    GKeyFile *legacy_page = g_key_file_new();
+    assert(g_key_file_load_from_file(legacy_page, legacy_page_path, 0, NULL));
+    g_key_file_set_integer(legacy_page, "page", "version", 2);
+    assert(g_key_file_remove_key(legacy_page, "page", "pending", NULL));
+    for (unsigned i = 0; i < first_page.count; i++) {
+        char group[32]; snprintf(group, sizeof(group), "entry%u", i);
+        assert(g_key_file_remove_key(legacy_page, group, "result", NULL));
+    }
+    assert(g_key_file_remove_key(legacy_page, "page", "committed_cursor", NULL));
+    char *legacy_page_data = g_key_file_to_data(legacy_page, NULL, NULL);
+    put(legacy_page_path, legacy_page_data);
+    g_free(legacy_page_data);
+    g_key_file_unref(legacy_page);
+    diagnostic = latcd_retirement_queue_new(root, 100);
+    assert(!latcd_retirement_queue_diagnostic_resume(diagnostic, error, sizeof(error)));
+    do {
+        diagnostic_result = latcd_retirement_queue_step(diagnostic, 32, 10000,
+                                                         &diagnostic_stats, error, sizeof(error));
+    } while (diagnostic_result > 0);
+    assert(diagnostic_result < 0 && !diagnostic_stats.complete);
+    assert(!latcd_retirement_queue_aggregated_page(diagnostic, &second_page));
+    assert(second_page.count == first_page.count);
+    for (unsigned i = 0; i < first_page.count; i++)
+        assert(!strcmp(first_page.entries[i].name, second_page.entries[i].name));
+    assert(!latcd_retirement_queue_take(diagnostic, UINT64_MAX, &diagnostic_attempt));
+    latcd_retirement_queue_free(diagnostic);
+    g_free(legacy_page_path);
     LatcdRetirementPageState initial = first_page;
+    initial.count = 0;
+    initial.cursor[0] = 0;
+    assert(!latcd_retirement_page_state_store(root, &initial, error, sizeof(error)));
+    g_strlcpy(initial.committed_cursor, first_page.entries[0].name,
+              sizeof(initial.committed_cursor));
+    initial.count = 1;
+    initial.entries[0] = first_page.entries[2];
+    g_strlcpy(initial.cursor, initial.entries[0].name, sizeof(initial.cursor));
+    assert(!latcd_retirement_page_state_store(root, &initial, error, sizeof(error)));
+    diagnostic = latcd_retirement_queue_new(root, 100);
+    assert(!latcd_retirement_queue_diagnostic_resume(diagnostic, error, sizeof(error)));
+    do {
+        diagnostic_result = latcd_retirement_queue_step(diagnostic, 32, 10000,
+                                                         &diagnostic_stats, error, sizeof(error));
+    } while (diagnostic_result > 0);
+    assert(diagnostic_result < 0 && !diagnostic_stats.complete);
+    assert(!latcd_retirement_queue_aggregated_page(diagnostic, &second_page));
+    assert(second_page.count == 128);
+    for (unsigned i = 0; i < second_page.count; i++)
+        assert(!strcmp(second_page.entries[i].name, expected->pdata[i + 1]));
+    assert(!latcd_retirement_queue_take(diagnostic, UINT64_MAX, &diagnostic_attempt));
+    latcd_retirement_queue_free(diagnostic);
+    initial.committed_cursor[0] = 0;
     initial.count = 0;
     initial.cursor[0] = 0;
     assert(!latcd_retirement_page_state_store(root, &initial, error, sizeof(error)));
@@ -3353,8 +5758,8 @@ static void test_queue_overflow_fixture(void)
         assert(!strcmp(second_page.entries[i].name, expected->pdata[128 + i]));
     g_ptr_array_unref(expected);
     unsigned extended = 0;
-    for (unsigned i = 0; i < first_page.count; i++) extended += first_page.entries[i].deadline == 200;
-    for (unsigned i = 0; i < second_page.count; i++) extended += second_page.entries[i].deadline == 200;
+    for (unsigned i = 0; i < first_page.count; i++) extended += first_page.entries[i].deadline == 201;
+    for (unsigned i = 0; i < second_page.count; i++) extended += second_page.entries[i].deadline == 201;
     assert(extended == 3);
     clock_fault = 1;
     assert(latcd_retirement_queue_step(diagnostic, 32, 10000, &diagnostic_stats,
@@ -3387,7 +5792,7 @@ static void test_queue_overflow_fixture(void)
     assert(latcd_retirement_queue_step(diagnostic, 1, 10000, &diagnostic_stats,
                                       error, sizeof(error)) < 0);
     assert(latcd_retirement_queue_aggregated_page(diagnostic, &second_page) < 0);
-    simulated_boottime_us = cutoff;
+    simulated_boottime_us = cutoff + 100;
     assert(latcd_retirement_queue_step(diagnostic, 1, 10000, &diagnostic_stats,
                                       error, sizeof(error)) == 1);
     char *replacement = NULL;
@@ -3473,6 +5878,23 @@ int main(int argc, char **argv)
     test_oversized_prepared();
     test_round_cursor();
     test_page_round_begin(NULL, false);
+    test_page_identity();
+    test_schedule_result_upgrade();
+    test_schedule_check_page();
+    test_page_stage();
+    test_schedule_store();
+    test_schedule_max_record();
+    test_schedule_merge_multiple();
+    test_schedule_count_limit();
+    test_schedule_byte_limit();
+    test_schedule_growth_limit();
+    test_schedule_capacity();
+    test_schedule_crash(false, false);
+    test_schedule_crash(true, false);
+    test_schedule_crash(false, true);
+    test_schedule_crash(true, true);
+    test_recovery_round_barrier();
+    test_recovery_lock_directory_swap();
     test_round_directory_swap(false);
     test_round_directory_swap(true);
     const char *page_faults[] = {"created", "partial-write", "file-synced",
@@ -3489,6 +5911,7 @@ int main(int argc, char **argv)
     test_roots_latch();
     test_recovery_directory_binding(false);
     test_recovery_directory_binding(true);
+    test_delete_lock_domain_swap();
     test_publication_directory_binding(false, false);
     test_publication_directory_binding(true, false);
     test_publication_directory_binding(false, true);
@@ -3497,6 +5920,7 @@ int main(int argc, char **argv)
         test_other_current(mutation, false);
         test_other_current(mutation, true);
     }
+    test_bound_new_hold_directory();
     test_explicit_holds();
     test_due_without_retirement();
     for (unsigned mutation = 0; mutation < 16; mutation++) {
@@ -3516,10 +5940,23 @@ int main(int argc, char **argv)
         test_crash(phase, false);
         test_crash(phase, true);
     }
+    for (int outcome = 0; outcome < 3; outcome++)
+        test_recovery_capacity_admission(outcome);
     test_unknown_and_corrupt();
     test_reboot();
+    for (unsigned replace = 0; replace < 2; replace++)
+        for (unsigned execute = 0; execute < 2; execute++)
+            test_queue_root_replacement(replace, execute);
     for (unsigned mutation = 0; mutation < 8; mutation++) test_queue_consumer(mutation, false);
     for (unsigned mutation = 0; mutation < 18; mutation++) test_queue_consumer(mutation, true);
+    test_queue_consumer(18, true);
+    test_queue_consumer(19, true);
+    test_queue_consumer(20, true);
+    test_queue_consumer(21, true);
+    test_queue_consumer(22, true);
+    test_queue_consumer(23, true);
+    test_queue_consumer(24, true);
+    test_queue_consumer(25, true);
     for (unsigned phase = 0; phase < 3; phase++)
         for (unsigned fault = 1; fault <= 8; fault++) test_clock_failure(phase, fault);
     for (int mutation = 0; mutation < 7; mutation++) test_object_identity(mutation);
@@ -3535,6 +5972,8 @@ int main(int argc, char **argv)
     test_tombstone();
     test_cache_domain();
     test_mount_lease_crash_persistence();
+    test_tombstone_capacity_admission(false);
+    test_tombstone_capacity_admission(true);
     for (int mutation = 0; mutation < 11; mutation++) test_tombstone_recovery(mutation);
     const char *points[] = {"created", "partial-write", "written", "chmod",
         "file-synced", "closed", "renamed", "directory-synced"};

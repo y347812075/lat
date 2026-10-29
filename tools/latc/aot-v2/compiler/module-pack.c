@@ -2564,9 +2564,8 @@ static int emit_assembly(const char *path, const ModulePack *pack,
         if (entry) {
             fprintf(file,
                 ".Llat_aot_runtime_target_%u:\n"
-                "pcalau12i $t0,%%got_pc_hi20(%s)\n"
-                "ld.d $t0,$t0,%%got_pc_lo12(%s)\n"
-                "jirl $zero,$t0,0\n", symbol, entry, entry);
+                "la.global $t0,%s\n"
+                "jirl $zero,$t0,0\n", symbol, entry);
         }
     }
     /* Keep the ABI import independent of the generated text's branch range. */
