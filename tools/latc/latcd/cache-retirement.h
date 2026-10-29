@@ -525,6 +525,11 @@ int latcd_retirement_queue_retry_begin(LatcdRetirementQueue *queue,
  * match is not proof that a shard or its object can be removed. */
 int latcd_retirement_queue_retry_matches(const LatcdRetirementQueue *queue,
     bool matches[128], unsigned *count);
+/* Two-pass receipt observations for retry hints. Diagnostic only: the
+ * retained witness still needs lock-bound revalidation, and does not authorize
+ * deletion, DONE results, or schedule-shard consumption. */
+int latcd_retirement_queue_retry_receipts(const LatcdRetirementQueue *queue,
+    bool receipts[128], unsigned *count);
 /* Complete monitored retry discovery in selection order, including unmatched
  * hints. The returned snapshot is diagnostic, not deletion authorization. */
 int latcd_retirement_queue_retry_items(const LatcdRetirementQueue *queue,

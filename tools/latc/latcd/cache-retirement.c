@@ -5195,6 +5195,8 @@ struct LatcdRetirementQueue {
     GHashTable *discovered;
     GHashTable *discovered_keys;
     GHashTable *confirmed_keys;
+    GHashTable *removed_first;
+    GHashTable *removed_second;
     GHashTable *retry_hints;
     char retry_order[128][138];
     unsigned retry_count;
@@ -5245,6 +5247,8 @@ LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grac
     queue->discovered = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     queue->discovered_keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     queue->confirmed_keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    queue->removed_first = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    queue->removed_second = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     queue->retry_hints = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     return queue;
 }
@@ -5359,6 +5363,20 @@ int latcd_retirement_queue_retry_matches(const LatcdRetirementQueue *queue,
     return 0;
 }
 
+int latcd_retirement_queue_retry_receipts(const LatcdRetirementQueue *queue,
+    bool receipts[128], unsigned *count)
+{
+    if (!receipts || !count) return -1;
+    memset(receipts, 0, 128 * sizeof(*receipts));
+    *count = 0;
+    if (!queue || !queue->retry_witness || !queue->aggregation_verified) return -1;
+    *count = queue->retry_count;
+    for (unsigned i = 0; i < *count; i++)
+        receipts[i] = g_hash_table_contains(queue->removed_second, queue->retry_order[i]) &&
+                      !g_hash_table_contains(queue->confirmed_keys, queue->retry_order[i]);
+    return 0;
+}
+
 int latcd_retirement_queue_retry_items(const LatcdRetirementQueue *queue,
     LatcdRetirementRetryItem items[128], unsigned *count)
 {
@@ -5406,6 +5424,8 @@ void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
     g_hash_table_unref(queue->discovered);
     g_hash_table_unref(queue->discovered_keys);
     g_hash_table_unref(queue->confirmed_keys);
+    g_hash_table_unref(queue->removed_first);
+    g_hash_table_unref(queue->removed_second);
     g_hash_table_unref(queue->retry_hints);
     g_free(queue->root); g_free(queue);
 }
@@ -5610,7 +5630,12 @@ static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t si
         if (g_hash_table_contains(next_refs, key)) continue;
         int removed = queue_object_removed(queue, source, key, object_record);
         if (removed < 0) { valid = false; break; }
-        if (removed) continue;
+        if (removed) {
+            if (g_hash_table_contains(queue->retry_hints, key))
+                g_hash_table_add(queue->aggregating ? queue->removed_second : queue->removed_first,
+                                 g_strdup(key));
+            continue;
+        }
         bool nominated = !queue->diagnostic_cutoff || stamp < queue->diagnostic_cutoff;
         if (!queue->aggregating && nominated) {
             queue_nominate(queue, key);
@@ -5673,6 +5698,8 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         g_hash_table_remove_all(queue->discovered);
         g_hash_table_remove_all(queue->discovered_keys);
         g_hash_table_remove_all(queue->confirmed_keys);
+        g_hash_table_remove_all(queue->removed_first);
+        g_hash_table_remove_all(queue->removed_second);
         queue->epoch++;
         int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (!queue_bind_root(queue, root)) { if (root >= 0) close(root); goto out; }
@@ -5774,6 +5801,15 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
     }
     if (!result && g_hash_table_size(queue->discovered_keys) !=
                    g_hash_table_size(queue->confirmed_keys)) result = -1;
+    if (!result && g_hash_table_size(queue->removed_first) !=
+                   g_hash_table_size(queue->removed_second)) result = -1;
+    if (!result) {
+        GHashTableIter removed_iter;
+        gpointer removed_key;
+        g_hash_table_iter_init(&removed_iter, queue->removed_first);
+        while (g_hash_table_iter_next(&removed_iter, &removed_key, NULL))
+            if (!g_hash_table_contains(queue->removed_second, removed_key)) { result = -1; break; }
+    }
     if (!result) {
         GHashTableIter iterator;
         gpointer value;

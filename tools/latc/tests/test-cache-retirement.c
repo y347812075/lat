@@ -7001,6 +7001,29 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
             assert(queued >= 0);
         } while (queued);
         assert(stats.complete && stats.candidates == 2 && stats.due == 2);
+        char retry_boot[37];
+        uint64_t retry_cutoff;
+        assert(!latcd_retirement_round_sample(root, retry_boot, &retry_cutoff, error, sizeof(error)));
+        LatcdRetirementPageDeadline receipt_hints[2] = {0};
+        g_strlcpy(receipt_hints[0].name, names[0], sizeof(receipt_hints[0].name));
+        snprintf(receipt_hints[1].name, sizeof(receipt_hints[1].name), "%064x.so", 9999);
+        receipt_hints[0].enqueued = receipt_hints[1].enqueued = 1;
+        LatcdRetirementQueue *receipt_queue = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_diagnostic_retry(receipt_queue, retry_boot, retry_cutoff,
+                                                        receipt_hints, 2));
+        LatcdRetirementQueueStats receipt_stats;
+        do {
+            queued = latcd_retirement_queue_step(receipt_queue, 32, 10000, &receipt_stats,
+                                                  error, sizeof(error));
+        } while (queued > 0);
+        bool receipts[128];
+        unsigned receipt_count;
+        assert(queued < 0 && !latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count));
+        assert(receipt_count == 2 && receipts[0] && !receipts[1]);
+        assert(latcd_retirement_queue_retry_revalidate(receipt_queue, error, sizeof(error)) < 0);
+        assert(latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count) < 0 &&
+               !receipt_count);
+        latcd_retirement_queue_free(receipt_queue);
         /* Every transaction mentioning a removed name must bind the receipt. */
         GKeyFile *other = g_key_file_new();
         assert(g_key_file_load_from_data(other, raw, -1, 0, NULL));
