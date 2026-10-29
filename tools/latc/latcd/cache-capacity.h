@@ -99,6 +99,12 @@ typedef struct LatcdPageBudget {
 int latcd_cache_capacity_restore_page(LatcdCacheCapacity *capacity, uint64_t bytes,
                                       uint64_t limit, const uint8_t identity[32],
                                       LatcdPageBudget *budget);
+/* Under scheduler lock, before publishing a page checkpoint. Cancellation is
+ * only valid when the caller has proved that checkpoint was not installed. */
+int latcd_cache_capacity_reserve_page(LatcdCacheCapacity *capacity, uint64_t bytes,
+                                      uint64_t limit, const uint8_t identity[32],
+                                      LatcdPageBudget *budget);
+int latcd_cache_capacity_cancel_page(LatcdCacheCapacity *capacity, LatcdPageBudget *budget);
 /* Compute a conservative serial-write peak after existing files have been
  * inventoried. missing is the number of new result files, not page size;
  * every other result must already occupy at least result_bytes. The caller

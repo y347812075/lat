@@ -961,14 +961,15 @@ int latcd_cache_capacity_state_begin(int directory, const char *name, uint64_t b
     return record_begin(directory, name, bytes, reservation, true, false, NULL);
 }
 
-int latcd_cache_capacity_restore_page(LatcdCacheCapacity *capacity, uint64_t bytes,
-                                      uint64_t limit, const uint8_t identity[32],
-                                      LatcdPageBudget *budget)
+static int reserve_page(LatcdCacheCapacity *capacity, uint64_t bytes, uint64_t limit,
+                        const uint8_t identity[32], LatcdPageBudget *budget, bool recovery)
 {
     if (!capacity || !identity || !budget || !bytes) { errno = EINVAL; return -1; }
     pthread_mutex_lock(&capacity->lock);
     check_changes(capacity);
-    bool valid = capacity->ready && capacity->recovery_gate && !capacity->restored_page_budget && !budget->capacity &&
+    bool valid = capacity->ready && capacity->recovery_gate == recovery &&
+        (!capacity->unknown_tasks || !g_hash_table_size(capacity->unknown_tasks)) &&
+        !capacity->restored_page_budget && !budget->capacity &&
         !budget->remaining && !budget->inflight && !budget->invalid &&
         !budget->page_identity_bound && capacity_fits(capacity, bytes, limit);
     if (valid) {
@@ -978,6 +979,39 @@ int latcd_cache_capacity_restore_page(LatcdCacheCapacity *capacity, uint64_t byt
         memcpy(budget->page_identity, identity, sizeof(budget->page_identity));
         budget->page_identity_bound = true;
         capacity->restored_page_budget = budget;
+    }
+    pthread_mutex_unlock(&capacity->lock);
+    if (!valid) errno = EBUSY;
+    return valid ? 0 : -1;
+}
+
+int latcd_cache_capacity_restore_page(LatcdCacheCapacity *capacity, uint64_t bytes,
+                                      uint64_t limit, const uint8_t identity[32],
+                                      LatcdPageBudget *budget)
+{
+    return reserve_page(capacity, bytes, limit, identity, budget, true);
+}
+
+int latcd_cache_capacity_reserve_page(LatcdCacheCapacity *capacity, uint64_t bytes,
+                                      uint64_t limit, const uint8_t identity[32],
+                                      LatcdPageBudget *budget)
+{
+    return reserve_page(capacity, bytes, limit, identity, budget, false);
+}
+
+int latcd_cache_capacity_cancel_page(LatcdCacheCapacity *capacity, LatcdPageBudget *budget)
+{
+    if (!capacity || !budget) { errno = EINVAL; return -1; }
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
+    bool valid = capacity->ready && !capacity->recovery_gate &&
+        capacity->restored_page_budget == budget && budget->capacity == capacity &&
+        budget->page_identity_bound && !budget->invalid && !budget->inflight &&
+        budget->remaining <= capacity->metadata_reserved;
+    if (valid) {
+        capacity->metadata_reserved -= budget->remaining;
+        capacity->restored_page_budget = NULL;
+        *budget = (LatcdPageBudget){0};
     }
     pthread_mutex_unlock(&capacity->lock);
     if (!valid) errno = EBUSY;

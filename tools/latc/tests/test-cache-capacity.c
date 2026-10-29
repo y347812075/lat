@@ -115,6 +115,12 @@ static void test_recovery_gate(void)
     assert(!latcd_cache_capacity_recovery_finish(&capacity));
     assert(latcd_cache_capacity_restore_page(&capacity, 1, 100, identity, &duplicate));
     assert(!latcd_cache_capacity_test_page_release(&capacity, &restored));
+    assert(!latcd_cache_capacity_reserve_page(&capacity, 10, 100, identity, &restored));
+    assert(latcd_cache_capacity_reserve_page(&capacity, 1, 100, identity, &duplicate));
+    assert(latcd_cache_capacity_reserve(&capacity, 20, 100, NULL, 0));
+    assert(!latcd_cache_capacity_cancel_page(&capacity, &restored));
+    assert(!capacity.metadata_reserved && !restored.capacity);
+    assert(latcd_cache_capacity_cancel_page(&capacity, &restored));
     assert(latcd_cache_capacity_recovery_finish(&capacity));
     assert(latcd_cache_capacity_reserve(&capacity, 30, 100, NULL, 0));
     assert(!latcd_cache_capacity_reserve(&capacity, 29, 100, NULL, 0));
