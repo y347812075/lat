@@ -27,6 +27,7 @@ static bool consumption_unlinked;
 static bool retry_sync_fault;
 static dev_t retry_sync_device;
 static ino_t retry_sync_inode;
+static const char *sync_swap_path, *sync_swap_saved;
 int __real_unlinkat(int fd, const char *name, int flags);
 int __real_fsync(int fd);
 int __wrap_unlinkat(int fd, const char *name, int flags)
@@ -39,6 +40,12 @@ int __wrap_unlinkat(int fd, const char *name, int flags)
 int __wrap_fsync(int fd)
 {
     struct stat st;
+    if (sync_swap_path && !fstat(fd, &st) && st.st_dev == retry_sync_device &&
+        st.st_ino == retry_sync_inode) {
+        assert(!rename(sync_swap_path, sync_swap_saved));
+        assert(!mkdir(sync_swap_path, 0700));
+        sync_swap_path = NULL;
+    }
     if (retry_sync_fault && !fstat(fd, &st) && st.st_dev == retry_sync_device &&
         st.st_ino == retry_sync_inode) { errno = EIO; return -1; }
     if (consumption_io_fault == 2 && consumption_unlinked) { errno = EIO; return -1; }
@@ -3259,6 +3266,21 @@ static void test_budgeted_page_stage(void)
     retry_sync_fault = false;
     g_free(sync_store);
     assert(!budget.capacity && latcd_cache_capacity_recovery_finish(&recovered) < 0);
+    assert(!latcd_cache_capacity_recovery_abort(&recovered));
+    latcd_cache_capacity_close(&recovered);
+    assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
+    assert(!latcd_cache_capacity_recovery_begin(&recovered));
+    sync_store = g_build_filename(gc, "retirement-schedule", NULL);
+    char *saved_store = g_build_filename(gc, "retirement-schedule-saved", NULL);
+    assert(!stat(sync_store, &sync_stat));
+    retry_sync_device = sync_stat.st_dev; retry_sync_inode = sync_stat.st_ino;
+    sync_swap_path = sync_store; sync_swap_saved = saved_store;
+    assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 100, &budget,
+                                                 &loaded, error, sizeof(error)) < 0);
+    assert(!sync_swap_path && !budget.capacity && latcd_cache_capacity_recovery_finish(&recovered) < 0);
+    assert(!rmdir(sync_store) && !rename(saved_store, sync_store));
+    g_free(saved_store); g_free(sync_store);
     assert(!latcd_cache_capacity_recovery_abort(&recovered));
     latcd_cache_capacity_close(&recovered);
     assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));

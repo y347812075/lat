@@ -2412,7 +2412,11 @@ int latcd_retirement_page_restore_budget(const char *root, LatcdCacheCapacity *c
         latcd_retirement_page_state_compatible(&persisted, boot, expected_grace_us, now) ||
         schedule_page_results(root, now, &persisted, results, &inventory, error, error_size) < 0 ||
         latcd_retirement_page_budget_identity(&persisted, identity) ||
+        !directory_matches_at(directory, ".gc", gc) ||
+        !directory_matches_at(gc, "retirement-schedule", store) ||
         fsync(gc) || fsync(store) ||
+        !directory_matches_at(directory, ".gc", gc) ||
+        !directory_matches_at(gc, "retirement-schedule", store) ||
         (persisted.consumption_bound ?
          latcd_retirement_consumption_budget_estimate(&persisted, &persisted.consumption, results, &inventory, &bytes) :
          latcd_retirement_page_budget_estimate(&persisted, results, &inventory, &bytes)) ||
