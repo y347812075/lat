@@ -3928,6 +3928,8 @@ static void test_retry_page_identity(void)
     page->items[1].aggregate.deadline = 190;
     strcpy(page->end_cursor, page->items[2].hint.name);
     assert(!latcd_retirement_retry_page_identity(page, original));
+    uint8_t budget_identity[32], changed_budget[32];
+    assert(!latcd_retirement_retry_page_budget_identity(page, budget_identity));
     char *encoded = NULL; size_t encoded_size = 0;
     LatcdRetirementRetryPage *decoded = g_new0(LatcdRetirementRetryPage, 1);
     assert(!latcd_retirement_retry_page_encode(page, &encoded, &encoded_size));
@@ -3943,6 +3945,9 @@ static void test_retry_page_identity(void)
     page->completed = 1; page->intent_present = true;
     memset(page->replacement_digest[0], 0x12, 32);
     memset(page->replacement_digest[1], 0x34, 32);
+    assert(!latcd_retirement_retry_page_budget_identity(page, changed_budget) &&
+           !memcmp(budget_identity, changed_budget, 32));
+    assert(!latcd_retirement_retry_page_identity(page, changed) && memcmp(original, changed, 32));
     assert(!latcd_retirement_retry_page_encode(page, &encoded, &encoded_size));
     decoded = g_new0(LatcdRetirementRetryPage, 1);
     assert(!latcd_retirement_retry_page_decode(encoded, encoded_size, decoded) &&
@@ -3955,6 +3960,8 @@ static void test_retry_page_identity(void)
     page->completed = 0; page->intent_present = false;
     page->items[0].shard_sequence++;
     assert(!latcd_retirement_retry_page_identity(page, changed) && memcmp(original, changed, 32));
+    assert(!latcd_retirement_retry_page_budget_identity(page, changed_budget) &&
+           memcmp(budget_identity, changed_budget, 32));
     page->items[0].shard_sequence--;
     page->items[1].aggregate.deadline++;
     assert(!latcd_retirement_retry_page_identity(page, changed) && memcmp(original, changed, 32));

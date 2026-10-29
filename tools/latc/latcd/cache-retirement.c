@@ -834,6 +834,30 @@ int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
     return length == 32 ? 0 : -1;
 }
 
+int latcd_retirement_retry_page_budget_identity(const LatcdRetirementRetryPage *page,
+                                                 uint8_t digest[32])
+{
+    if (!digest) return -1;
+    memset(digest, 0, 32);
+    uint8_t validated[32], initial[32];
+    if (latcd_retirement_retry_page_identity(page, validated)) return -1;
+    LatcdRetirementRetryPage *copy = g_memdup2(page, sizeof(*page));
+    copy->completed = 0;
+    copy->intent_present = false;
+    memset(copy->replacement_digest, 0, sizeof(copy->replacement_digest));
+    int result = latcd_retirement_retry_page_identity(copy, initial);
+    g_free(copy);
+    if (result) return -1;
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    static const char domain[] = "latcd-retirement-retry-budget-v1";
+    g_checksum_update(checksum, (const guchar *)domain, sizeof(domain));
+    g_checksum_update(checksum, initial, sizeof(initial));
+    gsize length = 32;
+    g_checksum_get_digest(checksum, digest, &length);
+    g_checksum_free(checksum);
+    return length == 32 ? 0 : -1;
+}
+
 int latcd_retirement_page_identity(const LatcdRetirementPageState *state,
                                    uint8_t digest[32])
 {
@@ -2838,7 +2862,7 @@ int latcd_retirement_retry_page_restore_budget(const char *root,
             sequences[i] != persisted->items[i].shard_sequence ||
             memcmp(digests[i], persisted->items[i].shard_digest, 32)) goto out;
     if (!directory_matches_at(directory, ".gc", gc) || !directory_matches_at(gc, "retirement-schedule", store) ||
-        latcd_retirement_retry_page_identity(persisted, identity) ||
+        latcd_retirement_retry_page_budget_identity(persisted, identity) ||
         latcd_cache_capacity_page_peak(count, count, RETIREMENT_SCHEDULE_RECORD_BYTES, RECORD_LIMIT, &bytes) ||
         latcd_cache_capacity_restore_page(capacity, bytes, limit, identity, budget)) goto out;
     *page = *persisted;
@@ -5494,7 +5518,7 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
         if (latcd_retirement_queue_retry_items(queue, page->items, &count)) goto out;
         page->count = count;
         g_strlcpy(page->end_cursor, queue->retry_order[count - 1], sizeof(page->end_cursor));
-        if (latcd_retirement_retry_page_identity(page, identity)) goto out;
+        if (latcd_retirement_retry_page_budget_identity(page, identity)) goto out;
         if (budget) {
             char *data = NULL; size_t size = 0; uint64_t bytes = 0;
             GKeyFile *record = g_key_file_new();

@@ -59,6 +59,8 @@ typedef struct LatcdRetirementRetryPage {
 } LatcdRetirementRetryPage;
 int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
                                         uint8_t digest[32]);
+int latcd_retirement_retry_page_budget_identity(const LatcdRetirementRetryPage *page,
+                                               uint8_t digest[32]);
 /* Codec for a complete immutable checkpoint; free encoded data with g_free. */
 int latcd_retirement_retry_page_encode(const LatcdRetirementRetryPage *page,
                                        char **data, size_t *size);
