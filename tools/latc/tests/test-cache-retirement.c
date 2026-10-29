@@ -3695,6 +3695,27 @@ static void test_schedule_merge_multiple(void)
     g_free(bad); g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
 }
 
+static void test_retry_select(void)
+{
+    LatcdRetirementPageDeadline *entries = g_new0(LatcdRetirementPageDeadline, 4096);
+    LatcdRetirementPageDeadline selected[128];
+    unsigned count;
+    for (unsigned i = 0; i < 4096; i++) {
+        snprintf(entries[i].name, sizeof(entries[i].name), "%064x.so", i + 1);
+        entries[i].enqueued = 100;
+        entries[i].retry_at = i % 2 ? 201 : 200;
+    }
+    assert(!latcd_retirement_retry_select(entries, 4096, entries[4092].name, 200, selected, &count));
+    assert(count == 128 && !strcmp(selected[0].name, entries[4094].name) &&
+           !strcmp(selected[1].name, entries[0].name) && !strcmp(selected[127].name, entries[252].name));
+    assert(!latcd_retirement_retry_select(entries, 4096, NULL, 199, selected, &count) && !count);
+    assert(!latcd_retirement_retry_select(entries, 4096, NULL, 201, selected, &count) &&
+           count == 128 && !strcmp(selected[127].name, entries[127].name));
+    entries[1] = entries[0];
+    assert(latcd_retirement_retry_select(entries, 4096, NULL, 201, selected, &count) < 0 && !count);
+    g_free(entries);
+}
+
 static void test_schedule_byte_limit(void)
 {
     char *root = root_new(), error[256], *boot = NULL;
@@ -7231,6 +7252,7 @@ int main(int argc, char **argv)
     test_budgeted_crash("renamed", true, false, true);
     test_budgeted_crash("directory-synced", true, false, true);
     test_schedule_store();
+    test_retry_select();
     test_schedule_max_record();
     test_schedule_merge_multiple();
     test_schedule_count_limit();

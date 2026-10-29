@@ -626,6 +626,32 @@ int latcd_retirement_page_names(const char *const *names, size_t count,
     return page->count;
 }
 
+int latcd_retirement_retry_select(const LatcdRetirementPageDeadline *entries,
+                                  size_t count, const char *after, uint64_t now_us,
+                                  LatcdRetirementPageDeadline selected[128],
+                                  unsigned *selected_count)
+{
+    if (!selected_count) return -1;
+    *selected_count = 0;
+    if ((!entries && count) || !selected || !now_us || count > RETIREMENT_SCHEDULE_LIMIT ||
+        (after && *after && !page_object_name_valid(after))) return -1;
+    for (size_t i = 0; i < count; i++) {
+        if (strnlen(entries[i].name, sizeof(entries[i].name)) == sizeof(entries[i].name) ||
+            !page_object_name_valid(entries[i].name) || !entries[i].enqueued ||
+            entries[i].enqueued > now_us || entries[i].busy_count > 7 ||
+            (i && strcmp(entries[i - 1].name, entries[i].name) >= 0)) return -1;
+    }
+    for (unsigned pass = 0; pass < 2 && *selected_count < 128; pass++) {
+        for (size_t i = 0; i < count && *selected_count < 128; i++) {
+            int order = after && *after ? strcmp(entries[i].name, after) : 1;
+            if ((pass == 0 ? order <= 0 : order > 0) || entries[i].retry_at > now_us) continue;
+            selected[(*selected_count)++] = entries[i];
+        }
+        if (!after || !*after) break;
+    }
+    return 0;
+}
+
 int latcd_retirement_page_state_valid(const LatcdRetirementPageState *state)
 {
     if (!state || !state->cache_device || !state->cache_inode || !state->grace_us || !state->round_cutoff ||

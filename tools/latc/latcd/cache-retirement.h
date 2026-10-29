@@ -37,6 +37,12 @@ typedef struct LatcdRetirementPageDeadline {
     uint64_t deadline, enqueued, last_attempt, retry_at;
     unsigned busy_count;
 } LatcdRetirementPageDeadline;
+/* Select due hints in name order after a separate retry cursor, wrapping once.
+ * This is a scheduling hint only; transaction rediscovery is still required. */
+int latcd_retirement_retry_select(const LatcdRetirementPageDeadline *entries,
+                                  size_t count, const char *after, uint64_t now_us,
+                                  LatcdRetirementPageDeadline selected[128],
+                                  unsigned *selected_count);
 typedef struct LatcdRetirementConsumption {
     uint8_t completed[16];
     bool intent_present;
