@@ -5042,8 +5042,8 @@ static void test_tombstone_delete(const char *point, bool crash, int mutation)
         assert(fd >= 0 && !flock(fd, LOCK_SH));
     }
     if (mutation == 2) put(path, "replacement must survive\n");
-    if (mutation == 3) put(current, "invalid manifest\n");
-    if (mutation == 4) {
+    if (mutation == 3 || mutation == 10) put(current, "invalid manifest\n");
+    if (mutation == 4 || mutation == 9) {
         char *manifest = g_strdup_printf("{\"version\":2,\"module\":\"%s.so\","
             "\"native\":\"%s\",\"tbset\":\"\",\"source_sha256\":\"%s\","
             "\"codegen_id\":\"%s\",\"published_sequence\":1}", source, name, source, source);
@@ -5053,7 +5053,7 @@ static void test_tombstone_delete(const char *point, bool crash, int mutation)
         fd = lat_aot_v2_cache_source_lock(root, source, LOCK_SH, false, error, sizeof(error));
         assert(fd >= 0);
     }
-    if (mutation == 6) assert(!unlink(path));
+    if (mutation == 6 || mutation == 9 || mutation == 10) assert(!unlink(path));
     if (mutation == 7) put(marker, "broken tombstone\n");
     if (mutation == 8) {
         assert(!chmod(path, 0600));
@@ -5079,8 +5079,16 @@ static void test_tombstone_delete(const char *point, bool crash, int mutation)
     else assert(WIFEXITED(status) && !WEXITSTATUS(status));
     if (fd >= 0) close(fd);
     assert(!access(marker, F_OK));
-    if (rejected || (point && !strcmp(point, "before-unlink"))) assert(!access(path, F_OK));
+    if ((rejected && mutation != 9 && mutation != 10) ||
+        (point && !strcmp(point, "before-unlink"))) assert(!access(path, F_OK));
     else assert(access(path, F_OK));
+    if (mutation == 9 || mutation == 10) {
+        GKeyFile *record = g_key_file_new();
+        assert(g_key_file_load_from_file(record, marker, 0, NULL));
+        assert(!g_key_file_has_key(record, "tombstone", "deletion_status", NULL));
+        g_key_file_unref(record);
+        assert_tombstone_status(marker, "UNKNOWN");
+    }
     if (!rejected) {
         for (int pass = 0; pass < 2; pass++) {
             unsigned recovered;
@@ -8523,7 +8531,7 @@ int main(int argc, char **argv)
         for (int crash = 0; crash < 2; crash++)
             for (int missing = 0; missing < 2; missing++)
                 test_tombstone_recovery_crash(points[i], crash, missing);
-    for (int mutation = 0; mutation < 9; mutation++) test_tombstone_delete(NULL, false, mutation);
+    for (int mutation = 0; mutation < 11; mutation++) test_tombstone_delete(NULL, false, mutation);
     test_partial_generation_delete();
     const char *unlink_points[] = {"before-unlink", "unlinked", "unlink-synced",
         "created", "partial-write", "written", "chmod", "file-synced", "closed",
