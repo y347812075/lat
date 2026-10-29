@@ -5034,6 +5034,8 @@ int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
     int root = -1, gc = -1, roots = -1, store = -1, tombstones = -1, result = -1;
     char *boot = NULL;
     uint64_t now = 0;
+    uint64_t sequence = 0;
+    GArray *snapshot = g_array_new(FALSE, FALSE, sizeof(LatcdRetirementPageDeadline));
     struct stat cache, path, transactions, tombstone_stat;
     if (scheduler < 0) goto out;
     root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -5053,9 +5055,25 @@ int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
         !same_directory(tombstones, queue->discovery_tombstones) ||
         retirement_clock(&boot, &now) || strcmp(boot, queue->diagnostic_boot) ||
         now < queue->diagnostic_last_time || now < queue->diagnostic_cutoff ||
-        !queue_watch_clean(queue->discovery_watch)) goto out;
+        !queue_watch_clean(queue->discovery_watch) ||
+        retirement_schedule_access(queue->root, boot, queue->grace, now, 0, NULL,
+            true, &sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL,
+            NULL, NULL, scheduler, snapshot, error, error_size)) goto out;
+    for (unsigned i = 0; i < queue->retry_count; i++) {
+        const LatcdRetirementPageDeadline *hint = g_hash_table_lookup(queue->retry_hints, queue->retry_order[i]);
+        const LatcdRetirementPageDeadline *found = NULL;
+        for (unsigned j = 0; j < snapshot->len; j++) {
+            const LatcdRetirementPageDeadline *entry = &g_array_index(snapshot, LatcdRetirementPageDeadline, j);
+            if (!strcmp(entry->name, queue->retry_order[i])) { found = entry; break; }
+        }
+        if (!hint || !found || found->enqueued != hint->enqueued ||
+            found->last_attempt != hint->last_attempt || found->retry_at != hint->retry_at ||
+            found->busy_count != hint->busy_count || found->retry_at > now) goto out;
+    }
+    if (!queue_watch_clean(queue->discovery_watch)) goto out;
     result = 0;
 out:
+    g_array_free(snapshot, TRUE);
     g_free(boot);
     if (tombstones >= 0) close(tombstones);
     if (store >= 0) close(store);

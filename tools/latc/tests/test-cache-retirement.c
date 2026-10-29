@@ -6722,6 +6722,11 @@ static void test_page_round_insertions(void)
     hints[0].busy_count = 2;
     snprintf(hints[1].name, sizeof(hints[1].name), "%064x.so", 9999);
     hints[1].enqueued = 90;
+    char *schedule_dir = g_build_filename(root, ".gc", "retirement-schedule", NULL);
+    assert(!mkdir(schedule_dir, 0700));
+    g_free(schedule_dir);
+    assert(!latcd_retirement_schedule_store(root, boot, 1, 200, 3, &hints[0], error, sizeof(error)));
+    assert(!latcd_retirement_schedule_store(root, boot, 1, 200, 3, &hints[1], error, sizeof(error)));
     queue = latcd_retirement_queue_new(root, 1);
     hints[0].retry_at = 201;
     assert(latcd_retirement_queue_diagnostic_retry(queue, boot, cutoff, hints, 2) < 0);
@@ -6765,6 +6770,18 @@ static void test_page_round_insertions(void)
     assert(latcd_retirement_queue_retry_items(queue, items, &item_count) < 0 && !item_count);
     assert(!unlink(changed));
     g_free(changed);
+    latcd_retirement_queue_free(queue);
+
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(!latcd_retirement_queue_diagnostic_retry(queue, boot, cutoff, hints, 2));
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    char *shard_name = g_strconcat(hints[0].name, ".ini", NULL);
+    char *shard_path = g_build_filename(root, ".gc", "retirement-schedule", shard_name, NULL);
+    assert(!unlink(shard_path));
+    g_free(shard_path); g_free(shard_name);
+    assert(latcd_retirement_queue_retry_revalidate(queue, error, sizeof(error)) < 0);
+    assert(latcd_retirement_queue_retry_items(queue, items, &item_count) < 0 && !item_count);
     latcd_retirement_queue_free(queue);
 
     /* Equal-cutoff and later transactions on both sides belong to a later round. */
