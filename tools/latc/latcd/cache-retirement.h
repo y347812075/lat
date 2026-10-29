@@ -463,6 +463,10 @@ int latcd_retirement_queue_diagnostic_round(LatcdRetirementQueue *queue,
  * remain mandatory and the resulting page cannot authorize deletion. */
 int latcd_retirement_queue_diagnostic_retry(LatcdRetirementQueue *queue,
     const char *boot, uint64_t cutoff, const LatcdRetirementPageDeadline *hints, unsigned count);
+/* Preserve input retry order and report transaction rediscovery only. A false
+ * match is not proof that a shard or its object can be removed. */
+int latcd_retirement_queue_retry_matches(const LatcdRetirementQueue *queue,
+    bool matches[128], unsigned *count);
 /* Resume diagnostic discovery after the committed cursor. Any in-flight page
  * is ignored and rediscovered; a v2 page never proves completion.
  * Owner lease required; missing or incompatible state is not a new round. */

@@ -6719,6 +6719,10 @@ static void test_page_round_insertions(void)
            page.entries[0].deadline == 101 && page.entries[0].enqueued == 90 &&
            page.entries[0].last_attempt == 3 && page.entries[0].retry_at == 199 &&
            page.entries[0].busy_count == 2);
+    bool matches[128];
+    unsigned match_count;
+    assert(!latcd_retirement_queue_retry_matches(queue, matches, &match_count));
+    assert(match_count == 2 && matches[0] && !matches[1]);
     LatcdRetirementAttempt attempt;
     assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));
     latcd_retirement_queue_free(queue);

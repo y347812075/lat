@@ -4376,6 +4376,8 @@ struct LatcdRetirementQueue {
     GHashTable *discovered_keys;
     GHashTable *confirmed_keys;
     GHashTable *retry_hints;
+    char retry_order[128][138];
+    unsigned retry_count;
     bool complete, persistence_uncertain;
     char last_source[65];
     LatcdRetirementAttempt active;
@@ -4481,11 +4483,25 @@ int latcd_retirement_queue_diagnostic_retry(LatcdRetirementQueue *queue,
             return -1;
         }
         g_hash_table_insert(queue->retry_hints, g_strdup(hints[i].name), g_memdup2(&hints[i], sizeof(hints[i])));
+        g_strlcpy(queue->retry_order[i], hints[i].name, sizeof(queue->retry_order[i]));
     }
     if (latcd_retirement_queue_diagnostic_round(queue, boot, cutoff, NULL)) {
         g_hash_table_remove_all(queue->retry_hints);
         return -1;
     }
+    queue->retry_count = count;
+    return 0;
+}
+
+int latcd_retirement_queue_retry_matches(const LatcdRetirementQueue *queue,
+    bool matches[128], unsigned *count)
+{
+    if (!queue || !matches || !count || !queue->retry_count || queue->cursor ||
+        !queue->aggregation_verified) return -1;
+    memset(matches, 0, 128 * sizeof(*matches));
+    *count = queue->retry_count;
+    for (unsigned i = 0; i < queue->retry_count; i++)
+        matches[i] = g_hash_table_contains(queue->confirmed_keys, queue->retry_order[i]);
     return 0;
 }
 
