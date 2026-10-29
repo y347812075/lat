@@ -526,7 +526,8 @@ int latcd_retirement_queue_retry_page_stage(LatcdRetirementQueue *queue,
     char *error, size_t error_size);
 int latcd_retirement_retry_page_load(const char *root, LatcdRetirementRetryPage *page,
     char *error, size_t error_size);
-/* Startup with capacity recovery gated; only an untouched staged page is accepted. */
+/* Startup with capacity recovery gated; accepts an untouched page or intent
+ * whose original shard remains intact. Does not replay the intent. */
 int latcd_retirement_retry_page_restore_budget(const char *root,
     struct LatcdCacheCapacity *capacity, uint64_t limit, uint64_t expected_grace_us,
     struct LatcdPageBudget *budget, LatcdRetirementRetryPage *page,

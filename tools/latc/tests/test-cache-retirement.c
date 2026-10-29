@@ -1757,6 +1757,15 @@ static void test_retry_page_stage(void)
            page->intent_present && page->intent_size == 1024 && !page->completed);
     assert(latcd_retirement_retry_page_begin_unmatched(root, &restored, error, sizeof(error)) < 0);
     latcd_cache_capacity_close(&recovered);
+    LatcdCacheCapacity intent_recovered = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget intent_budget = {0};
+    assert(!latcd_cache_capacity_scan(&intent_recovered, root, error, sizeof(error)));
+    assert(!latcd_cache_capacity_recovery_begin(&intent_recovered));
+    latcd_cache_capacity_metadata_bind(&intent_recovered, UINT64_MAX);
+    assert(!latcd_retirement_retry_page_restore_budget(root, &intent_recovered, UINT64_MAX, 100,
+                                                       &intent_budget, page, error, sizeof(error)) &&
+           page->intent_present && !latcd_cache_capacity_recovery_finish(&intent_recovered));
+    latcd_cache_capacity_close(&intent_recovered);
     char *shard_name = g_strconcat(hint.name, ".ini", NULL);
     char *shard_path = g_build_filename(schedule, shard_name, NULL);
     GKeyFile *shard = g_key_file_new();
