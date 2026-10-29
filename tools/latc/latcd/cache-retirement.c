@@ -1625,10 +1625,12 @@ int latcd_retirement_test_page_budget_matches(const char *root, const uint8_t id
     return result ? fail(error, error_size, "page budget identity changed") : 0;
 }
 
-int latcd_retirement_test_budget_result(const char *root, uint64_t now_us,
+#endif
+static int page_budget_result(const char *root, uint64_t now_us,
                                     const uint8_t identity[32], LatcdPageBudget *budget,
                                     const LatcdRetirementPageDeadline *entry,
-                                    LatcdRetirementResultKind kind, char *error, size_t error_size)
+                                    LatcdRetirementResultKind kind, bool require_bound,
+                                    char *error, size_t error_size)
 {
     if (!root || !identity || !budget || !budget->capacity ||
         !budget->page_identity_bound || memcmp(identity, budget->page_identity, 32) || !entry ||
@@ -1640,6 +1642,7 @@ int latcd_retirement_test_budget_result(const char *root, uint64_t now_us,
     uint8_t actual[32], membership[32];
     bool legacy = false, member = false;
     int result = page_state_load(root, &page, &legacy, error, error_size) || legacy || page.committed_pending ||
+        (require_bound && !page.budget_bound) ||
         latcd_retirement_page_budget_identity(&page, actual) || memcmp(identity, actual, 32) ||
         latcd_retirement_page_identity(&page, membership);
     char *boot = NULL;
@@ -1668,6 +1671,21 @@ int latcd_retirement_test_budget_result(const char *root, uint64_t now_us,
     close(scheduler);
     return result ? fail(error, error_size, "budget result write failed") : 0;
 }
+int latcd_retirement_page_budget_result(const char *root, uint64_t now_us,
+                                    const uint8_t identity[32], LatcdPageBudget *budget,
+                                    const LatcdRetirementPageDeadline *entry,
+                                    LatcdRetirementResultKind kind, char *error, size_t error_size)
+{
+    return page_budget_result(root, now_us, identity, budget, entry, kind, true, error, error_size);
+}
+#if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
+int latcd_retirement_test_budget_result(const char *root, uint64_t now_us,
+                                    const uint8_t identity[32], LatcdPageBudget *budget,
+                                    const LatcdRetirementPageDeadline *entry,
+                                    LatcdRetirementResultKind kind, char *error, size_t error_size)
+{
+    return page_budget_result(root, now_us, identity, budget, entry, kind, false, error, error_size);
+}
 #endif
 
 int latcd_retirement_schedule_check_page(const char *root, uint64_t now_us,
@@ -1679,7 +1697,8 @@ int latcd_retirement_schedule_check_page(const char *root, uint64_t now_us,
 
 static int page_commit(const char *root, uint64_t now_us,
                                     const LatcdRetirementPageState *page,
-                                    LatcdPageBudget *budget, char *error, size_t error_size)
+                                    LatcdPageBudget *budget, bool require_bound,
+                                    char *error, size_t error_size)
 {
     uint8_t expected[32], actual[32];
     if (!root || !page || latcd_retirement_page_identity(page, expected))
@@ -1691,17 +1710,16 @@ static int page_commit(const char *root, uint64_t now_us,
     int result = -1;
     int directory = -1, gc = -1;
     if (page_state_load(root, &persisted, &legacy, error, error_size) || legacy ||
-        persisted.committed_pending || (persisted.budget_bound && !budget) || page->committed_pending ||
+        persisted.committed_pending || (persisted.budget_bound && !budget) ||
+        (require_bound && !persisted.budget_bound) || page->committed_pending ||
         latcd_retirement_page_identity(&persisted, actual) ||
         memcmp(expected, actual, sizeof(expected)) || persisted.sequence != page->sequence) goto out;
     for (unsigned i = 0; i < persisted.count; i++)
         if (persisted.entries[i].enqueued != page->entries[i].enqueued) goto out;
-#ifdef LATCD_CAPACITY_TESTING
     uint8_t binding[32];
     if (budget && (!budget->capacity || !budget->page_identity_bound ||
         latcd_retirement_page_budget_identity(&persisted, binding) ||
         memcmp(binding, budget->page_identity, sizeof(binding)))) goto out;
-#endif
     char *boot = NULL;
     uint64_t observed;
     if (retirement_clock(&boot, &observed)) goto out;
@@ -1737,7 +1755,16 @@ int latcd_retirement_page_commit(const char *root, uint64_t now_us,
                                     const LatcdRetirementPageState *page,
                                     char *error, size_t error_size)
 {
-    return page_commit(root, now_us, page, NULL, error, error_size);
+    return page_commit(root, now_us, page, NULL, false, error, error_size);
+}
+
+int latcd_retirement_page_budget_commit(const char *root, uint64_t now_us,
+                                    const LatcdRetirementPageState *page, LatcdPageBudget *budget,
+                                    char *error, size_t error_size)
+{
+    if (!budget || !page || !page->budget_bound)
+        return fail(error, error_size, "missing bound page budget");
+    return page_commit(root, now_us, page, budget, true, error, error_size);
 }
 
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
@@ -1746,7 +1773,7 @@ int latcd_retirement_test_budget_commit(const char *root, uint64_t now_us,
                                     char *error, size_t error_size)
 {
     if (!budget) return fail(error, error_size, "missing page budget");
-    return page_commit(root, now_us, page, budget, error, error_size);
+    return page_commit(root, now_us, page, budget, false, error, error_size);
 }
 #endif
 

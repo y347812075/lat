@@ -2529,7 +2529,7 @@ static void test_budgeted_page_stage(void)
     assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
     uint8_t binding[32];
     assert(!latcd_retirement_page_budget_identity(&page, binding));
-    assert(!latcd_retirement_test_budget_result(root, 150, binding, &budget, &page.entries[0],
+    assert(!latcd_retirement_page_budget_result(root, 150, binding, &budget, &page.entries[0],
                                                 LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
     assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
     assert(!latcd_cache_capacity_test_page_release(&capacity, &budget));
@@ -2548,7 +2548,7 @@ static void test_budgeted_page_stage(void)
            budget.remaining == 2 * 65536);
     assert(latcd_cache_capacity_reserve(&recovered, 1, UINT64_MAX, error, sizeof(error)) < 0);
     assert(!latcd_cache_capacity_recovery_finish(&recovered));
-    assert(!latcd_retirement_test_budget_commit(root, 150, &page, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_page_budget_commit(root, 150, &loaded, &budget, error, sizeof(error)));
     assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
     latcd_cache_capacity_close(&recovered);
     assert(!pthread_mutex_destroy(&recovered.lock));
