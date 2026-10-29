@@ -478,6 +478,10 @@ int latcd_retirement_queue_retry_matches(const LatcdRetirementQueue *queue,
  * hints. The returned snapshot is diagnostic, not deletion authorization. */
 int latcd_retirement_queue_retry_items(const LatcdRetirementQueue *queue,
     LatcdRetirementRetryItem items[128], unsigned *count);
+/* Consume the retained scan witness after checking it under scheduler and
+ * reference-roots locks. This does not authorize deletion or persist a page. */
+int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
+    char *error, size_t error_size);
 /* Resume diagnostic discovery after the committed cursor. Any in-flight page
  * is ignored and rediscovered; a v2 page never proves completion.
  * Owner lease required; missing or incompatible state is not a new round. */

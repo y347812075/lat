@@ -6747,8 +6747,24 @@ static void test_page_round_insertions(void)
            items[0].aggregate.deadline == 101 && items[0].aggregate.retry_at == 199);
     assert(!items[1].matched && !strcmp(items[1].hint.name, hints[1].name) &&
            !items[1].aggregate.name[0] && !items[1].aggregate.deadline);
+    assert(latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_queue_retry_revalidate(queue, error, sizeof(error)));
+    assert(latcd_retirement_queue_retry_revalidate(queue, error, sizeof(error)) < 0);
     LatcdRetirementAttempt attempt;
     assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));
+    latcd_retirement_queue_free(queue);
+
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(!latcd_retirement_queue_diagnostic_retry(queue, boot, cutoff, hints, 2));
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0 && !latcd_retirement_queue_retry_items(queue, items, &item_count));
+    char *changed = g_build_filename(root, ".gc", "tombstones", "witness-change", NULL);
+    put(changed, "changed\n");
+    assert(latcd_retirement_queue_retry_revalidate(queue, error, sizeof(error)) < 0);
+    assert(latcd_retirement_queue_retry_items(queue, items, &item_count) < 0 && !item_count);
+    assert(!unlink(changed));
+    g_free(changed);
     latcd_retirement_queue_free(queue);
 
     /* Equal-cutoff and later transactions on both sides belong to a later round. */
@@ -6871,11 +6887,20 @@ static void test_queue_overflow_fixture(void)
     char *store = g_build_filename(root, ".gc", "transactions", NULL);
     GDir *directory = g_dir_open(store, 0, NULL);
     assert(directory);
-    const char *original_name = g_dir_read_name(directory);
-    assert(original_name);
-    char *original_path = g_build_filename(store, original_name, NULL);
     GKeyFile *duplicate = g_key_file_new();
-    assert(g_key_file_load_from_file(duplicate, original_path, 0, NULL));
+    const char *original_name;
+    bool selected_source = false;
+    char *selected = g_strdup_printf("%064x", 1);
+    while ((original_name = g_dir_read_name(directory))) {
+        char *original_path = g_build_filename(store, original_name, NULL);
+        assert(g_key_file_load_from_file(duplicate, original_path, 0, NULL));
+        char *source = g_key_file_get_string(duplicate, "transaction", "source", NULL);
+        selected_source = source && !strcmp(source, selected);
+        g_free(source); g_free(original_path);
+        if (selected_source) break;
+    }
+    g_free(selected);
+    assert(selected_source);
     g_key_file_set_uint64(duplicate, "transaction", "retired_boottime_us", 201);
     char *duplicate_data = g_key_file_to_data(duplicate, NULL, NULL);
     char *duplicate_id = g_uuid_string_random();
@@ -6884,7 +6909,7 @@ static void test_queue_overflow_fixture(void)
     g_free(duplicate_id); g_free(duplicate_name);
     put(duplicate_path, duplicate_data);
     g_free(duplicate_data); g_key_file_unref(duplicate);
-    g_dir_close(directory); g_free(original_path);
+    g_dir_close(directory);
     simulated_boottime_us = 201;
     LatcdRetirementQueue *diagnostic = latcd_retirement_queue_new(root, 0);
     assert(!latcd_retirement_queue_diagnostic_round(diagnostic, boot, cutoff, NULL));
