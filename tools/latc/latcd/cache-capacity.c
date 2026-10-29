@@ -430,7 +430,7 @@ int latcd_cache_capacity_scan(LatcdCacheCapacity *capacity, const char *root,
                               char *error, size_t error_size)
 {
     pthread_mutex_lock(&capacity->lock);
-    bool busy = capacity->reserved || capacity->transient_reserved || capacity->recovered_reserved ||
+    bool busy = capacity->recovery_gate || capacity->reserved || capacity->transient_reserved || capacity->recovered_reserved ||
         capacity->journal_reserved ||
         capacity->metadata_reserved || capacity->state_reserved ||
         (capacity->unknown_tasks && g_hash_table_size(capacity->unknown_tasks)) ||

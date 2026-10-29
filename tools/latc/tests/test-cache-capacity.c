@@ -88,6 +88,8 @@ static void test_recovery_gate(void)
     assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
     assert(!latcd_cache_capacity_recovery_begin(&capacity));
     assert(latcd_cache_capacity_recovery_begin(&capacity));
+    assert(latcd_cache_capacity_scan(&capacity, root, NULL, 0) && errno == EBUSY);
+    assert(capacity.recovery_gate && capacity.ready);
     assert(latcd_cache_capacity_reserve(&capacity, 1, 100, NULL, 0));
     assert(latcd_cache_capacity_reserve_transient(&capacity, 1, 100, NULL, 0));
     latcd_cache_capacity_metadata_bind(&capacity, 100);
