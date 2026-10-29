@@ -1903,13 +1903,16 @@ int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t n
     LatcdRetirementPageState page;
     bool legacy = false;
     uint8_t identity[32], results[128] = {0};
+    LatcdRetirementPageInventory inventory = {0};
+    uint64_t required;
     int result = -1, directory = -1, gc = -1, matching = -1;
     struct stat held, path;
     if (page_state_load(root, &page, &legacy, error, error_size) || legacy ||
         !page.budget_bound || !page.committed_pending ||
         latcd_retirement_page_budget_identity(&page, identity) ||
         memcmp(identity, budget->page_identity, sizeof(identity))) goto out;
-    if (schedule_page_results(root, now_us, &page, results, NULL, error, error_size)) goto out;
+    if (schedule_page_results(root, now_us, &page, results, &inventory, error, error_size) ||
+        latcd_retirement_page_budget_estimate(&page, results, &inventory, &required)) goto out;
     directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
     if (gc < 0 || !same_directory(scheduler, gc) || fstat(directory, &held) ||
