@@ -300,6 +300,53 @@ class PlannerTest(unittest.TestCase):
             if row['selection_status'] != 'removed':
                 self.assertIn('mount_lease_reference', row['holds'])
 
+    def test_retirement_exit_handoff(self):
+        cache = self.root.stat()
+        record = (f'[handoff]\nversion=1\nboot={BOOT}\ncache_device={cache.st_dev}\n'
+                  f'cache_inode={cache.st_ino}\nrecorded_boottime_us=100\ngrace_us=600\n'
+                  'reason=IDLE\nstate=PENDING_RESCAN\ndiscovery_complete=true\n'
+                  'unattended_gc_guaranteed=false\nautomatic_deletion_enabled=false\n'
+                  'known_candidates=2\nknown_deferred=1\nnext_attempt_hint_boottime_us=200\n')
+
+        def inspect(text, clock=(BOOT, 150)):
+            self.put('.gc/retirement-handoff.ini', text.encode())
+            before = self.snapshot()
+            inventory = GC.Inventory(str(self.root), clock=clock)
+            fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                inventory.scan(fd)
+                inventory.verify(fd)
+            finally:
+                os.close(fd)
+            plan = inventory.report()
+            self.assertEqual(before, self.snapshot())
+            self.assertFalse(plan['delete_authorized'])
+            return plan
+
+        handoff = inspect(record)['retirement_plan']['exit_handoff']
+        self.assertEqual(handoff['status'], 'valid')
+        self.assertTrue(handoff['requires_rescan'])
+        self.assertEqual(handoff['next_attempt_hint_boottime_us'], 200)
+        self.assertEqual(inspect(record, (str(uuid.uuid4()), 150))['retirement_plan']
+                         ['exit_handoff']['status'], 'previous_boot')
+        self.assertEqual(inspect(record, False)['retirement_plan']['exit_handoff']
+                         ['status'], 'clock_unavailable')
+        old = record.replace('next_attempt_hint_boottime_us=200\n', '')
+        self.assertEqual(inspect(old)['retirement_plan']['exit_handoff']['status'], 'valid')
+        incomplete = record.replace('discovery_complete=true', 'discovery_complete=false')
+        incomplete = incomplete.replace('next_attempt_hint_boottime_us=200',
+                                        'next_attempt_hint_boottime_us=0')
+        self.assertEqual(inspect(incomplete)['retirement_plan']['exit_handoff']
+                         ['status'], 'incomplete_discovery')
+        for bad in (record.replace(f'cache_inode={cache.st_ino}', 'cache_inode=0'),
+                    record.replace('automatic_deletion_enabled=false', 'automatic_deletion_enabled=true'),
+                    record + 'unknown=1\n', record.replace('known_deferred=1', 'known_deferred=3'),
+                    record.replace('recorded_boottime_us=100', 'recorded_boottime_us=160')):
+            with self.subTest(bad=bad):
+                plan = inspect(bad)
+                self.assertFalse(plan['complete'])
+                self.assertTrue(plan['retirement_plan']['exit_handoff']['requires_rescan'])
+
     def test_cache_domain_plan(self):
         plan = self.run_plan()
         self.assertEqual(plan['cache_domain'], {'status': 'legacy'})

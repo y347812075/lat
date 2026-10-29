@@ -93,6 +93,7 @@ class Inventory:
         self.directories = {}
         self.manifests = {}
         self.domain = None
+        self.retirement_handoff = None
         self.domain_binding_observed = False
         self.errors = []
         self.refs = {}
@@ -152,6 +153,8 @@ class Inventory:
                         self.read_manifest(fd, name, st)
                     if prefix == ".gc" and name == "domain.ini":
                         self.read_domain(fd, st)
+                    if prefix == ".gc" and name == "retirement-handoff.ini":
+                        self.read_retirement_handoff(fd, st)
                     if prefix in (".gc/transactions", ".gc/tombstones"):
                         if name.startswith(".write-"):
                             self.freeze_all = True
@@ -232,6 +235,53 @@ class Inventory:
         except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
             self.freeze_all = True
             self.error(relative, "invalid_explicit_hold", str(exc))
+
+    def read_retirement_handoff(self, directory, before):
+        relative = ".gc/retirement-handoff.ini"
+        self.retirement_handoff = {"status": "invalid", "requires_rescan": True}
+        try:
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
+                    before.st_nlink != 1 or before.st_mode & 0o222 or
+                    not 0 < before.st_size <= 4096):
+                raise ValueError("unsafe retirement handoff")
+            fd = os.open("retirement-handoff.ini", os.O_RDONLY | os.O_CLOEXEC |
+                         os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            try:
+                raw = os.read(fd, 4097)
+                if identity(os.fstat(fd)) != identity(before) or len(raw) != before.st_size:
+                    raise ValueError("retirement handoff changed during read")
+            finally:
+                os.close(fd)
+            parser = configparser.ConfigParser(interpolation=None, strict=True)
+            parser.read_string(raw.decode("ascii"))
+            if parser.defaults() or parser.sections() != ["handoff"]:
+                raise ValueError("invalid retirement handoff sections")
+            value = dict(parser["handoff"])
+            numbers = {"cache_device", "cache_inode", "recorded_boottime_us", "grace_us",
+                       "known_candidates", "known_deferred"}
+            optional = {"next_attempt_hint_boottime_us"}
+            fields = numbers | {"version", "boot", "reason", "state", "discovery_complete",
+                                "unattended_gc_guaranteed", "automatic_deletion_enabled"}
+            if (not fields <= value.keys() or value.keys() - fields - optional or
+                    value["version"] != "1" or str(uuid.UUID(value["boot"])) != value["boot"] or
+                    value["reason"] not in ("IDLE", "STOP") or value["state"] != "PENDING_RESCAN" or
+                    value["discovery_complete"] not in ("true", "false") or
+                    value["unattended_gc_guaranteed"] != "false" or
+                    value["automatic_deletion_enabled"] != "false"):
+                raise ValueError("invalid retirement handoff fields")
+            for key in numbers | (optional & value.keys()):
+                if not re.fullmatch(r"[0-9]+", value[key]) or int(value[key]) >= 2**64:
+                    raise ValueError("invalid retirement handoff integer")
+                value[key] = int(value[key])
+            value["discovery_complete"] = value["discovery_complete"] == "true"
+            hint = value.get("next_attempt_hint_boottime_us", 0)
+            if (value["known_deferred"] > value["known_candidates"] or
+                    (not value["discovery_complete"] and hint) or
+                    (hint and hint < value["recorded_boottime_us"])):
+                raise ValueError("inconsistent retirement handoff")
+            self.retirement_handoff = dict(value, status="valid", requires_rescan=True)
+        except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
+            self.error(relative, "invalid_retirement_handoff", str(exc))
 
     def read_domain(self, directory, before):
         relative = ".gc/domain.ini"
@@ -895,6 +945,24 @@ class Inventory:
         domain_marker = self.entries.get(".gc/domain.ini")
         domain_lock = self.entries.get(".gc/domain.lock")
         cache = self.directories.get("")
+        handoff = self.retirement_handoff
+        if handoff and handoff["status"] == "valid":
+            handoff["binding_observed"] = bool(cache and cache[:2] ==
+                (handoff["cache_device"], handoff["cache_inode"]))
+            if not handoff["binding_observed"]:
+                handoff["status"] = "wrong_cache"
+                self.error(".gc/retirement-handoff.ini", "retirement_handoff_binding_changed",
+                           "record does not bind this cache")
+            elif not self.clock:
+                handoff["status"] = "clock_unavailable"
+            elif handoff["boot"] != self.clock[0]:
+                handoff["status"] = "previous_boot"
+            elif handoff["recorded_boottime_us"] > self.clock[1]:
+                handoff["status"] = "future_record"
+                self.error(".gc/retirement-handoff.ini", "invalid_retirement_handoff_clock",
+                           "recorded time is in the future")
+            elif not handoff["discovery_complete"]:
+                handoff["status"] = "incomplete_discovery"
         if domain_marker or domain_lock:
             lock_valid = bool(domain_lock and stat.S_ISREG(domain_lock["_mode"]) and
                 domain_lock["_uid"] == os.geteuid() and domain_lock["links"] == 1 and
@@ -1196,6 +1264,7 @@ class Inventory:
                 "mount_leases": self.mount_leases,
                 "transactions": self.transactions,
                 "retirement_plan": {"grace_us": self.grace_us,
+                                    "exit_handoff": handoff,
                                     "clock": ({"boot_id": self.clock[0], "boottime_us": self.clock[1]}
                                               if self.clock else None),
                                     "full_reference_graph_verified": False,
