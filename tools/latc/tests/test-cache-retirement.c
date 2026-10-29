@@ -1183,12 +1183,22 @@ static void test_round_cursor(void)
     evidence.members[0].present = evidence.members[1].present = true;
     evidence.members[0].snapshot = intent_stat;
     memcpy(evidence.members[0].digest, intent_digest, 32);
+    evidence.occupied_slots = 4095; evidence.occupied_bytes = 4095 * 1024;
+    uint64_t consumption_budget;
     consumption = (LatcdRetirementConsumption){0};
     assert(!latcd_retirement_consumption_check_inventory(&pending_page, &consumption, evidence_results, &evidence));
+    assert(!latcd_retirement_consumption_budget_estimate(&pending_page, &consumption, evidence_results,
+                                                          &evidence, &consumption_budget));
+    assert(consumption_budget == 2 * 65536);
     evidence_results[0] = 0; evidence.members[0].present = false;
     assert(latcd_retirement_consumption_check_inventory(&pending_page, &consumption, evidence_results, &evidence) < 0);
+    assert(latcd_retirement_consumption_budget_estimate(&pending_page, &consumption, evidence_results,
+                                                        &evidence, &consumption_budget) < 0 && !consumption_budget);
     assert(!latcd_retirement_consumption_bind(&pending_page, &consumption, 0, &intent_stat, intent_digest));
     assert(!latcd_retirement_consumption_check_inventory(&pending_page, &consumption, evidence_results, &evidence));
+    assert(!latcd_retirement_consumption_budget_estimate(&pending_page, &consumption, evidence_results,
+                                                          &evidence, &consumption_budget));
+    assert(consumption_budget == 2 * 65536);
     evidence_results[0] = 1; evidence.members[0].present = true;
     assert(!latcd_retirement_consumption_check_inventory(&pending_page, &consumption, evidence_results, &evidence));
     evidence.members[0].snapshot.st_ino++;

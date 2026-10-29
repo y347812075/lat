@@ -208,6 +208,11 @@ int latcd_retirement_consumption_check_inventory(const LatcdRetirementPageState 
                                     const LatcdRetirementConsumption *consumption,
                                     const uint8_t results[128],
                                     const LatcdRetirementPageInventory *inventory);
+int latcd_retirement_consumption_budget_estimate(const LatcdRetirementPageState *page,
+                                    const LatcdRetirementConsumption *consumption,
+                                    const uint8_t results[128],
+                                    const LatcdRetirementPageInventory *inventory,
+                                    uint64_t *bytes);
 int latcd_retirement_page_snapshot(const char *root, uint64_t now_us,
                                     LatcdRetirementPageState *page,
                                     uint8_t results[128], LatcdRetirementPageInventory *inventory,

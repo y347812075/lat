@@ -1768,6 +1768,32 @@ int latcd_retirement_consumption_check_inventory(const LatcdRetirementPageState 
     return 0;
 }
 
+int latcd_retirement_consumption_budget_estimate(const LatcdRetirementPageState *page,
+                                    const LatcdRetirementConsumption *consumption,
+                                    const uint8_t results[128],
+                                    const LatcdRetirementPageInventory *inventory,
+                                    uint64_t *bytes)
+{
+    if (!bytes) { errno = EINVAL; return -1; }
+    *bytes = 0;
+    if (latcd_retirement_consumption_check_inventory(page, consumption, results, inventory) ||
+        inventory->occupied_slots > RETIREMENT_SCHEDULE_LIMIT ||
+        inventory->occupied_bytes > RETIREMENT_SCHEDULE_BYTES) {
+        errno = EINVAL;
+        return -1;
+    }
+    unsigned present = 0;
+    for (unsigned i = 0; i < page->count; i++)
+        if (inventory->members[i].present) present++;
+    if (present > inventory->occupied_slots ||
+        (uint64_t)present * RETIREMENT_SCHEDULE_RECORD_BYTES > inventory->occupied_bytes) {
+        errno = EINVAL;
+        return -1;
+    }
+    return latcd_cache_capacity_page_peak(0, RETIREMENT_SCHEDULE_LIMIT - inventory->occupied_slots,
+                                         RETIREMENT_SCHEDULE_RECORD_BYTES, RECORD_LIMIT, bytes);
+}
+
 int latcd_retirement_page_restore_budget(const char *root, LatcdCacheCapacity *capacity,
                                     uint64_t limit, uint64_t expected_grace_us, LatcdPageBudget *budget,
                                     LatcdRetirementPageState *page, char *error, size_t error_size)
