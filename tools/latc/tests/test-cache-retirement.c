@@ -3334,9 +3334,40 @@ static void test_budgeted_max_page(unsigned consumption)
             error, sizeof(error)));
     assert(!latcd_retirement_page_budget_commit(root, UINT64_MAX, &page, &budget, error, sizeof(error)));
     if (consumption) {
+        if (consumption == 5) {
+            assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:file-synced", 1));
+            assert(latcd_retirement_consumption_begin(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
+            unsetenv("LATCD_TEST_RETIREMENT_IO");
+            assert(!latcd_cache_capacity_poll(&capacity) && budget.invalid);
+            assert(!latcd_cache_capacity_abandon_page(&capacity, &budget));
+            latcd_cache_capacity_close(&capacity);
+            assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+            latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+            assert(!latcd_cache_capacity_recovery_begin(&capacity));
+            assert(!latcd_retirement_page_restore_budget(root, &capacity, UINT64_MAX, UINT64_MAX,
+                                                         &budget, &loaded, error, sizeof(error)));
+            assert(!latcd_cache_capacity_recovery_finish(&capacity));
+            assert(!loaded.consumption_bound);
+        }
         assert(!latcd_retirement_consumption_begin(root, UINT64_MAX, &budget, error, sizeof(error)));
         assert(latcd_retirement_consumption_prepare(root, UINT64_MAX, 0, &budget, error, sizeof(error)) < 0);
+        if (consumption == 5) {
+            assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:renamed", 1));
+            assert(latcd_retirement_consumption_prepare(root, UINT64_MAX, 1, &budget, error, sizeof(error)) < 0);
+            unsetenv("LATCD_TEST_RETIREMENT_IO");
+            assert(!latcd_cache_capacity_poll(&capacity) && budget.invalid);
+            assert(!latcd_cache_capacity_abandon_page(&capacity, &budget));
+            latcd_cache_capacity_close(&capacity);
+            assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+            latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+            assert(!latcd_cache_capacity_recovery_begin(&capacity));
+            assert(!latcd_retirement_page_restore_budget(root, &capacity, UINT64_MAX, UINT64_MAX,
+                                                         &budget, &loaded, error, sizeof(error)));
+            assert(!latcd_cache_capacity_recovery_finish(&capacity));
+            assert(loaded.consumption.intent_present);
+        } else {
         assert(!latcd_retirement_consumption_prepare(root, UINT64_MAX, 1, &budget, error, sizeof(error)));
+        }
         assert(latcd_retirement_consumption_prepare(root, UINT64_MAX, 1, &budget, error, sizeof(error)) < 0);
     }
     char *checkpoint = g_build_filename(gc, "retirement-page.ini", NULL);
@@ -3358,7 +3389,7 @@ static void test_budgeted_max_page(unsigned consumption)
         assert(loaded.consumption_bound && loaded.consumption.intent_present && loaded.consumption.intent_index == 1);
         assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
         latcd_cache_capacity_close(&recovered);
-        if (consumption > 1) {
+        if (consumption > 1 && consumption < 5) {
             assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
             latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
             assert(!latcd_cache_capacity_recovery_begin(&recovered));
@@ -7008,6 +7039,7 @@ int main(int argc, char **argv)
     test_budgeted_max_page(2);
     test_budgeted_max_page(3);
     test_budgeted_max_page(4);
+    test_budgeted_max_page(5);
     test_budgeted_rebind();
     test_rebind_crash("file-synced", false, false);
     test_rebind_crash("linked", false, true);

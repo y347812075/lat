@@ -2207,6 +2207,7 @@ int latcd_retirement_consumption_begin(const char *root, uint64_t now_us,
     if (matching < 0) goto out;
     page.consumption_bound = true;
     result = page_state_store_fd(directory, gc, &page, budget, NULL);
+    if (result) latcd_cache_capacity_page_uncertain(budget->capacity, budget);
 out:
     if (matching >= 0) close(matching);
     if (gc >= 0) close(gc);
@@ -2245,6 +2246,7 @@ int latcd_retirement_consumption_prepare(const char *root, uint64_t now_us, unsi
     matching = latcd_cache_capacity_open_matching_root(budget->capacity, root, directory);
     if (matching < 0) goto out;
     result = page_state_store_fd(directory, gc, &page, budget, NULL);
+    if (result) latcd_cache_capacity_page_uncertain(budget->capacity, budget);
 out:
     if (matching >= 0) close(matching);
     if (gc >= 0) close(gc);
