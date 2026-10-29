@@ -4240,6 +4240,29 @@ static void test_retry_select(void)
     for (unsigned i = 0; i < 4096; i++) assert(visited[i]);
     assert(!latcd_retirement_retry_select(entries, 4096, cursor, 201, selected, &count) &&
            count == 128 && !strcmp(selected[0].name, entries[0].name));
+    /* Replace one already visited slot per page with a later-sorting arrival.
+     * Every member of the original snapshot must still be visited. */
+    memset(visited, 0, sizeof(visited));
+    cursor[0] = 0;
+    for (unsigned page = 0; page < 32; page++) {
+        assert(!latcd_retirement_retry_select(entries, 4096, cursor, 201, selected, &count) && count == 128);
+        for (unsigned i = 0; i < count; i++) {
+            unsigned id = 0;
+            assert(sscanf(selected[i].name, "%x", &id) == 1);
+            if (id <= 4096) {
+                assert(id && !visited[id - 1]);
+                visited[id - 1] = true;
+            }
+        }
+        g_strlcpy(cursor, selected[count - 1].name, sizeof(cursor));
+        unsigned slot = page * 128;
+        assert(visited[slot]);
+        memmove(&entries[slot], &entries[slot + 1], (4095 - slot) * sizeof(*entries));
+        snprintf(entries[4095].name, sizeof(entries[4095].name), "%064x.so", 4097 + page);
+        entries[4095].enqueued = 100;
+        entries[4095].retry_at = 200;
+    }
+    for (unsigned i = 0; i < 4096; i++) assert(visited[i]);
     entries[1] = entries[0];
     assert(latcd_retirement_retry_select(entries, 4096, NULL, 201, selected, &count) < 0 && !count);
     g_free(entries);
