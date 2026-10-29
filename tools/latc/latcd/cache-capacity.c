@@ -969,7 +969,8 @@ static int reserve_page(LatcdCacheCapacity *capacity, uint64_t bytes, uint64_t l
     if (!capacity || !identity || !budget || !bytes) { errno = EINVAL; return -1; }
     pthread_mutex_lock(&capacity->lock);
     check_changes(capacity);
-    bool valid = capacity->ready && capacity->recovery_gate == recovery &&
+    bool valid = metadata_capacity == capacity && limit <= metadata_limit &&
+        capacity->ready && capacity->recovery_gate == recovery &&
         (!capacity->unknown_tasks || !g_hash_table_size(capacity->unknown_tasks)) &&
         !capacity->restored_page_budget && !budget->capacity &&
         !budget->remaining && !budget->inflight && !budget->invalid &&

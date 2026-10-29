@@ -103,6 +103,8 @@ static void test_recovery_gate(void)
     assert(capacity.ready && capacity.metadata_committed == 1 && !access(record, F_OK));
     uint8_t identity[32] = {1};
     LatcdPageBudget restored = {0}, duplicate = {0};
+    assert(latcd_cache_capacity_restore_page(&capacity, 10, 101, identity, &restored));
+    assert(!restored.capacity && !capacity.metadata_reserved);
     assert(latcd_cache_capacity_restore_page(&capacity, 100, 100, identity, &restored));
     assert(!latcd_cache_capacity_restore_page(&capacity, 10, 100, identity, &restored));
     assert(restored.page_identity_bound && !memcmp(restored.page_identity, identity, 32));
@@ -115,6 +117,8 @@ static void test_recovery_gate(void)
     assert(!latcd_cache_capacity_recovery_finish(&capacity));
     assert(latcd_cache_capacity_restore_page(&capacity, 1, 100, identity, &duplicate));
     assert(!latcd_cache_capacity_test_page_release(&capacity, &restored));
+    assert(latcd_cache_capacity_reserve_page(&capacity, 10, 101, identity, &restored));
+    assert(!restored.capacity && !capacity.metadata_reserved);
     assert(!latcd_cache_capacity_reserve_page(&capacity, 10, 100, identity, &restored));
     LatcdPageBudget copied = restored;
     assert(latcd_cache_capacity_page_begin(fd, "record", 1, &copied, &reservation));
