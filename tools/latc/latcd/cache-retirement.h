@@ -40,6 +40,8 @@ typedef struct LatcdRetirementPageDeadline {
 typedef struct LatcdRetirementRetryItem {
     LatcdRetirementPageDeadline hint;
     LatcdRetirementPageDeadline aggregate;
+    uint64_t shard_sequence;
+    bool shard_sequence_bound;
     bool matched;
 } LatcdRetirementRetryItem;
 /* Select due hints in name order after a separate retry cursor, wrapping once.

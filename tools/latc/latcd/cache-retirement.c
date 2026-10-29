@@ -4613,6 +4613,8 @@ int latcd_retirement_queue_retry_items(const LatcdRetirementQueue *queue,
             return -1;
         }
         items[i].hint = *hint;
+        items[i].shard_sequence = queue->retry_item_sequence[i];
+        items[i].shard_sequence_bound = queue->retry_snapshot_bound;
         items[i].matched = matched;
         if (matched) {
             g_strlcpy(items[i].aggregate.name, name, sizeof(items[i].aggregate.name));

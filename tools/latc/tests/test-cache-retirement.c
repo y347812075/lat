@@ -6748,6 +6748,7 @@ static void test_page_round_insertions(void)
     assert(match_count == 2 && matches[0] && !matches[1]);
     assert(!latcd_retirement_queue_retry_items(queue, items, &item_count) && item_count == 2);
     assert(items[0].matched && !strcmp(items[0].hint.name, hints[0].name) &&
+           !items[0].shard_sequence_bound && !items[0].shard_sequence &&
            items[0].hint.deadline == hints[0].deadline &&
            items[0].aggregate.deadline == 101 && items[0].aggregate.retry_at == 199);
     assert(!items[1].matched && !strcmp(items[1].hint.name, hints[1].name) &&
@@ -6798,6 +6799,8 @@ static void test_page_round_insertions(void)
     while (result > 0);
     assert(result < 0 && !latcd_retirement_queue_retry_items(queue, items, &item_count) && item_count == 2);
     assert(!strcmp(items[0].hint.name, hints[1].name) && !strcmp(items[1].hint.name, hints[0].name));
+    assert(items[0].shard_sequence_bound && items[1].shard_sequence_bound &&
+           items[0].shard_sequence == 3 && items[1].shard_sequence == 3);
     assert(!latcd_retirement_queue_retry_revalidate(queue, error, sizeof(error)));
     latcd_retirement_queue_free(queue);
     queue = latcd_retirement_queue_new(root, 1);
