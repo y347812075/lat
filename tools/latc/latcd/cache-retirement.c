@@ -866,6 +866,29 @@ int latcd_retirement_page_state_load(const char *root, LatcdRetirementPageState 
     return page_state_load(root, state, NULL, error, error_size);
 }
 
+static bool gc_has_no_partial_records(int gc)
+{
+    struct stat before, after;
+    if (fstat(gc, &before)) return false;
+    int scan = openat(gc, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    DIR *dir = scan < 0 ? NULL : fdopendir(scan);
+    if (!dir) { if (scan >= 0) close(scan); return false; }
+    bool valid = true;
+    unsigned visited = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) { if (errno) valid = false; break; }
+        if (++visited > 100000 || g_str_has_prefix(entry->d_name, ".write-")) {
+            valid = false;
+            break;
+        }
+    }
+    if (fstat(gc, &after) || !object_stat_equal(&before, &after)) valid = false;
+    closedir(dir);
+    return valid;
+}
+
 int latcd_retirement_page_startup_check(const char *root, char *error, size_t error_size)
 {
     if (!root) return fail(error, error_size, "invalid retirement startup root");
@@ -880,7 +903,7 @@ int latcd_retirement_page_startup_check(const char *root, char *error, size_t er
     bool valid = status >= 0 && gc >= 0 && same_directory(scheduler, gc) &&
         !fstat(directory, &held) && !lstat(root, &path) &&
         held.st_dev == path.st_dev && held.st_ino == path.st_ino &&
-        directory_matches_at(directory, ".gc", gc) &&
+        directory_matches_at(directory, ".gc", gc) && gc_has_no_partial_records(gc) &&
         (status == 1 || (!legacy && !state.count && !state.committed_pending));
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);

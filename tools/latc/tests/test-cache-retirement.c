@@ -1115,6 +1115,11 @@ static void test_round_cursor(void)
     empty_page.cursor[0] = 0;
     assert(!latcd_retirement_page_state_store(page_root, &empty_page, page_error, sizeof(page_error)));
     assert(!latcd_retirement_page_startup_check(page_root, page_error, sizeof(page_error)));
+    char *partial = g_build_filename(page_root, ".gc", ".write-interrupted", NULL);
+    put(partial, "partial");
+    assert(latcd_retirement_page_startup_check(page_root, page_error, sizeof(page_error)) < 0);
+    assert(!unlink(partial));
+    g_free(partial);
     assert(latcd_retirement_page_state_store(page_root, &state, page_error,
                                              sizeof(page_error)) == 0);
     assert(latcd_retirement_page_startup_check(page_root, page_error, sizeof(page_error)) < 0);
@@ -2719,6 +2724,8 @@ static void test_budgeted_crash(const char *point, bool installed, bool result_w
     assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
     assert((installed || result_write || commit) ? loaded.count == 1 && loaded.budget_bound : !loaded.count);
+    if (!result_write && !commit && !installed)
+        assert(latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0);
     if (commit) assert(loaded.committed_pending == installed);
     LatcdCacheCapacity recovered = LATCD_CACHE_CAPACITY_INIT;
     LatcdPageBudget budget = {0};
