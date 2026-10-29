@@ -162,6 +162,21 @@ PY
     test "$page_hash" = "$(sha256sum "$page_phase/cache/.gc/retirement-page.ini")"
 done
 
+page_phase=$work/partial-retirement-record
+mkdir -m 700 "$page_phase" "$page_phase/cache" "$page_phase/cache/.gc"
+printf 'interrupted checkpoint\n' > "$page_phase/cache/.gc/.write-interrupted"
+chmod 400 "$page_phase/cache/.gc/.write-interrupted"
+page_hash=$(sha256sum "$page_phase/cache/.gc/.write-interrupted")
+if "$latcd" --serve --socket "$page_phase/latcd.sock" --cache-dir "$page_phase/cache" \
+     --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+     >"$page_phase/stdout" 2>"$page_phase/stderr"; then
+    echo "latcd accepted an interrupted metadata record" >&2
+    exit 1
+fi
+grep -q 'retirement page budget recovery unavailable or checkpoint unsafe' "$page_phase/stderr"
+test ! -e "$page_phase/latcd.sock"
+test "$page_hash" = "$(sha256sum "$page_phase/cache/.gc/.write-interrupted")"
+
 owner_cache=$work/cache-owner
 owner_phase=$work/cache-owner-primary
 mkdir -m 700 "$owner_phase"
