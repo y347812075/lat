@@ -536,7 +536,10 @@ int latcd_retirement_retry_page_restore_budget(const char *root,
     char *error, size_t error_size);
 int latcd_retirement_retry_page_begin_unmatched(const char *root,
     struct LatcdPageBudget *budget, char *error, size_t error_size);
-/* Apply or idempotently recognize the first unmatched intent; no removal authority. */
+/* Defer a matched member only while its aggregate deadline is still in the future. */
+int latcd_retirement_retry_page_begin_not_due(const char *root,
+    struct LatcdPageBudget *budget, char *error, size_t error_size);
+/* Apply or idempotently recognize a deferral intent; no removal authority. */
 int latcd_retirement_retry_page_apply_unmatched(const char *root,
     struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Persist completion only after validating the replacement shard. */

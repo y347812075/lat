@@ -1724,8 +1724,9 @@ static void test_retry_page_stage(bool crash_commit)
     assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
     do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
     while (result > 0);
-    assert(result < 0 && !latcd_retirement_queue_retry_page_stage(queue, &capacity, UINT64_MAX,
-                                                                  &budget, error, sizeof(error)));
+    assert(result < 0);
+    assert(!latcd_retirement_queue_retry_page_stage(queue, &capacity, UINT64_MAX,
+                                                   &budget, error, sizeof(error)));
     LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
     assert(!latcd_retirement_retry_page_load(root, page, error, sizeof(error)) && page->count == 2 &&
            !strcmp(page->items[0].hint.name, hint.name) && page->round_sequence == state.sequence);
@@ -7170,6 +7171,63 @@ static void publish_page_fixture(const char *root, unsigned id)
     g_free(evidence); g_free(current); g_free(previous); g_free(next_manifest); g_free(src);
 }
 
+static void test_retry_not_due(void)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    simulated_boottime_us = 100;
+    publish_page_fixture(root, 7);
+    simulated_boottime_us = 101;
+    LatcdRetirementPageState state;
+    assert(!latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    char *schedule = g_build_filename(root, ".gc", "retirement-schedule", NULL);
+    assert(!mkdir(schedule, 0700));
+    char *tombstones = g_build_filename(root, ".gc", "tombstones", NULL);
+    assert(!mkdir(tombstones, 0700));
+    LatcdRetirementPageDeadline hint = {.enqueued = 100, .retry_at = 100};
+    snprintf(hint.name, sizeof(hint.name), "%064x.so", 7);
+    assert(!latcd_retirement_schedule_store(root, boot, 100, 101, 3, &hint, error, sizeof(error)));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT; LatcdPageBudget budget = {0};
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 100);
+    assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
+    LatcdRetirementQueueStats stats; int result;
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0);
+    int staged = latcd_retirement_queue_retry_page_stage(queue, &capacity, UINT64_MAX,
+                                                         &budget, error, sizeof(error));
+    assert(!staged);
+    LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
+    assert(!latcd_retirement_retry_page_load(root, page, error, sizeof(error)) &&
+           page->count == 1 && page->items[0].matched && page->items[0].aggregate.deadline == 200);
+    assert(latcd_retirement_retry_page_begin_unmatched(root, &budget, error, sizeof(error)) < 0);
+    pid_t child = fork(); assert(child >= 0);
+    if (!child) {
+        simulated_boottime_us = 200;
+        _exit(latcd_retirement_retry_page_begin_not_due(root, &budget, error, sizeof(error)) < 0 ? 0 : 1);
+    }
+    int status; assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(!latcd_retirement_retry_page_begin_not_due(root, &budget, error, sizeof(error)));
+    latcd_retirement_queue_free(queue); latcd_cache_capacity_close(&capacity);
+    capacity = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT; memset(&budget, 0, sizeof(budget));
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    assert(!latcd_cache_capacity_recovery_begin(&capacity));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    assert(!latcd_retirement_retry_page_restore_budget(root, &capacity, UINT64_MAX, 100,
+                                                       &budget, page, error, sizeof(error)) &&
+           page->intent_present && !latcd_cache_capacity_recovery_finish(&capacity));
+    assert(!latcd_retirement_retry_page_apply_unmatched(root, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_retry_page_finish_unmatched(root, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_retry_page_commit(root, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_page_state_load(root, &state, error, sizeof(error)) &&
+           !strcmp(state.retry_cursor, hint.name));
+    latcd_cache_capacity_close(&capacity); g_free(page); g_free(boot); g_free(schedule); g_free(tombstones);
+    simulated_boottime_us = 0; remove_root(root); g_free(root);
+}
+
 static void test_page_round_insertions(void)
 {
     char *root = root_new(), error[256], boot[37];
@@ -7997,6 +8055,7 @@ int main(int argc, char **argv)
         test_page_state_write_fault(page_faults[i], true);
     }
     test_queue_overflow_fixture();
+    test_retry_not_due();
     test_page_round_insertions();
     test_deletion_report(NULL, false);
     test_roots_latch();
