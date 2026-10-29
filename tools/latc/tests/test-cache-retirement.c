@@ -2590,7 +2590,7 @@ static void test_budgeted_page_stage(void)
     g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
 }
 
-static void test_budgeted_stage_crash(const char *point, bool installed)
+static void test_budgeted_crash(const char *point, bool installed, bool result_write)
 {
     char *root = root_new(), error[256], *boot = NULL;
     char *gc = g_build_filename(root, ".gc", NULL);
@@ -2618,26 +2618,45 @@ static void test_budgeted_stage_crash(const char *point, bool installed)
         LatcdPageBudget budget = {0};
         assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
         latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+        if (result_write)
+            assert(!latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
+                                                         &budget, error, sizeof(error)));
         char *fault = g_strdup_printf("crash:%s", point);
         assert(!setenv("LATCD_TEST_RETIREMENT_IO", fault, 1));
-        latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
-                                             &budget, error, sizeof(error));
+        if (result_write) {
+            uint8_t identity[32];
+            assert(!latcd_retirement_page_budget_identity(&page, identity));
+            latcd_retirement_test_budget_result(root, 150, identity, &budget, &page.entries[0],
+                                                 LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error));
+        } else latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
+                                                     &budget, error, sizeof(error));
         _exit(1);
     }
     int status;
     assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
-    assert(installed ? loaded.count == 1 && loaded.budget_bound : !loaded.count);
+    assert((installed || result_write) ? loaded.count == 1 && loaded.budget_bound : !loaded.count);
     LatcdCacheCapacity recovered = LATCD_CACHE_CAPACITY_INIT;
     LatcdPageBudget budget = {0};
     assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
     assert(!latcd_cache_capacity_recovery_begin(&recovered));
-    if (installed) {
+    if (result_write && !installed) {
+        assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, &budget,
+                                                     &loaded, error, sizeof(error)) < 0);
+        assert(!budget.capacity && recovered.recovery_gate);
+    } else if (installed || result_write) {
         assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, &budget,
                                                       &loaded, error, sizeof(error)));
-        assert(budget.remaining == 2 * 65536 + 1024);
+        assert(budget.remaining == 2 * 65536 + (result_write && installed ? 0 : 1024));
         assert(!latcd_cache_capacity_recovery_finish(&recovered));
+        if (result_write) {
+            uint8_t identity[32];
+            assert(!latcd_retirement_page_budget_identity(&loaded, identity));
+            assert(!latcd_retirement_test_budget_result(root, 150, identity, &budget, &page.entries[0],
+                                                         LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
+            assert(!latcd_retirement_test_budget_commit(root, 150, &page, &budget, error, sizeof(error)));
+        }
         assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
     } else {
         assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, &budget,
@@ -6128,9 +6147,12 @@ int main(int argc, char **argv)
     test_schedule_check_page();
     test_page_stage();
     test_budgeted_page_stage();
-    test_budgeted_stage_crash("file-synced", false);
-    test_budgeted_stage_crash("renamed", true);
-    test_budgeted_stage_crash("directory-synced", true);
+    test_budgeted_crash("file-synced", false, false);
+    test_budgeted_crash("renamed", true, false);
+    test_budgeted_crash("directory-synced", true, false);
+    test_budgeted_crash("file-synced", false, true);
+    test_budgeted_crash("renamed", true, true);
+    test_budgeted_crash("directory-synced", true, true);
     test_schedule_store();
     test_schedule_max_record();
     test_schedule_merge_multiple();
