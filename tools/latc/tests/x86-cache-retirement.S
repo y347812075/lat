@@ -16,3 +16,12 @@ extra_entry:
     syscall
     ud2
 .size extra_entry, .-extra_entry
+
+.global extra_entry2
+.type extra_entry2, @function
+extra_entry2:
+    mov $60, %eax
+    mov $44, %edi
+    syscall
+    ud2
+.size extra_entry2, .-extra_entry2

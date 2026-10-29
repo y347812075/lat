@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 
-from tb_key_set import read_key_set
+from tb_key_set import read_key_set, write_key_set
 
 
 def main(prefix, guest, work):
@@ -18,11 +18,20 @@ def main(prefix, guest, work):
     latcd, latc, runner = (prefix / 'bin' / name for name in ('latcd', 'latc', 'latx-x86_64'))
     env = dict(os.environ, TMPDIR=str(Path.home() / 'tmp'), LD_LIBRARY_PATH=str(prefix / 'lib'))
     source = hashlib.sha256(guest.read_bytes()).hexdigest()
-    initial, full = work / 'initial.tbset', work / 'full.tbset'
+    initial, middle, full = (work / (name + '.tbset') for name in ('initial', 'middle', 'full'))
     subprocess.run([sys.executable, str(Path(__file__).with_name('make-tbset.py')),
                     str(guest), str(initial)], check=True, env=env)
     subprocess.run([str(latc), 'emit-static-tbset', str(guest), '-o', str(full)], check=True, env=env)
     assert set(read_key_set(initial)[2]) < set(read_key_set(full)[2])
+    symbols = subprocess.check_output(['readelf', '-sW', str(guest)], text=True)
+    extra = next(int(line.split()[1], 16) for line in symbols.splitlines()
+                 if line.split() and line.split()[-1] == 'extra_entry')
+    segments = subprocess.check_output(['readelf', '-lW', str(guest)], text=True)
+    bases = [int(line.split()[2], 16) for line in segments.splitlines()
+             if line.strip().startswith('LOAD')]
+    extra_key = (extra - min(bases), 3)
+    assert extra_key in set(read_key_set(full)[2])
+    write_key_set(guest, middle, set(read_key_set(initial)[2]) | {extra_key})
     args = [str(latcd), '--once', '--socket', str(sock), '--cache-dir', str(cache),
             '--latc', str(latc), '--runner', str(runner), '--runtime-dir', str(prefix / 'lib')]
 
@@ -67,8 +76,11 @@ def main(prefix, guest, work):
                     raise AssertionError('captured module not pinned')
                 except BlockingIOError:
                     pass
+            publish(middle)
+            intermediate = json.loads(manifest.read_text())
+            assert intermediate['module'] != old['module']
             publish(full)
-            assert json.loads(manifest.read_text())['module'] != old['module']
+            assert json.loads(manifest.read_text())['module'] not in (old['module'], intermediate['module'])
             release.touch()
             assert child.wait(timeout=30) == 42
         finally:
