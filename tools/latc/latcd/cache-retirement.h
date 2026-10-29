@@ -65,6 +65,9 @@ typedef struct LatcdRetirementConsumption {
 } LatcdRetirementConsumption;
 int latcd_retirement_consumption_valid(const LatcdRetirementPageState *page,
                                        const LatcdRetirementConsumption *consumption);
+int latcd_retirement_consumption_identity(const LatcdRetirementPageState *page,
+                                          const LatcdRetirementConsumption *consumption,
+                                          uint8_t digest[32]);
 int latcd_retirement_consumption_bind(const LatcdRetirementPageState *page,
                                       LatcdRetirementConsumption *consumption,
                                       unsigned index, const struct stat *snapshot,

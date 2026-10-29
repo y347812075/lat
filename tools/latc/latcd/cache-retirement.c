@@ -796,6 +796,34 @@ static int page_snapshot_identity(const LatcdRetirementPageState *state, uint8_t
     return length == 32 ? 0 : -1;
 }
 
+int latcd_retirement_consumption_identity(const LatcdRetirementPageState *page,
+                                          const LatcdRetirementConsumption *consumption,
+                                          uint8_t digest[32])
+{
+    if (!digest) return -1;
+    memset(digest, 0, 32);
+    uint8_t page_digest[32];
+    if (latcd_retirement_consumption_valid(page, consumption) ||
+        page_snapshot_identity(page, page_digest)) return -1;
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    static const char domain[] = "latcd-retirement-consumption-v1";
+    g_checksum_update(checksum, (const guchar *)domain, sizeof(domain));
+    g_checksum_update(checksum, page_digest, sizeof(page_digest));
+    g_checksum_update(checksum, consumption->completed, sizeof(consumption->completed));
+    page_identity_u64(checksum, consumption->intent_present);
+    page_identity_u64(checksum, consumption->intent_index);
+    const uint64_t fields[] = {consumption->device, consumption->inode, consumption->mode,
+        consumption->uid, consumption->nlink, consumption->size, consumption->blocks,
+        (uint64_t)consumption->mtime_sec, consumption->mtime_nsec,
+        (uint64_t)consumption->ctime_sec, consumption->ctime_nsec};
+    for (unsigned i = 0; i < G_N_ELEMENTS(fields); i++) page_identity_u64(checksum, fields[i]);
+    g_checksum_update(checksum, consumption->digest, sizeof(consumption->digest));
+    gsize length = 32;
+    g_checksum_get_digest(checksum, digest, &length);
+    g_checksum_free(checksum);
+    return length == 32 ? 0 : -1;
+}
+
 static bool record_string_is(GKeyFile *record, const char *group,
                              const char *key, const char *expected);
 static bool record_uint64(GKeyFile *record, const char *group,
