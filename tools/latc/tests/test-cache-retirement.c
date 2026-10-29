@@ -7533,6 +7533,19 @@ static void test_page_round_insertions(void)
     assert(!latcd_retirement_queue_diagnostic_retry(queue, boot, cutoff, hints, 2));
     do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
     while (result > 0);
+    assert(result < 0 && !latcd_retirement_queue_retry_items(queue, items, &item_count));
+    changed = g_build_filename(root, hints[1].name, NULL);
+    put(changed, "reappeared\n");
+    assert(latcd_retirement_queue_retry_revalidate(queue, error, sizeof(error)) < 0);
+    assert(latcd_retirement_queue_retry_items(queue, items, &item_count) < 0 && !item_count);
+    assert(!unlink(changed));
+    g_free(changed);
+    latcd_retirement_queue_free(queue);
+
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(!latcd_retirement_queue_diagnostic_retry(queue, boot, cutoff, hints, 2));
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
     char *shard_name = g_strconcat(hints[0].name, ".ini", NULL);
     char *shard_path = g_build_filename(root, ".gc", "retirement-schedule", shard_name, NULL);
     assert(!unlink(shard_path));

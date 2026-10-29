@@ -5680,12 +5680,19 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         int gc = open_directory(root, ".gc", false);
         queue->discovery_tombstones = gc < 0 ? -1 : open_directory(gc, "tombstones", true);
         if (gc >= 0) close(gc);
-        close(root);
-        if (store < 0 || queue->discovery_tombstones < 0) { if (store >= 0) close(store); goto out; }
+        if (store < 0 || queue->discovery_tombstones < 0) {
+            if (store >= 0) close(store);
+            close(root);
+            goto out;
+        }
         queue->cursor = fdopendir(store);
-        if (!queue->cursor) { close(store); goto out; }
+        if (!queue->cursor) { close(store); close(root); goto out; }
         queue->discovery_watch = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-        if (queue->discovery_watch < 0 || queue_watch_fd(queue->discovery_watch,
+        int watch_root = queue->discovery_watch < 0 ? -1 : queue_watch_fd(queue->discovery_watch,
+            root, IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO |
+            IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR);
+        close(root);
+        if (watch_root || queue_watch_fd(queue->discovery_watch,
             dirfd(queue->cursor), IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO |
             IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR)) goto out;
         if (queue_watch_fd(queue->discovery_watch, queue->discovery_tombstones,
