@@ -5676,6 +5676,15 @@ static void test_mount_lease_registration_lock(void)
     char *record = g_build_filename(store, record_name, NULL);
     assert(access(record, F_OK) && errno == ENOENT);
     close(lock);
+    struct stat st;
+    assert(!stat(store, &st));
+    retry_sync_device = st.st_dev; retry_sync_inode = st.st_ino;
+    char *saved = g_build_filename(gc, "mount-leases-saved", NULL);
+    sync_swap_path = store; sync_swap_saved = saved;
+    assert(latcd_retirement_mount_lease(root, id, "CACHE", NULL, NULL, error, sizeof(error)) < 0);
+    assert(!sync_swap_path && access(record, F_OK) && errno == ENOENT);
+    assert(!rmdir(store) && !rename(saved, store));
+    g_free(saved);
     int lease = latcd_retirement_mount_lease(root, id, "CACHE", NULL, NULL, error, sizeof(error));
     assert(lease >= 0 && !access(record, F_OK));
     close(lease);

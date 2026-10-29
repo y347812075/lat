@@ -4254,6 +4254,17 @@ static bool mount_lease_fd_valid(const char *root, int gc, int lease_fd)
     return valid;
 }
 
+static bool mount_lease_directories_valid(const char *root, int directory, int gc,
+                                          int store, int roots)
+{
+    struct stat held, path;
+    return !fstat(directory, &held) && !lstat(root, &path) &&
+        held.st_dev == path.st_dev && held.st_ino == path.st_ino &&
+        directory_matches_at(directory, ".gc", gc) &&
+        directory_matches_at(gc, "mount-leases", store) &&
+        lock_matches_at(gc, "reference-roots.lock", roots);
+}
+
 int latcd_retirement_mount_lease(const char *root, const char *id, const char *scope,
                                  const char *source, const char *name,
                                  char *error, size_t error_size)
@@ -4277,7 +4288,8 @@ int latcd_retirement_mount_lease(const char *root, const char *id, const char *s
     directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     gc = directory < 0 ? -1 : open_directory(directory, ".gc", true);
     store = gc < 0 ? -1 : open_directory(gc, "mount-leases", true);
-    if (store < 0 || flock(store, LOCK_EX | LOCK_NB) || fstat(directory, &cache)) goto out;
+    if (store < 0 || flock(store, LOCK_EX | LOCK_NB) || fstat(directory, &cache) ||
+        !mount_lease_directories_valid(root, directory, gc, store, roots)) goto out;
     const char *record_source = cache_scope ? "" : source;
     const char *record_name = object_scope ? name : "";
     if (object_scope) {
@@ -4313,6 +4325,7 @@ int latcd_retirement_mount_lease(const char *root, const char *id, const char *s
         g_key_file_set_uint64(record, "mount", "object_inode", object.st_ino);
         if (write_record(store, filename, record)) goto out;
     }
+    if (!mount_lease_directories_valid(root, directory, gc, store, roots)) goto out;
     result = roots;
     roots = -1;
 out:
@@ -4345,6 +4358,7 @@ int latcd_retirement_mount_release(const char *root, const char *id,
     GKeyFile *record = g_key_file_new();
     MountLeaseRecord lease = {0};
     if (store < 0 || fstat(directory, &cache) || !mount_lease_fd_valid(root, gc, lease_fd) ||
+        !mount_lease_directories_valid(root, directory, gc, store, lease_fd) ||
         read_file(store, filename, MANIFEST_LIMIT, &raw, &size) ||
         memchr(raw, 0, size) ||
         !g_key_file_load_from_data(record, raw, size, 0, NULL) ||
@@ -4360,6 +4374,7 @@ int latcd_retirement_mount_release(const char *root, const char *id,
         g_key_file_set_string(record, "mount", "state", "RELEASED");
         if (write_record(store, filename, record)) goto out;
     }
+    if (!mount_lease_directories_valid(root, directory, gc, store, lease_fd)) goto out;
     result = 0;
 out:
     mount_lease_clear(&lease);
