@@ -5160,8 +5160,10 @@ out:
 }
 
 static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatched,
+                                LatcdRetirementRetryPage *page,
                                 char *error, size_t error_size)
 {
+    if (page) memset(page, 0, sizeof(*page));
     if (!queue || !queue->retry_witness || !queue->cursor ||
         queue->discovery_watch < 0 || queue->discovery_tombstones < 0)
         return fail(error, error_size, "missing retry discovery witness");
@@ -5207,8 +5209,8 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
             found->last_attempt != hint->last_attempt || found->retry_at != hint->retry_at ||
             found->busy_count != hint->busy_count || found->retry_at > now) goto out;
     }
-    if (advance_unmatched && (!queue->retry_snapshot_bound ||
-        g_hash_table_size(queue->confirmed_keys))) goto out;
+    if ((advance_unmatched || page) && !queue->retry_snapshot_bound) goto out;
+    if (advance_unmatched && g_hash_table_size(queue->confirmed_keys)) goto out;
     if (queue->retry_snapshot_bound) {
         LatcdRetirementPageDeadline selected[128];
         uint64_t selected_sequences[128] = {0};
@@ -5229,6 +5231,23 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
                 selected_sequences[i] != queue->retry_item_sequence[i]) goto out;
     }
     if (!queue_watch_clean(queue->discovery_watch)) goto out;
+    if (page) {
+        unsigned count = 0;
+        uint8_t identity[32];
+        page->cache_device = current.cache_device;
+        page->cache_inode = current.cache_inode;
+        page->grace_us = current.grace_us;
+        page->round_cutoff = current.round_cutoff;
+        page->snapshot_time = queue->retry_snapshot_time;
+        page->snapshot_sequence = queue->retry_snapshot_sequence;
+        g_strlcpy(page->boot, current.boot, sizeof(page->boot));
+        g_strlcpy(page->committed_cursor, current.committed_cursor, sizeof(page->committed_cursor));
+        g_strlcpy(page->retry_cursor, current.retry_cursor, sizeof(page->retry_cursor));
+        if (latcd_retirement_queue_retry_items(queue, page->items, &count)) goto out;
+        page->count = count;
+        g_strlcpy(page->end_cursor, queue->retry_order[count - 1], sizeof(page->end_cursor));
+        if (latcd_retirement_retry_page_identity(page, identity)) goto out;
+    }
     if (advance_unmatched) {
         g_strlcpy(current.retry_cursor, queue->retry_order[queue->retry_count - 1],
                   sizeof(current.retry_cursor));
@@ -5247,20 +5266,30 @@ out:
     if (queue->cursor) { closedir(queue->cursor); queue->cursor = NULL; }
     if (queue->discovery_watch >= 0) { close(queue->discovery_watch); queue->discovery_watch = -1; }
     if (queue->discovery_tombstones >= 0) { close(queue->discovery_tombstones); queue->discovery_tombstones = -1; }
-    if (result) queue->aggregation_verified = false;
+    if (result) {
+        queue->aggregation_verified = false;
+        if (page) memset(page, 0, sizeof(*page));
+    }
     return result ? fail(error, error_size, "retry witness changed; rescan") : 0;
 }
 
 int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
                                              char *error, size_t error_size)
 {
-    return retry_witness_finish(queue, false, error, error_size);
+    return retry_witness_finish(queue, false, NULL, error, error_size);
+}
+
+int latcd_retirement_queue_retry_page_snapshot(LatcdRetirementQueue *queue,
+    LatcdRetirementRetryPage *page, char *error, size_t error_size)
+{
+    if (!page) return fail(error, error_size, "missing retry page output");
+    return retry_witness_finish(queue, false, page, error, error_size);
 }
 
 int latcd_retirement_queue_retry_advance_unmatched(LatcdRetirementQueue *queue,
                                                     char *error, size_t error_size)
 {
-    return retry_witness_finish(queue, true, error, error_size);
+    return retry_witness_finish(queue, true, NULL, error, error_size);
 }
 
 int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,

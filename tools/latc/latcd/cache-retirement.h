@@ -498,6 +498,10 @@ int latcd_retirement_queue_retry_items(const LatcdRetirementQueue *queue,
  * reference-roots locks. This does not authorize deletion or persist a page. */
 int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
     char *error, size_t error_size);
+/* Return the validated input observed under both locks. Locks are released
+ * before return, so the output is neither a durable checkpoint nor authority. */
+int latcd_retirement_queue_retry_page_snapshot(LatcdRetirementQueue *queue,
+    LatcdRetirementRetryPage *page, char *error, size_t error_size);
 /* Advance only past an entirely unmatched retry batch while preserving every
  * shard. Requires a snapshot-bound monitored scan; never authorizes removal. */
 int latcd_retirement_queue_retry_advance_unmatched(LatcdRetirementQueue *queue,
