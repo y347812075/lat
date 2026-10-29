@@ -1153,7 +1153,7 @@ static void test_round_cursor(void)
     struct stat intent_stat = {.st_dev = 1, .st_ino = 2, .st_mode = S_IFREG | 0400,
         .st_uid = geteuid(), .st_nlink = 1, .st_size = 1024, .st_blocks = 8};
     uint8_t intent_digest[32] = {1};
-    assert(!latcd_retirement_consumption_bind(&consumption, 0, &intent_stat, intent_digest));
+    assert(!latcd_retirement_consumption_bind(&pending_page, &consumption, 0, &intent_stat, intent_digest));
     assert(!latcd_retirement_consumption_valid(&pending_page, &consumption));
     consumption.size++;
     assert(latcd_retirement_consumption_valid(&pending_page, &consumption) < 0);
@@ -1169,12 +1169,15 @@ static void test_round_cursor(void)
     consumption.completed[15] = 128;
     assert(latcd_retirement_consumption_valid(&pending_page, &consumption) < 0);
     consumption.completed[15] = 0;
-    assert(!latcd_retirement_consumption_bind(&consumption, 1, &intent_stat, intent_digest));
-    assert(latcd_retirement_consumption_valid(&pending_page, &consumption) < 0);
-    consumption.intent_index = 128;
-    assert(latcd_retirement_consumption_valid(&pending_page, &consumption) < 0);
-    consumption.intent_present = false;
-    assert(latcd_retirement_consumption_valid(&pending_page, &consumption) < 0);
+    LatcdRetirementConsumption before_bind = consumption;
+    assert(latcd_retirement_consumption_bind(&pending_page, &consumption, 1, &intent_stat, intent_digest) < 0);
+    assert(!memcmp(&consumption, &before_bind, sizeof(consumption)));
+    assert(latcd_retirement_consumption_bind(&pending_page, &consumption, 128, &intent_stat, intent_digest) < 0);
+    assert(!memcmp(&consumption, &before_bind, sizeof(consumption)));
+    consumption.completed[0] = 1;
+    before_bind = consumption;
+    assert(latcd_retirement_consumption_bind(&pending_page, &consumption, 0, &intent_stat, intent_digest) < 0);
+    assert(!memcmp(&consumption, &before_bind, sizeof(consumption)));
     assert(!latcd_retirement_page_state_store(page_root, &pending_page, page_error, sizeof(page_error)));
     assert(latcd_retirement_page_startup_check(page_root, page_error, sizeof(page_error)) < 0);
     assert(!latcd_retirement_page_state_load(page_root, &loaded, page_error, sizeof(page_error)) &&

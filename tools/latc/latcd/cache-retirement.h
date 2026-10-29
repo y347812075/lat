@@ -65,7 +65,8 @@ typedef struct LatcdRetirementConsumption {
 } LatcdRetirementConsumption;
 int latcd_retirement_consumption_valid(const LatcdRetirementPageState *page,
                                        const LatcdRetirementConsumption *consumption);
-int latcd_retirement_consumption_bind(LatcdRetirementConsumption *consumption,
+int latcd_retirement_consumption_bind(const LatcdRetirementPageState *page,
+                                      LatcdRetirementConsumption *consumption,
                                       unsigned index, const struct stat *snapshot,
                                       const uint8_t digest[32]);
 /* Select the next stable-name page from a caller-provided sorted list. Names

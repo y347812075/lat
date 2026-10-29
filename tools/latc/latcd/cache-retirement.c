@@ -682,11 +682,15 @@ int latcd_retirement_consumption_valid(const LatcdRetirementPageState *page,
     return 0;
 }
 
-int latcd_retirement_consumption_bind(LatcdRetirementConsumption *consumption,
+int latcd_retirement_consumption_bind(const LatcdRetirementPageState *page,
+                                      LatcdRetirementConsumption *consumption,
                                       unsigned index, const struct stat *snapshot,
                                       const uint8_t digest[32])
 {
-    if (!consumption || !snapshot || !digest || consumption->intent_present || index >= 128 ||
+    if (!consumption || !snapshot || !digest ||
+        latcd_retirement_consumption_valid(page, consumption) || consumption->intent_present ||
+        index >= page->count || page->results[index] != LATCD_RETIREMENT_RESULT_DONE ||
+        (consumption->completed[index / 8] & (1u << (index % 8))) ||
         !S_ISREG(snapshot->st_mode) || (snapshot->st_mode & 0222) ||
         snapshot->st_uid != geteuid() || snapshot->st_nlink != 1 ||
         snapshot->st_size != RETIREMENT_SCHEDULE_RECORD_BYTES || snapshot->st_blocks < 0 ||
