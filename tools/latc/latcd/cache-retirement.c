@@ -1356,7 +1356,7 @@ int latcd_retirement_schedule_store_page_result(const char *root, uint64_t now_u
     uint8_t persisted_identity[32];
     bool legacy = false;
     if (page_state_load(root, &persisted, &legacy, error, error_size) || legacy ||
-        persisted.committed_pending || page->committed_pending ||
+        persisted.committed_pending || persisted.budget_bound || page->committed_pending ||
         latcd_retirement_page_identity(&persisted, persisted_identity) ||
         memcmp(identity, persisted_identity, sizeof(identity)) || persisted.sequence != page->sequence) {
         close(scheduler);
@@ -1691,7 +1691,7 @@ static int page_commit(const char *root, uint64_t now_us,
     int result = -1;
     int directory = -1, gc = -1;
     if (page_state_load(root, &persisted, &legacy, error, error_size) || legacy ||
-        persisted.committed_pending || page->committed_pending ||
+        persisted.committed_pending || (persisted.budget_bound && !budget) || page->committed_pending ||
         latcd_retirement_page_identity(&persisted, actual) ||
         memcmp(expected, actual, sizeof(expected)) || persisted.sequence != page->sequence) goto out;
     for (unsigned i = 0; i < persisted.count; i++)

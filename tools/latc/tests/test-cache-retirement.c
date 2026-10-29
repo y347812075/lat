@@ -2524,10 +2524,14 @@ static void test_budgeted_page_stage(void)
     assert(budget.capacity == &capacity && budget.page_identity_bound && capacity.ready);
     assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && loaded.budget_bound);
     assert(latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0);
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
+           LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
     uint8_t binding[32];
     assert(!latcd_retirement_page_budget_identity(&page, binding));
     assert(!latcd_retirement_test_budget_result(root, 150, binding, &budget, &page.entries[0],
                                                 LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
+    assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
     assert(!latcd_cache_capacity_test_page_release(&capacity, &budget));
     latcd_cache_capacity_close(&capacity);
     assert(!pthread_mutex_destroy(&capacity.lock));
