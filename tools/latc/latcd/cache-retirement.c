@@ -1087,6 +1087,7 @@ static int retirement_schedule_access(const char *root, const char *boot,
     uint64_t bytes = 0;
     uint64_t replaced_bytes = 0;
     bool found = false;
+    bool identical_result = false;
     uint64_t saved_sequence = 0;
     LatcdRetirementResultKind saved_kind = 0;
     bool page_seen[128] = {0};
@@ -1200,6 +1201,10 @@ static int retirement_schedule_access(const char *root, const char *boot,
             g_strlcpy(saved.name, name, sizeof(saved.name));
             saved.enqueued = enqueued; saved.last_attempt = attempted;
             saved.retry_at = retry; saved.busy_count = busy;
+            identical_result = budget && v2 && page_identity && !strcmp(identity, page_hex) &&
+                seq == sequence && enqueued == entry->enqueued && attempted == entry->last_attempt &&
+                retry == entry->retry_at && busy == entry->busy_count &&
+                !strcmp(saved_result, kind == LATCD_RETIREMENT_RESULT_DONE ? "done" : "deferred");
             if (loading && page_identity && v2) {
                 if (!strcmp(identity, page_hex)) saved_kind = !strcmp(saved_result, "done") ?
                     LATCD_RETIREMENT_RESULT_DONE : LATCD_RETIREMENT_RESULT_DEFERRED;
@@ -1270,7 +1275,14 @@ static int retirement_schedule_access(const char *root, const char *boot,
         lstat(root, &path) || path.st_dev != cache.st_dev || path.st_ino != cache.st_ino ||
         !directory_matches_at(root_fd, ".gc", gc) ||
         !directory_matches_at(gc, "retirement-schedule", store)) goto out;
-    result = write_record_kind(store, filename, output, true, true, false, budget, NULL);
+    if (identical_result) {
+        LatcdMetadataReservation reservation;
+        result = latcd_cache_capacity_page_begin(store, filename, output_size, budget, &reservation);
+        if (!result) {
+            latcd_cache_capacity_metadata_finish(&reservation, false, false);
+            if (!latcd_cache_capacity_poll(budget->capacity)) result = -1;
+        }
+    } else result = write_record_kind(store, filename, output, true, true, false, budget, NULL);
 out:
     g_key_file_unref(output); g_free(filename);
     if (watch >= 0) close(watch);

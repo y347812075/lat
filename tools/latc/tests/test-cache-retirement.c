@@ -1824,8 +1824,14 @@ static void test_schedule_check_page(void)
     assert(!latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
            &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
     assert(page_budget.remaining == saved_reservation - 1024 && page_capacity.ready);
+    LatcdPageBudget copy = page_budget;
+    assert(latcd_retirement_test_budget_result(root, 150, budget_binding, &copy,
+           &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(page_budget.remaining == saved_reservation - 1024 && page_capacity.ready);
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:created", 1));
     assert(!latcd_retirement_test_budget_result(root, 150, budget_binding, &page_budget,
            &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
     assert(page_budget.remaining == saved_reservation - 1024 && page_capacity.ready);
     uint64_t committed_before_fault = page_capacity.metadata_committed;
     int fd_before = open("/dev/null", O_RDONLY | O_CLOEXEC);
