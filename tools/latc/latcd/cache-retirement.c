@@ -665,8 +665,43 @@ int latcd_retirement_consumption_valid(const LatcdRetirementPageState *page,
     if (consumption->intent_present) {
         unsigned i = consumption->intent_index;
         if (i >= page->count || page->results[i] != LATCD_RETIREMENT_RESULT_DONE ||
-            (consumption->completed[i / 8] & (1u << (i % 8)))) return -1;
-    } else if (consumption->intent_index) return -1;
+            (consumption->completed[i / 8] & (1u << (i % 8))) ||
+            !consumption->device || !consumption->inode ||
+            !S_ISREG(consumption->mode) || (consumption->mode & 0222) || consumption->uid != geteuid() ||
+            consumption->nlink != 1 || consumption->size != RETIREMENT_SCHEDULE_RECORD_BYTES ||
+            consumption->mtime_nsec >= 1000000000 || consumption->ctime_nsec >= 1000000000)
+            return -1;
+    } else {
+        LatcdRetirementConsumption empty = *consumption;
+        memset(empty.completed, 0, sizeof(empty.completed));
+        LatcdRetirementConsumption zero = {0};
+        if (empty.intent_index || empty.device || empty.inode || empty.mode || empty.uid ||
+            empty.nlink || empty.size || empty.blocks || empty.mtime_sec || empty.ctime_sec ||
+            empty.mtime_nsec || empty.ctime_nsec || memcmp(empty.digest, zero.digest, 32)) return -1;
+    }
+    return 0;
+}
+
+int latcd_retirement_consumption_bind(LatcdRetirementConsumption *consumption,
+                                      unsigned index, const struct stat *snapshot,
+                                      const uint8_t digest[32])
+{
+    if (!consumption || !snapshot || !digest || consumption->intent_present || index >= 128 ||
+        !S_ISREG(snapshot->st_mode) || (snapshot->st_mode & 0222) ||
+        snapshot->st_uid != geteuid() || snapshot->st_nlink != 1 ||
+        snapshot->st_size != RETIREMENT_SCHEDULE_RECORD_BYTES || snapshot->st_blocks < 0 ||
+        snapshot->st_mtim.tv_nsec < 0 || snapshot->st_mtim.tv_nsec >= 1000000000 ||
+        snapshot->st_ctim.tv_nsec < 0 || snapshot->st_ctim.tv_nsec >= 1000000000 ||
+        !snapshot->st_dev || !snapshot->st_ino) return -1;
+    consumption->intent_present = true;
+    consumption->intent_index = index;
+    consumption->device = snapshot->st_dev; consumption->inode = snapshot->st_ino;
+    consumption->mode = snapshot->st_mode; consumption->uid = snapshot->st_uid;
+    consumption->nlink = snapshot->st_nlink; consumption->size = snapshot->st_size;
+    consumption->blocks = snapshot->st_blocks;
+    consumption->mtime_sec = snapshot->st_mtim.tv_sec; consumption->mtime_nsec = snapshot->st_mtim.tv_nsec;
+    consumption->ctime_sec = snapshot->st_ctim.tv_sec; consumption->ctime_nsec = snapshot->st_ctim.tv_nsec;
+    memcpy(consumption->digest, digest, 32);
     return 0;
 }
 

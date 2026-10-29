@@ -58,9 +58,16 @@ typedef struct LatcdRetirementConsumption {
     uint8_t completed[16];
     bool intent_present;
     unsigned intent_index;
+    uint64_t device, inode, mode, uid, nlink, size, blocks;
+    int64_t mtime_sec, ctime_sec;
+    uint32_t mtime_nsec, ctime_nsec;
+    uint8_t digest[32];
 } LatcdRetirementConsumption;
 int latcd_retirement_consumption_valid(const LatcdRetirementPageState *page,
                                        const LatcdRetirementConsumption *consumption);
+int latcd_retirement_consumption_bind(LatcdRetirementConsumption *consumption,
+                                      unsigned index, const struct stat *snapshot,
+                                      const uint8_t digest[32]);
 /* Select the next stable-name page from a caller-provided sorted list. Names
  * must be valid object basenames. This is scheduling only, never admission. */
 int latcd_retirement_page_select(const char *const *names, size_t count,
