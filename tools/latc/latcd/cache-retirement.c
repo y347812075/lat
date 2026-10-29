@@ -6395,13 +6395,21 @@ int latcd_retirement_queue_handoff(LatcdRetirementQueue *queue, const char *reas
     g_key_file_set_boolean(record, "handoff", "unattended_gc_guaranteed", false);
     g_key_file_set_boolean(record, "handoff", "automatic_deletion_enabled", false);
     g_key_file_set_uint64(record, "handoff", "known_candidates", g_hash_table_size(queue->candidates));
-    uint64_t deferred = 0;
+    uint64_t deferred = 0, next_attempt = 0;
     GHashTableIter iterator;
     gpointer value;
     g_hash_table_iter_init(&iterator, queue->candidates);
-    while (g_hash_table_iter_next(&iterator, NULL, &value))
-        if (((RetirementCandidate *)value)->retry_at > now) deferred++;
+    while (g_hash_table_iter_next(&iterator, NULL, &value)) {
+        RetirementCandidate *candidate = value;
+        if (candidate->retry_at > now) deferred++;
+        if (queue->complete) {
+            uint64_t attempt = MAX(candidate->deadline, candidate->retry_at);
+            attempt = MAX(attempt, now);
+            if (!next_attempt || attempt < next_attempt) next_attempt = attempt;
+        }
+    }
     g_key_file_set_uint64(record, "handoff", "known_deferred", deferred);
+    g_key_file_set_uint64(record, "handoff", "next_attempt_hint_boottime_us", next_attempt);
     char *previous = NULL;
     size_t size;
     int status = read_file(gc, "retirement-handoff.ini", RECORD_LIMIT, &previous, &size);

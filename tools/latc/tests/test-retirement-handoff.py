@@ -4,6 +4,7 @@
 import configparser
 import base64
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -26,10 +27,11 @@ def run(prefix, guest, work):
     for mode in ('idle', 'stop'):
         case = work / mode
         case.mkdir(mode=0o700)
-        cache, socket = case / 'cache', case / 'socket'
+        cache, socket, stats = case / 'cache', case / 'socket', case / 'stats.json'
         args = [str(latcd), '--serve', '--socket', str(socket), '--cache-dir', str(cache),
                 '--latc', str(prefix / 'bin/latc'), '--runner', str(prefix / 'bin/latx-x86_64'),
-                '--runtime-dir', str(prefix / 'lib'), '--idle-seconds', '2' if mode == 'idle' else '0']
+                '--runtime-dir', str(prefix / 'lib'), '--stats', str(stats),
+                '--idle-seconds', '10' if mode == 'idle' else '0']
         previous_manifest = None
         retained = None
         for iteration in range(2):
@@ -55,6 +57,16 @@ def run(prefix, guest, work):
                     if previous_manifest is not None:
                         assert manifest == previous_manifest
                     previous_manifest = manifest
+                    deadline = time.monotonic() + 9
+                    while True:
+                        try:
+                            observed = json.loads(stats.read_bytes())
+                        except (FileNotFoundError, ValueError):
+                            observed = {}
+                        if observed.get('retirement_discovery_complete') and observed.get('retirement_candidates', 0):
+                            break
+                        assert daemon.poll() is None and time.monotonic() < deadline, observed
+                        time.sleep(.05)
                     if mode == 'stop':
                         daemon.terminate()
                     assert daemon.wait(timeout=30) == 0
@@ -74,6 +86,10 @@ def run(prefix, guest, work):
             assert value['boot'] == Path('/proc/sys/kernel/random/boot_id').read_text().strip()
             assert value.getint('recorded_boottime_us') > 0
             assert value.getint('known_candidates') > 0, 'fixture must produce a replacement generation'
+            hint = value.getint('next_attempt_hint_boottime_us')
+            assert hint == 0 or hint >= value.getint('recorded_boottime_us')
+            if not value.getboolean('discovery_complete'):
+                assert hint == 0
             objects = {}
             for transaction in (cache / '.gc/transactions').glob('*.ini'):
                 tx = configparser.ConfigParser(interpolation=None, strict=True)

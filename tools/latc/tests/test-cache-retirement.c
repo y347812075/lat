@@ -6414,6 +6414,7 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         g_free(state);
         assert(g_key_file_get_uint64(handoff, "handoff", "known_candidates", NULL) == 3);
         assert(g_key_file_get_uint64(handoff, "handoff", "known_deferred", NULL) == 1);
+        assert(g_key_file_get_uint64(handoff, "handoff", "next_attempt_hint_boottime_us", NULL) > 0);
         assert(!g_key_file_get_boolean(handoff, "handoff", "unattended_gc_guaranteed", NULL));
         assert(!g_key_file_get_boolean(handoff, "handoff", "automatic_deletion_enabled", NULL));
         assert(latcd_retirement_queue_defer(queue, &interrupted, 0, true) < 0);
