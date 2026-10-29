@@ -4246,8 +4246,7 @@ static bool mount_lease_fd_valid(const char *root, int gc, int lease_fd)
         !fstat(lock, &path) && object_stat_equal(&held, &path) &&
         S_ISREG(held.st_mode) && held.st_uid == geteuid() && held.st_nlink == 1 &&
         !(held.st_mode & 0077) && !held.st_size && !fstatat(gc, "reference-roots.lock",
-        &path, AT_SYMLINK_NOFOLLOW) && object_stat_equal(&held, &path) &&
-        !flock(lease_fd, LOCK_EX | LOCK_NB);
+        &path, AT_SYMLINK_NOFOLLOW) && object_stat_equal(&held, &path);
     int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     valid = valid && directory >= 0 && !fstat(directory, &cache);
     if (directory >= 0) close(directory);
@@ -4329,11 +4328,13 @@ out:
         "mount lease rejected or incomplete");
 }
 
-int latcd_retirement_mount_release(const char *root, const char *id, int lease_fd,
+int latcd_retirement_mount_release(const char *root, const char *id,
                                    char *error, size_t error_size)
 {
-    if (!root || !hold_id_valid(id) || lease_fd < 0)
+    if (!root || !hold_id_valid(id))
         return fail(error, error_size, "invalid mount lease release");
+    int lease_fd = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, error_size);
+    if (lease_fd < 0) return -1;
     int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
     int store = gc < 0 ? -1 : open_directory(gc, "mount-leases", false);
@@ -4366,6 +4367,7 @@ out:
     if (store >= 0) close(store);
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
+    close(lease_fd);
     g_free(raw);
     g_free(filename);
     g_key_file_unref(record);

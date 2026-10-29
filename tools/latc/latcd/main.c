@@ -6321,11 +6321,7 @@ static int run_gc_plan(int argc, char **argv)
     }
     if (release) {
         if (!lease_id) { usage(argv[0]); return 2; }
-        int roots = latcd_retirement_roots_lock(cache, LOCK_EX | LOCK_NB,
-                                                error, sizeof(error));
-        int result = roots < 0 ? -1 : latcd_retirement_mount_release(
-            cache, lease_id, roots, error, sizeof(error));
-        if (roots >= 0) close(roots);
+        int result = latcd_retirement_mount_release(cache, lease_id, error, sizeof(error));
         if (result) {
             fprintf(stderr, "latcd: mount lease release failed: %s\n", error);
             return 1;
