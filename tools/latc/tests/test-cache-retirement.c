@@ -4246,7 +4246,7 @@ static void test_startup_partial_records(void)
 {
     char *root = root_new(), error[256];
     assert(!latcd_retirement_startup_records_check(root, error, sizeof(error)));
-    const char *names[] = {"transactions", "tombstones"};
+    const char *names[] = {"transactions", "tombstones", "retirement-schedule"};
     for (unsigned i = 0; i < G_N_ELEMENTS(names); i++) {
         char *store = g_build_filename(root, ".gc", names[i], NULL);
         assert(!g_mkdir_with_parents(store, 0700));

@@ -971,7 +971,7 @@ int latcd_retirement_startup_records_check(const char *root, char *error, size_t
     bool valid = directory >= 0 && !fstat(directory, &held) && !lstat(root, &path) &&
         held.st_dev == path.st_dev && held.st_ino == path.st_ino;
     if (valid && gc < 0) valid = gc_errno == ENOENT;
-    const char *names[] = {"transactions", "tombstones"};
+    const char *names[] = {"transactions", "tombstones", "retirement-schedule"};
     for (unsigned i = 0; valid && gc >= 0 && i < G_N_ELEMENTS(names); i++) {
         int store = open_directory(gc, names[i], false);
         if (store < 0) { valid = errno == ENOENT; continue; }

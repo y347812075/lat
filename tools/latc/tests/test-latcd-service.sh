@@ -177,7 +177,7 @@ grep -q 'retirement page budget recovery unavailable or checkpoint unsafe' "$pag
 test ! -e "$page_phase/latcd.sock"
 test "$page_hash" = "$(sha256sum "$page_phase/cache/.gc/.write-interrupted")"
 
-for record_store in transactions tombstones; do
+for record_store in transactions tombstones retirement-schedule; do
     phase=$work/partial-$record_store
     mkdir -m 700 "$phase" "$phase/cache" "$phase/cache/.gc" "$phase/cache/.gc/$record_store"
     printf 'interrupted lifecycle record\n' > "$phase/cache/.gc/$record_store/.write-interrupted"
