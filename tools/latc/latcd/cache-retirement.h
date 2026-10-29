@@ -243,6 +243,9 @@ int latcd_retirement_consumption_begin(const char *root, uint64_t now_us,
 /* Persist one done shard's current identity under the scheduler lock. */
 int latcd_retirement_consumption_prepare(const char *root, uint64_t now_us, unsigned index,
                                     struct LatcdPageBudget *budget, char *error, size_t error_size);
+/* Owner lease and controlled namespace required; recovery gate must be closed. */
+int latcd_retirement_consumption_apply(const char *root, uint64_t now_us,
+                                    struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Caller holds the owner lease and serializes budget lifetime. These operations
  * require a persisted budget binding and never authorize object deletion. */
 int latcd_retirement_page_budget_result(const char *root, uint64_t now_us,

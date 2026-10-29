@@ -1268,7 +1268,7 @@ void latcd_cache_capacity_metadata_finish(LatcdMetadataReservation *reservation,
 }
 
 static int metadata_remove(int directory, const char *name, uint64_t device,
-                           uint64_t inode, const struct stat *expected)
+                           uint64_t inode, const struct stat *expected, LatcdPageBudget *budget)
 {
     LatcdCacheCapacity *capacity = metadata_capacity;
     if (!capacity || !name || !*name || strchr(name, '/') || !strcmp(name, ".") ||
@@ -1281,6 +1281,8 @@ static int metadata_remove(int directory, const char *name, uint64_t device,
     struct stat st;
     int result = -1;
     if (!capacity->ready || capacity->recovery_gate ||
+        (budget && (budget->capacity != capacity || capacity->restored_page_budget != budget ||
+                    budget->invalid || budget->inflight || !budget->page_identity_bound)) ||
         g_hash_table_contains(capacity->state_expected, key)) {
         errno = EBUSY;
         goto out;
@@ -1332,14 +1334,56 @@ out:
 int latcd_cache_capacity_metadata_remove(int directory, const char *name,
                                          uint64_t device, uint64_t inode)
 {
-    return metadata_remove(directory, name, device, inode, NULL);
+    return metadata_remove(directory, name, device, inode, NULL, NULL);
 }
 
 int latcd_cache_capacity_metadata_remove_checked(int directory, const char *name,
                                                  const struct stat *expected)
 {
     if (!expected) { errno = EINVAL; return -1; }
-    return metadata_remove(directory, name, expected->st_dev, expected->st_ino, expected);
+    return metadata_remove(directory, name, expected->st_dev, expected->st_ino, expected, NULL);
+}
+
+int latcd_cache_capacity_page_remove_checked(int directory, const char *name,
+                                             const struct stat *expected, LatcdPageBudget *budget)
+{
+    if (!expected || !budget) { errno = EINVAL; return -1; }
+    return metadata_remove(directory, name, expected->st_dev, expected->st_ino, expected, budget);
+}
+
+int latcd_cache_capacity_page_sync_absent(int directory, const char *name, LatcdPageBudget *budget)
+{
+    LatcdCacheCapacity *capacity = metadata_capacity;
+    if (!capacity || !budget || !name || !*name || strchr(name, '/') || !strcmp(name, ".") ||
+        !strcmp(name, "..")) { errno = EINVAL; return -1; }
+    char *key = metadata_directory_matches(capacity, directory) ?
+        metadata_record_key(directory, name) : NULL;
+    if (!key) { errno = EINVAL; return -1; }
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
+    int result = -1;
+    if (!capacity->ready || capacity->recovery_gate || budget->capacity != capacity ||
+        capacity->restored_page_budget != budget || budget->invalid || budget->inflight ||
+        !budget->page_identity_bound ||
+        g_hash_table_contains(capacity->state_expected, key)) { errno = EBUSY; goto out; }
+    GHashTableIter iterator;
+    gpointer watch, value;
+    g_hash_table_iter_init(&iterator, capacity->state_files);
+    while (g_hash_table_iter_next(&iterator, &watch, &value)) {
+        StateFileWatch *entry = value;
+        if (!strcmp(entry->key, key)) { capacity->ready = false; errno = ESTALE; goto out; }
+    }
+    struct stat st;
+    if (!fstatat(directory, name, &st, AT_SYMLINK_NOFOLLOW) || errno != ENOENT || fsync(directory)) {
+        capacity->ready = false;
+        goto out;
+    }
+    check_changes(capacity);
+    if (capacity->ready) result = 0;
+out:
+    pthread_mutex_unlock(&capacity->lock);
+    g_free(key);
+    return result;
 }
 
 int latcd_cache_capacity_restore_task(LatcdCacheCapacity *capacity, const char *id, uint64_t bytes)

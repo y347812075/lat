@@ -3335,9 +3335,28 @@ static void test_budgeted_max_page(bool consumption)
     assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, UINT64_MAX,
                                                  &budget, &loaded, error, sizeof(error)));
     assert(loaded.committed_pending && loaded.count == 128 && budget.remaining == 2 * 65536);
+    if (consumption)
+        assert(latcd_retirement_consumption_apply(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
     assert(!latcd_cache_capacity_recovery_finish(&recovered));
     if (consumption) {
         assert(loaded.consumption_bound && loaded.consumption.intent_present && loaded.consumption.intent_index == 1);
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:consumption-unlinked", 1));
+        assert(latcd_retirement_consumption_apply(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
+        unsetenv("LATCD_TEST_RETIREMENT_IO");
+        assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+               loaded.consumption.intent_present);
+        assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
+        latcd_cache_capacity_close(&recovered);
+        assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
+        latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
+        assert(!latcd_cache_capacity_recovery_begin(&recovered));
+        assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, UINT64_MAX,
+                                                     &budget, &loaded, error, sizeof(error)));
+        assert(!latcd_cache_capacity_recovery_finish(&recovered));
+        assert(!latcd_retirement_consumption_apply(root, UINT64_MAX, &budget, error, sizeof(error)));
+        assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+               !loaded.consumption.intent_present && (loaded.consumption.completed[0] & 2));
+        assert(latcd_retirement_consumption_apply(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
         assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
         latcd_cache_capacity_close(&recovered);
         assert(!pthread_mutex_destroy(&recovered.lock));

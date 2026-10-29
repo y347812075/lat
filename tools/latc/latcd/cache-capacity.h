@@ -183,6 +183,10 @@ int latcd_cache_capacity_metadata_remove(int directory, const char *name,
 /* Failure can follow unlink; re-inventory and reload before retrying. */
 int latcd_cache_capacity_metadata_remove_checked(int directory, const char *name,
                                                  const struct stat *expected);
+/* Confirm an inventoried absence and make a prior unlink durable. */
+int latcd_cache_capacity_page_remove_checked(int directory, const char *name,
+                                             const struct stat *expected, LatcdPageBudget *budget);
+int latcd_cache_capacity_page_sync_absent(int directory, const char *name, LatcdPageBudget *budget);
 /* Ordinary persistent state has no committed-transaction over-limit exception.
  * Allowed directories: root (only SHA.current), .tbsets, .identities.
  * Caller serializes same-record replacement through finish. Uses metadata bind. */
