@@ -841,6 +841,33 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(rows[name]["selection_status"], "held")
         self.assertIn("inventory_or_source_unknown", rows[name]["holds"])
 
+    def test_completed_receipt_with_released_task_input(self):
+        old = self.generation("1")
+        self.transaction(old, self.manifest)
+        obj = self.root / old["native"]
+        st = obj.stat()
+        task = self.task()
+        fields = (f'[base_native]\nname={obj.name}\ndirectory=cache\n'
+                  f'device={st.st_dev}\ninode={st.st_ino}\nsize={st.st_size}\n'
+                  f'mode={st.st_mode}\nuid={st.st_uid}\n'
+                  f'mtime_sec={st.st_mtime_ns // 10**9}\nmtime_nsec={st.st_mtime_ns % 10**9}\n')
+        self.put(str(task.relative_to(self.root)), task.read_bytes() + fields.encode())
+        task_st = task.stat()
+        release = (f'[handoff]\nversion=1\ntask_id={task.stem}\nstate=INPUTS_RELEASED\n'
+                   f'task_device={task_st.st_dev}\ntask_inode={task_st.st_ino}\n')
+        release_path = f'.gc/compiler-releases/{task.name}'
+        raw = (f'[tombstone]\nversion=1\nsource={SOURCE}\nname={obj.name}\nstate=DELETING\n'
+               f'device={st.st_dev}\ninode={st.st_ino}\nsize={st.st_size}\n'
+               f'allocated={st.st_blocks * 512}\nsha256={hashlib.sha256(obj.read_bytes()).hexdigest()}\n'
+               'recovery_status=MISSING\ndeletion_status=UNLINKED\n')
+        self.put('.gc/tombstones/' + obj.name, raw.encode())
+        obj.unlink()
+        _, rows = self.selected()
+        self.assertIn('persistent_task_reference', rows[obj.name]['holds'])
+        self.put(release_path, release.encode())
+        _, rows = self.selected()
+        self.assertEqual(rows[obj.name]['selection_status'], 'removed')
+
     def test_current_and_inventory(self):
         self.put(".superseded/legacy/" + STEM + ".so", b"old")
         self.put(".tmp/part.native", b"work")

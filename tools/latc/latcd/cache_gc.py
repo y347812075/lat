@@ -841,7 +841,7 @@ class Inventory:
         marker = self.tombstones.get(".gc/tombstones/" + name)
         if (not marker or marker.get("deletion_status") != "UNLINKED" or
                 marker.get("recovery_status") != "MISSING" or name in self.entries or
-                name in self.refs or name in self.task_refs or name in self.hold_refs or
+                name in self.refs or self.task_refs.get(name) or self.hold_refs.get(name) or
                 self.freeze_all or marker["source"] in self.frozen or self.errors or
                 marker["source"] + ".current" not in self.manifests):
             return False
@@ -903,7 +903,7 @@ class Inventory:
             current = [ref for alias in aliases for ref in self.refs.get(alias["path"], [])]
             if current:
                 holds.add("current_reference")
-            if name in self.task_refs or any(self.task_refs.get(alias["path"]) for alias in aliases):
+            if self.task_refs.get(name) or any(self.task_refs.get(alias["path"]) for alias in aliases):
                 holds.add("persistent_task_reference")
             if any(self.hold_refs.get(alias["path"]) for alias in aliases) or name in self.hold_refs:
                 holds.add("explicit_retention_reference")
