@@ -1929,7 +1929,10 @@ int latcd_retirement_page_restore_budget(const char *root, LatcdCacheCapacity *c
         return fail(error, error_size, "invalid retirement budget recovery");
     memset(page, 0, sizeof(*page));
     int scheduler = scheduler_lock(root, error, error_size);
-    if (scheduler < 0) return -1;
+    if (scheduler < 0) {
+        latcd_cache_capacity_recovery_fail(capacity);
+        return -1;
+    }
     LatcdRetirementPageState persisted;
     LatcdRetirementPageInventory inventory = {0};
     uint8_t results[128] = {0}, identity[32];
@@ -1966,6 +1969,7 @@ int latcd_retirement_page_restore_budget(const char *root, LatcdCacheCapacity *c
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
     close(scheduler);
+    if (status < 0) latcd_cache_capacity_recovery_fail(capacity);
     return status < 0 ? fail(error, error_size, "retirement budget recovery unsafe") : status;
 }
 

@@ -563,6 +563,14 @@ int latcd_cache_capacity_recovery_abort(LatcdCacheCapacity *capacity)
     return valid ? 0 : -1;
 }
 
+void latcd_cache_capacity_recovery_fail(LatcdCacheCapacity *capacity)
+{
+    if (!capacity) return;
+    pthread_mutex_lock(&capacity->lock);
+    if (capacity->recovery_gate) capacity->ready = false;
+    pthread_mutex_unlock(&capacity->lock);
+}
+
 static int reserve_bytes(LatcdCacheCapacity *capacity, uint64_t bytes,
                            uint64_t limit, bool transient, char *error, size_t error_size)
 {

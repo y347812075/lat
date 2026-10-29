@@ -57,6 +57,8 @@ int latcd_cache_capacity_recovery_finish(LatcdCacheCapacity *capacity);
 /* Abort startup recovery without opening admission. The owner must discard
  * outstanding budgets and re-inventory/recover before accepting work. */
 int latcd_cache_capacity_recovery_abort(LatcdCacheCapacity *capacity);
+/* A failed recovery under the gate requires abort and a fresh inventory. */
+void latcd_cache_capacity_recovery_fail(LatcdCacheCapacity *capacity);
 /* Return a readable directory fd for the inventoried root only when the configured path and
  * caller's directory fd still identify it. Caller owns the returned fd.
  * Startup/shutdown and rescans must not race this operation. */

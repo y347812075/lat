@@ -2743,7 +2743,13 @@ static void test_budgeted_page_stage(void)
     assert(!latcd_cache_capacity_recovery_begin(&recovered));
     assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 101, &budget,
                                                 &loaded, error, sizeof(error)) < 0);
-    assert(!budget.capacity && !loaded.count && recovered.recovery_gate && recovered.ready);
+    assert(!budget.capacity && !loaded.count && recovered.recovery_gate && !recovered.ready);
+    assert(latcd_cache_capacity_recovery_finish(&recovered) < 0);
+    assert(!latcd_cache_capacity_recovery_abort(&recovered));
+    latcd_cache_capacity_close(&recovered);
+    assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
+    assert(!latcd_cache_capacity_recovery_begin(&recovered));
     assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 100, &budget,
                                                   &loaded, error, sizeof(error)));
     assert(loaded.budget_bound && loaded.count == 1 && budget.capacity == &recovered &&
@@ -2980,7 +2986,8 @@ static void test_budgeted_crash(const char *point, bool installed, bool result_w
     } else {
         assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 100, &budget,
                                                      &loaded, error, sizeof(error)) < 0);
-        assert(!budget.capacity && recovered.recovery_gate);
+        assert(!budget.capacity && recovered.recovery_gate && !recovered.ready);
+        assert(latcd_cache_capacity_recovery_finish(&recovered) < 0);
     }
     latcd_cache_capacity_close(&recovered);
     assert(!pthread_mutex_destroy(&recovered.lock));
