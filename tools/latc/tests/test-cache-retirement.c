@@ -7001,6 +7001,18 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
             assert(queued >= 0);
         } while (queued);
         assert(stats.complete && stats.candidates == 2 && stats.due == 2);
+        char *fixture_gc = g_build_filename(root, ".gc", NULL);
+        GDir *fixture_dir = g_dir_open(fixture_gc, 0, NULL);
+        assert(fixture_dir);
+        const char *fixture_name;
+        while ((fixture_name = g_dir_read_name(fixture_dir))) {
+            if (!g_str_has_prefix(fixture_name, ".write-")) continue;
+            char *fixture_partial = g_build_filename(fixture_gc, fixture_name, NULL);
+            assert(!unlink(fixture_partial));
+            g_free(fixture_partial);
+        }
+        g_dir_close(fixture_dir);
+        g_free(fixture_gc);
         char retry_boot[37];
         uint64_t retry_cutoff;
         assert(!latcd_retirement_round_sample(root, retry_boot, &retry_cutoff, error, sizeof(error)));
@@ -7008,7 +7020,12 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         g_strlcpy(receipt_hints[0].name, names[0], sizeof(receipt_hints[0].name));
         snprintf(receipt_hints[1].name, sizeof(receipt_hints[1].name), "%064x.so", 9999);
         receipt_hints[0].enqueued = receipt_hints[1].enqueued = 1;
-        LatcdRetirementQueue *receipt_queue = latcd_retirement_queue_new(root, 0);
+        char *receipt_schedule = g_build_filename(root, ".gc", "retirement-schedule", NULL);
+        assert(!mkdir(receipt_schedule, 0700));
+        for (unsigned i = 0; i < 2; i++)
+            assert(!latcd_retirement_schedule_store(root, retry_boot, 1, retry_cutoff, 1,
+                                                     &receipt_hints[i], error, sizeof(error)));
+        LatcdRetirementQueue *receipt_queue = latcd_retirement_queue_new(root, 1);
         assert(!latcd_retirement_queue_diagnostic_retry(receipt_queue, retry_boot, retry_cutoff,
                                                         receipt_hints, 2));
         LatcdRetirementQueueStats receipt_stats;
@@ -7020,10 +7037,27 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         unsigned receipt_count;
         assert(queued < 0 && !latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count));
         assert(receipt_count == 2 && receipts[0] && !receipts[1]);
-        assert(latcd_retirement_queue_retry_revalidate(receipt_queue, error, sizeof(error)) < 0);
+        assert(!latcd_retirement_queue_retry_receipts_revalidate(receipt_queue, receipts, &receipt_count,
+                                                                  error, sizeof(error)));
+        assert(receipt_count == 2 && receipts[0] && !receipts[1]);
         assert(latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count) < 0 &&
                !receipt_count);
         latcd_retirement_queue_free(receipt_queue);
+        receipt_queue = latcd_retirement_queue_new(root, 1);
+        assert(!latcd_retirement_queue_diagnostic_retry(receipt_queue, retry_boot, retry_cutoff,
+                                                        receipt_hints, 2));
+        do {
+            queued = latcd_retirement_queue_step(receipt_queue, 32, 10000, &receipt_stats,
+                                                  error, sizeof(error));
+        } while (queued > 0);
+        assert(queued < 0 && !latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count));
+        put(paths[0], "replacement\n");
+        assert(latcd_retirement_queue_retry_receipts_revalidate(receipt_queue, receipts, &receipt_count,
+                                                                 error, sizeof(error)) < 0);
+        assert(!receipt_count && !receipts[0]);
+        assert(!unlink(paths[0]));
+        latcd_retirement_queue_free(receipt_queue);
+        g_free(receipt_schedule);
         /* Every transaction mentioning a removed name must bind the receipt. */
         GKeyFile *other = g_key_file_new();
         assert(g_key_file_load_from_data(other, raw, -1, 0, NULL));

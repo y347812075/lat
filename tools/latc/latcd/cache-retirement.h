@@ -530,6 +530,10 @@ int latcd_retirement_queue_retry_matches(const LatcdRetirementQueue *queue,
  * deletion, DONE results, or schedule-shard consumption. */
 int latcd_retirement_queue_retry_receipts(const LatcdRetirementQueue *queue,
     bool receipts[128], unsigned *count);
+/* Consumes the witness after locked revalidation. Locks are released before
+ * return; the output is diagnostic, not durable or removal authority. */
+int latcd_retirement_queue_retry_receipts_revalidate(LatcdRetirementQueue *queue,
+    bool receipts[128], unsigned *count, char *error, size_t error_size);
 /* Complete monitored retry discovery in selection order, including unmatched
  * hints. The returned snapshot is diagnostic, not deletion authorization. */
 int latcd_retirement_queue_retry_items(const LatcdRetirementQueue *queue,

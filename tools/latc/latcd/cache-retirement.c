@@ -5898,9 +5898,12 @@ out:
 static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatched,
                                 LatcdRetirementRetryPage *page,
                                 LatcdCacheCapacity *capacity, uint64_t limit, LatcdPageBudget *budget,
+                                bool *receipts, unsigned *receipt_count,
                                 char *error, size_t error_size)
 {
     if (page) memset(page, 0, sizeof(*page));
+    if (receipts) memset(receipts, 0, 128 * sizeof(*receipts));
+    if (receipt_count) *receipt_count = 0;
     if (!queue || !queue->retry_witness || !queue->cursor ||
         queue->discovery_watch < 0 || queue->discovery_tombstones < 0)
         return fail(error, error_size, "missing retry discovery witness");
@@ -5970,6 +5973,12 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
                 memcmp(selected_digests[i], queue->retry_item_digest[i], 32)) goto out;
     }
     if (!queue_watch_clean(queue->discovery_watch)) goto out;
+    if (receipts) {
+        for (unsigned i = 0; i < queue->retry_count; i++)
+            receipts[i] = g_hash_table_contains(queue->removed_second, queue->retry_order[i]) &&
+                          !g_hash_table_contains(queue->confirmed_keys, queue->retry_order[i]);
+        *receipt_count = queue->retry_count;
+    }
     if (page) {
         unsigned count = 0;
         uint8_t identity[32];
@@ -6034,6 +6043,8 @@ out:
     if (result) {
         queue->aggregation_verified = false;
         if (page) memset(page, 0, sizeof(*page));
+        if (receipts) memset(receipts, 0, 128 * sizeof(*receipts));
+        if (receipt_count) *receipt_count = 0;
     }
     return result ? fail(error, error_size, "retry witness changed; rescan") : 0;
 }
@@ -6041,14 +6052,21 @@ out:
 int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
                                              char *error, size_t error_size)
 {
-    return retry_witness_finish(queue, false, NULL, NULL, 0, NULL, error, error_size);
+    return retry_witness_finish(queue, false, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
+}
+
+int latcd_retirement_queue_retry_receipts_revalidate(LatcdRetirementQueue *queue,
+    bool receipts[128], unsigned *count, char *error, size_t error_size)
+{
+    if (!receipts || !count) return fail(error, error_size, "missing receipt observation output");
+    return retry_witness_finish(queue, false, NULL, NULL, 0, NULL, receipts, count, error, error_size);
 }
 
 int latcd_retirement_queue_retry_page_snapshot(LatcdRetirementQueue *queue,
     LatcdRetirementRetryPage *page, char *error, size_t error_size)
 {
     if (!page) return fail(error, error_size, "missing retry page output");
-    return retry_witness_finish(queue, false, page, NULL, 0, NULL, error, error_size);
+    return retry_witness_finish(queue, false, page, NULL, 0, NULL, NULL, NULL, error, error_size);
 }
 
 int latcd_retirement_queue_retry_page_stage(LatcdRetirementQueue *queue,
@@ -6057,7 +6075,7 @@ int latcd_retirement_queue_retry_page_stage(LatcdRetirementQueue *queue,
 {
     if (!capacity || !budget) return fail(error, error_size, "missing retry page budget");
     LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
-    int result = retry_witness_finish(queue, false, page, capacity, limit, budget, error, error_size);
+    int result = retry_witness_finish(queue, false, page, capacity, limit, budget, NULL, NULL, error, error_size);
     g_free(page);
     return result;
 }
@@ -6065,7 +6083,7 @@ int latcd_retirement_queue_retry_page_stage(LatcdRetirementQueue *queue,
 int latcd_retirement_queue_retry_advance_unmatched(LatcdRetirementQueue *queue,
                                                     char *error, size_t error_size)
 {
-    return retry_witness_finish(queue, true, NULL, NULL, 0, NULL, error, error_size);
+    return retry_witness_finish(queue, true, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
 }
 
 int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,
