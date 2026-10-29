@@ -835,13 +835,14 @@ static int page_state_store_fd(int root_fd, int gc, const LatcdRetirementPageSta
     uint8_t binding[32];
     if (gc < 0 || latcd_retirement_page_state_valid(state) ||
         (state->budget_bound && !budget) ||
-        (budget && (!budget->page_identity_bound ||
+        (budget && state->count && (!budget->page_identity_bound ||
          latcd_retirement_page_budget_identity(state, binding) ||
-         memcmp(binding, budget->page_identity, sizeof(binding)))) || fstat(root_fd, &cache) ||
+         memcmp(binding, budget->page_identity, sizeof(binding)))) ||
+        (budget && !budget->page_identity_bound) || fstat(root_fd, &cache) ||
         state->cache_device != (uint64_t)cache.st_dev ||
         state->cache_inode != (uint64_t)cache.st_ino) goto out;
-    g_key_file_set_integer(record, "page", "version", budget ? 7 : 5);
-    if (budget) {
+    g_key_file_set_integer(record, "page", "version", budget && state->count ? 7 : 5);
+    if (budget && state->count) {
         char identity[65];
         for (unsigned i = 0; i < 32; i++) snprintf(identity + 2 * i, 3, "%02x", binding[i]);
         g_key_file_set_integer(record, "page", "budget_protocol", 1);
@@ -1880,6 +1881,47 @@ int latcd_retirement_page_budget_commit(const char *root, uint64_t now_us,
     if (!budget || !page)
         return fail(error, error_size, "missing bound page budget");
     return page_commit(root, now_us, page, budget, true, error, error_size);
+}
+
+int latcd_retirement_page_finish_deferred(const char *root, uint64_t now_us,
+                                          LatcdPageBudget *budget, char *error, size_t error_size)
+{
+    if (!root || !budget || !budget->capacity || !budget->page_identity_bound)
+        return fail(error, error_size, "invalid deferred page completion");
+    int scheduler = scheduler_lock(root, error, error_size);
+    if (scheduler < 0) return -1;
+    LatcdRetirementPageState page;
+    bool legacy = false;
+    uint8_t identity[32], results[128] = {0};
+    int result = -1, directory = -1, gc = -1, matching = -1;
+    struct stat held, path;
+    if (page_state_load(root, &page, &legacy, error, error_size) || legacy ||
+        !page.budget_bound || !page.committed_pending ||
+        latcd_retirement_page_budget_identity(&page, identity) ||
+        memcmp(identity, budget->page_identity, sizeof(identity))) goto out;
+    for (unsigned i = 0; i < page.count; i++)
+        if (page.results[i] != LATCD_RETIREMENT_RESULT_DEFERRED) goto out;
+    if (schedule_page_results(root, now_us, &page, results, NULL, error, error_size)) goto out;
+    directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
+    if (gc < 0 || !same_directory(scheduler, gc) || fstat(directory, &held) ||
+        lstat(root, &path) || held.st_dev != path.st_dev || held.st_ino != path.st_ino ||
+        !directory_matches_at(directory, ".gc", gc)) goto out;
+    matching = latcd_cache_capacity_open_matching_root(budget->capacity, root, directory);
+    if (matching < 0) goto out;
+    g_strlcpy(page.committed_cursor, page.cursor, sizeof(page.committed_cursor));
+    page.cursor[0] = 0;
+    page.count = 0;
+    page.committed_pending = false;
+    page.budget_bound = false;
+    if (page_state_store_fd(directory, gc, &page, budget, NULL)) goto out;
+    result = latcd_cache_capacity_cancel_page(budget->capacity, budget);
+out:
+    if (matching >= 0) close(matching);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    close(scheduler);
+    return result ? fail(error, error_size, "deferred page completion uncertain; reload") : 0;
 }
 
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)

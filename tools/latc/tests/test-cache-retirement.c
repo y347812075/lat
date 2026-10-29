@@ -2810,6 +2810,73 @@ static void test_budgeted_crash(const char *point, bool installed, bool result_w
     g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
 }
 
+static void test_deferred_finish_crash(const char *point, bool installed, bool partial)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    struct stat st;
+    assert(!stat(root, &st));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    LatcdRetirementPageState empty = {.cache_device = st.st_dev, .cache_inode = st.st_ino,
+        .grace_us = 100, .round_cutoff = 120, .sequence = 3};
+    g_strlcpy(empty.boot, boot, sizeof(empty.boot));
+    LatcdRetirementPageState page = empty, loaded;
+    page.count = 1;
+    snprintf(page.entries[0].name, sizeof(page.entries[0].name), "%064x.so", 1);
+    page.entries[0].deadline = 140; page.entries[0].enqueued = 100;
+    page.entries[0].last_attempt = 3; page.entries[0].retry_at = 200; page.entries[0].busy_count = 1;
+    g_strlcpy(page.cursor, page.entries[0].name, sizeof(page.cursor));
+    assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
+    simulated_boottime_us = 150;
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+        LatcdPageBudget budget = {0};
+        uint8_t identity[32];
+        assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+        latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+        assert(!latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
+                                                     &budget, error, sizeof(error)));
+        assert(!latcd_retirement_page_budget_identity(&page, identity));
+        assert(!latcd_retirement_page_budget_result(root, 150, identity, &budget, &page.entries[0],
+                     LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
+        assert(!latcd_retirement_page_budget_commit(root, 150, &page, &budget, error, sizeof(error)));
+        char *fault = g_strdup_printf("crash:%s", point);
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", fault, 1));
+        latcd_retirement_page_finish_deferred(root, 150, &budget, error, sizeof(error));
+        _exit(1);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
+    assert(installed ? !loaded.count && !strcmp(loaded.committed_cursor, page.cursor) :
+                       loaded.committed_pending && loaded.count == 1);
+    assert((latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0) == (!installed || partial));
+    LatcdCacheCapacity recovered = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget budget = {0};
+    assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
+    assert(!latcd_cache_capacity_recovery_begin(&recovered));
+    if (!installed && !partial) {
+        assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, 100,
+                                                     &budget, &loaded, error, sizeof(error)));
+        assert(!latcd_cache_capacity_recovery_finish(&recovered));
+        assert(!latcd_retirement_page_finish_deferred(root, 150, &budget, error, sizeof(error)));
+    } else assert(!latcd_cache_capacity_recovery_abort(&recovered));
+    LatcdRetirementPageState merged = page;
+    merged.entries[0].retry_at = 0; merged.entries[0].busy_count = 0;
+    assert(!latcd_retirement_schedule_merge_page(root, boot, 100, 150, &merged, error, sizeof(error)));
+    assert(merged.entries[0].retry_at == 200 && merged.entries[0].busy_count == 1);
+    latcd_cache_capacity_close(&recovered);
+    assert(!pthread_mutex_destroy(&recovered.lock));
+    simulated_boottime_us = 0;
+    g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
+}
+
 static void test_budgeted_max_page(void)
 {
     char *root = root_new(), error[256], *boot = NULL;
@@ -2862,7 +2929,20 @@ static void test_budgeted_max_page(void)
                                                  &budget, &loaded, error, sizeof(error)));
     assert(loaded.committed_pending && loaded.count == 128 && budget.remaining == 2 * 65536);
     assert(!latcd_cache_capacity_recovery_finish(&recovered));
-    assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:file-synced", 1));
+    assert(latcd_retirement_page_finish_deferred(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && loaded.committed_pending);
+    assert(!latcd_retirement_page_finish_deferred(root, UINT64_MAX, &budget, error, sizeof(error)));
+    assert(!budget.capacity && !recovered.metadata_reserved);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+           !loaded.count && !loaded.committed_pending && !strcmp(loaded.committed_cursor, page.cursor));
+    LatcdRetirementPageState merged = page;
+    merged.entries[0].retry_at = 0;
+    merged.entries[0].busy_count = 0;
+    assert(!latcd_retirement_schedule_merge_page(root, boot, UINT64_MAX, UINT64_MAX,
+                                                  &merged, error, sizeof(error)));
+    assert(merged.entries[0].retry_at == UINT64_MAX && merged.entries[0].busy_count == 7);
     latcd_cache_capacity_close(&recovered);
     assert(!pthread_mutex_destroy(&recovered.lock));
     simulated_boottime_us = 0;
@@ -6403,6 +6483,10 @@ int main(int argc, char **argv)
     test_page_stage();
     test_budgeted_page_stage();
     test_budgeted_max_page();
+    test_deferred_finish_crash("file-synced", false, false);
+    test_deferred_finish_crash("linked", false, true);
+    test_deferred_finish_crash("renamed", true, false);
+    test_deferred_finish_crash("directory-synced", true, false);
     test_budgeted_crash("file-synced", false, false, false);
     test_budgeted_crash("linked", false, false, false);
     test_budgeted_crash("renamed", true, false, false);
