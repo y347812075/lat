@@ -4311,7 +4311,7 @@ int latcd_retirement_mount_lease(const char *root, const char *id, const char *s
             (!object_scope || (lease.object_device == (uint64_t)object.st_dev &&
                                lease.object_inode == (uint64_t)object.st_ino));
         mount_lease_clear(&lease);
-        if (!valid) goto out;
+        if (!valid || fsync(store)) goto out;
     } else {
         g_key_file_set_integer(record, "mount", "version", 1);
         g_key_file_set_string(record, "mount", "id", id);

@@ -5688,6 +5688,12 @@ static void test_mount_lease_registration_lock(void)
     int lease = latcd_retirement_mount_lease(root, id, "CACHE", NULL, NULL, error, sizeof(error));
     assert(lease >= 0 && !access(record, F_OK));
     close(lease);
+    retry_sync_fault = true;
+    assert(latcd_retirement_mount_lease(root, id, "CACHE", NULL, NULL, error, sizeof(error)) < 0);
+    retry_sync_fault = false;
+    lease = latcd_retirement_mount_lease(root, id, "CACHE", NULL, NULL, error, sizeof(error));
+    assert(lease >= 0);
+    close(lease);
     assert(!latcd_retirement_mount_release(root, id, error, sizeof(error)));
     g_free(record); g_free(record_name); g_free(id); g_free(store); g_free(gc);
     remove_root(root); g_free(root);
