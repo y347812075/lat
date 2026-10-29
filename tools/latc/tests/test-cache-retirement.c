@@ -3376,6 +3376,20 @@ static void test_budgeted_max_page(unsigned consumption)
     latcd_cache_capacity_close(&capacity);
     assert(!pthread_mutex_destroy(&capacity.lock));
     LatcdCacheCapacity recovered = LATCD_CACHE_CAPACITY_INIT;
+    if (consumption == 5) {
+        char *partial = g_build_filename(gc, ".write-unattributed", NULL);
+        put(partial, "unfinished");
+        assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
+        latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
+        assert(!latcd_cache_capacity_recovery_begin(&recovered));
+        assert(latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, UINT64_MAX,
+                                                    &budget, &loaded, error, sizeof(error)) < 0);
+        assert(!budget.capacity && recovered.recovery_gate);
+        assert(!latcd_cache_capacity_recovery_abort(&recovered));
+        latcd_cache_capacity_close(&recovered);
+        assert(!unlink(partial));
+        g_free(partial);
+    }
     assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
     assert(!latcd_cache_capacity_recovery_begin(&recovered));

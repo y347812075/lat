@@ -1939,9 +1939,14 @@ int latcd_retirement_page_restore_budget(const char *root, LatcdCacheCapacity *c
     int status = page_state_load(root, &persisted, &legacy, error, error_size);
     int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
+    int store = gc < 0 ? -1 : open_directory(gc, "retirement-schedule", false);
     struct stat held, path;
     if (status < 0 || gc < 0 || !same_directory(scheduler, gc) || fstat(directory, &held) ||
         lstat(root, &path) || held.st_dev != path.st_dev || held.st_ino != path.st_ino ||
+        !directory_matches_at(directory, ".gc", gc) ||
+        !gc_has_no_partial_records(gc) ||
+        (!status && (store < 0 || !directory_matches_at(gc, "retirement-schedule", store) ||
+         !gc_has_no_partial_records(store) || !directory_matches_at(gc, "retirement-schedule", store))) ||
         !directory_matches_at(directory, ".gc", gc)) status = -1;
     int matching = status < 0 ? -1 : latcd_cache_capacity_open_matching_root(capacity, root, directory);
     if (matching < 0) status = -1;
@@ -1957,6 +1962,7 @@ int latcd_retirement_page_restore_budget(const char *root, LatcdCacheCapacity *c
         latcd_cache_capacity_restore_page(capacity, bytes, limit, identity, budget))) status = -1;
     if (!status) *page = persisted;
     g_free(boot);
+    if (store >= 0) close(store);
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
     close(scheduler);
