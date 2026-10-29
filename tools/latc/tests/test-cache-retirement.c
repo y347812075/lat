@@ -2445,7 +2445,7 @@ static void test_schedule_check_page(void)
     assert(page_budget.remaining == saved_reservation && page_capacity.ready);
     assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
     assert(!latcd_retirement_test_page_budget_matches(root, budget_binding, error, sizeof(error)));
-    assert(latcd_retirement_page_budget_result(root, 150, budget_binding, &page_budget,
+    assert(latcd_retirement_test_bound_budget_result(root, 150, budget_binding, &page_budget,
            &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     LatcdRetirementPageState claimed_bound = page;
     claimed_bound.budget_bound = true;
@@ -3222,7 +3222,10 @@ static void test_budgeted_page_stage(void)
     assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
     uint8_t binding[32];
     assert(!latcd_retirement_page_budget_identity(&page, binding));
-    assert(!latcd_retirement_page_budget_result(root, 150, binding, &budget, &page.entries[0],
+    assert(latcd_retirement_page_budget_result(root, 150, binding, &budget, &page.entries[0],
+                                               LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(strstr(error, "receipt witness"));
+    assert(!latcd_retirement_test_bound_budget_result(root, 150, binding, &budget, &page.entries[0],
                                                 LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
     assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
     assert(!latcd_cache_capacity_test_page_release(&capacity, &budget));
@@ -3571,7 +3574,7 @@ static void test_deferred_finish_crash(const char *point, bool installed, bool p
         assert(!latcd_retirement_page_budget_identity(&page, identity));
         assert(!latcd_retirement_page_budget_result(root, 150, identity, &budget, &page.entries[0],
                      LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
-        assert(!latcd_retirement_page_budget_result(root, 150, identity, &budget, &page.entries[1],
+        assert(!latcd_retirement_test_bound_budget_result(root, 150, identity, &budget, &page.entries[1],
                      LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
         assert(!latcd_retirement_page_budget_commit(root, 150, &page, &budget, error, sizeof(error)));
         char *fault = g_strdup_printf("crash:%s", point);
@@ -3705,7 +3708,7 @@ static void test_rebind_crash(const char *point, bool installed, bool partial)
         assert(!latcd_retirement_page_budget_identity(&page, identity));
         char *fault = g_strdup_printf("crash:%s", point);
         assert(!setenv("LATCD_TEST_RETIREMENT_IO", fault, 1));
-        latcd_retirement_page_budget_result(root, 150, identity, &budget, &page.entries[0],
+        latcd_retirement_test_bound_budget_result(root, 150, identity, &budget, &page.entries[0],
                                             LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error));
         _exit(1);
     }
@@ -3730,7 +3733,7 @@ static void test_rebind_crash(const char *point, bool installed, bool partial)
         assert(!latcd_retirement_page_budget_identity(&loaded, identity));
         if (!installed) assert(latcd_retirement_page_budget_commit(root, 150, &page, &budget,
                                                                     error, sizeof(error)) < 0);
-        assert(!latcd_retirement_page_budget_result(root, 150, identity, &budget, &page.entries[0],
+        assert(!latcd_retirement_test_bound_budget_result(root, 150, identity, &budget, &page.entries[0],
                          LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
         assert(!latcd_retirement_page_budget_commit(root, 150, &page, &budget, error, sizeof(error)));
         assert(!latcd_retirement_page_finish_preserving_results(root, 150, &budget, error, sizeof(error)));
@@ -3778,12 +3781,12 @@ static void test_budgeted_rebind(void)
                                                  &budget, error, sizeof(error)));
     assert(!latcd_retirement_page_budget_identity(&page, identity));
     assert(latcd_retirement_page_budget_commit(root, 150, &page, &budget, error, sizeof(error)) < 0);
-    assert(latcd_retirement_page_budget_result(root, 150, identity, &budget, &page.entries[0],
+    assert(latcd_retirement_test_bound_budget_result(root, 150, identity, &budget, &page.entries[0],
                       LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     LatcdRetirementPageDeadline premature = page.entries[0];
     premature.last_attempt = 4; premature.retry_at = 0; premature.busy_count = 0;
     uint64_t reserved = budget.remaining;
-    assert(latcd_retirement_page_budget_result(root, 150, identity, &budget, &premature,
+    assert(latcd_retirement_test_bound_budget_result(root, 150, identity, &budget, &premature,
                       LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     assert(budget.remaining == reserved && capacity.ready);
     LatcdRetirementPageDeadline retained;
@@ -3792,7 +3795,7 @@ static void test_budgeted_rebind(void)
                                            &retained_sequence, &retained, error, sizeof(error)));
     assert(retained_sequence == 3 && retained.last_attempt == 3 && retained.retry_at == 200 &&
            retained.busy_count == 1);
-    assert(!latcd_retirement_page_budget_result(root, 150, identity, &budget, &page.entries[0],
+    assert(!latcd_retirement_test_bound_budget_result(root, 150, identity, &budget, &page.entries[0],
                       LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)));
     assert(!latcd_cache_capacity_test_page_release(&capacity, &budget));
     latcd_cache_capacity_close(&capacity);
@@ -3876,7 +3879,7 @@ static void test_budgeted_max_page(unsigned consumption)
     uint8_t binding[32];
     assert(!latcd_retirement_page_budget_identity(&page, binding));
     for (unsigned i = 0; i < page.count; i++)
-        assert(!latcd_retirement_page_budget_result(root, UINT64_MAX, binding, &budget,
+        assert(!latcd_retirement_test_bound_budget_result(root, UINT64_MAX, binding, &budget,
             &page.entries[i], i % 2 ? LATCD_RETIREMENT_RESULT_DONE : LATCD_RETIREMENT_RESULT_DEFERRED,
             error, sizeof(error)));
     assert(!latcd_retirement_page_budget_commit(root, UINT64_MAX, &page, &budget, error, sizeof(error)));
@@ -4415,9 +4418,9 @@ static void test_schedule_byte_limit(void)
                                                  &budget, error, sizeof(error)));
     uint8_t identity[32];
     assert(!latcd_retirement_page_budget_identity(&page, identity));
-    assert(latcd_retirement_page_budget_result(root, 200, identity, &budget, &page.entries[0],
+    assert(latcd_retirement_test_bound_budget_result(root, 200, identity, &budget, &page.entries[0],
                                                LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
-    assert(!latcd_retirement_page_budget_result(root, 250, identity, &budget, &page.entries[0],
+    assert(!latcd_retirement_test_bound_budget_result(root, 250, identity, &budget, &page.entries[0],
                                                 LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
     assert(!latcd_retirement_page_budget_commit(root, 250, &page, &budget, error, sizeof(error)));
     assert(!latcd_retirement_consumption_begin(root, 250, &budget, error, sizeof(error)));

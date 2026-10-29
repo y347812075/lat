@@ -301,7 +301,8 @@ int latcd_retirement_consumption_apply(const char *root, uint64_t now_us,
 int latcd_retirement_consumption_finish(const char *root, uint64_t now_us,
                                     struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Caller holds the owner lease and serializes budget lifetime. These operations
- * require a persisted budget binding and never authorize object deletion. */
+ * require a persisted budget binding and never authorize object deletion.
+ * DONE is rejected until a receipt witness protocol is implemented. */
 int latcd_retirement_page_budget_result(const char *root, uint64_t now_us,
                                     const uint8_t identity[32], struct LatcdPageBudget *budget,
                                     const LatcdRetirementPageDeadline *entry,
@@ -318,6 +319,11 @@ int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t n
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
 extern void (*latcd_retirement_test_before_settlement)(void);
 extern void (*latcd_retirement_test_before_page_finish)(struct LatcdPageBudget *budget);
+/* Fixture-only bound result, including synthetic DONE without a receipt. */
+int latcd_retirement_test_bound_budget_result(const char *root, uint64_t now_us,
+                                    const uint8_t identity[32], struct LatcdPageBudget *budget,
+                                    const LatcdRetirementPageDeadline *entry,
+                                    LatcdRetirementResultKind kind, char *error, size_t error_size);
 struct LatcdCacheCapacity;
 struct LatcdPageBudget;
 /* Test-only handoff; caller owns the lease and serializes budget lifetime. */

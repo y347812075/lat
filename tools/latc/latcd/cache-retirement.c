@@ -2556,9 +2556,18 @@ int latcd_retirement_page_budget_result(const char *root, uint64_t now_us,
                                     const LatcdRetirementPageDeadline *entry,
                                     LatcdRetirementResultKind kind, char *error, size_t error_size)
 {
+    if (kind == LATCD_RETIREMENT_RESULT_DONE)
+        return fail(error, error_size, "done result requires receipt witness");
     return page_budget_result(root, now_us, identity, budget, entry, kind, true, error, error_size);
 }
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
+int latcd_retirement_test_bound_budget_result(const char *root, uint64_t now_us,
+                                    const uint8_t identity[32], LatcdPageBudget *budget,
+                                    const LatcdRetirementPageDeadline *entry,
+                                    LatcdRetirementResultKind kind, char *error, size_t error_size)
+{
+    return page_budget_result(root, now_us, identity, budget, entry, kind, true, error, error_size);
+}
 int latcd_retirement_test_budget_result(const char *root, uint64_t now_us,
                                     const uint8_t identity[32], LatcdPageBudget *budget,
                                     const LatcdRetirementPageDeadline *entry,
