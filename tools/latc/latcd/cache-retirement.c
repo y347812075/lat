@@ -3073,7 +3073,7 @@ static int retry_page_begin_deferral(const char *root, LatcdPageBudget *budget, 
         (matching = latcd_cache_capacity_open_matching_root(budget->capacity, root, directory)) < 0 ||
         latcd_retirement_retry_page_load(root, page, error, error_size) ||
         page->completed == page->count || page->intent_present ||
-        page->items[page->completed].matched != (mode != 0) ||
+        (mode != 3 && page->items[page->completed].matched != (mode != 0)) ||
         latcd_retirement_retry_page_budget_identity(page, identity) || !budget->page_identity_bound ||
         memcmp(identity, budget->page_identity, 32) || retirement_clock(&boot, &now) ||
         strcmp(boot, page->boot) || now < page->snapshot_time ||
@@ -3125,6 +3125,12 @@ int latcd_retirement_retry_page_begin_unattempted(const char *root, LatcdPageBud
                                                    char *error, size_t error_size)
 {
     return retry_page_begin_deferral(root, budget, 2, error, error_size);
+}
+
+int latcd_retirement_retry_page_begin_deferred(const char *root, LatcdPageBudget *budget,
+                                                char *error, size_t error_size)
+{
+    return retry_page_begin_deferral(root, budget, 3, error, error_size);
 }
 
 static int retry_apply_unmatched(const char *root, LatcdPageBudget *budget, bool finish,

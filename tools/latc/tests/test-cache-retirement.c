@@ -7208,6 +7208,38 @@ static void publish_page_fixture(const char *root, unsigned id)
     g_free(evidence); g_free(current); g_free(previous); g_free(next_manifest); g_free(src);
 }
 
+static void make_startup_retry_fixture(const char *root)
+{
+    const uint64_t grace = UINT64_C(600) * 1000000;
+    char error[256], *boot = NULL;
+    struct timespec ts;
+    assert(!clock_gettime(CLOCK_BOOTTIME, &ts));
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    publish_page_fixture(root, 7);
+    LatcdRetirementPageState state;
+    assert(!latcd_retirement_page_round_begin(root, grace, &state, error, sizeof(error)));
+    LatcdRetirementPageDeadline hint = {.enqueued = now, .retry_at = now};
+    snprintf(hint.name, sizeof(hint.name), "%064x.so", 7);
+    assert(!latcd_retirement_schedule_store(root, boot, grace, now, 3, &hint, error, sizeof(error)));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget budget = {0};
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, grace);
+    assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
+    LatcdRetirementQueueStats stats; int result;
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0);
+    assert(!latcd_retirement_queue_retry_page_stage(queue, &capacity, UINT64_MAX,
+                                                      &budget, error, sizeof(error)));
+    latcd_retirement_queue_free(queue);
+    latcd_cache_capacity_close(&capacity);
+    g_free(boot);
+}
+
 static void test_retry_not_due(bool due)
 {
     char *root = root_new(), error[256], *boot = NULL;
@@ -7256,8 +7288,7 @@ static void test_retry_not_due(bool due)
     child = fork(); assert(child >= 0);
     if (!child) {
         assert(!setenv("LATCD_TEST_RETIREMENT_IO", "crash:renamed", 1));
-        if (due) latcd_retirement_retry_page_begin_unattempted(root, &budget, error, sizeof(error));
-        else latcd_retirement_retry_page_begin_not_due(root, &budget, error, sizeof(error));
+        latcd_retirement_retry_page_begin_deferred(root, &budget, error, sizeof(error));
         _exit(1);
     }
     assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
@@ -7286,7 +7317,7 @@ static void test_retry_not_due(bool due)
     assert(!latcd_retirement_retry_page_apply_unmatched(root, &budget, error, sizeof(error)));
     assert(!latcd_retirement_retry_page_finish_unmatched(root, &budget, error, sizeof(error)));
     assert(latcd_retirement_retry_page_begin_not_due(root, &budget, error, sizeof(error)) < 0);
-    assert(!latcd_retirement_retry_page_begin_unmatched(root, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_retry_page_begin_deferred(root, &budget, error, sizeof(error)));
     assert(!latcd_retirement_retry_page_apply_unmatched(root, &budget, error, sizeof(error)));
     assert(!latcd_retirement_retry_page_finish_unmatched(root, &budget, error, sizeof(error)));
     assert(!latcd_retirement_retry_page_commit(root, &budget, error, sizeof(error)));
@@ -8008,6 +8039,10 @@ static void test_queue_overflow_fixture(void)
 
 int main(int argc, char **argv)
 {
+    if (argc == 3 && !strcmp(argv[1], "--startup-retry-fixture")) {
+        make_startup_retry_fixture(argv[2]);
+        return 0;
+    }
     if (argc == 5 && !strcmp(argv[1], "--loader-pin-probe")) {
         const char *root = argv[2], *digest = argv[3], *name = argv[4];
         char error[256] = {0};

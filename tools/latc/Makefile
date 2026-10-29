@@ -1029,13 +1029,13 @@ test-latcd-once: all
 	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) \
 	  $(BUILD)/latcd-once-test
 
-test-latcd-service: all
+test-latcd-service: all $(BUILD)/tests/test-cache-retirement
 	@test -n "$(AOT_V2_RUNNER)" -a -n "$(AOT_V2_RUNTIME_DIR)" \
 	  -a -n "$(X86_GUEST)" || \
 	  { echo "usage: make test-latcd-service AOT_V2_RUNNER=... AOT_V2_RUNTIME_DIR=... X86_GUEST=..."; exit 2; }
 	sh tests/test-latcd-service.sh $(BUILD)/latcd/latcd $(BUILD)/latc \
 	  $(AOT_V2_RUNNER) $(AOT_V2_RUNTIME_DIR) $(X86_GUEST) \
-	  $(BUILD)/latcd-service-test
+	  $(BUILD)/latcd-service-test $(BUILD)/tests/test-cache-retirement
 
 test-latcd-runner: all $(BUILD)/tests/x86-static-hello \
 		$(BUILD)/tests/x86-dynamic-hello

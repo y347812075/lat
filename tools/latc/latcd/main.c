@@ -6664,10 +6664,39 @@ int main(int argc, char **argv)
         budget_result = restore_compiler_budgets_step(&config, &compiler_budget_recovery,
             32, &budget_visited, error, sizeof(error));
     } while (budget_result == 1 && !stop_requested);
-    if (!budget_result && latcd_retirement_page_startup_check(config.cache_dir, error, sizeof(error)))
-        budget_result = -1;
+    LatcdPageBudget retry_budget = {0};
+    LatcdRetirementRetryPage *retry_page = g_new0(LatcdRetirementRetryPage, 1);
+    bool retry_recovered = false;
+    if (!budget_result && latcd_retirement_page_startup_check(config.cache_dir, error, sizeof(error))) {
+        char retry_error[sizeof(error)];
+        if (latcd_retirement_retry_page_load(config.cache_dir, retry_page, retry_error, sizeof(retry_error)))
+            budget_result = -1;
+        else if (latcd_retirement_retry_page_restore_budget(config.cache_dir, &generation_capacity,
+                config.max_cache_bytes, UINT64_C(600) * 1000000, &retry_budget, retry_page,
+                error, sizeof(error))) budget_result = -1;
+        else retry_recovered = true;
+    }
     if (!budget_result && latcd_cache_capacity_recovery_finish(&generation_capacity))
         budget_result = fail(error, sizeof(error), "capacity index invalid after compiler budget recovery");
+    while (!budget_result && retry_recovered && !stop_requested) {
+        if (latcd_retirement_retry_page_load(config.cache_dir, retry_page, error, sizeof(error))) {
+            budget_result = -1;
+        } else if (retry_page->completed == retry_page->count) {
+            budget_result = latcd_retirement_retry_page_commit(config.cache_dir, &retry_budget,
+                                                                error, sizeof(error));
+            retry_recovered = false;
+        } else {
+            if (!retry_page->intent_present) {
+                budget_result = latcd_retirement_retry_page_begin_deferred(config.cache_dir, &retry_budget,
+                                                                           error, sizeof(error));
+            }
+            if (!budget_result) budget_result = latcd_retirement_retry_page_apply_unmatched(
+                config.cache_dir, &retry_budget, error, sizeof(error));
+            if (!budget_result) budget_result = latcd_retirement_retry_page_finish_unmatched(
+                config.cache_dir, &retry_budget, error, sizeof(error));
+        }
+    }
+    g_free(retry_page);
     atomic_store(&compiler_budget_recovery_state, budget_result < 0 ? -1 : budget_result == 0);
     if (budget_result < 0 || stop_requested) {
         fprintf(stderr, "latcd: %s\n", stop_requested ? "budget recovery deferred by stop request" : error);

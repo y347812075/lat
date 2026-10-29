@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 6 ]; then
-    echo "usage: $0 LATCD LATC RUNNER RUNTIME_DIR X86_GUEST WORKDIR" >&2
+if [ "$#" -ne 7 ]; then
+    echo "usage: $0 LATCD LATC RUNNER RUNTIME_DIR X86_GUEST WORKDIR FIXTURE" >&2
     exit 2
 fi
 
@@ -12,6 +12,7 @@ runner=$3
 runtime_dir=$4
 guest=$5
 work=$6
+fixture=$7
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 export LATC_FAKE_REAL=$latc
 rm -rf "$work"
@@ -88,6 +89,29 @@ stop_service()
     wait "$server_pid"
     server_pid=
 }
+
+start_service startup-retry "$latc"
+stop_service
+"$fixture" --startup-retry-fixture "$cache"
+object=$cache/$(printf '%064x' 7).so
+[ -f "$object" ]
+"$latcd" --serve --socket "$socket" --cache-dir "$cache" \
+  --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+  --stats "$stats" --workers 1 >"$phase/restart.stdout" 2>"$phase/restart.stderr" &
+server_pid=$!
+n=0
+while ! grep -q "^retry_cursor=$(printf '%064x' 7).so$" "$cache/.gc/retirement-page.ini" && \
+      kill -0 "$server_pid" 2>/dev/null; do
+    n=$((n + 1)); [ "$n" -lt 500 ] || break; sleep 0.01
+done
+n=0
+while [ ! -S "$socket" ] && kill -0 "$server_pid" 2>/dev/null; do
+    n=$((n + 1)); [ "$n" -lt 500 ] || break; sleep 0.01
+done
+[ -S "$socket" ]
+[ -f "$object" ]
+grep -q "^retry_cursor=$(printf '%064x' 7).so$" "$cache/.gc/retirement-page.ini"
+stop_service
 
 submit_source()
 {

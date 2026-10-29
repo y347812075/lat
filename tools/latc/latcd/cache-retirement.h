@@ -542,6 +542,9 @@ int latcd_retirement_retry_page_begin_not_due(const char *root,
 /* Defer a due matched member without recording an execution or deletion. */
 int latcd_retirement_retry_page_begin_unattempted(const char *root,
     struct LatcdPageBudget *budget, char *error, size_t error_size);
+/* Defer the current member without attempting execution, regardless of its deadline. */
+int latcd_retirement_retry_page_begin_deferred(const char *root,
+    struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Apply or idempotently recognize a deferral intent; no removal authority. */
 int latcd_retirement_retry_page_apply_unmatched(const char *root,
     struct LatcdPageBudget *budget, char *error, size_t error_size);
