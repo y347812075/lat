@@ -22,6 +22,7 @@ typedef struct LatcdCacheCapacity {
     void *unknown_tasks;
     bool ready;
     bool recovery_gate;
+    void *restored_page_budget;
     bool inventory_active;
     bool metadata_present;
     int watch_fd;
@@ -92,6 +93,12 @@ typedef struct LatcdPageBudget {
     bool page_identity_bound;
     uint8_t page_identity[32];
 } LatcdPageBudget;
+/* Startup only, with ordinary admission gated and the page and its installed
+ * fragments verified under the scheduler lock. The caller owns budget storage
+ * for the entire reservation lifetime; this does not validate persisted data. */
+int latcd_cache_capacity_restore_page(LatcdCacheCapacity *capacity, uint64_t bytes,
+                                      uint64_t limit, const uint8_t identity[32],
+                                      LatcdPageBudget *budget);
 /* Compute a conservative serial-write peak after existing files have been
  * inventoried. missing is the number of new result files, not page size;
  * every other result must already occupy at least result_bytes. The caller
