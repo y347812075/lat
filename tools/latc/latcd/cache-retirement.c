@@ -324,8 +324,9 @@ void (*latcd_retirement_test_before_settlement)(void);
 
 static int write_record_kind(int directory, const char *name, GKeyFile *record,
                              bool scheduling, bool fixed_schedule_size, bool recovery,
-                             LatcdPageBudget *budget)
+                             LatcdPageBudget *budget, bool *not_installed)
 {
+    if (not_installed) *not_installed = true;
     gsize size;
     char *data = g_key_file_to_data(record, &size, NULL);
     if (fixed_schedule_size) {
@@ -402,6 +403,7 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record,
     if (record_write_fault("closed") ||
         renameat(directory, temporary, directory, name)) goto out;
     replaced = true;
+    if (not_installed) *not_installed = false;
     if (record_write_fault("renamed") || fsync(directory) ||
         record_write_fault("directory-synced")) goto out;
     result = 0;
@@ -411,6 +413,7 @@ out:
     saved = errno;
     if (result && created && !replaced && unlinkat(directory, temporary, 0) && errno != ENOENT)
         leftover = true;
+    if (leftover && not_installed) *not_installed = false;
     /* A failed post-rename sync leaves the durable namespace uncertain. */
     LatcdCacheCapacity *charged_capacity = reservation.capacity;
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
@@ -430,12 +433,12 @@ out:
 
 static int write_record(int directory, const char *name, GKeyFile *record)
 {
-    return write_record_kind(directory, name, record, false, false, false, NULL);
+    return write_record_kind(directory, name, record, false, false, false, NULL, NULL);
 }
 
 static int write_recovery_record(int directory, const char *name, GKeyFile *record)
 {
-    return write_record_kind(directory, name, record, false, false, true, NULL);
+    return write_record_kind(directory, name, record, false, false, true, NULL, NULL);
 }
 
 static int retirement_clock(char **boot, uint64_t *stamp)
@@ -748,8 +751,9 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
 }
 
 static int page_state_store_fd(int root_fd, int gc, const LatcdRetirementPageState *state,
-                               LatcdPageBudget *budget)
+                               LatcdPageBudget *budget, bool *not_installed)
 {
+    if (not_installed) *not_installed = true;
     int result = -1;
     GKeyFile *record = g_key_file_new();
     struct stat cache;
@@ -789,7 +793,7 @@ static int page_state_store_fd(int root_fd, int gc, const LatcdRetirementPageSta
         g_key_file_set_uint64(record, group, "busy_count", state->entries[i].busy_count);
         g_key_file_set_uint64(record, group, "result", state->results[i]);
     }
-    result = write_record_kind(gc, "retirement-page.ini", record, true, false, false, budget);
+    result = write_record_kind(gc, "retirement-page.ini", record, true, false, false, budget, not_installed);
 out:
     g_key_file_unref(record);
     return result;
@@ -805,7 +809,7 @@ int latcd_retirement_page_state_store(const char *root,
     if (scheduler < 0) return -1;
     int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int gc = root_fd < 0 ? -1 : open_directory(root_fd, ".gc", true);
-    int result = same_directory(scheduler, gc) ? page_state_store_fd(root_fd, gc, state, NULL) : -1;
+    int result = same_directory(scheduler, gc) ? page_state_store_fd(root_fd, gc, state, NULL, NULL) : -1;
     if (gc >= 0) close(gc);
     if (root_fd >= 0) close(root_fd);
     close(scheduler);
@@ -875,11 +879,18 @@ int latcd_retirement_page_startup_check(const char *root, char *error, size_t er
         "retirement page budget recovery unavailable or checkpoint unsafe");
 }
 
-int latcd_retirement_page_stage(const char *root, const LatcdRetirementPageState *page,
-                                char *error, size_t error_size)
+static int schedule_page_results(const char *root, uint64_t now_us,
+                                 const LatcdRetirementPageState *page,
+                                 uint8_t *results, LatcdRetirementPageInventory *inventory,
+                                 char *error, size_t error_size);
+
+static int page_stage(const char *root, const LatcdRetirementPageState *page,
+                      LatcdCacheCapacity *capacity, uint64_t limit, LatcdPageBudget *budget,
+                      char *error, size_t error_size)
 {
     uint8_t identity[32];
-    if (!root || !page || latcd_retirement_page_identity(page, identity))
+    if (!root || !page || (!!capacity != !!budget) || page->budget_bound ||
+        latcd_retirement_page_identity(page, identity))
         return fail(error, error_size, "invalid retirement page stage");
     int scheduler = scheduler_lock(root, error, error_size);
     if (scheduler < 0) return -1;
@@ -903,13 +914,45 @@ int latcd_retirement_page_stage(const char *root, const LatcdRetirementPageState
     if (!same_directory(scheduler, gc) || fstat(directory, &held) || lstat(root, &path) ||
         held.st_dev != path.st_dev || held.st_ino != path.st_ino ||
         !directory_matches_at(directory, ".gc", gc)) goto out;
-    result = page_state_store_fd(directory, gc, page, NULL);
+    if (budget) {
+        LatcdRetirementPageInventory inventory = {0};
+        uint8_t results[128] = {0}, binding[32];
+        uint64_t bytes;
+        int matching = latcd_cache_capacity_open_matching_root(capacity, root, directory);
+        if (matching < 0) goto out;
+        close(matching);
+        if (schedule_page_results(root, now, page, results, &inventory, error, error_size) < 0 ||
+            latcd_retirement_page_budget_identity(page, binding) ||
+            latcd_retirement_page_budget_estimate(page, results, &inventory, &bytes) ||
+            latcd_cache_capacity_reserve_page(capacity, bytes, limit, binding, budget)) goto out;
+        bool not_installed = false;
+        result = page_state_store_fd(directory, gc, page, budget, &not_installed);
+        if (result && not_installed) {
+            int saved = errno;
+            latcd_cache_capacity_cancel_page(capacity, budget);
+            errno = saved;
+        }
+    } else result = page_state_store_fd(directory, gc, page, NULL, NULL);
 out:
     g_free(boot);
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
     close(scheduler);
     return result ? fail(error, error_size, "retirement page stage failed; reload") : 0;
+}
+
+int latcd_retirement_page_stage(const char *root, const LatcdRetirementPageState *page,
+                                char *error, size_t error_size)
+{
+    return page_stage(root, page, NULL, 0, NULL, error, error_size);
+}
+
+int latcd_retirement_page_stage_budgeted(const char *root, const LatcdRetirementPageState *page,
+                                LatcdCacheCapacity *capacity, uint64_t limit, LatcdPageBudget *budget,
+                                char *error, size_t error_size)
+{
+    if (!capacity || !budget) return fail(error, error_size, "missing page capacity or budget");
+    return page_stage(root, page, capacity, limit, budget, error, error_size);
 }
 
 int latcd_retirement_page_round_begin(const char *root, uint64_t grace_us,
@@ -938,7 +981,7 @@ int latcd_retirement_page_round_begin(const char *root, uint64_t grace_us,
     next.grace_us = grace_us;
     next.round_cutoff = cutoff;
     memcpy(next.boot, boot, sizeof(next.boot));
-    if (page_state_store_fd(directory, gc, &next, NULL) ||
+    if (page_state_store_fd(directory, gc, &next, NULL, NULL) ||
         lstat(root, &path) || !object_stat_equal(&cache, &path) ||
         fstatat(directory, ".gc", &path, AT_SYMLINK_NOFOLLOW) ||
         path.st_dev != held_gc.st_dev || path.st_ino != held_gc.st_ino ||
@@ -1217,7 +1260,7 @@ static int retirement_schedule_access(const char *root, const char *boot,
         lstat(root, &path) || path.st_dev != cache.st_dev || path.st_ino != cache.st_ino ||
         !directory_matches_at(root_fd, ".gc", gc) ||
         !directory_matches_at(gc, "retirement-schedule", store)) goto out;
-    result = write_record_kind(store, filename, output, true, true, false, budget);
+    result = write_record_kind(store, filename, output, true, true, false, budget, NULL);
 out:
     g_key_file_unref(output); g_free(filename);
     if (watch >= 0) close(watch);
@@ -1614,7 +1657,7 @@ static int page_commit(const char *root, uint64_t now_us,
         if (matching < 0) goto out;
         close(matching);
     }
-    result = page_state_store_fd(directory, gc, &persisted, budget);
+    result = page_state_store_fd(directory, gc, &persisted, budget, NULL);
 out:
     int saved = errno;
     if (gc >= 0) close(gc);
@@ -4357,7 +4400,7 @@ static int queue_checkpoint(LatcdRetirementQueue *queue, bool partial, bool acti
     gsize current_size;
     char *current = g_key_file_to_data(record, &current_size, NULL);
     result = status < 0 || current_size > RECORD_LIMIT ? -1 : !active && !status && previous_size == current_size &&
-        !memcmp(previous, current, current_size) ? 0 : write_record_kind(gc, "retirement-scheduler.ini", record, true, false, false, NULL);
+        !memcmp(previous, current, current_size) ? 0 : write_record_kind(gc, "retirement-scheduler.ini", record, true, false, false, NULL, NULL);
     g_free(previous); g_free(current);
 out:
     g_free(boot); g_key_file_unref(record);
@@ -4414,7 +4457,7 @@ int latcd_retirement_queue_handoff(LatcdRetirementQueue *queue, const char *reas
     int status = read_file(gc, "retirement-handoff.ini", RECORD_LIMIT, &previous, &size);
     g_free(previous);
     if (status < 0) goto out;
-    result = write_record_kind(gc, "retirement-handoff.ini", record, true, false, false, NULL);
+    result = write_record_kind(gc, "retirement-handoff.ini", record, true, false, false, NULL, NULL);
 out:
     if (gc >= 0) close(gc);
     if (root >= 0) close(root);

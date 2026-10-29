@@ -91,6 +91,13 @@ int latcd_retirement_page_startup_check(const char *root, char *error, size_t er
  * hold the owner lease and control the namespace; this is not admission. */
 int latcd_retirement_page_stage(const char *root, const LatcdRetirementPageState *page,
                                 char *error, size_t error_size);
+struct LatcdCacheCapacity;
+struct LatcdPageBudget;
+/* Owner lease required; budget storage must outlive all page writes. On error
+ * a nonempty budget remains owned by the caller until recovery; never discard it. */
+int latcd_retirement_page_stage_budgeted(const char *root, const LatcdRetirementPageState *page,
+                                struct LatcdCacheCapacity *capacity, uint64_t limit,
+                                struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Owner lease required. Create an initial empty round only when no page state
  * exists, holding roots EX through clock sampling and durable storage. On any
  * error reload the state before retrying; an interrupted rename may persist.

@@ -2466,6 +2466,65 @@ static void test_page_stage(void)
     g_free(boot); remove_root(root); g_free(root);
 }
 
+static void test_budgeted_page_stage(void)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    struct stat st;
+    assert(!stat(root, &st));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    LatcdRetirementPageState empty = {.cache_device = st.st_dev, .cache_inode = st.st_ino,
+        .grace_us = 100, .round_cutoff = 120, .sequence = 3};
+    g_strlcpy(empty.boot, boot, sizeof(empty.boot));
+    LatcdRetirementPageState page = empty, loaded;
+    page.count = 1;
+    snprintf(page.entries[0].name, sizeof(page.entries[0].name), "%064x.so", 1);
+    page.entries[0].deadline = 140;
+    page.entries[0].enqueued = 100;
+    g_strlcpy(page.cursor, page.entries[0].name, sizeof(page.cursor));
+    assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
+    simulated_boottime_us = 150;
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget budget = {0};
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    assert(latcd_retirement_page_stage_budgeted(root, &page, &capacity, capacity.metadata_committed,
+                                                &budget, error, sizeof(error)) < 0);
+    assert(!budget.capacity && capacity.ready);
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:file-synced", 1));
+    assert(latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
+                                                &budget, error, sizeof(error)) < 0);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    assert(!budget.capacity && capacity.ready && !capacity.metadata_reserved);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && !loaded.count);
+    assert(!latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
+                                                 &budget, error, sizeof(error)));
+    assert(budget.capacity == &capacity && budget.page_identity_bound && capacity.ready);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && loaded.budget_bound);
+    assert(latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0);
+    assert(!latcd_cache_capacity_test_page_release(&capacity, &budget));
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
+    LatcdCacheCapacity uncertain = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&uncertain, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&uncertain, UINT64_MAX);
+    assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:renamed", 1));
+    assert(latcd_retirement_page_stage_budgeted(root, &page, &uncertain, UINT64_MAX,
+                                                &budget, error, sizeof(error)) < 0);
+    unsetenv("LATCD_TEST_RETIREMENT_IO");
+    assert(budget.capacity == &uncertain && budget.invalid && !uncertain.ready);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && loaded.budget_bound);
+    assert(!latcd_cache_capacity_test_page_abandon(&uncertain, &budget));
+    latcd_cache_capacity_close(&uncertain);
+    assert(!pthread_mutex_destroy(&uncertain.lock));
+    simulated_boottime_us = 0;
+    g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
+}
+
 static void test_schedule_max_record(void)
 {
     char *root = root_new(), error[256], *boot = NULL;
@@ -5943,6 +6002,7 @@ int main(int argc, char **argv)
     test_schedule_result_upgrade();
     test_schedule_check_page();
     test_page_stage();
+    test_budgeted_page_stage();
     test_schedule_store();
     test_schedule_max_record();
     test_schedule_merge_multiple();
