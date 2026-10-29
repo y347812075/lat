@@ -1738,6 +1738,36 @@ int latcd_retirement_page_budget_estimate(const LatcdRetirementPageState *page,
         RETIREMENT_SCHEDULE_RECORD_BYTES, RECORD_LIMIT, bytes);
 }
 
+int latcd_retirement_consumption_check_inventory(const LatcdRetirementPageState *page,
+                                    const LatcdRetirementConsumption *consumption,
+                                    const uint8_t results[128],
+                                    const LatcdRetirementPageInventory *inventory)
+{
+    if (!results || !inventory || latcd_retirement_consumption_valid(page, consumption) ||
+        inventory->undersized_member) return -1;
+    for (unsigned i = 0; i < page->count; i++) {
+        bool complete = (consumption->completed[i / 8] & (1u << (i % 8))) != 0;
+        bool intent = consumption->intent_present && consumption->intent_index == i;
+        if (complete) {
+            if (results[i] || inventory->members[i].present) return -1;
+            continue;
+        }
+        if (intent && !results[i] && !inventory->members[i].present) continue;
+        if (results[i] != page->results[i] || !inventory->members[i].present) return -1;
+        if (intent) {
+            const struct stat *st = &inventory->members[i].snapshot;
+            if ((uint64_t)st->st_dev != consumption->device || (uint64_t)st->st_ino != consumption->inode ||
+                (uint64_t)st->st_mode != consumption->mode || (uint64_t)st->st_uid != consumption->uid ||
+                (uint64_t)st->st_nlink != consumption->nlink || (uint64_t)st->st_size != consumption->size ||
+                (uint64_t)st->st_blocks != consumption->blocks || st->st_mtim.tv_sec != consumption->mtime_sec ||
+                st->st_mtim.tv_nsec != consumption->mtime_nsec || st->st_ctim.tv_sec != consumption->ctime_sec ||
+                st->st_ctim.tv_nsec != consumption->ctime_nsec ||
+                memcmp(inventory->members[i].digest, consumption->digest, 32)) return -1;
+        }
+    }
+    return 0;
+}
+
 int latcd_retirement_page_restore_budget(const char *root, LatcdCacheCapacity *capacity,
                                     uint64_t limit, uint64_t expected_grace_us, LatcdPageBudget *budget,
                                     LatcdRetirementPageState *page, char *error, size_t error_size)

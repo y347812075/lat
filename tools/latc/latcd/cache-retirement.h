@@ -202,6 +202,12 @@ typedef struct LatcdRetirementPageInventory {
         uint8_t digest[32];
     } members[128];
 } LatcdRetirementPageInventory;
+/* Classify a pending-page inventory for consumption recovery. This does not
+ * prove namespace isolation, synchronize a deletion, or grant admission. */
+int latcd_retirement_consumption_check_inventory(const LatcdRetirementPageState *page,
+                                    const LatcdRetirementConsumption *consumption,
+                                    const uint8_t results[128],
+                                    const LatcdRetirementPageInventory *inventory);
 int latcd_retirement_page_snapshot(const char *root, uint64_t now_us,
                                     LatcdRetirementPageState *page,
                                     uint8_t results[128], LatcdRetirementPageInventory *inventory,
