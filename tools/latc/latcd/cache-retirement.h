@@ -53,6 +53,14 @@ typedef struct LatcdRetirementPageState {
     /* Result types are populated only for a committed pending page. */
     uint8_t results[128];
 } LatcdRetirementPageState;
+/* In-memory validation only; not persisted and never deletion authority. */
+typedef struct LatcdRetirementConsumption {
+    uint8_t completed[16];
+    bool intent_present;
+    unsigned intent_index;
+} LatcdRetirementConsumption;
+int latcd_retirement_consumption_valid(const LatcdRetirementPageState *page,
+                                       const LatcdRetirementConsumption *consumption);
 /* Select the next stable-name page from a caller-provided sorted list. Names
  * must be valid object basenames. This is scheduling only, never admission. */
 int latcd_retirement_page_select(const char *const *names, size_t count,

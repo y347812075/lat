@@ -1147,6 +1147,27 @@ static void test_round_cursor(void)
     pending_page.committed_pending = true;
     pending_page.results[0] = 1;
     pending_page.results[1] = 2;
+    LatcdRetirementConsumption consumption = {0};
+    assert(!latcd_retirement_consumption_valid(&pending_page, &consumption));
+    assert(latcd_retirement_consumption_valid(&state, &consumption) < 0);
+    consumption.intent_present = true;
+    assert(!latcd_retirement_consumption_valid(&pending_page, &consumption));
+    consumption.completed[0] = 1;
+    assert(latcd_retirement_consumption_valid(&pending_page, &consumption) < 0);
+    consumption.intent_present = false;
+    assert(!latcd_retirement_consumption_valid(&pending_page, &consumption));
+    consumption.completed[0] = 2;
+    assert(latcd_retirement_consumption_valid(&pending_page, &consumption) < 0);
+    consumption.completed[0] = 0;
+    consumption.completed[15] = 128;
+    assert(latcd_retirement_consumption_valid(&pending_page, &consumption) < 0);
+    consumption.completed[15] = 0;
+    consumption.intent_present = true; consumption.intent_index = 1;
+    assert(latcd_retirement_consumption_valid(&pending_page, &consumption) < 0);
+    consumption.intent_index = 128;
+    assert(latcd_retirement_consumption_valid(&pending_page, &consumption) < 0);
+    consumption.intent_present = false;
+    assert(latcd_retirement_consumption_valid(&pending_page, &consumption) < 0);
     assert(!latcd_retirement_page_state_store(page_root, &pending_page, page_error, sizeof(page_error)));
     assert(latcd_retirement_page_startup_check(page_root, page_error, sizeof(page_error)) < 0);
     assert(!latcd_retirement_page_state_load(page_root, &loaded, page_error, sizeof(page_error)) &&

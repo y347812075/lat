@@ -652,6 +652,24 @@ int latcd_retirement_page_state_valid(const LatcdRetirementPageState *state)
     return 0;
 }
 
+int latcd_retirement_consumption_valid(const LatcdRetirementPageState *page,
+                                       const LatcdRetirementConsumption *consumption)
+{
+    if (!consumption || latcd_retirement_page_state_valid(page) || !page->committed_pending)
+        return -1;
+    for (unsigned i = 0; i < 128; i++) {
+        bool completed = (consumption->completed[i / 8] & (1u << (i % 8))) != 0;
+        if (completed && (i >= page->count || page->results[i] != LATCD_RETIREMENT_RESULT_DONE))
+            return -1;
+    }
+    if (consumption->intent_present) {
+        unsigned i = consumption->intent_index;
+        if (i >= page->count || page->results[i] != LATCD_RETIREMENT_RESULT_DONE ||
+            (consumption->completed[i / 8] & (1u << (i % 8)))) return -1;
+    } else if (consumption->intent_index) return -1;
+    return 0;
+}
+
 static void page_identity_u64(GChecksum *checksum, uint64_t value)
 {
     uint8_t bytes[8];
