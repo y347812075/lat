@@ -828,7 +828,8 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
                        page_budget->inflight < UINT_MAX : capacity_fits(capacity, bytes, metadata_limit));
     bool updating = g_hash_table_contains(capacity->state_expected, key);
     if (updating) fits = false;
-    if (recovery && !state && !fits && !updating && old && bytes <= UINT64_MAX - capacity->metadata_reserved) {
+    if (recovery && !state && !capacity->recovery_gate && !fits && !updating && old &&
+        bytes <= UINT64_MAX - capacity->metadata_reserved) {
         /* The caller must establish that this is irreversible-operation
          * recovery. Preserve the charge and close ordinary admission. */
         capacity->ready = false;
@@ -1147,7 +1148,8 @@ static int metadata_remove(int directory, const char *name, uint64_t device,
     check_changes(capacity);
     struct stat st;
     int result = -1;
-    if (!capacity->ready || g_hash_table_contains(capacity->state_expected, key)) {
+    if (!capacity->ready || capacity->recovery_gate ||
+        g_hash_table_contains(capacity->state_expected, key)) {
         errno = EBUSY;
         goto out;
     }

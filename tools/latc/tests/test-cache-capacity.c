@@ -82,6 +82,8 @@ static void test_recovery_gate(void)
     char *root = g_dir_make_tmp("capacity-recovery-XXXXXX", NULL);
     char *gc = g_build_filename(root, ".gc", NULL);
     assert(root && !mkdir(gc, 0700));
+    char *record = g_build_filename(gc, "record", NULL);
+    put(record, "x");
     LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
     assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
     assert(!latcd_cache_capacity_recovery_begin(&capacity));
@@ -92,15 +94,20 @@ static void test_recovery_gate(void)
     int fd = open(gc, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     LatcdMetadataReservation reservation;
     assert(fd >= 0 && latcd_cache_capacity_metadata_begin(fd, "record", 1, &reservation));
+    assert(latcd_cache_capacity_metadata_recovery_begin(fd, "record", 1, &reservation));
+    struct stat existing;
+    assert(!stat(record, &existing));
+    assert(latcd_cache_capacity_metadata_remove_checked(fd, "record", &existing));
+    assert(capacity.ready && capacity.metadata_committed == 1 && !access(record, F_OK));
     latcd_cache_capacity_unknown_task(&capacity, "task");
     assert(latcd_cache_capacity_recovery_finish(&capacity));
     assert(latcd_cache_capacity_reserve(&capacity, 1, 100, NULL, 0));
     assert(!latcd_cache_capacity_restore_task(&capacity, "task", 80));
     assert(!latcd_cache_capacity_recovery_finish(&capacity));
     assert(latcd_cache_capacity_recovery_finish(&capacity));
-    assert(latcd_cache_capacity_reserve(&capacity, 21, 100, NULL, 0));
-    assert(!latcd_cache_capacity_reserve(&capacity, 20, 100, NULL, 0));
-    latcd_cache_capacity_finish(&capacity, 20, false);
+    assert(latcd_cache_capacity_reserve(&capacity, 20, 100, NULL, 0));
+    assert(!latcd_cache_capacity_reserve(&capacity, 19, 100, NULL, 0));
+    latcd_cache_capacity_finish(&capacity, 19, false);
     latcd_cache_capacity_release_task(&capacity, "task");
     assert(!latcd_cache_capacity_recovery_begin(&capacity));
     char *unexpected = g_build_filename(gc, "unexpected", NULL);
@@ -112,6 +119,8 @@ static void test_recovery_gate(void)
     assert(!pthread_mutex_destroy(&capacity.lock));
     assert(!unlink(unexpected));
     g_free(unexpected);
+    assert(!unlink(record));
+    g_free(record);
     assert(!rmdir(gc) && !rmdir(root));
     g_free(gc); g_free(root);
 }
