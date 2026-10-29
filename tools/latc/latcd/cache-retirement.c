@@ -2215,6 +2215,44 @@ out:
     return result ? fail(error, error_size, "consumption checkpoint uncertain; reload") : 0;
 }
 
+int latcd_retirement_consumption_prepare(const char *root, uint64_t now_us, unsigned index,
+                                         LatcdPageBudget *budget, char *error, size_t error_size)
+{
+    if (!root || !budget || !budget->capacity || !budget->page_identity_bound)
+        return fail(error, error_size, "invalid consumption intent");
+    int scheduler = scheduler_lock(root, error, error_size);
+    if (scheduler < 0) return -1;
+    LatcdRetirementPageState page;
+    LatcdRetirementPageInventory inventory = {0};
+    uint8_t identity[32], results[128] = {0};
+    bool legacy = false;
+    int directory = -1, gc = -1, matching = -1, result = -1;
+    struct stat held, path;
+    if (page_state_load(root, &page, &legacy, error, error_size) || legacy ||
+        !page.budget_bound || !page.consumption_bound || index >= page.count ||
+        latcd_retirement_page_budget_identity(&page, identity) ||
+        memcmp(identity, budget->page_identity, sizeof(identity)) ||
+        schedule_page_results(root, now_us, &page, results, &inventory, error, error_size) < 0 ||
+        latcd_retirement_consumption_check_inventory(&page, &page.consumption, results, &inventory) ||
+        !inventory.members[index].present ||
+        latcd_retirement_consumption_bind(&page, &page.consumption, index,
+            &inventory.members[index].snapshot, inventory.members[index].digest)) goto out;
+    directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
+    if (gc < 0 || !same_directory(scheduler, gc) || fstat(directory, &held) ||
+        lstat(root, &path) || held.st_dev != path.st_dev || held.st_ino != path.st_ino ||
+        !directory_matches_at(directory, ".gc", gc)) goto out;
+    matching = latcd_cache_capacity_open_matching_root(budget->capacity, root, directory);
+    if (matching < 0) goto out;
+    result = page_state_store_fd(directory, gc, &page, budget, NULL);
+out:
+    if (matching >= 0) close(matching);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    close(scheduler);
+    return result ? fail(error, error_size, "consumption intent uncertain; reload") : 0;
+}
+
 int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t now_us,
                                           LatcdPageBudget *budget, char *error, size_t error_size)
 {

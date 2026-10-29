@@ -3277,7 +3277,7 @@ static void test_budgeted_rebind(void)
     g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
 }
 
-static void test_budgeted_max_page(void)
+static void test_budgeted_max_page(bool consumption)
 {
     char *root = root_new(), error[256], *boot = NULL;
     char *gc = g_build_filename(root, ".gc", NULL);
@@ -3317,6 +3317,12 @@ static void test_budgeted_max_page(void)
             &page.entries[i], i % 2 ? LATCD_RETIREMENT_RESULT_DONE : LATCD_RETIREMENT_RESULT_DEFERRED,
             error, sizeof(error)));
     assert(!latcd_retirement_page_budget_commit(root, UINT64_MAX, &page, &budget, error, sizeof(error)));
+    if (consumption) {
+        assert(!latcd_retirement_consumption_begin(root, UINT64_MAX, &budget, error, sizeof(error)));
+        assert(latcd_retirement_consumption_prepare(root, UINT64_MAX, 0, &budget, error, sizeof(error)) < 0);
+        assert(!latcd_retirement_consumption_prepare(root, UINT64_MAX, 1, &budget, error, sizeof(error)));
+        assert(latcd_retirement_consumption_prepare(root, UINT64_MAX, 1, &budget, error, sizeof(error)) < 0);
+    }
     char *checkpoint = g_build_filename(gc, "retirement-page.ini", NULL);
     assert(!stat(checkpoint, &st) && st.st_size > 0 && st.st_size <= 65536);
     assert(!latcd_cache_capacity_test_page_release(&capacity, &budget));
@@ -3330,6 +3336,15 @@ static void test_budgeted_max_page(void)
                                                  &budget, &loaded, error, sizeof(error)));
     assert(loaded.committed_pending && loaded.count == 128 && budget.remaining == 2 * 65536);
     assert(!latcd_cache_capacity_recovery_finish(&recovered));
+    if (consumption) {
+        assert(loaded.consumption_bound && loaded.consumption.intent_present && loaded.consumption.intent_index == 1);
+        assert(!latcd_cache_capacity_test_page_release(&recovered, &budget));
+        latcd_cache_capacity_close(&recovered);
+        assert(!pthread_mutex_destroy(&recovered.lock));
+        simulated_boottime_us = 0;
+        g_free(checkpoint); g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
+        return;
+    }
     assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:file-synced", 1));
     assert(latcd_retirement_page_finish_preserving_results(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
     unsetenv("LATCD_TEST_RETIREMENT_IO");
@@ -6894,7 +6909,8 @@ int main(int argc, char **argv)
     test_schedule_check_page();
     test_page_stage();
     test_budgeted_page_stage();
-    test_budgeted_max_page();
+    test_budgeted_max_page(false);
+    test_budgeted_max_page(true);
     test_budgeted_rebind();
     test_rebind_crash("file-synced", false, false);
     test_rebind_crash("linked", false, true);
