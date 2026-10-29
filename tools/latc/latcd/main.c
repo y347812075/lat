@@ -6663,6 +6663,8 @@ int main(int argc, char **argv)
         budget_result = restore_compiler_budgets_step(&config, &compiler_budget_recovery,
             32, &budget_visited, error, sizeof(error));
     } while (budget_result == 1 && !stop_requested);
+    if (!budget_result && latcd_retirement_page_startup_check(config.cache_dir, error, sizeof(error)))
+        budget_result = -1;
     if (!budget_result && latcd_cache_capacity_recovery_finish(&generation_capacity))
         budget_result = fail(error, sizeof(error), "capacity index invalid after compiler budget recovery");
     atomic_store(&compiler_budget_recovery_state, budget_result < 0 ? -1 : budget_result == 0);

@@ -825,6 +825,29 @@ int latcd_retirement_page_state_load(const char *root, LatcdRetirementPageState 
     return page_state_load(root, state, NULL, error, error_size);
 }
 
+int latcd_retirement_page_startup_check(const char *root, char *error, size_t error_size)
+{
+    if (!root) return fail(error, error_size, "invalid retirement startup root");
+    int scheduler = scheduler_lock(root, error, error_size);
+    if (scheduler < 0) return -1;
+    LatcdRetirementPageState state;
+    bool legacy = false;
+    int status = page_state_load(root, &state, &legacy, error, error_size);
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
+    struct stat held, path;
+    bool valid = status >= 0 && gc >= 0 && same_directory(scheduler, gc) &&
+        !fstat(directory, &held) && !lstat(root, &path) &&
+        held.st_dev == path.st_dev && held.st_ino == path.st_ino &&
+        directory_matches_at(directory, ".gc", gc) &&
+        (status == 1 || (!legacy && !state.count && !state.committed_pending));
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    close(scheduler);
+    return valid ? 0 : fail(error, error_size,
+        "retirement page budget recovery unavailable or checkpoint unsafe");
+}
+
 int latcd_retirement_page_stage(const char *root, const LatcdRetirementPageState *page,
                                 char *error, size_t error_size)
 {

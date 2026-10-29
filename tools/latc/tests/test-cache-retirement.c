@@ -1108,9 +1108,25 @@ static void test_round_cursor(void)
     LatcdRetirementPageState loaded;
     assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
                                             sizeof(page_error)) == 1);
+    assert(!latcd_retirement_page_startup_check(page_root, page_error, sizeof(page_error)));
     state.entries[1].name[0] = 'b';
+    LatcdRetirementPageState empty_page = state;
+    empty_page.count = 0;
+    empty_page.cursor[0] = 0;
+    assert(!latcd_retirement_page_state_store(page_root, &empty_page, page_error, sizeof(page_error)));
+    assert(!latcd_retirement_page_startup_check(page_root, page_error, sizeof(page_error)));
     assert(latcd_retirement_page_state_store(page_root, &state, page_error,
                                              sizeof(page_error)) == 0);
+    assert(latcd_retirement_page_startup_check(page_root, page_error, sizeof(page_error)) < 0);
+    LatcdRetirementPageState pending_page = state;
+    pending_page.committed_pending = true;
+    pending_page.results[0] = 1;
+    pending_page.results[1] = 2;
+    assert(!latcd_retirement_page_state_store(page_root, &pending_page, page_error, sizeof(page_error)));
+    assert(latcd_retirement_page_startup_check(page_root, page_error, sizeof(page_error)) < 0);
+    assert(!latcd_retirement_page_state_load(page_root, &loaded, page_error, sizeof(page_error)) &&
+           loaded.committed_pending && loaded.results[0] == 1 && loaded.results[1] == 2);
+    assert(!latcd_retirement_page_state_store(page_root, &state, page_error, sizeof(page_error)));
     assert(latcd_retirement_page_state_load(page_root, &loaded, page_error,
                                             sizeof(page_error)) == 0);
     g_strlcpy(state.committed_cursor, "0", sizeof(state.committed_cursor));
@@ -1128,6 +1144,7 @@ static void test_round_cursor(void)
     put(page_path, bad_pending);
     g_free(bad_pending);
     assert(latcd_retirement_page_state_load(page_root, &loaded, page_error, sizeof(page_error)) < 0);
+    assert(latcd_retirement_page_startup_check(page_root, page_error, sizeof(page_error)) < 0);
     g_key_file_set_string(v4, "page", "pending", "true");
     bad_pending = g_key_file_to_data(v4, NULL, NULL);
     put(page_path, bad_pending);
