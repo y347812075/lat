@@ -3790,6 +3790,18 @@ static void test_retry_page_identity(void)
     page->items[1].aggregate.deadline = 190;
     strcpy(page->end_cursor, page->items[2].hint.name);
     assert(!latcd_retirement_retry_page_identity(page, original));
+    char *encoded = NULL; size_t encoded_size = 0;
+    LatcdRetirementRetryPage *decoded = g_new0(LatcdRetirementRetryPage, 1);
+    assert(!latcd_retirement_retry_page_encode(page, &encoded, &encoded_size));
+    assert(!latcd_retirement_retry_page_decode(encoded, encoded_size, decoded));
+    assert(!latcd_retirement_retry_page_identity(decoded, changed) && !memcmp(original, changed, 32));
+    char *tampered = g_strdup(encoded), *field = strstr(tampered, "sequence=100");
+    assert(field); field[strlen("sequence=10")] = '1';
+    assert(latcd_retirement_retry_page_decode(tampered, encoded_size, decoded) < 0 && !decoded->count);
+    g_free(tampered);
+    tampered = g_strconcat(encoded, "unexpected=1\n", NULL);
+    assert(latcd_retirement_retry_page_decode(tampered, strlen(tampered), decoded) < 0);
+    g_free(tampered); g_free(encoded); g_free(decoded);
     page->items[0].shard_sequence++;
     assert(!latcd_retirement_retry_page_identity(page, changed) && memcmp(original, changed, 32));
     page->items[0].shard_sequence--;
@@ -3807,6 +3819,22 @@ static void test_retry_page_identity(void)
     page->items[1].aggregate.enqueued--;
     strcpy(page->items[2].hint.name, page->items[0].hint.name);
     assert(latcd_retirement_retry_page_identity(page, changed) < 0);
+    memset(page->items, 0, sizeof(page->items));
+    page->retry_cursor[0] = 0; page->count = 128;
+    page->snapshot_time = UINT64_MAX; page->snapshot_sequence = UINT64_MAX;
+    for (unsigned i = 0; i < page->count; i++) {
+        LatcdRetirementRetryItem *item = &page->items[i];
+        snprintf(item->hint.name, sizeof(item->hint.name), "%064x-%064x.native", i + 1, i + 1);
+        item->hint.enqueued = UINT64_MAX; item->hint.last_attempt = UINT64_MAX;
+        item->hint.retry_at = UINT64_MAX; item->hint.busy_count = 7;
+        item->shard_sequence = UINT64_MAX; item->shard_sequence_bound = true;
+        item->matched = true; item->aggregate = item->hint; item->aggregate.deadline = UINT64_MAX;
+    }
+    strcpy(page->end_cursor, page->items[127].hint.name);
+    decoded = g_new0(LatcdRetirementRetryPage, 1);
+    assert(!latcd_retirement_retry_page_encode(page, &encoded, &encoded_size) && encoded_size < 65536);
+    assert(!latcd_retirement_retry_page_decode(encoded, encoded_size, decoded) && decoded->count == 128);
+    g_free(decoded); g_free(encoded);
     g_free(page);
 }
 

@@ -54,6 +54,11 @@ typedef struct LatcdRetirementRetryPage {
 } LatcdRetirementRetryPage;
 int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
                                         uint8_t digest[32]);
+/* Codec for a complete immutable checkpoint; free encoded data with g_free. */
+int latcd_retirement_retry_page_encode(const LatcdRetirementRetryPage *page,
+                                       char **data, size_t *size);
+int latcd_retirement_retry_page_decode(const char *data, size_t size,
+                                       LatcdRetirementRetryPage *page);
 /* Select due hints in name order after a separate retry cursor, wrapping once.
  * This is a scheduling hint only; transaction rediscovery is still required. */
 int latcd_retirement_retry_select(const LatcdRetirementPageDeadline *entries,

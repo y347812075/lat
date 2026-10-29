@@ -944,6 +944,123 @@ static void encode_hex(const uint8_t *bytes, size_t size, char *out)
     for (size_t i = 0; i < size; i++) snprintf(out + i * 2, 3, "%02x", bytes[i]);
 }
 
+int latcd_retirement_retry_page_encode(const LatcdRetirementRetryPage *page,
+                                       char **data, size_t *size)
+{
+    if (!data || !size) return -1;
+    *data = NULL; *size = 0;
+    uint8_t digest[32];
+    if (latcd_retirement_retry_page_identity(page, digest)) return -1;
+    GKeyFile *record = g_key_file_new();
+    char hex[65];
+    encode_hex(digest, sizeof(digest), hex);
+    g_key_file_set_integer(record, "retry", "version", 1);
+    g_key_file_set_uint64(record, "retry", "cache_device", page->cache_device);
+    g_key_file_set_uint64(record, "retry", "cache_inode", page->cache_inode);
+    g_key_file_set_uint64(record, "retry", "grace_us", page->grace_us);
+    g_key_file_set_uint64(record, "retry", "round_cutoff", page->round_cutoff);
+    g_key_file_set_uint64(record, "retry", "snapshot_time", page->snapshot_time);
+    g_key_file_set_uint64(record, "retry", "snapshot_sequence", page->snapshot_sequence);
+    g_key_file_set_string(record, "retry", "boot", page->boot);
+    g_key_file_set_string(record, "retry", "committed_cursor", page->committed_cursor);
+    g_key_file_set_string(record, "retry", "retry_cursor", page->retry_cursor);
+    g_key_file_set_string(record, "retry", "end_cursor", page->end_cursor);
+    g_key_file_set_uint64(record, "retry", "count", page->count);
+    g_key_file_set_string(record, "retry", "identity", hex);
+    for (unsigned i = 0; i < page->count; i++) {
+        char group[32];
+        const LatcdRetirementRetryItem *item = &page->items[i];
+        snprintf(group, sizeof(group), "entry%u", i);
+        g_key_file_set_string(record, group, "name", item->hint.name);
+        g_key_file_set_uint64(record, group, "enqueued", item->hint.enqueued);
+        g_key_file_set_uint64(record, group, "last_attempt", item->hint.last_attempt);
+        g_key_file_set_uint64(record, group, "retry_at", item->hint.retry_at);
+        g_key_file_set_uint64(record, group, "busy_count", item->hint.busy_count);
+        g_key_file_set_uint64(record, group, "sequence", item->shard_sequence);
+        g_key_file_set_uint64(record, group, "matched", item->matched);
+        g_key_file_set_uint64(record, group, "deadline", item->aggregate.deadline);
+    }
+    gsize length = 0;
+    char *encoded = g_key_file_to_data(record, &length, NULL);
+    g_key_file_unref(record);
+    if (!encoded || !length || length > RECORD_LIMIT) { g_free(encoded); errno = EFBIG; return -1; }
+    *data = encoded; *size = length;
+    return 0;
+}
+
+int latcd_retirement_retry_page_decode(const char *data, size_t size,
+                                       LatcdRetirementRetryPage *page)
+{
+    if (!page) return -1;
+    memset(page, 0, sizeof(*page));
+    if (!data || !size || size > RECORD_LIMIT || memchr(data, 0, size)) return -1;
+    GKeyFile *record = g_key_file_new();
+    const char *header[] = {"version", "cache_device", "cache_inode", "grace_us", "round_cutoff",
+        "snapshot_time", "snapshot_sequence", "boot", "committed_cursor", "retry_cursor", "end_cursor", "count", "identity"};
+    const char *fields[] = {"name", "enqueued", "last_attempt", "retry_at", "busy_count", "sequence", "matched", "deadline"};
+    uint64_t count = 0;
+    bool valid = g_key_file_load_from_data(record, data, size, 0, NULL) &&
+        exact_keys(record, "retry", header, G_N_ELEMENTS(header)) &&
+        record_string_is(record, "retry", "version", "1") &&
+        record_uint64(record, "retry", "cache_device", &page->cache_device) &&
+        record_uint64(record, "retry", "cache_inode", &page->cache_inode) &&
+        record_uint64(record, "retry", "grace_us", &page->grace_us) &&
+        record_uint64(record, "retry", "round_cutoff", &page->round_cutoff) &&
+        record_uint64(record, "retry", "snapshot_time", &page->snapshot_time) &&
+        record_uint64(record, "retry", "snapshot_sequence", &page->snapshot_sequence) &&
+        record_uint64(record, "retry", "count", &count) && count && count <= 128;
+    char *boot = g_key_file_get_string(record, "retry", "boot", NULL);
+    char *committed = g_key_file_get_string(record, "retry", "committed_cursor", NULL);
+    char *cursor = g_key_file_get_string(record, "retry", "retry_cursor", NULL);
+    char *end = g_key_file_get_string(record, "retry", "end_cursor", NULL);
+    char *identity = g_key_file_get_string(record, "retry", "identity", NULL);
+    gsize groups_count = 0;
+    char **groups = g_key_file_get_groups(record, &groups_count);
+    valid = valid && boot && strlen(boot) < sizeof(page->boot) && committed &&
+        strlen(committed) < sizeof(page->committed_cursor) && cursor &&
+        strlen(cursor) < sizeof(page->retry_cursor) && end && strlen(end) < sizeof(page->end_cursor) &&
+        identity && strlen(identity) == 64 && strspn(identity, "0123456789abcdef") == 64 &&
+        groups_count == count + 1;
+    if (valid) {
+        g_strlcpy(page->boot, boot, sizeof(page->boot));
+        g_strlcpy(page->committed_cursor, committed, sizeof(page->committed_cursor));
+        g_strlcpy(page->retry_cursor, cursor, sizeof(page->retry_cursor));
+        g_strlcpy(page->end_cursor, end, sizeof(page->end_cursor));
+        page->count = count;
+    }
+    for (unsigned i = 0; valid && i < page->count; i++) {
+        char group[32]; uint64_t busy, matched, deadline;
+        LatcdRetirementRetryItem *item = &page->items[i];
+        snprintf(group, sizeof(group), "entry%u", i);
+        char *name = g_key_file_get_string(record, group, "name", NULL);
+        valid = exact_keys(record, group, fields, G_N_ELEMENTS(fields)) && name &&
+            strlen(name) < sizeof(item->hint.name) &&
+            record_uint64(record, group, "enqueued", &item->hint.enqueued) &&
+            record_uint64(record, group, "last_attempt", &item->hint.last_attempt) &&
+            record_uint64(record, group, "retry_at", &item->hint.retry_at) &&
+            record_uint64(record, group, "busy_count", &busy) && busy <= 7 &&
+            record_uint64(record, group, "sequence", &item->shard_sequence) &&
+            record_uint64(record, group, "matched", &matched) && matched <= 1 &&
+            record_uint64(record, group, "deadline", &deadline);
+        if (valid) {
+            g_strlcpy(item->hint.name, name, sizeof(item->hint.name));
+            item->hint.busy_count = busy; item->shard_sequence_bound = true; item->matched = matched;
+            if (matched) { item->aggregate = item->hint; item->aggregate.deadline = deadline; }
+            else if (deadline) valid = false;
+        }
+        g_free(name);
+    }
+    uint8_t digest[32]; char expected[65];
+    if (valid && !latcd_retirement_retry_page_identity(page, digest)) {
+        encode_hex(digest, sizeof(digest), expected);
+        valid = !strcmp(expected, identity);
+    } else valid = false;
+    g_strfreev(groups); g_free(boot); g_free(committed); g_free(cursor); g_free(end); g_free(identity);
+    g_key_file_unref(record);
+    if (!valid) memset(page, 0, sizeof(*page));
+    return valid ? 0 : -1;
+}
+
 static bool record_hex(GKeyFile *record, const char *key, uint8_t *out, size_t size)
 {
     char *value = g_key_file_get_string(record, "consumption", key, NULL);
