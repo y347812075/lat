@@ -349,6 +349,7 @@ static bool record_write_fault(const char *point)
 
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
 void (*latcd_retirement_test_before_settlement)(void);
+void (*latcd_retirement_test_before_target_revalidate)(void);
 void (*latcd_retirement_test_before_page_finish)(LatcdPageBudget *budget);
 #endif
 
@@ -434,6 +435,10 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record,
     if (record_write_fault("written") || fchmod(fd, 0400) ||
         record_write_fault("chmod") || fsync(fd) ||
         record_write_fault("file-synced")) goto close_out;
+#if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
+    if (latcd_retirement_test_before_target_revalidate)
+        latcd_retirement_test_before_target_revalidate();
+#endif
     if (latcd_cache_capacity_metadata_revalidate(&reservation)) goto close_out;
     if (anonymous) {
         char descriptor[64];

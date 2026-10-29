@@ -101,6 +101,13 @@ static void replace_settlement_target(void)
     assert(fd >= 0 && write(fd, "x", 1) == 1 && !close(fd));
     latcd_retirement_test_before_settlement = NULL;
 }
+static void replace_before_target_revalidate(void)
+{
+    assert(!rename(settlement_target, settlement_saved));
+    int fd = open(settlement_target, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0400);
+    assert(fd >= 0 && write(fd, "x", 1) == 1 && !close(fd));
+    latcd_retirement_test_before_target_revalidate = NULL;
+}
 static void invalidate_settlement(void)
 {
     int fd = open(settlement_unexpected, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
@@ -3247,6 +3254,18 @@ static void test_budgeted_page_stage(void)
     char *saved = g_build_filename(gc, "saved-settlement", NULL);
     settlement_target = target;
     settlement_saved = saved;
+    latcd_retirement_test_before_target_revalidate = replace_before_target_revalidate;
+    assert(latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
+                                                &budget, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_test_before_target_revalidate && !capacity.ready && budget.invalid);
+    char *replacement = NULL;
+    assert(g_file_get_contents(target, &replacement, NULL, NULL) && !strcmp(replacement, "x"));
+    g_free(replacement);
+    assert(!latcd_cache_capacity_abandon_page(&capacity, &budget));
+    latcd_cache_capacity_close(&capacity);
+    assert(!unlink(target) && !rename(saved, target));
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
     latcd_retirement_test_before_settlement = replace_settlement_target;
     assert(latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
                                                 &budget, error, sizeof(error)) < 0);
