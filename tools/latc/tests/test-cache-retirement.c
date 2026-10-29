@@ -7084,6 +7084,31 @@ static void test_page_round_insertions(void)
     latcd_retirement_queue_free(queue);
     assert(!latcd_retirement_schedule_store(root, boot, 1, 200, 3, &hints[0], error, sizeof(error)));
 
+    /* A v2 result can change while the scheduling fields and sequence stay fixed. */
+    shard_name = g_strconcat(hints[0].name, ".ini", NULL);
+    shard_path = g_build_filename(root, ".gc", "retirement-schedule", shard_name, NULL);
+    GKeyFile *same_fields = g_key_file_new();
+    assert(g_key_file_load_from_file(same_fields, shard_path, 0, NULL));
+    g_key_file_set_integer(same_fields, "schedule", "version", 2);
+    g_key_file_set_string(same_fields, "schedule", "page_identity",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    g_key_file_set_string(same_fields, "schedule", "result", "deferred");
+    char *same_data = g_key_file_to_data(same_fields, NULL, NULL);
+    put(shard_path, same_data); g_free(same_data);
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    g_key_file_set_string(same_fields, "schedule", "page_identity",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    same_data = g_key_file_to_data(same_fields, NULL, NULL);
+    put(shard_path, same_data); g_free(same_data); g_key_file_unref(same_fields);
+    assert(result < 0 && latcd_retirement_queue_retry_revalidate(queue, error, sizeof(error)) < 0);
+    latcd_retirement_queue_free(queue);
+    assert(!unlink(shard_path));
+    g_free(shard_path); g_free(shard_name);
+    assert(!latcd_retirement_schedule_store(root, boot, 1, 200, 3, &hints[0], error, sizeof(error)));
+
     g_strlcpy(retry_state.retry_cursor, hints[0].name, sizeof(retry_state.retry_cursor));
     assert(!latcd_retirement_page_state_store(root, &retry_state, error, sizeof(error)));
     queue = latcd_retirement_queue_new(root, 1);

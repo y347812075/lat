@@ -41,6 +41,7 @@ typedef struct LatcdRetirementRetryItem {
     LatcdRetirementPageDeadline hint;
     LatcdRetirementPageDeadline aggregate;
     uint64_t shard_sequence;
+    uint8_t shard_digest[32];
     bool shard_sequence_bound;
     bool matched;
 } LatcdRetirementRetryItem;
