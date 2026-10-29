@@ -45,6 +45,8 @@ typedef struct LatcdRetirementPageState {
     /* When set, cursor is the committed end; committed_cursor is its start.
      * The full page remains until a future verified reclamation protocol. */
     bool committed_pending;
+    /* A validated persistent budget binding, not recovery or deletion authority. */
+    bool budget_bound;
     unsigned count;
     LatcdRetirementPageDeadline entries[128];
     /* Result types are populated only for a committed pending page. */
