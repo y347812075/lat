@@ -3875,6 +3875,25 @@ static void test_recovery_entry_budget(void)
     g_free(store); remove_root(root); g_free(root);
 }
 
+static void test_startup_partial_records(void)
+{
+    char *root = root_new(), error[256];
+    assert(!latcd_retirement_startup_records_check(root, error, sizeof(error)));
+    const char *names[] = {"transactions", "tombstones"};
+    for (unsigned i = 0; i < G_N_ELEMENTS(names); i++) {
+        char *store = g_build_filename(root, ".gc", names[i], NULL);
+        assert(!g_mkdir_with_parents(store, 0700));
+        char *partial = g_build_filename(store, ".write-interrupted", NULL);
+        put(partial, "incomplete");
+        assert(latcd_retirement_startup_records_check(root, error, sizeof(error)) < 0);
+        assert(!access(partial, F_OK));
+        assert(!unlink(partial));
+        assert(!latcd_retirement_startup_records_check(root, error, sizeof(error)));
+        g_free(partial); g_free(store);
+    }
+    remove_root(root); g_free(root);
+}
+
 static void test_delete_lock_domain_swap(void)
 {
     char *root = root_new(), *other = root_new(), error[256];
@@ -6295,6 +6314,7 @@ int main(int argc, char **argv)
         return 0;
     }
     assert(argc == 1);
+    test_startup_partial_records();
     test_queue_empty_store();
     test_oversized_prepared();
     test_round_cursor();

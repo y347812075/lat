@@ -87,6 +87,9 @@ int latcd_retirement_page_state_load(const char *root, LatcdRetirementPageState 
 /* Startup under the owner lease and closed capacity admission. Until persistent
  * page-budget recovery exists, refuse active or unsafe page checkpoints. */
 int latcd_retirement_page_startup_check(const char *root, char *error, size_t error_size);
+/* Owner lease required; reject incomplete lifecycle writes before recovery.
+ * This checks for uncertainty, not access-domain admission. */
+int latcd_retirement_startup_records_check(const char *root, char *error, size_t error_size);
 /* Stage an in-flight page from an existing empty checkpoint. The caller must
  * hold the owner lease and control the namespace; this is not admission. */
 int latcd_retirement_page_stage(const char *root, const LatcdRetirementPageState *page,

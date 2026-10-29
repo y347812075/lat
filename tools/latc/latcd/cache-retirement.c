@@ -918,6 +918,30 @@ static bool gc_has_no_partial_records(int gc)
     return valid;
 }
 
+int latcd_retirement_startup_records_check(const char *root, char *error, size_t error_size)
+{
+    if (!root) return fail(error, error_size, "invalid retirement startup root");
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
+    int gc_errno = errno;
+    struct stat held, path;
+    bool valid = directory >= 0 && !fstat(directory, &held) && !lstat(root, &path) &&
+        held.st_dev == path.st_dev && held.st_ino == path.st_ino;
+    if (valid && gc < 0) valid = gc_errno == ENOENT;
+    const char *names[] = {"transactions", "tombstones"};
+    for (unsigned i = 0; valid && gc >= 0 && i < G_N_ELEMENTS(names); i++) {
+        int store = open_directory(gc, names[i], false);
+        if (store < 0) { valid = errno == ENOENT; continue; }
+        valid = directory_matches_at(gc, names[i], store) && gc_has_no_partial_records(store) &&
+            directory_matches_at(gc, names[i], store);
+        close(store);
+    }
+    if (valid && gc >= 0) valid = directory_matches_at(directory, ".gc", gc);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    return valid ? 0 : fail(error, error_size, "incomplete or unsafe retirement startup records");
+}
+
 int latcd_retirement_page_startup_check(const char *root, char *error, size_t error_size)
 {
     if (!root) return fail(error, error_size, "invalid retirement startup root");

@@ -177,6 +177,23 @@ grep -q 'retirement page budget recovery unavailable or checkpoint unsafe' "$pag
 test ! -e "$page_phase/latcd.sock"
 test "$page_hash" = "$(sha256sum "$page_phase/cache/.gc/.write-interrupted")"
 
+for record_store in transactions tombstones; do
+    phase=$work/partial-$record_store
+    mkdir -m 700 "$phase" "$phase/cache" "$phase/cache/.gc" "$phase/cache/.gc/$record_store"
+    printf 'interrupted lifecycle record\n' > "$phase/cache/.gc/$record_store/.write-interrupted"
+    chmod 400 "$phase/cache/.gc/$record_store/.write-interrupted"
+    record_hash=$(sha256sum "$phase/cache/.gc/$record_store/.write-interrupted")
+    if "$latcd" --serve --socket "$phase/latcd.sock" --cache-dir "$phase/cache" \
+         --latc "$latc" --runner "$runner" --runtime-dir "$runtime_dir" \
+         >"$phase/stdout" 2>"$phase/stderr"; then
+        echo "latcd accepted interrupted $record_store record" >&2
+        exit 1
+    fi
+    grep -q 'incomplete or unsafe retirement startup records' "$phase/stderr"
+    test ! -e "$phase/latcd.sock"
+    test "$record_hash" = "$(sha256sum "$phase/cache/.gc/$record_store/.write-interrupted")"
+done
+
 owner_cache=$work/cache-owner
 owner_phase=$work/cache-owner-primary
 mkdir -m 700 "$owner_phase"

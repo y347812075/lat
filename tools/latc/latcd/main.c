@@ -6618,7 +6618,8 @@ int main(int argc, char **argv)
     sigemptyset(&recovery_action.sa_mask);
     sigaction(SIGINT, &recovery_action, NULL);
     sigaction(SIGTERM, &recovery_action, NULL);
-    int recovery = recover_lifecycle(config.cache_dir, false, error, sizeof(error));
+    int recovery = latcd_retirement_startup_records_check(config.cache_dir, error, sizeof(error));
+    if (!recovery) recovery = recover_lifecycle(config.cache_dir, false, error, sizeof(error));
     if (!recovery) recovery = recover_lifecycle(config.cache_dir, true, error, sizeof(error));
     if (!recovery && !serve) recovery = recover_compiler_inputs(&config, error, sizeof(error));
     if (!recovery && check_cache_owner_binding(config.cache_dir, cache_owner, error, sizeof(error)))
