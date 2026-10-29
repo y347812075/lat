@@ -2946,6 +2946,15 @@ static void test_rebind_crash(const char *point, bool installed, bool partial)
     simulated_boottime_us = 150;
     assert(latcd_retirement_schedule_store_page_result(root, 150, &stale, &early,
                        LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    assert(!latcd_retirement_page_state_store(root, &stale, error, sizeof(error)));
+    assert(latcd_retirement_schedule_store_page_result(root, 150, &stale, &early,
+                       LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
+    LatcdRetirementPageDeadline still_deferred;
+    uint64_t old_sequence;
+    assert(!latcd_retirement_schedule_load(root, boot, 100, 150, early.name,
+                       &old_sequence, &still_deferred, error, sizeof(error)));
+    assert(old_sequence == 3 && still_deferred.last_attempt == 3 &&
+           still_deferred.retry_at == 200 && still_deferred.busy_count == 1);
     assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
     pid_t child = fork();
     assert(child >= 0);
