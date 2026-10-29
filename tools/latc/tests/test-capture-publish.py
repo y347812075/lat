@@ -12,7 +12,7 @@ import time
 from tb_key_set import read_key_set, write_key_set
 
 
-def main(prefix, guest, work):
+def main(prefix, guest, work, probe):
     work.mkdir(mode=0o700, parents=True, exist_ok=False)
     cache, sock = work / 'cache', work / 'socket'
     latcd, latc, runner = (prefix / 'bin' / name for name in ('latcd', 'latc', 'latx-x86_64'))
@@ -81,6 +81,9 @@ def main(prefix, guest, work):
             assert intermediate['module'] != old['module']
             publish(full)
             assert json.loads(manifest.read_text())['module'] not in (old['module'], intermediate['module'])
+            command = [str(probe), '--loader-pin-probe', str(cache), source, old['module']]
+            assert subprocess.run(command, env=env, timeout=30).returncode == 1
+            assert (cache / old['module']).is_file()
             release.touch()
             assert child.wait(timeout=30) == 42
         finally:
@@ -88,10 +91,14 @@ def main(prefix, guest, work):
                 child.kill()
                 child.wait()
     assert 'module=registered' in (work / 'runner.log').read_text()
+    subprocess.run(command, env=env, check=True, timeout=30)
+    assert not (cache / old['module']).exists()
+    receipt = (cache / '.gc/tombstones' / old['module']).read_text()
+    assert 'deletion_status=UNLINKED' in receipt and 'recovery_status=MISSING' in receipt
     print('test-capture-publish: PASS')
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 4:
-        raise SystemExit('usage: test-capture-publish.py PREFIX X86_GUEST NEW_WORKDIR')
+    if len(sys.argv) != 5:
+        raise SystemExit('usage: test-capture-publish.py PREFIX X86_GUEST NEW_WORKDIR PROBE')
     main(*(Path(arg).resolve() for arg in sys.argv[1:]))

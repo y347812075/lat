@@ -6254,6 +6254,41 @@ static void test_queue_overflow_fixture(void)
 
 int main(int argc, char **argv)
 {
+    if (argc == 5 && !strcmp(argv[1], "--loader-pin-probe")) {
+        const char *root = argv[2], *digest = argv[3], *name = argv[4];
+        char error[256] = {0};
+        const char *names[] = {name};
+        char *evidence = latcd_retirement_capture_objects(root, digest, names, 1);
+        char *path = g_build_filename(root, name, NULL);
+        char *owner_path = g_build_filename(root, ".latcd.lock", NULL);
+        int owner = open(owner_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        int latch = lat_aot_v2_cache_source_lock_existing(root, digest, LOCK_EX | LOCK_NB,
+                                                            false, error, sizeof(error));
+        int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (owner < 0 || flock(owner, LOCK_EX | LOCK_NB) || latch < 0 || !evidence || fd < 0)
+            return 3;
+        errno = 0;
+        int result =
+            latcd_retirement_tombstone(root, digest, name, fd, evidence, error, sizeof(error));
+        int saved = errno;
+        if (fd >= 0) close(fd);
+        if (latch >= 0) close(latch);
+        g_free(evidence); g_free(path); g_free(owner_path);
+        if (result) {
+            fprintf(stderr, "intent rejected: %s errno=%d\n", error, saved);
+            close(owner);
+            return saved == EWOULDBLOCK ? 1 : 3;
+        }
+        LatcdRetirementDeletionReport report;
+        if (latcd_tombstone_delete_report(root, name, &report, error, sizeof(error)) ||
+            !report.object_unlinked || !report.namespace_durable || !report.receipt_durable) {
+            fprintf(stderr, "deletion incomplete: %s\n", error);
+            close(owner);
+            return 2;
+        }
+        close(owner);
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "--space-root")) {
         test_deletion_report(argv[2], true);
         puts("test-cache-retirement: isolated-space PASS");
