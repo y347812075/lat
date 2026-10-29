@@ -1128,6 +1128,9 @@ static void test_round_cursor(void)
     memset(unterminated.committed_cursor, 'a', sizeof(unterminated.committed_cursor));
     assert(latcd_retirement_page_state_valid(&unterminated) < 0);
     unterminated = state;
+    memset(unterminated.retry_cursor, 'a', sizeof(unterminated.retry_cursor));
+    assert(latcd_retirement_page_state_valid(&unterminated) < 0);
+    unterminated = state;
     memset(unterminated.entries[0].name, 'a', sizeof(unterminated.entries[0].name));
     assert(latcd_retirement_page_state_valid(&unterminated) < 0);
     state.round_cutoff = 0;
@@ -2790,6 +2793,7 @@ static void test_budgeted_page_stage(void)
     LatcdRetirementPageState empty = {.cache_device = st.st_dev, .cache_inode = st.st_ino,
         .grace_us = 100, .round_cutoff = 120, .sequence = 3};
     g_strlcpy(empty.boot, boot, sizeof(empty.boot));
+    snprintf(empty.retry_cursor, sizeof(empty.retry_cursor), "%064x.so", 9);
     LatcdRetirementPageState page = empty, loaded;
     page.count = 1;
     snprintf(page.entries[0].name, sizeof(page.entries[0].name), "%064x.so", 1);
@@ -2797,11 +2801,17 @@ static void test_budgeted_page_stage(void)
     page.entries[0].enqueued = 100;
     g_strlcpy(page.cursor, page.entries[0].name, sizeof(page.cursor));
     assert(!latcd_retirement_page_state_store(root, &empty, error, sizeof(error)));
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+           !strcmp(loaded.retry_cursor, empty.retry_cursor));
     simulated_boottime_us = 150;
     LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
     LatcdPageBudget budget = {0};
     assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    LatcdRetirementPageState stale_retry = page;
+    snprintf(stale_retry.retry_cursor, sizeof(stale_retry.retry_cursor), "%064x.so", 10);
+    assert(latcd_retirement_page_stage_budgeted(root, &stale_retry, &capacity, UINT64_MAX,
+                                                &budget, error, sizeof(error)) < 0);
     assert(latcd_retirement_page_stage_budgeted(root, &page, &capacity, capacity.metadata_committed,
                                                 &budget, error, sizeof(error)) < 0);
     assert(!budget.capacity && capacity.ready);
@@ -2829,7 +2839,8 @@ static void test_budgeted_page_stage(void)
     assert(!latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
                                                  &budget, error, sizeof(error)));
     assert(budget.capacity == &capacity && budget.page_identity_bound && capacity.ready);
-    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && loaded.budget_bound);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && loaded.budget_bound &&
+           !strcmp(loaded.retry_cursor, empty.retry_cursor));
     assert(latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0);
     assert(latcd_retirement_schedule_store_page_result(root, 150, &page, &page.entries[0],
            LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
@@ -2876,11 +2887,15 @@ static void test_budgeted_page_stage(void)
     char *checkpoint = g_build_filename(gc, "retirement-page.ini", NULL);
     char *checkpoint_data = NULL;
     assert(g_file_get_contents(checkpoint, &checkpoint_data, NULL, NULL));
-    for (unsigned variant = 0; variant < 4; variant++) {
+    for (unsigned variant = 0; variant < 5; variant++) {
         GKeyFile *altered = g_key_file_new();
         assert(g_key_file_load_from_data(altered, checkpoint_data, -1, 0, NULL));
         const char *field[] = {"result", "last_attempt", "retry_at", "busy_count"};
-        g_key_file_set_uint64(altered, "entry0", field[variant], variant == 0 ? 2 : 1);
+        if (variant < 4)
+            g_key_file_set_uint64(altered, "entry0", field[variant], variant == 0 ? 2 : 1);
+        else
+            g_key_file_set_string(altered, "page", "retry_cursor",
+                                  "000000000000000000000000000000000000000000000000000000000000000a.so");
         char *raw = g_key_file_to_data(altered, NULL, NULL);
         put(checkpoint, raw);
         assert(latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) < 0);

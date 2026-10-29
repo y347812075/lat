@@ -659,6 +659,8 @@ int latcd_retirement_page_state_valid(const LatcdRetirementPageState *state)
         state->count > 128 || (state->count && !state->cursor[0]) ||
         (state->committed_pending && !state->count) ||
         strnlen(state->committed_cursor, sizeof(state->committed_cursor)) >= sizeof(state->committed_cursor) ||
+        strnlen(state->retry_cursor, sizeof(state->retry_cursor)) >= sizeof(state->retry_cursor) ||
+        (state->retry_cursor[0] && !page_object_name_valid(state->retry_cursor)) ||
         strnlen(state->cursor, sizeof(state->cursor)) >= sizeof(state->cursor)) return -1;
     for (unsigned i = 0; i < state->count; i++) {
         if (state->committed_pending ? (state->results[i] != 1 && state->results[i] != 2) :
@@ -769,6 +771,11 @@ int latcd_retirement_page_identity(const LatcdRetirementPageState *state,
     page_identity_u64(checksum, state->grace_us);
     page_identity_u64(checksum, state->round_cutoff);
     page_identity_string(checksum, state->committed_cursor);
+    if (state->retry_cursor[0]) {
+        static const char retry_domain[] = "latcd-retirement-retry-cursor-v1";
+        g_checksum_update(checksum, (const guchar *)retry_domain, sizeof(retry_domain));
+        page_identity_string(checksum, state->retry_cursor);
+    }
     page_identity_u64(checksum, state->count);
     for (unsigned i = 0; i < state->count; i++) {
         page_identity_string(checksum, state->entries[i].name);
@@ -941,6 +948,11 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
     const char *queue_fields_v7[] = {"version", "cache_device", "cache_inode", "grace_us",
         "boot", "round_cutoff", "committed_cursor", "cursor", "sequence", "count", "pending",
         "budget_protocol", "budget_identity", "snapshot_identity"};
+    const char *queue_fields_v9[] = {"version", "cache_device", "cache_inode", "grace_us",
+        "boot", "round_cutoff", "committed_cursor", "retry_cursor", "cursor", "sequence", "count", "pending"};
+    const char *queue_fields_v10[] = {"version", "cache_device", "cache_inode", "grace_us",
+        "boot", "round_cutoff", "committed_cursor", "retry_cursor", "cursor", "sequence", "count", "pending",
+        "budget_protocol", "budget_identity", "snapshot_identity"};
     const char *entry_fields[] = {"name", "deadline", "enqueued", "last_attempt",
                                   "retry_at", "busy_count"};
     const char *entry_fields_v5[] = {"name", "deadline", "enqueued", "last_attempt",
@@ -953,14 +965,23 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
     bool v6 = record_string_is(record, "page", "version", "6");
     bool v7 = record_string_is(record, "page", "version", "7");
     bool v8 = record_string_is(record, "page", "version", "8");
+    bool v9 = record_string_is(record, "page", "version", "9");
+    bool v10 = record_string_is(record, "page", "version", "10");
+    bool v11 = record_string_is(record, "page", "version", "11");
+    bool retry_version = v9 || v10 || v11;
+    bool budget_version = v6 || v7 || v8 || v10 || v11;
+    bool snapshot_version = v7 || v8 || v10 || v11;
+    bool consumption_version = v8 || v11;
     bool valid = groups_count && !strcmp(groups[0], "page") &&
-        ((v7 || v8) ? exact_keys(record, "page", queue_fields_v7, G_N_ELEMENTS(queue_fields_v7)) :
+        ((v10 || v11) ? exact_keys(record, "page", queue_fields_v10, G_N_ELEMENTS(queue_fields_v10)) :
+         v9 ? exact_keys(record, "page", queue_fields_v9, G_N_ELEMENTS(queue_fields_v9)) :
+         (v7 || v8) ? exact_keys(record, "page", queue_fields_v7, G_N_ELEMENTS(queue_fields_v7)) :
          v6 ? exact_keys(record, "page", queue_fields_v6, G_N_ELEMENTS(queue_fields_v6)) :
          (v4 || v5) ? exact_keys(record, "page", queue_fields_v4, G_N_ELEMENTS(queue_fields_v4)) :
          v3 ? exact_keys(record, "page", queue_fields_v3, G_N_ELEMENTS(queue_fields_v3)) :
               exact_keys(record, "page", queue_fields, G_N_ELEMENTS(queue_fields)));
     g_strfreev(groups);
-    if (!valid || (!v8 && !v7 && !v6 && !v5 && !v4 && !v3 && !record_string_is(record, "page", "version", "2")) ||
+    if (!valid || (!retry_version && !v8 && !v7 && !v6 && !v5 && !v4 && !v3 && !record_string_is(record, "page", "version", "2")) ||
         !record_uint64(record, "page", "cache_device", &state->cache_device) ||
         !record_uint64(record, "page", "cache_inode", &state->cache_inode) ||
         !record_uint64(record, "page", "grace_us", &state->grace_us) ||
@@ -968,10 +989,12 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
         !record_uint64(record, "page", "sequence", &state->sequence)) return false;
     char *boot = g_key_file_get_string(record, "page", "boot", NULL);
     char *cursor = g_key_file_get_string(record, "page", "cursor", NULL);
-    char *committed = (v3 || v4 || v5 || v6 || v7 || v8) ? g_key_file_get_string(record, "page", "committed_cursor", NULL) : g_strdup("");
+    char *committed = (v3 || v4 || v5 || v6 || v7 || v8 || retry_version) ? g_key_file_get_string(record, "page", "committed_cursor", NULL) : g_strdup("");
+    char *retry = retry_version ? g_key_file_get_string(record, "page", "retry_cursor", NULL) : g_strdup("");
     uint64_t count, pending = 0;
-    valid = boot && cursor && committed && strlen(committed) < sizeof(state->committed_cursor) &&
-        (!(v4 || v5 || v6 || v7 || v8) || (record_uint64(record, "page", "pending", &pending) && pending <= 1)) &&
+    valid = boot && cursor && committed && retry && strlen(committed) < sizeof(state->committed_cursor) &&
+        strlen(retry) < sizeof(state->retry_cursor) && (!retry_version || retry[0]) &&
+        (!(v4 || v5 || v6 || v7 || v8 || retry_version) || (record_uint64(record, "page", "pending", &pending) && pending <= 1)) &&
         (!v4 || !pending) &&
         record_uint64(record, "page", "count", &count) &&
         count <= 128 &&
@@ -980,19 +1003,20 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
         g_strlcpy(state->boot, boot, sizeof(state->boot));
         g_strlcpy(state->cursor, cursor, sizeof(state->cursor));
         g_strlcpy(state->committed_cursor, committed, sizeof(state->committed_cursor));
+        g_strlcpy(state->retry_cursor, retry, sizeof(state->retry_cursor));
         state->count = (unsigned)count;
         state->committed_pending = pending;
     }
-    if (valid && groups_count != (gsize)state->count + 1 + v8) valid = false;
-    g_free(boot); g_free(cursor); g_free(committed);
+    if (valid && groups_count != (gsize)state->count + 1 + consumption_version) valid = false;
+    g_free(boot); g_free(cursor); g_free(committed); g_free(retry);
     for (unsigned i = 0; valid && i < state->count; i++) {
         char group[32];
         snprintf(group, sizeof(group), "entry%u", i);
         uint64_t busy, result = 0;
         char *name = g_key_file_get_string(record, group, "name", NULL);
-        valid = ((v5 || v6 || v7 || v8) ? exact_keys(record, group, entry_fields_v5, G_N_ELEMENTS(entry_fields_v5)) :
+        valid = ((v5 || v6 || v7 || v8 || retry_version) ? exact_keys(record, group, entry_fields_v5, G_N_ELEMENTS(entry_fields_v5)) :
                       exact_keys(record, group, entry_fields, G_N_ELEMENTS(entry_fields))) &&
-            (!(v5 || v6 || v7 || v8) || (record_uint64(record, group, "result", &result) && result <= 2)) &&
+            (!(v5 || v6 || v7 || v8 || retry_version) || (record_uint64(record, group, "result", &result) && result <= 2)) &&
             name && strlen(name) < sizeof(state->entries[i].name) &&
             record_uint64(record, group, "deadline", &state->entries[i].deadline) &&
             record_uint64(record, group, "enqueued", &state->entries[i].enqueued) &&
@@ -1007,7 +1031,7 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
         g_free(name);
     }
     if (!valid || latcd_retirement_page_state_valid(state)) return false;
-    if (v6 || v7 || v8) {
+    if (budget_version) {
         uint8_t digest[32];
         char expected[65];
         char *identity = g_key_file_get_string(record, "page", "budget_identity", NULL);
@@ -1019,7 +1043,7 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
         }
         g_free(identity);
         if (!valid) return false;
-        if (v7 || v8) {
+        if (snapshot_version) {
             identity = g_key_file_get_string(record, "page", "snapshot_identity", NULL);
             valid = !page_snapshot_identity(state, digest);
             if (valid) {
@@ -1031,7 +1055,7 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
         }
         state->budget_bound = true;
     }
-    if (v8) {
+    if (consumption_version) {
         if (!consumption_shape(record, state)) return false;
         state->consumption_bound = true;
     }
@@ -1056,7 +1080,9 @@ static int page_state_store_fd(int root_fd, int gc, const LatcdRetirementPageSta
         (budget && !budget->page_identity_bound) || fstat(root_fd, &cache) ||
         state->cache_device != (uint64_t)cache.st_dev ||
         state->cache_inode != (uint64_t)cache.st_ino) goto out;
-    g_key_file_set_integer(record, "page", "version", state->consumption_bound ? 8 : budget && state->count ? 7 : 5);
+    g_key_file_set_integer(record, "page", "version", state->retry_cursor[0] ?
+        (state->consumption_bound ? 11 : budget && state->count ? 10 : 9) :
+        (state->consumption_bound ? 8 : budget && state->count ? 7 : 5));
     if (budget && state->count) {
         char identity[65];
         for (unsigned i = 0; i < 32; i++) snprintf(identity + 2 * i, 3, "%02x", binding[i]);
@@ -1072,6 +1098,7 @@ static int page_state_store_fd(int root_fd, int gc, const LatcdRetirementPageSta
     g_key_file_set_uint64(record, "page", "round_cutoff", state->round_cutoff);
     g_key_file_set_string(record, "page", "boot", state->boot);
     g_key_file_set_string(record, "page", "committed_cursor", state->committed_cursor);
+    if (state->retry_cursor[0]) g_key_file_set_string(record, "page", "retry_cursor", state->retry_cursor);
     g_key_file_set_string(record, "page", "cursor", state->cursor);
     g_key_file_set_uint64(record, "page", "sequence", state->sequence);
     g_key_file_set_uint64(record, "page", "count", state->count);
@@ -1272,6 +1299,7 @@ static int page_stage(const char *root, const LatcdRetirementPageState *page,
         previous.cache_device != page->cache_device || previous.cache_inode != page->cache_inode ||
         previous.grace_us != page->grace_us || previous.round_cutoff != page->round_cutoff ||
         strcmp(previous.boot, page->boot) || strcmp(previous.committed_cursor, page->committed_cursor) ||
+        strcmp(previous.retry_cursor, page->retry_cursor) ||
         page->sequence < previous.sequence) goto out;
     directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
@@ -4998,6 +5026,7 @@ int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,
         current.round_cutoff != queue->round_state.round_cutoff ||
         current.sequence != queue->round_state.sequence ||
         strcmp(current.boot, queue->round_state.boot) ||
+        strcmp(current.retry_cursor, queue->round_state.retry_cursor) ||
         strcmp(current.committed_cursor, queue->round_state.committed_cursor) ||
         retirement_clock(&boot, &now) || strcmp(boot, current.boot) ||
         now <= current.round_cutoff || now < queue->diagnostic_last_time ||

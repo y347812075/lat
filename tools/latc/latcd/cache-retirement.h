@@ -63,6 +63,8 @@ typedef struct LatcdRetirementPageState {
     uint64_t cache_device, cache_inode, grace_us, round_cutoff;
     char boot[37];
     char committed_cursor[138];
+    /* Independent position for retry selection; never advances the round cursor. */
+    char retry_cursor[138];
     char cursor[138];
     uint64_t sequence;
     /* When set, cursor is the committed end; committed_cursor is its start.
