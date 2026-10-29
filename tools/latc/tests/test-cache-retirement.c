@@ -1551,6 +1551,48 @@ static void test_empty_round_advance(void)
     remove_root(root); g_free(root);
 }
 
+static void test_empty_round_advance_crash(const char *point)
+{
+    char *root = root_new(), error[256];
+    LatcdRetirementPageState state, loaded;
+    simulated_boottime_us = 100;
+    assert(!latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)));
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 100);
+        assert(!latcd_retirement_queue_diagnostic_resume(queue, error, sizeof(error)));
+        LatcdRetirementQueueStats stats;
+        int result;
+        do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+        while (result > 0);
+        assert(result < 0);
+        simulated_boottime_us = 101;
+        char *setting = g_strdup_printf("crash:%s", point);
+        assert(!setenv("LATCD_TEST_RETIREMENT_IO", setting, 1));
+        latcd_retirement_queue_round_advance(queue, error, sizeof(error));
+        _exit(1);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
+    assert(loaded.round_cutoff == (!strcmp(point, "file-synced") ? 100 : 101));
+    assert(!loaded.count && !loaded.cursor[0] && !loaded.committed_cursor[0]);
+    simulated_boottime_us = 102;
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 100);
+    assert(!latcd_retirement_queue_diagnostic_resume(queue, error, sizeof(error)));
+    LatcdRetirementQueueStats stats;
+    int result;
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    assert(result < 0);
+    assert(!latcd_retirement_queue_round_advance(queue, error, sizeof(error)));
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && loaded.round_cutoff == 102);
+    latcd_retirement_queue_free(queue);
+    simulated_boottime_us = 0;
+    remove_root(root); g_free(root);
+}
+
 static void test_page_round_begin(const char *point, bool crash)
 {
     char *root = root_new(), error[256];
@@ -7127,6 +7169,9 @@ int main(int argc, char **argv)
     test_oversized_prepared();
     test_round_cursor();
     test_empty_round_advance();
+    test_empty_round_advance_crash("file-synced");
+    test_empty_round_advance_crash("renamed");
+    test_empty_round_advance_crash("directory-synced");
     test_page_round_begin(NULL, false);
     test_page_identity();
     test_schedule_result_upgrade();
