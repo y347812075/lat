@@ -147,6 +147,34 @@ static void *reserve_race(void *data)
     return NULL;
 }
 
+static void test_recovery_gate_race(void)
+{
+    char *root = g_dir_make_tmp("capacity-gate-race-XXXXXX", NULL);
+    assert(root);
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    for (unsigned i = 0; i < 200; i++) {
+        pthread_barrier_t start, finish;
+        assert(!pthread_barrier_init(&start, NULL, 2));
+        assert(!pthread_barrier_init(&finish, NULL, 2));
+        ReservationRace race = { .capacity = &capacity, .start = &start, .finish = &finish };
+        pthread_t worker;
+        assert(!pthread_create(&worker, NULL, reserve_race, &race));
+        pthread_barrier_wait(&start);
+        bool closed = !latcd_cache_capacity_recovery_begin(&capacity);
+        pthread_barrier_wait(&finish);
+        assert(closed != race.accepted);
+        assert(!pthread_join(worker, NULL));
+        if (closed) assert(!latcd_cache_capacity_recovery_finish(&capacity));
+        assert(!pthread_barrier_destroy(&start));
+        assert(!pthread_barrier_destroy(&finish));
+    }
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    assert(!rmdir(root));
+    g_free(root);
+}
+
 typedef struct PageBudgetRace {
     LatcdCacheCapacity *capacity;
     LatcdPageBudget *budget;
@@ -1000,6 +1028,7 @@ int main(void)
     assert(latcd_cache_capacity_page_peak(1, 1, 1, 1, NULL) < 0 && errno == EINVAL);
     test_matching_root();
     test_recovery_gate();
+    test_recovery_gate_race();
     test_external_metadata_root_creation();
     test_controlled_metadata_directory();
     test_metadata_subdirectory_moved_in();
