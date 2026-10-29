@@ -402,6 +402,7 @@ int latcd_retirement_hold(const char *root, const char *source, const char *name
 int latcd_retirement_mount_lease(const char *root, const char *id, const char *scope,
                                  const char *source, const char *name,
                                  char *error, size_t error_size);
+/* After unmount verification, release under a separately acquired roots EX. */
 int latcd_retirement_mount_release(const char *root, const char *id, int lease_fd,
                                    char *error, size_t error_size);
 

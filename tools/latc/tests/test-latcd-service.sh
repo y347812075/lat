@@ -126,6 +126,11 @@ while ! grep -q 'state=ACTIVE' "$mount_phase/stdout" && kill -0 "$mount_pid" 2>/
     n=$((n + 1)); [ "$n" -lt 500 ] || break; sleep 0.01
 done
 grep -q 'state=ACTIVE' "$mount_phase/stdout"
+if "$latcd" gc --release-mount-lease --cache-dir "$mount_phase/cache" --lease-id "$mount_id"; then
+    echo 'released mount lease while holder was active' >&2
+    exit 1
+fi
+grep -q '^state=ACTIVE$' "$mount_phase/cache/.gc/mount-leases/$mount_id.ini"
 kill -TERM "$mount_pid"
 wait "$mount_pid"
 mount_pid=

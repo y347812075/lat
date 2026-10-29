@@ -4247,7 +4247,7 @@ static bool mount_lease_fd_valid(const char *root, int gc, int lease_fd)
         S_ISREG(held.st_mode) && held.st_uid == geteuid() && held.st_nlink == 1 &&
         !(held.st_mode & 0077) && !held.st_size && !fstatat(gc, "reference-roots.lock",
         &path, AT_SYMLINK_NOFOLLOW) && object_stat_equal(&held, &path) &&
-        !flock(lease_fd, LOCK_SH | LOCK_NB);
+        !flock(lease_fd, LOCK_EX | LOCK_NB);
     int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     valid = valid && directory >= 0 && !fstat(directory, &cache);
     if (directory >= 0) close(directory);

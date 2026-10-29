@@ -5624,7 +5624,9 @@ static void test_due_without_retirement(void)
     assert(lease >= 0);
     assert(latcd_tombstone_delete_due(root, name, 0, error, sizeof(error)) != 0);
     assert(!access(path, F_OK));
-    assert(!latcd_retirement_mount_release(root, lease_id, lease, error, sizeof(error)));
+    close(lease);
+    lease = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, sizeof(error));
+    assert(lease >= 0 && !latcd_retirement_mount_release(root, lease_id, lease, error, sizeof(error)));
     close(lease);
     assert(!latcd_tombstone_delete(root, name, error, sizeof(error)));
     assert(access(path, F_OK) != 0);
@@ -5652,7 +5654,7 @@ static void test_mount_lease_crash_persistence(void)
     assert(latcd_tombstone_delete_due(root, name, 0, error, sizeof(error)));
     assert(!access(path, F_OK));
     int release_latch = latcd_retirement_roots_lock(
-        root, LOCK_SH | LOCK_NB, error, sizeof(error));
+        root, LOCK_EX | LOCK_NB, error, sizeof(error));
     assert(release_latch >= 0);
     assert(!latcd_retirement_mount_release(
         root, lease_id, release_latch, error, sizeof(error)));
