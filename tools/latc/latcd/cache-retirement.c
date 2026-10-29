@@ -4277,7 +4277,7 @@ int latcd_retirement_mount_lease(const char *root, const char *id, const char *s
     directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     gc = directory < 0 ? -1 : open_directory(directory, ".gc", true);
     store = gc < 0 ? -1 : open_directory(gc, "mount-leases", true);
-    if (store < 0 || fstat(directory, &cache)) goto out;
+    if (store < 0 || flock(store, LOCK_EX | LOCK_NB) || fstat(directory, &cache)) goto out;
     const char *record_source = cache_scope ? "" : source;
     const char *record_name = object_scope ? name : "";
     if (object_scope) {

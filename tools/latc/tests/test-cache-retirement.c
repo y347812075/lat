@@ -5662,6 +5662,28 @@ static void test_mount_lease_crash_persistence(void)
     remove_root(root); g_free(root);
 }
 
+static void test_mount_lease_registration_lock(void)
+{
+    char *root = root_new(), error[256];
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "mount-leases", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    int lock = open(store, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(lock >= 0 && !flock(lock, LOCK_EX | LOCK_NB));
+    char *id = g_uuid_string_random();
+    assert(latcd_retirement_mount_lease(root, id, "CACHE", NULL, NULL, error, sizeof(error)) < 0);
+    char *record_name = g_strconcat(id, ".ini", NULL);
+    char *record = g_build_filename(store, record_name, NULL);
+    assert(access(record, F_OK) && errno == ENOENT);
+    close(lock);
+    int lease = latcd_retirement_mount_lease(root, id, "CACHE", NULL, NULL, error, sizeof(error));
+    assert(lease >= 0 && !access(record, F_OK));
+    close(lease);
+    assert(!latcd_retirement_mount_release(root, id, error, sizeof(error)));
+    g_free(record); g_free(record_name); g_free(id); g_free(store); g_free(gc);
+    remove_root(root); g_free(root);
+}
+
 static LatcdRetirementQueueStats sweep_queue(LatcdRetirementQueue *queue)
 {
     LatcdRetirementQueueStats stats;
@@ -8305,6 +8327,7 @@ int main(int argc, char **argv)
     test_tombstone();
     test_cache_domain();
     test_mount_lease_crash_persistence();
+    test_mount_lease_registration_lock();
     test_tombstone_capacity_admission(false);
     test_tombstone_capacity_admission(true);
     for (int mutation = 0; mutation < 11; mutation++) test_tombstone_recovery(mutation);
