@@ -5938,17 +5938,6 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
         retirement_schedule_access(queue->root, boot, queue->grace, now, 0, NULL,
             true, &sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL,
             NULL, NULL, scheduler, snapshot, error, error_size)) goto out;
-#if defined(LATCD_RETIREMENT_TESTING)
-    if (latcd_retirement_test_retry_scanned) latcd_retirement_test_retry_scanned(queue->root);
-#endif
-    roots = roots_lock_gc(gc, LOCK_EX | LOCK_NB, error, error_size);
-    if (roots < 0 || !same_directory(scheduler, gc) || !queue_bind_root(queue, root) ||
-        lstat(queue->root, &path) || !object_stat_equal(&cache, &path) ||
-        !directory_matches_at(root, ".gc", gc) ||
-        !lock_matches_at(gc, "reference-roots.lock", roots) ||
-        !directory_matches_at(gc, "transactions", store) ||
-        !directory_matches_at(gc, "tombstones", tombstones) ||
-        !queue_watch_clean(queue->discovery_watch)) goto out;
     for (unsigned i = 0; i < queue->retry_count; i++) {
         const LatcdRetirementPageDeadline *hint = g_hash_table_lookup(queue->retry_hints, queue->retry_order[i]);
         const LatcdRetirementPageDeadline *found = NULL;
@@ -5983,7 +5972,17 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
                 selected_sequences[i] != queue->retry_item_sequence[i] ||
                 memcmp(selected_digests[i], queue->retry_item_digest[i], 32)) goto out;
     }
-    if (!queue_watch_clean(queue->discovery_watch)) goto out;
+#if defined(LATCD_RETIREMENT_TESTING)
+    if (latcd_retirement_test_retry_scanned) latcd_retirement_test_retry_scanned(queue->root);
+#endif
+    roots = roots_lock_gc(gc, LOCK_EX | LOCK_NB, error, error_size);
+    if (roots < 0 || !same_directory(scheduler, gc) || !queue_bind_root(queue, root) ||
+        lstat(queue->root, &path) || !object_stat_equal(&cache, &path) ||
+        !directory_matches_at(root, ".gc", gc) ||
+        !lock_matches_at(gc, "reference-roots.lock", roots) ||
+        !directory_matches_at(gc, "transactions", store) ||
+        !directory_matches_at(gc, "tombstones", tombstones) ||
+        !queue_watch_clean(queue->discovery_watch)) goto out;
     if (receipts) {
         for (unsigned i = 0; i < queue->retry_count; i++)
             receipts[i] = g_hash_table_contains(queue->removed_second, queue->retry_order[i]) &&
