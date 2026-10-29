@@ -515,6 +515,11 @@ int latcd_retirement_queue_retry_page_stage(LatcdRetirementQueue *queue,
     char *error, size_t error_size);
 int latcd_retirement_retry_page_load(const char *root, LatcdRetirementRetryPage *page,
     char *error, size_t error_size);
+/* Startup with capacity recovery gated; only an untouched staged page is accepted. */
+int latcd_retirement_retry_page_restore_budget(const char *root,
+    struct LatcdCacheCapacity *capacity, uint64_t limit, uint64_t expected_grace_us,
+    struct LatcdPageBudget *budget, LatcdRetirementRetryPage *page,
+    char *error, size_t error_size);
 /* Advance only past an entirely unmatched retry batch while preserving every
  * shard. Requires a snapshot-bound monitored scan; never authorizes removal. */
 int latcd_retirement_queue_retry_advance_unmatched(LatcdRetirementQueue *queue,

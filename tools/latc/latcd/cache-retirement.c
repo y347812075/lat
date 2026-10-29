@@ -2778,6 +2778,62 @@ int latcd_retirement_retry_snapshot(const char *root, const char *boot,
                           sequence, selected_sequences, NULL, error, error_size);
 }
 
+int latcd_retirement_retry_page_restore_budget(const char *root,
+    LatcdCacheCapacity *capacity, uint64_t limit, uint64_t expected_grace_us,
+    LatcdPageBudget *budget, LatcdRetirementRetryPage *page,
+    char *error, size_t error_size)
+{
+    if (!root || !capacity || !expected_grace_us || !budget || !page)
+        return fail(error, error_size, "invalid retry budget recovery");
+    memset(page, 0, sizeof(*page));
+    int scheduler = scheduler_lock(root, error, error_size);
+    int directory = -1, gc = -1, store = -1, matching = -1, result = -1;
+    char *boot = NULL; uint64_t now = 0, sequence = 0, bytes = 0;
+    uint8_t identity[32], digests[128][32] = {{0}};
+    uint64_t sequences[128] = {0}; unsigned count = 0;
+    LatcdRetirementPageDeadline selected[128];
+    LatcdRetirementRetryPage *persisted = g_new0(LatcdRetirementRetryPage, 1);
+    GArray *snapshot = g_array_new(FALSE, FALSE, sizeof(RetrySnapshotEntry));
+    struct stat held, path;
+    if (scheduler < 0) goto out;
+    directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
+    store = gc < 0 ? -1 : open_directory(gc, "retirement-schedule", false);
+    if (!same_directory(scheduler, gc) || store < 0 || fstat(directory, &held) ||
+        lstat(root, &path) || held.st_dev != path.st_dev || held.st_ino != path.st_ino ||
+        !directory_matches_at(directory, ".gc", gc) || !directory_matches_at(gc, "retirement-schedule", store) ||
+        !gc_has_no_partial_records(gc) || !gc_has_no_partial_records(store) ||
+        (matching = latcd_cache_capacity_open_matching_root(capacity, root, directory)) < 0 ||
+        latcd_retirement_retry_page_load(root, persisted, error, error_size) ||
+        retirement_clock(&boot, &now) || strcmp(boot, persisted->boot) ||
+        persisted->grace_us != expected_grace_us || persisted->snapshot_time > now ||
+        retirement_schedule_access(root, boot, expected_grace_us, now, 0, NULL, true,
+            &sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
+            NULL, scheduler, snapshot, error, error_size) ||
+        sequence != persisted->snapshot_sequence ||
+        retry_snapshot_select(snapshot, persisted->retry_cursor, persisted->snapshot_time,
+                              selected, sequences, digests, &count) || count != persisted->count) goto out;
+    for (unsigned i = 0; i < count; i++)
+        if (strcmp(selected[i].name, persisted->items[i].hint.name) ||
+            sequences[i] != persisted->items[i].shard_sequence ||
+            memcmp(digests[i], persisted->items[i].shard_digest, 32)) goto out;
+    if (!directory_matches_at(directory, ".gc", gc) || !directory_matches_at(gc, "retirement-schedule", store) ||
+        latcd_retirement_retry_page_identity(persisted, identity) ||
+        latcd_cache_capacity_page_peak(count, count, RETIREMENT_SCHEDULE_RECORD_BYTES, RECORD_LIMIT, &bytes) ||
+        latcd_cache_capacity_restore_page(capacity, bytes, limit, identity, budget)) goto out;
+    *page = *persisted;
+    result = 0;
+out:
+    if (matching >= 0) close(matching);
+    if (store >= 0) close(store);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    if (scheduler >= 0) close(scheduler);
+    g_free(boot); g_free(persisted); g_array_free(snapshot, TRUE);
+    if (result) latcd_cache_capacity_recovery_fail(capacity);
+    return result ? fail(error, error_size, "retry budget recovery unsafe") : 0;
+}
+
 int latcd_retirement_schedule_merge_page(const char *root, const char *boot,
                                          uint64_t grace_us, uint64_t now_us,
                                          LatcdRetirementPageState *page,

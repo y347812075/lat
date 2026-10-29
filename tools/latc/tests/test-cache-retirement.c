@@ -1730,6 +1730,32 @@ static void test_retry_page_stage(void)
     assert(latcd_retirement_page_startup_check(root, error, sizeof(error)) < 0);
     assert(budget.capacity == &capacity && budget.page_identity_bound);
     latcd_retirement_queue_free(queue); latcd_cache_capacity_close(&capacity);
+    LatcdCacheCapacity recovered = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget restored = {0};
+    assert(!latcd_cache_capacity_scan(&recovered, root, error, sizeof(error)));
+    assert(!latcd_cache_capacity_recovery_begin(&recovered));
+    latcd_cache_capacity_metadata_bind(&recovered, UINT64_MAX);
+    assert(!latcd_retirement_retry_page_restore_budget(root, &recovered, UINT64_MAX, 100,
+                                                       &restored, page, error, sizeof(error)));
+    assert(restored.capacity == &recovered && page->count == 1 &&
+           !latcd_cache_capacity_recovery_finish(&recovered));
+    latcd_cache_capacity_close(&recovered);
+    char *shard_name = g_strconcat(hint.name, ".ini", NULL);
+    char *shard_path = g_build_filename(schedule, shard_name, NULL);
+    GKeyFile *shard = g_key_file_new();
+    assert(g_key_file_load_from_file(shard, shard_path, 0, NULL));
+    g_key_file_set_uint64(shard, "schedule", "sequence", 4);
+    char *changed = g_key_file_to_data(shard, NULL, NULL);
+    put(shard_path, changed); g_free(changed); g_key_file_unref(shard);
+    LatcdCacheCapacity rejected = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget rejected_budget = {0};
+    assert(!latcd_cache_capacity_scan(&rejected, root, error, sizeof(error)));
+    assert(!latcd_cache_capacity_recovery_begin(&rejected));
+    latcd_cache_capacity_metadata_bind(&rejected, UINT64_MAX);
+    assert(latcd_retirement_retry_page_restore_budget(root, &rejected, UINT64_MAX, 100,
+                                                      &rejected_budget, page, error, sizeof(error)) < 0);
+    assert(!rejected_budget.capacity && latcd_cache_capacity_recovery_finish(&rejected) < 0);
+    latcd_cache_capacity_close(&rejected); g_free(shard_path); g_free(shard_name);
     g_free(page); g_free(boot); g_free(tombstones); g_free(transactions); g_free(schedule); g_free(gc);
     simulated_boottime_us = 0;
     remove_root(root); g_free(root);
