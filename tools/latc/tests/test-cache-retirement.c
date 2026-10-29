@@ -1512,6 +1512,45 @@ static void test_tombstone_crash(const char *point, bool crash)
     remove_root(root); g_free(root);
 }
 
+static void test_empty_round_advance(void)
+{
+    char *root = root_new(), error[256];
+    LatcdRetirementPageState state, loaded;
+    simulated_boottime_us = 100;
+    assert(!latcd_retirement_page_round_begin(root, 100, &state, error, sizeof(error)));
+    for (unsigned scenario = 0; scenario < 4; scenario++) {
+        LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 100);
+        assert(!latcd_retirement_queue_diagnostic_resume(queue, error, sizeof(error)));
+        LatcdRetirementQueueStats stats;
+        int result;
+        do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+        while (result > 0);
+        assert(result < 0);
+        int shared = -1;
+        char *added = NULL;
+        simulated_boottime_us = scenario == 0 ? 100 : 101;
+        if (scenario == 1) {
+            shared = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, error, sizeof(error));
+            assert(shared >= 0);
+        }
+        if (scenario == 2) {
+            added = g_build_filename(root, ".gc", "transactions", "unexpected", NULL);
+            put(added, "unexpected");
+        }
+        result = latcd_retirement_queue_round_advance(queue, error, sizeof(error));
+        assert(scenario == 3 ? !result : result < 0);
+        if (shared >= 0) close(shared);
+        if (added) { assert(!unlink(added)); g_free(added); }
+        assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
+        assert(loaded.round_cutoff == (scenario == 3 ? 101 : 100));
+        assert(latcd_retirement_queue_round_advance(queue, error, sizeof(error)) < 0);
+        latcd_retirement_queue_free(queue);
+        simulated_boottime_us = 100;
+    }
+    simulated_boottime_us = 0;
+    remove_root(root); g_free(root);
+}
+
 static void test_page_round_begin(const char *point, bool crash)
 {
     char *root = root_new(), error[256];
@@ -7087,6 +7126,7 @@ int main(int argc, char **argv)
     test_queue_empty_store();
     test_oversized_prepared();
     test_round_cursor();
+    test_empty_round_advance();
     test_page_round_begin(NULL, false);
     test_page_identity();
     test_schedule_result_upgrade();

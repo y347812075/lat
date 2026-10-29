@@ -4296,6 +4296,8 @@ struct LatcdRetirementQueue {
     char diagnostic_boot[37], diagnostic_after[138];
     unsigned visited;
     bool aggregating, aggregation_verified, discovery_overflow;
+    bool round_resumed, empty_round_verified;
+    LatcdRetirementPageState round_state;
     DIR *cursor;
     int discovery_watch;
     int discovery_tombstones;
@@ -4378,6 +4380,9 @@ int latcd_retirement_queue_diagnostic_resume(LatcdRetirementQueue *queue,
         latcd_retirement_queue_diagnostic_round(queue, state.boot, state.round_cutoff,
                                                 state.committed_pending ? state.cursor :
                                                                           state.committed_cursor)) goto out;
+    queue->round_state = state;
+    queue->round_resumed = !state.count && !state.committed_pending &&
+        !state.budget_bound && !state.consumption_bound;
     result = 0;
 out:
     g_free(boot);
@@ -4630,7 +4635,7 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
                                  uint64_t time_us, LatcdRetirementQueueStats *stats,
                                  char *error, size_t error_size)
 {
-    if (!queue || !entries || !time_us || time_us > INT64_MAX / 2 || !stats)
+    if (!queue || queue->empty_round_verified || !entries || !time_us || time_us > INT64_MAX / 2 || !stats)
         return fail(error, error_size, "invalid retirement queue budget");
     if (queue->execution)
         return fail(error, error_size, "cannot scan while retirement execution is active");
@@ -4756,7 +4761,11 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
     if (!result) queue->aggregation_verified = true;
     /* Diagnostic pages cannot feed the executor until durable page completion
      * and cross-page retry state are implemented. */
-    if (!result && queue->diagnostic_cutoff) result = -1;
+    if (!result && queue->diagnostic_cutoff) {
+        queue->empty_round_verified = queue->round_resumed && !queue->discovery_overflow &&
+            !g_hash_table_size(queue->discovered);
+        result = -1;
+    }
     if (!result && queue->discovery_overflow) result = -1;
     if (!result && *queue->active.name &&
         !g_hash_table_contains(queue->discovered, queue->active.name) &&
@@ -4787,12 +4796,12 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         queue->complete = true;
     }
 out:
-    if (result <= 0 && queue->cursor) { closedir(queue->cursor); queue->cursor = NULL; }
-    if (result <= 0 && queue->discovery_watch >= 0) {
+    if (result <= 0 && !queue->empty_round_verified && queue->cursor) { closedir(queue->cursor); queue->cursor = NULL; }
+    if (result <= 0 && !queue->empty_round_verified && queue->discovery_watch >= 0) {
         close(queue->discovery_watch);
         queue->discovery_watch = -1;
     }
-    if (result <= 0 && queue->discovery_tombstones >= 0) {
+    if (result <= 0 && !queue->empty_round_verified && queue->discovery_tombstones >= 0) {
         close(queue->discovery_tombstones);
         queue->discovery_tombstones = -1;
     }
@@ -4820,6 +4829,66 @@ out:
     }
     g_free(boot);
     return result < 0 ? fail(error, error_size, "retirement queue discovery incomplete or unsafe") : result;
+}
+
+int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,
+                                         char *error, size_t error_size)
+{
+    if (!queue || !queue->empty_round_verified || !queue->cursor ||
+        queue->discovery_watch < 0 || queue->discovery_tombstones < 0)
+        return fail(error, error_size, "missing empty retirement scan");
+    queue->empty_round_verified = false;
+    int scheduler = scheduler_lock(queue->root, error, error_size);
+    int root = -1, gc = -1, roots = -1, store = -1, tombstones = -1, result = -1;
+    char *boot = NULL;
+    uint64_t now = 0;
+    LatcdRetirementPageState current;
+    bool legacy = false;
+    struct stat cache, path, transactions, tombstone_stat;
+    if (scheduler < 0) goto out;
+    root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    gc = root < 0 ? -1 : open_directory(root, ".gc", false);
+    roots = roots_lock_gc(gc, LOCK_EX | LOCK_NB, error, error_size);
+    store = root < 0 ? -1 : open_store(root, false);
+    tombstones = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
+    if (roots < 0 || !same_directory(scheduler, gc) || !queue_bind_root(queue, root) ||
+        fstat(root, &cache) || lstat(queue->root, &path) || !object_stat_equal(&cache, &path) ||
+        !directory_matches_at(root, ".gc", gc) ||
+        !lock_matches_at(gc, "reference-roots.lock", roots) || store < 0 || tombstones < 0 ||
+        fstat(store, &transactions) || fstat(tombstones, &tombstone_stat) ||
+        !object_stat_equal(&queue->discovery_store, &transactions) ||
+        !same_directory(store, dirfd(queue->cursor)) ||
+        !object_stat_equal(&queue->discovery_tombstone_store, &tombstone_stat) ||
+        !same_directory(tombstones, queue->discovery_tombstones) ||
+        page_state_load(queue->root, &current, &legacy, error, error_size) || legacy ||
+        current.count || current.committed_pending || current.budget_bound || current.consumption_bound ||
+        current.cache_device != queue->round_state.cache_device ||
+        current.cache_inode != queue->round_state.cache_inode ||
+        current.grace_us != queue->round_state.grace_us ||
+        current.round_cutoff != queue->round_state.round_cutoff ||
+        current.sequence != queue->round_state.sequence ||
+        strcmp(current.boot, queue->round_state.boot) ||
+        strcmp(current.committed_cursor, queue->round_state.committed_cursor) ||
+        retirement_clock(&boot, &now) || strcmp(boot, current.boot) ||
+        now <= current.round_cutoff || now < queue->diagnostic_last_time ||
+        !queue_watch_clean(queue->discovery_watch)) goto out;
+    current.round_cutoff = now;
+    current.committed_cursor[0] = 0;
+    if (page_state_store_fd(root, gc, &current, NULL, NULL)) goto out;
+    result = 0;
+out:
+    g_free(boot);
+    if (tombstones >= 0) close(tombstones);
+    if (store >= 0) close(store);
+    if (roots >= 0) close(roots);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    if (scheduler >= 0) close(scheduler);
+    if (queue->cursor) { closedir(queue->cursor); queue->cursor = NULL; }
+    if (queue->discovery_watch >= 0) { close(queue->discovery_watch); queue->discovery_watch = -1; }
+    if (queue->discovery_tombstones >= 0) { close(queue->discovery_tombstones); queue->discovery_tombstones = -1; }
+    queue->round_resumed = false;
+    return result ? fail(error, error_size, "retirement round advance failed; rescan and reload") : 0;
 }
 
 int latcd_retirement_queue_take(LatcdRetirementQueue *queue, uint64_t now_us,

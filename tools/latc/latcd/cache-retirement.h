@@ -451,6 +451,10 @@ int latcd_retirement_queue_diagnostic_round(LatcdRetirementQueue *queue,
  * Owner lease required; missing or incompatible state is not a new round. */
 int latcd_retirement_queue_diagnostic_resume(LatcdRetirementQueue *queue,
                                               char *error, size_t error_size);
+/* Owner lease and controlled writers required. Consume an empty monitored
+ * resumed scan to advance the persisted round; no deletion authorization. */
+int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,
+                                         char *error, size_t error_size);
 /* Diagnostic only: number of selected keys retained, at most 128.
  * Zero outside an active incomplete page scan. */
 unsigned latcd_retirement_queue_discovered_keys(const LatcdRetirementQueue *queue);
