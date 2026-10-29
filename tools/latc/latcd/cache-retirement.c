@@ -1762,7 +1762,7 @@ int latcd_retirement_page_budget_commit(const char *root, uint64_t now_us,
                                     const LatcdRetirementPageState *page, LatcdPageBudget *budget,
                                     char *error, size_t error_size)
 {
-    if (!budget || !page || !page->budget_bound)
+    if (!budget || !page)
         return fail(error, error_size, "missing bound page budget");
     return page_commit(root, now_us, page, budget, true, error, error_size);
 }
