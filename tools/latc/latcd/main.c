@@ -2160,6 +2160,7 @@ static int test_consume_retirement_page(const LatcdConfig *config,
                 receipts[0] == matches[0]) goto fail;
             if (receipts[0]) {
                 if (latcd_retirement_queue_page_receipt_done(queue, &test_page_budget, error, error_size)) goto fail;
+                if (getenv("LATCD_TEST_CRASH_AFTER_PAGE_DONE")) kill(getpid(), SIGKILL);
             } else remaining++;
             latcd_retirement_queue_free(queue);
             queue = NULL;

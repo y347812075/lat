@@ -74,6 +74,38 @@ assert all((root / m[key]).is_file() for key in ('module', 'native', 'tbset'))
 PY
     stop
 done
+cache=$work/partial-done-cache
+socket=$work/partial-done.sock
+stats=$work/partial-done-stats.json
+mkdir -m 700 "$cache"
+start
+stop
+"$fixture" --timer-fixture "$cache"
+LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_CRASH_AFTER_PAGE_DONE=1 start
+n=0
+while kill -0 "$pid" 2>/dev/null; do
+    n=$((n + 1)); if [ "$n" -ge 300 ]; then cat "$work/server.err" >&2; exit 1; fi
+    sleep 0.05
+done
+if wait "$pid"; then echo 'expected partial DONE crash' >&2; exit 1; fi
+pid=
+rm -f "$socket"
+old=$cache/$(printf '%064x' 7)
+remaining=0
+for suffix in so native tbset; do
+    if [ -e "$old.$suffix" ]; then remaining=$((remaining + 1)); fi
+done
+test "$remaining" -eq 2
+LATCD_TEST_RECOVER_PAGE=1 start
+grep -q 'latcd: test recovered page consumed' "$work/server.err"
+test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
+python3 - "$cache" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1]); source = f'{7:064x}'
+m = json.loads((root / (source + '.current')).read_text())
+assert all((root / m[key]).is_file() for key in ('module', 'native', 'tbset'))
+PY
+stop
 cache=$work/crash-cache
 socket=$work/crash.sock
 stats=$work/crash-stats.json
