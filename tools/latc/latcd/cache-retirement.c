@@ -5503,6 +5503,8 @@ struct LatcdRetirementQueue {
     GHashTable *removed_second;
     GHashTable *retry_transaction_roots;
     GHashTable *retry_hints;
+    GHashTable *page_members;
+    bool page_restricted;
     char retry_order[128][138];
     unsigned retry_count;
     bool retry_snapshot_bound;
@@ -5565,7 +5567,53 @@ LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grac
     queue->removed_second = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     queue->retry_transaction_roots = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     queue->retry_hints = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    queue->page_members = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     return queue;
+}
+
+int latcd_retirement_queue_restrict_to_page(LatcdRetirementQueue *queue,
+    const LatcdRetirementPageState *page, char *error, size_t error_size)
+{
+    if (!queue || !page || !queue->complete || queue->persistence_uncertain ||
+        queue->active.sequence || queue->execution || queue->diagnostic_cutoff ||
+        latcd_retirement_page_state_valid(page) || !page->count || !page->budget_bound ||
+        page->grace_us != queue->grace)
+        return fail(error, error_size, "invalid persistent retirement page");
+    int scheduler = scheduler_lock(queue->root, error, error_size);
+    int root = -1, gc = -1, result = -1;
+    LatcdRetirementPageState current;
+    bool legacy = false;
+    uint8_t expected[32], actual[32];
+    if (scheduler < 0) return -1;
+    root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    gc = root < 0 ? -1 : open_directory(root, ".gc", false);
+    if (!same_directory(scheduler, gc) || !queue_bind_root(queue, root) ||
+        page_state_load(queue->root, &current, &legacy, error, error_size) || legacy ||
+        !current.budget_bound || current.committed_pending || current.consumption_bound ||
+        latcd_retirement_page_budget_identity(page, expected) ||
+        latcd_retirement_page_budget_identity(&current, actual) ||
+        memcmp(expected, actual, sizeof(expected))) goto out;
+    g_hash_table_remove_all(queue->page_members);
+    for (unsigned i = 0; i < current.count; i++) {
+        if (current.results[i] != 0) continue;
+        if (!g_hash_table_contains(queue->candidates, current.entries[i].name)) goto clear;
+        g_hash_table_add(queue->page_members, g_strdup(current.entries[i].name));
+    }
+    if (!g_hash_table_size(queue->page_members)) {
+        errno = ENOENT;
+        goto clear;
+    }
+    queue->page_restricted = true;
+    result = 0;
+    goto out;
+clear:
+    g_hash_table_remove_all(queue->page_members);
+    queue->page_restricted = false;
+out:
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    close(scheduler);
+    return result ? fail(error, error_size, "retirement page members unavailable") : 0;
 }
 
 int latcd_retirement_queue_diagnostic_round(LatcdRetirementQueue *queue,
@@ -5975,6 +6023,7 @@ void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
     g_hash_table_unref(queue->removed_second);
     g_hash_table_unref(queue->retry_transaction_roots);
     g_hash_table_unref(queue->retry_hints);
+    g_hash_table_unref(queue->page_members);
     g_free(queue->root); g_free(queue);
 }
 
@@ -6276,12 +6325,19 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         return fail(error, error_size, "retirement scheduler requires reload");
     if (!queue->cursor) queue->aggregation_verified = false;
     int result = -1;
+    const char *reason = "retirement queue discovery failed";
     char *boot = NULL;
     uint64_t now = 0;
-    if (retirement_clock(&boot, &now)) goto out;
+    if (retirement_clock(&boot, &now)) {
+        reason = "retirement queue clock unavailable";
+        goto out;
+    }
     if (queue->diagnostic_cutoff &&
         (strcmp(boot, queue->diagnostic_boot) || now < queue->diagnostic_cutoff ||
-         (queue->cursor && now < queue->diagnostic_last_time))) goto out;
+        (queue->cursor && now < queue->diagnostic_last_time))) {
+        reason = "retirement diagnostic round changed";
+        goto out;
+    }
     if (queue->diagnostic_cutoff) queue->diagnostic_last_time = now;
     if (!queue->cursor) {
         queue->complete = false;
@@ -6297,7 +6353,11 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         g_hash_table_remove_all(queue->retry_transaction_roots);
         queue->epoch++;
         int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        if (!queue_bind_root(queue, root)) { if (root >= 0) close(root); goto out; }
+        if (!queue_bind_root(queue, root)) {
+            reason = "retirement queue root changed";
+            if (root >= 0) close(root);
+            goto out;
+        }
         int store = open_store(root, true);
         int gc = open_directory(root, ".gc", false);
         queue->discovery_tombstones = gc < 0 ? -1 : open_directory(gc, "tombstones", true);
@@ -6305,10 +6365,14 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         if (store < 0 || queue->discovery_tombstones < 0) {
             if (store >= 0) close(store);
             close(root);
+            reason = "retirement queue stores unavailable";
             goto out;
         }
         queue->cursor = fdopendir(store);
-        if (!queue->cursor) { close(store); close(root); goto out; }
+        if (!queue->cursor) {
+            reason = "retirement queue cursor unavailable";
+            close(store); close(root); goto out;
+        }
         queue->discovery_watch = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
         int watch_root = queue->discovery_watch < 0 ? -1 : queue_watch_fd(queue->discovery_watch,
             root, IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO |
@@ -6316,7 +6380,10 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         close(root);
         if (watch_root || queue_watch_fd(queue->discovery_watch,
             dirfd(queue->cursor), IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO |
-            IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR)) goto out;
+            IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR)) {
+            reason = "retirement queue watches unavailable";
+            goto out;
+        }
         if (queue_watch_fd(queue->discovery_watch, queue->discovery_tombstones,
             IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY |
             IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR) ||
@@ -6346,7 +6413,7 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
             !read_file(dirfd(queue->cursor), entry->d_name, RECORD_LIMIT, &raw, &size) &&
             queue_record(queue, raw, size, boot, now);
         g_free(raw);
-        if (!valid) { result = -1; break; }
+        if (!valid) { reason = "retirement transaction record changed or invalid"; result = -1; break; }
     }
     if (!result && queue->cursor) {
         struct stat held, path;
@@ -6361,7 +6428,10 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
             fstat(queue->discovery_tombstones, &held_tombstones) || fstat(tombstones, &path_tombstones) ||
             !object_stat_equal(&queue->discovery_tombstone_store, &held_tombstones) ||
             !object_stat_equal(&held_tombstones, &path_tombstones) ||
-            !queue_watch_clean(queue->discovery_watch)) result = -1;
+            !queue_watch_clean(queue->discovery_watch)) {
+            reason = "retirement directories changed during scan";
+            result = -1;
+        }
         if (tombstones >= 0) close(tombstones);
         if (gc >= 0) close(gc);
         if (store >= 0) close(store);
@@ -6395,16 +6465,25 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         result = 1;
     }
     if (!result && g_hash_table_size(queue->discovered_keys) !=
-                   g_hash_table_size(queue->confirmed_keys)) result = -1;
+                   g_hash_table_size(queue->confirmed_keys)) {
+        reason = "retirement discovery passes differ";
+        result = -1;
+    }
     if (!result && g_hash_table_size(queue->removed_first) !=
-                   g_hash_table_size(queue->removed_second)) result = -1;
+                   g_hash_table_size(queue->removed_second)) {
+        reason = "retirement tombstone discovery passes differ";
+        result = -1;
+    }
     if (!result) {
         GHashTableIter removed_iter;
         gpointer removed_key, removed_digest;
         g_hash_table_iter_init(&removed_iter, queue->removed_first);
         while (g_hash_table_iter_next(&removed_iter, &removed_key, &removed_digest)) {
             const uint8_t *second = g_hash_table_lookup(queue->removed_second, removed_key);
-            if (!second || memcmp(removed_digest, second, 32)) { result = -1; break; }
+            if (!second || memcmp(removed_digest, second, 32)) {
+                reason = "retirement tombstone digest changed";
+                result = -1; break;
+            }
         }
     }
     if (!result) {
@@ -6413,6 +6492,7 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         g_hash_table_iter_init(&iterator, queue->discovered);
         while (g_hash_table_iter_next(&iterator, NULL, &value)) {
             if (((RetirementCandidate *)value)->epoch != queue->epoch) {
+                reason = "retirement discovery epoch changed";
                 result = -1;
                 break;
             }
@@ -6429,10 +6509,16 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
             g_hash_table_size(queue->discovered) > 0;
         result = -1;
     }
-    if (!result && queue->discovery_overflow) result = -1;
+    if (!result && queue->discovery_overflow && !queue->diagnostic_cutoff) {
+        reason = "retirement discovery overflow";
+        result = -1;
+    }
     if (!result && *queue->active.name &&
         !g_hash_table_contains(queue->discovered, queue->active.name) &&
-        g_hash_table_size(queue->discovered) >= 128) result = -1;
+        g_hash_table_size(queue->discovered) >= 128) {
+        reason = "active retirement attempt missing from full page";
+        result = -1;
+    }
     if (!result) {
         GHashTableIter iterator;
         gpointer key, value;
@@ -6491,7 +6577,7 @@ out:
             stats->next_deadline_us = candidate->deadline;
     }
     g_free(boot);
-    return result < 0 ? fail(error, error_size, "retirement queue discovery incomplete or unsafe") : result;
+    return result < 0 ? fail(error, error_size, "%s", reason) : result;
 }
 
 typedef struct {
@@ -7175,6 +7261,7 @@ int latcd_retirement_queue_take(LatcdRetirementQueue *queue, uint64_t now_us,
     g_hash_table_iter_init(&iterator, queue->candidates);
     while (g_hash_table_iter_next(&iterator, &key, &value)) {
         RetirementCandidate *candidate = value;
+        if (queue->page_restricted && !g_hash_table_contains(queue->page_members, key)) continue;
         if (candidate->deadline > now_us || candidate->retry_at > now_us) continue;
         if (!first || strncmp(key, first, 64) < 0) first = key;
         if (strncmp(key, queue->last_source, 64) > 0 && (!after || strncmp(key, after, 64) < 0)) after = key;
@@ -7185,6 +7272,7 @@ int latcd_retirement_queue_take(LatcdRetirementQueue *queue, uint64_t now_us,
     g_hash_table_iter_init(&iterator, queue->candidates);
     while (g_hash_table_iter_next(&iterator, &key, &value)) {
         RetirementCandidate *candidate = value;
+        if (queue->page_restricted && !g_hash_table_contains(queue->page_members, key)) continue;
         if (strncmp(key, source, 64) || candidate->deadline > now_us || candidate->retry_at > now_us) continue;
         if (!oldest || candidate->last_attempt < oldest->last_attempt ||
             (candidate->last_attempt == oldest->last_attempt &&

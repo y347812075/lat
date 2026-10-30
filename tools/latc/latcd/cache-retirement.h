@@ -664,6 +664,11 @@ int latcd_retirement_queue_page_discovery_begin(LatcdRetirementQueue *queue,
 int latcd_retirement_queue_page_stage(LatcdRetirementQueue *queue,
     struct LatcdCacheCapacity *capacity, uint64_t limit, struct LatcdPageBudget *budget,
     char *error, size_t error_size);
+/* Owner lease and controlled writers required. Restrict a completed discovery
+ * queue to unresolved members of the current fresh budget-bound page. The
+ * filter is in-memory only and does not authorize deletion. */
+int latcd_retirement_queue_restrict_to_page(LatcdRetirementQueue *queue,
+    const struct LatcdRetirementPageState *page, char *error, size_t error_size);
 /* Owner lease and controlled writers required. Consume an empty monitored
  * resumed scan to advance the persisted round; no deletion authorization. */
 int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,

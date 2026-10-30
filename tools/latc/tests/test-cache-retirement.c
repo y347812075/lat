@@ -8250,6 +8250,63 @@ static void test_page_discovery_witness(void)
     remove_root(root); g_free(root);
 }
 
+static void test_page_execution_restriction(void)
+{
+    char *root = root_new(), error[256];
+    simulated_boottime_us = 100;
+    publish_page_fixture(root, 9);
+    publish_page_fixture(root, 10);
+    char *src = g_strdup_printf("%064x", 9);
+    char *selected = g_strconcat(src, ".so", NULL);
+    char *sibling = g_strconcat(src, ".native", NULL);
+    char *outsider_src = g_strdup_printf("%064x", 10);
+    char *outsider = g_strconcat(outsider_src, ".so", NULL);
+    char *selected_path = g_build_filename(root, selected, NULL);
+    char *sibling_path = g_build_filename(root, sibling, NULL);
+    char *outsider_path = g_build_filename(root, outsider, NULL);
+    simulated_boottime_us = 101;
+    LatcdRetirementPageState page;
+    assert(!latcd_retirement_page_round_begin(root, 1, &page, error, sizeof(error)));
+    page.count = 1;
+    g_strlcpy(page.entries[0].name, selected, sizeof(page.entries[0].name));
+    page.entries[0].enqueued = 100;
+    page.entries[0].deadline = 101;
+    g_strlcpy(page.cursor, selected, sizeof(page.cursor));
+    char *schedule = g_build_filename(root, ".gc", "retirement-schedule", NULL);
+    char *transactions = g_build_filename(root, ".gc", "transactions", NULL);
+    char *tombstones = g_build_filename(root, ".gc", "tombstones", NULL);
+    assert(!mkdir(schedule, 0700));
+    assert(!mkdir(transactions, 0700) || errno == EEXIST);
+    assert(!mkdir(tombstones, 0700) || errno == EEXIST);
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget budget = {0};
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    simulated_boottime_us = 102;
+    assert(!latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
+                                                  &budget, error, sizeof(error)));
+    assert(!latcd_retirement_page_state_load(root, &page, error, sizeof(error)) &&
+           page.count == 1 && page.budget_bound);
+    latcd_cache_capacity_close(&capacity);
+    LatcdRetirementQueue *executor = latcd_retirement_queue_new(root, 1);
+    LatcdRetirementQueueStats stats = sweep_queue(executor);
+    assert(stats.complete && stats.ready >= 2);
+    assert(!latcd_retirement_queue_restrict_to_page(executor, &page, error, sizeof(error)));
+    LatcdRetirementDeletionReport report;
+    int execute_result = latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error));
+    if (execute_result != 1) fprintf(stderr, "page execute: %d %s\n", execute_result, error);
+    assert(execute_result == 1);
+    assert(report.object_unlinked && access(selected_path, F_OK) < 0 && errno == ENOENT);
+    assert(!access(sibling_path, F_OK) && !access(outsider_path, F_OK));
+    assert(!latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error)));
+    latcd_retirement_queue_free(executor);
+    simulated_boottime_us = 0;
+    g_free(outsider_path); g_free(sibling_path); g_free(selected_path);
+    g_free(outsider); g_free(outsider_src); g_free(sibling); g_free(selected); g_free(src);
+    g_free(tombstones); g_free(transactions); g_free(schedule);
+    remove_root(root); g_free(root);
+}
+
 static void test_page_receipt_witness(unsigned mode)
 {
     char *root = root_new(), error[256];
@@ -9422,6 +9479,7 @@ int main(int argc, char **argv)
     test_retry_not_due(false);
     test_retry_not_due(true);
     test_page_discovery_witness();
+    test_page_execution_restriction();
     test_page_receipt_witness(0);
     test_page_receipt_witness(1);
     test_page_receipt_witness(2);
