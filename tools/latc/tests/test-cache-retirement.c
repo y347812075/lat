@@ -8311,6 +8311,41 @@ static void test_page_execution_restriction(void)
     assert(!access(sibling_path, F_OK) && !access(outsider_path, F_OK));
     assert(!latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error)));
     latcd_retirement_queue_free(executor);
+    assert(!latcd_retirement_page_state_load(root, &page, error, sizeof(error)) &&
+           page.budget_bound && page.results[0] == 0);
+    LatcdRetirementQueue *receipt = latcd_retirement_queue_new(root, 1);
+    assert(!latcd_retirement_queue_page_receipt_begin(receipt, &budget, 0,
+                                                       error, sizeof(error)));
+    int receipt_step;
+    do {
+        receipt_step = latcd_retirement_queue_step(receipt, 32, 10000, &stats,
+                                                   error, sizeof(error));
+    } while (receipt_step > 0);
+    assert(receipt_step < 0 &&
+           !latcd_retirement_queue_page_receipt_done(receipt, &budget,
+                                                      error, sizeof(error)));
+    latcd_retirement_queue_free(receipt);
+    assert(!latcd_retirement_page_state_load(root, &page, error, sizeof(error)) &&
+           page.budget_bound && page.results[0] == 0);
+    uint8_t page_results[128] = {0};
+    assert(!latcd_retirement_schedule_page_results(root, 102, &page, page_results,
+                                                    error, sizeof(error)) &&
+           page_results[0] == LATCD_RETIREMENT_RESULT_DONE);
+    assert(!latcd_retirement_page_budget_commit(root, 102, &page, &budget,
+                                                 error, sizeof(error)));
+    assert(!latcd_retirement_page_state_load(root, &page, error, sizeof(error)) &&
+           page.committed_pending && page.results[0] == LATCD_RETIREMENT_RESULT_DONE);
+    assert(!latcd_retirement_consumption_begin(root, 102, &budget,
+                                                error, sizeof(error)));
+    assert(!latcd_retirement_consumption_prepare(root, 102, 0, &budget,
+                                                  error, sizeof(error)));
+    assert(!latcd_retirement_consumption_apply(root, 102, &budget,
+                                                error, sizeof(error)));
+    assert(!latcd_retirement_consumption_finish(root, 102, &budget,
+                                                 error, sizeof(error)));
+    assert(!latcd_retirement_page_state_load(root, &page, error, sizeof(error)) &&
+           !page.count && !page.committed_pending);
+    assert(capacity.ready && !budget.capacity && !budget.invalid);
     latcd_cache_capacity_close(&capacity);
     simulated_boottime_us = 0;
     g_free(outsider_path); g_free(sibling_path); g_free(selected_path);
