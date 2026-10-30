@@ -654,6 +654,12 @@ if 'CONFIG_LATX' in config_host
     'tools/latc/latcd/cache_gc.py',
     install_dir: latc_helper_dir / 'scripts',
   )
+  install_data(
+    'tools/latc/latcd/broker-export.py',
+    install_dir: get_option('bindir'),
+    rename: 'latcd-broker-export',
+    install_mode: 'rwxr-xr-x',
+  )
 
   latcd_inc = include_directories(
     'tools/latc/aot-v2/include',

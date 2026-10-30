@@ -81,6 +81,11 @@ test-broker-source: $(BUILD)/tests/test-broker-source $(BUILD)/tests/x86-exit42
 	$(BUILD)/tests/test-broker-source $(BUILD)/tests/x86-exit42
 test: test-broker-source
 
+.PHONY: test-broker-export
+test-broker-export: $(BUILD)/tests/x86-exit42
+	python3 tests/test-broker-export.py latcd/broker-export.py $(BUILD)/tests/x86-exit42
+test: test-broker-export
+
 test-native-config-replay:
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)" || \
 	  { echo "usage: make test-native-config-replay INSTALL_PREFIX=... X86_GUEST=... TBSET=... WORK=..."; exit 2; }

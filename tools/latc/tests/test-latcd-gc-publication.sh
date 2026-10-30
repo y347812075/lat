@@ -37,6 +37,11 @@ python3 "$script_dir/make-tbset.py" "$guest" "$work/initial.tbset"
 grep -q '^status=0$' "$work/initial-flush"
 if [ "$mode" = pin ]; then
     python3 "$script_dir/test-broker-publication.py" "$work/broker/broker.sock" "$cache" "$guest"
+    broker_client=$(dirname "$latcd")/latcd-broker-export
+    "$broker_client" --socket "$work/broker/broker.sock" --service-uid "$(id -u)" --output "$work/export-old.so" "$guest"
+    if "$broker_client" --socket "$work/broker/broker.sock" --service-uid "$(id -u)" --output "$work/export-old.so" "$guest"; then exit 1; fi
+    if "$broker_client" --socket "$work/broker/broker.sock" --service-uid 4294967294 --output "$work/invalid.so" "$guest"; then exit 1; fi
+    test ! -e "$work/invalid.so"
 fi
 python3 - "$cache" "$guest" "$work" "$script_dir" <<'PY'
 import hashlib, json, pathlib, struct, sys
@@ -167,6 +172,14 @@ PY
 fi
 if [ "$mode" = pin ]; then
     python3 "$script_dir/test-broker-publication.py" "$work/broker/broker.sock" "$cache" "$guest"
+    "$broker_client" --socket "$work/broker/broker.sock" --service-uid "$(id -u)" --output "$work/export-new.so" "$guest"
+    python3 - "$work" <<'PY'
+import hashlib, json, pathlib, sys
+work = pathlib.Path(sys.argv[1])
+for generation in ('old', 'new'):
+    manifest = json.loads((work / (generation + '.json')).read_text())
+    assert hashlib.sha256((work / ('export-' + generation + '.so')).read_bytes()).hexdigest() == manifest['module_sha256']
+PY
 fi
 python3 - "$cache" "$guest" "$work" <<'PY'
 import hashlib, json, pathlib, sys
