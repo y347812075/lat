@@ -4974,6 +4974,15 @@ static bool tombstone_shape(GKeyFile *record, const char *name,
             end && !*end && !errno && (i != 2 || values[i]);
         g_free(text);
     }
+    struct stat identity = {0};
+    identity.st_dev = (dev_t)values[0];
+    identity.st_ino = (ino_t)values[1];
+    identity.st_size = (off_t)values[2];
+    identity.st_blocks = (blkcnt_t)(values[3] / 512);
+    valid = valid && (uint64_t)identity.st_dev == values[0] &&
+        (uint64_t)identity.st_ino == values[1] && identity.st_size >= 0 &&
+        (uint64_t)identity.st_size == values[2] && !(values[3] % 512) &&
+        identity.st_blocks >= 0 && (uint64_t)identity.st_blocks == values[3] / 512;
     g_free(version); g_free(stored_name); g_free(state); g_free(observation); g_free(deletion);
     return valid;
 }

@@ -7416,6 +7416,45 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
             latcd_retirement_queue_free(receipt_queue);
         }
         g_free(receipt_schedule);
+        /* Matching corrupt identities in both records are not valid evidence. */
+        GKeyFile *bad_receipt = g_key_file_new(), *bad_transaction = g_key_file_new();
+        assert(g_key_file_load_from_data(bad_receipt, receipt, -1, 0, NULL));
+        assert(g_key_file_load_from_data(bad_transaction, raw, -1, 0, NULL));
+        char *bad_encoded = g_key_file_get_string(bad_transaction, "transaction", "objects", NULL);
+        gsize bad_size;
+        guchar *bad_decoded = g_base64_decode(bad_encoded, &bad_size);
+        GKeyFile *bad_objects = g_key_file_new();
+        assert(g_key_file_load_from_data(bad_objects, (char *)bad_decoded, bad_size, 0, NULL));
+        int bad_count = g_key_file_get_integer(bad_objects, "objects", "count", NULL);
+        bool bad_found = false;
+        for (int i = 0; i < bad_count; i++) {
+            char group[32];
+            snprintf(group, sizeof(group), "object%d", i);
+            char *object_name = g_key_file_get_string(bad_objects, group, "name", NULL);
+            if (!strcmp(object_name, names[0])) {
+                g_key_file_set_uint64(bad_objects, group, "allocated", 1);
+                bad_found = true;
+            }
+            g_free(object_name);
+        }
+        assert(bad_found);
+        g_key_file_set_uint64(bad_receipt, "tombstone", "allocated", 1);
+        char *bad_object_data = g_key_file_to_data(bad_objects, &bad_size, NULL);
+        char *bad_object_encoded = g_base64_encode((guchar *)bad_object_data, bad_size);
+        g_key_file_set_string(bad_transaction, "transaction", "objects", bad_object_encoded);
+        char *bad_transaction_data = g_key_file_to_data(bad_transaction, NULL, NULL);
+        char *bad_receipt_data = g_key_file_to_data(bad_receipt, NULL, NULL);
+        put(record_path, bad_transaction_data);
+        put(marker, bad_receipt_data);
+        do {
+            queued = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+        } while (queued > 0);
+        assert(queued < 0 && !stats.complete);
+        put(record_path, raw);
+        put(marker, receipt);
+        g_free(bad_receipt_data); g_free(bad_transaction_data); g_free(bad_object_encoded);
+        g_free(bad_object_data); g_key_file_unref(bad_objects); g_free(bad_decoded);
+        g_free(bad_encoded); g_key_file_unref(bad_transaction); g_key_file_unref(bad_receipt);
         /* Every transaction mentioning a removed name must bind the receipt. */
         GKeyFile *other = g_key_file_new();
         assert(g_key_file_load_from_data(other, raw, -1, 0, NULL));
