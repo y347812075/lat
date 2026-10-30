@@ -6762,7 +6762,21 @@ int main(int argc, char **argv)
     LatcdPageBudget retry_budget = {0};
     LatcdRetirementRetryPage *retry_page = g_new0(LatcdRetirementRetryPage, 1);
     bool retry_recovered = false;
+#ifdef LATCD_GC_TIMER_TEST
+    bool test_page_recovered = false;
+#endif
     if (!budget_result && latcd_retirement_page_startup_check(config.cache_dir, error, sizeof(error))) {
+#ifdef LATCD_GC_TIMER_TEST
+        if (getenv("LATCD_TEST_RECOVER_PAGE")) {
+            LatcdRetirementPageState page;
+            if (latcd_retirement_page_restore_budget(config.cache_dir, &generation_capacity,
+                    config.max_cache_bytes, LATCD_RETIREMENT_GRACE_US,
+                    &test_page_budget, &page, error, sizeof(error)) ||
+                page.committed_pending || page.consumption_bound) budget_result = -1;
+            else test_page_recovered = true;
+        } else
+#endif
+        {
         char retry_error[sizeof(error)];
         if (latcd_retirement_retry_page_load(config.cache_dir, retry_page, retry_error, sizeof(retry_error)))
             budget_result = -1;
@@ -6770,9 +6784,17 @@ int main(int argc, char **argv)
                 config.max_cache_bytes, LATCD_RETIREMENT_GRACE_US, &retry_budget, retry_page,
                 error, sizeof(error))) budget_result = -1;
         else retry_recovered = true;
+        }
     }
     if (!budget_result && latcd_cache_capacity_recovery_finish(&generation_capacity))
         budget_result = fail(error, sizeof(error), "capacity index invalid after compiler budget recovery");
+#ifdef LATCD_GC_TIMER_TEST
+    if (!budget_result && test_page_recovered) {
+        test_page_staged = true;
+        if (test_consume_retirement_page(&config, error, sizeof(error))) budget_result = -1;
+        else fprintf(stderr, "latcd: test recovered page consumed\n");
+    }
+#endif
     if (!budget_result && retry_recovered) {
         LatcdRetryRecovery *retry = latcd_retry_recovery_new(config.cache_dir,
             LATCD_RETIREMENT_GRACE_US, &retry_budget, false);

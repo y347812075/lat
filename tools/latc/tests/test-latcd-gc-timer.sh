@@ -75,6 +75,10 @@ if "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" \
 fi
 grep -q 'retirement page budget recovery unavailable or checkpoint unsafe' "$work/restart.err"
 test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
+LATCD_TEST_RECOVER_PAGE=1 start
+grep -q 'latcd: test recovered page consumed' "$work/server.err"
+test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
+stop
 cache=$work/consume-cache
 socket=$work/consume.sock
 stats=$work/consume-stats.json
