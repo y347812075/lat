@@ -3723,6 +3723,7 @@ typedef struct LatcdBrokerWorker {
     bool occupied, pending, complete;
     int source, output, event;
     int64_t deadline;
+    uint64_t generation;
     LatcdBrokerExportRequest request;
     LatcdBrokerExportResponse response;
 } LatcdBrokerWorker;
@@ -3778,13 +3779,15 @@ static int G_GNUC_UNUSED broker_worker_start(LatcdBrokerWorker *worker, const La
 
 /* On success ownership of source transfers to the worker. */
 static int G_GNUC_UNUSED broker_worker_submit(LatcdBrokerWorker *worker, int source,
-    const LatcdBrokerExportRequest *request, int64_t deadline)
+    const LatcdBrokerExportRequest *request, int64_t deadline, uint64_t *generation)
 {
     pthread_mutex_lock(&worker->lock);
-    if (source < 0 || !request || worker->occupied || atomic_load(&worker->stopping)) {
+    if (source < 0 || !request || !generation || worker->generation == UINT64_MAX ||
+        worker->occupied || atomic_load(&worker->stopping)) {
         pthread_mutex_unlock(&worker->lock); errno = EBUSY; return -1;
     }
     worker->occupied = worker->pending = true;
+    *generation = ++worker->generation;
     worker->source = source; worker->request = *request; worker->deadline = deadline;
     pthread_cond_signal(&worker->ready);
     pthread_mutex_unlock(&worker->lock);
@@ -3792,10 +3795,12 @@ static int G_GNUC_UNUSED broker_worker_submit(LatcdBrokerWorker *worker, int sou
 }
 
 static int G_GNUC_UNUSED broker_worker_take(LatcdBrokerWorker *worker,
+                                             uint64_t generation,
                                              LatcdBrokerExportResponse *response, int *output)
 {
     pthread_mutex_lock(&worker->lock);
     if (!worker->complete) { pthread_mutex_unlock(&worker->lock); errno = EAGAIN; return -1; }
+    if (worker->generation != generation) { pthread_mutex_unlock(&worker->lock); errno = ESTALE; return -1; }
     *response = worker->response; *output = worker->output;
     worker->output = -1; worker->complete = worker->occupied = false;
     uint64_t count;
@@ -3815,6 +3820,87 @@ static void G_GNUC_UNUSED broker_worker_stop(LatcdBrokerWorker *worker)
     if (worker->output >= 0) close(worker->output);
     close(worker->event);
     pthread_cond_destroy(&worker->ready); pthread_mutex_destroy(&worker->lock);
+}
+
+typedef struct LatcdBrokerConnection {
+    int fd, output;
+    uid_t uid;
+    gid_t gid;
+    bool submitted, response_ready;
+    int64_t deadline;
+    uint64_t generation;
+    LatcdBrokerExportResponse response;
+} LatcdBrokerConnection;
+
+static int G_GNUC_UNUSED broker_connection_open(LatcdBrokerConnection *connection,
+                                                 int fd, uid_t expected_uid,
+                                                 int64_t deadline)
+{
+    *connection = (LatcdBrokerConnection) {.fd = fd, .output = -1, .deadline = deadline};
+    if (fd < 0 || deadline <= g_get_monotonic_time() ||
+        latcd_broker_peer(fd, expected_uid, &connection->uid, &connection->gid)) return -1;
+    return 0;
+}
+
+/* Event-side only. Returns 1 while pending, 0 when done, -1 on failure.
+ * A disconnected client never releases an occupied worker slot. */
+static int G_GNUC_UNUSED broker_connection_step(LatcdBrokerConnection *connection,
+                                                 LatcdBrokerWorker *worker)
+{
+    if (g_get_monotonic_time() >= connection->deadline) { errno = ETIMEDOUT; return -1; }
+    if (!connection->submitted) {
+        LatcdBrokerExportRequest request;
+        int source = -1;
+        if (latcd_broker_receive(connection->fd, connection->uid, connection->gid,
+                                 &request, sizeof(request), &source)) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 1;
+            return -1;
+        }
+        if (source < 0 || request.version != LATCD_BROKER_EXPORT_VERSION || request.reserved ||
+            broker_worker_submit(worker, source, &request, connection->deadline,
+                                 &connection->generation)) {
+            if (source >= 0) close(source);
+            return -1;
+        }
+        connection->submitted = true;
+    }
+    if (!connection->response_ready) {
+        if (broker_worker_take(worker, connection->generation,
+                               &connection->response, &connection->output)) {
+            if (errno == EAGAIN) return 1;
+            return -1;
+        }
+        connection->response_ready = true;
+    }
+    if (latcd_broker_send(connection->fd, &connection->response,
+                          sizeof(connection->response), connection->output)) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 1;
+        return -1;
+    }
+    return 0;
+}
+
+static void G_GNUC_UNUSED broker_connection_close(LatcdBrokerConnection *connection)
+{
+    if (connection->fd >= 0) close(connection->fd);
+    if (connection->output >= 0) close(connection->output);
+    connection->fd = connection->output = -1;
+}
+
+/* Keep the generation after disconnect until its worker result is reclaimed. */
+static int G_GNUC_UNUSED broker_connection_reap(LatcdBrokerConnection *connection,
+                                                LatcdBrokerWorker *worker)
+{
+    if (!connection->submitted || connection->response_ready) return 0;
+    LatcdBrokerExportResponse discarded;
+    int output = -1;
+    if (broker_worker_take(worker, connection->generation, &discarded, &output)) {
+        if (errno == EAGAIN) return 1;
+        return -1;
+    }
+    if (output >= 0) close(output);
+    connection->submitted = false;
+    return 0;
 }
 
 static int G_GNUC_UNUSED broker_export_request(const LatcdConfig *config,
