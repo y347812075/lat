@@ -304,6 +304,7 @@ while ! grep -q 'test waiting page consumed' "$work/server.err"; do
 done
 grep -q 'test waiting timer woke' "$work/server.err"
 grep -q 'test retirement witness yielded' "$work/server.err"
+grep -q 'test retirement executor scan yielded' "$work/server.err"
 test "$(grep -c 'test consumption recovery step=' "$work/server.err")" -ge 2
 test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
 python3 - "$cache" <<'PY'

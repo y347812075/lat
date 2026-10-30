@@ -2120,6 +2120,7 @@ static LatcdPageBudget test_page_budget;
 static bool test_page_staged;
 static bool test_page_waiting;
 static bool test_page_executing;
+static bool test_page_scanning;
 static LatcdRetirementQueue *test_page_witness;
 static unsigned test_page_member;
 static unsigned test_page_remaining;
@@ -2150,6 +2151,7 @@ static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueu
         memcmp(page_identity, test_page_budget.page_identity, sizeof(page_identity)))
         return fail(error, error_size, "waiting page identity changed");
     if (test_page_executing) goto execute;
+    if (test_page_scanning) goto scan;
     for (unsigned i = test_page_member; i < page.count; i++) {
         if (results[i] == LATCD_RETIREMENT_RESULT_DONE) continue;
         if (results[i] == LATCD_RETIREMENT_RESULT_DEFERRED) {
@@ -2201,8 +2203,14 @@ static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueu
                                                  &test_page_budget, error, error_size)) return -1;
         return 2;
     }
-    do { result = latcd_retirement_queue_step(executor, 32, 10000, &stats, error, error_size); }
-    while (result > 0 && !stop_requested);
+    test_page_scanning = true;
+scan:
+    result = latcd_retirement_queue_step(executor, 32, 10000, &stats, error, error_size);
+    if (result > 0) {
+        fprintf(stderr, "latcd: test retirement executor scan yielded\n");
+        return 2;
+    }
+    test_page_scanning = false;
     if (result || stop_requested || !stats.complete ||
         latcd_retirement_queue_restrict_to_waiting_page(executor, &page, &test_page_budget,
                                                         deadline, error, error_size)) return -1;
