@@ -5472,6 +5472,19 @@ static int journal_queue_receipts(const LatcdConfig *config,
         int receipt = directory >= 0 ? openat(directory, "received.tbset",
             O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
         if (source >= 0 && receipt >= 0) {
+            LatcdJournalCompileInput input;
+            if (latcd_journal_open_compile_input(config->cache_dir, name, build,
+                    codegen, config->max_cache_bytes, &input, error, sizeof(error))) {
+                failures++;
+                close(source);
+                close(receipt);
+                if (directory >= 0) close(directory);
+                break;
+            }
+            close(source);
+            close(receipt);
+            source = input.source_fd;
+            receipt = input.receipt_fd;
             char digest[65] = {0};
             if (!receipt_digest(receipt, digest)) {
                 failures++;

@@ -6,6 +6,22 @@
 #define LATCD_JOURNAL_MAX_STREAMS 128u
 #define LATCD_JOURNAL_CONFIG_LIMIT 4096u
 
+typedef struct LatcdJournalCompileInput {
+    int source_fd;
+    int receipt_fd;
+    LatKeyJournalIdentity identity;
+    uint8_t receipt_sha256[32];
+    uint8_t config[LATCD_JOURNAL_CONFIG_LIMIT];
+    size_t config_size;
+} LatcdJournalCompileInput;
+
+/* A verified request provenance snapshot, not compilation authorization.
+ * The caller owns both returned descriptors and must close them. */
+int latcd_journal_open_compile_input(const char *cache, const char *stream,
+    const uint8_t build[32], const uint8_t codegen[32], uint64_t max_bytes,
+    LatcdJournalCompileInput *input, char *error, size_t error_size);
+void latcd_journal_close_compile_input(LatcdJournalCompileInput *input);
+
 /* Conservative stream quota includes source, config, journal and atomic receipt
  * replacement. Inventory validates persisted streams, not just file sizes. */
 int latcd_journal_budget(int snapshot_fd, int config_fd, uint64_t capacity, uint64_t *bytes);

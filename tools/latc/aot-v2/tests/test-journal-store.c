@@ -781,6 +781,34 @@ int main(void)
     check_collection(&config, stream_fd, &identity);
     g_assert_cmpint(kill(daemon, SIGTERM), ==, 0);
     wait_ok(daemon);
+    LatcdJournalCompileInput input;
+    g_assert_cmpint(latcd_journal_open_compile_input(cache, registered.message,
+        build, codegen, config.max_cache_bytes, &input, error, sizeof(error)), ==, 0);
+    g_assert_cmpmem(&input.identity, sizeof(input.identity), &identity, sizeof(identity));
+    gsize captured_size;
+    const void *captured_data = g_bytes_get_data(bytes, &captured_size);
+    g_assert_cmpmem(input.config, input.config_size, captured_data, captured_size);
+    char receipt_hash[65], after_hash[65];
+    g_assert_true(receipt_digest(input.receipt_fd, receipt_hash));
+    g_assert_cmpint(renameat(stream_fd, "received.tbset", stream_fd, "receipt.saved"), ==, 0);
+    int replacement = openat(stream_fd, "received.tbset", O_CREAT | O_EXCL | O_WRONLY, 0400);
+    g_assert_cmpint(replacement, >=, 0);
+    g_assert_cmpint(write(replacement, "replacement", 11), ==, 11);
+    close(replacement);
+    g_assert_true(receipt_digest(input.receipt_fd, after_hash));
+    g_assert_cmpstr(receipt_hash, ==, after_hash);
+    g_assert_cmpint(unlinkat(stream_fd, "received.tbset", 0), ==, 0);
+    g_assert_cmpint(renameat(stream_fd, "receipt.saved", stream_fd, "received.tbset"), ==, 0);
+    latcd_journal_close_compile_input(&input);
+    uint8_t bad_build[32]; memcpy(bad_build, build, sizeof(bad_build)); bad_build[0] ^= 1;
+    g_assert_cmpint(latcd_journal_open_compile_input(cache, registered.message,
+        bad_build, codegen, config.max_cache_bytes, &input, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(input.source_fd, ==, -1);
+    g_assert_cmpint(input.receipt_fd, ==, -1);
+    g_assert_cmpint(fchmodat(stream_fd, "config", 0600, 0), ==, 0);
+    g_assert_cmpint(latcd_journal_open_compile_input(cache, registered.message,
+        build, codegen, config.max_cache_bytes, &input, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(fchmodat(stream_fd, "config", 0400, 0), ==, 0);
     check_bad_receipts(cache, stream_fd, &identity);
     LatKeyJournal reader;
     g_assert_cmpint(lat_key_journal_open_at(stream_fd, "keys", &identity, false,

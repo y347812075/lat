@@ -335,6 +335,73 @@ static int recover_stream(int root, const char *name, const uint8_t build[32],
     return 0;
 }
 
+void latcd_journal_close_compile_input(LatcdJournalCompileInput *input)
+{
+    if (input->source_fd >= 0) close(input->source_fd);
+    if (input->receipt_fd >= 0) close(input->receipt_fd);
+    input->source_fd = input->receipt_fd = -1;
+}
+
+int latcd_journal_open_compile_input(const char *cache, const char *stream,
+    const uint8_t build[32], const uint8_t codegen[32], uint64_t max_bytes,
+    LatcdJournalCompileInput *input, char *error, size_t error_size)
+{
+    if (!input) return fail(error, error_size, "missing journal input");
+    memset(input, 0, sizeof(*input));
+    input->source_fd = input->receipt_fd = -1;
+    if (!cache || !stream || !build || !codegen || !stream_name(stream))
+        return fail(error, error_size, "invalid journal input identity");
+    int root = root_open(cache, false);
+    int directory = root >= 0 ? directory_at(root, stream, false) : -1;
+    int fd = -1;
+    struct stat st;
+    Registration record;
+    uint8_t digest[32];
+    char epoch[33];
+    bool ok = directory >= 0;
+    if (ok) fd = readonly_file(directory, "registration", sizeof(record), true, &st);
+    ok = ok && fd >= 0 && st.st_size == sizeof(record) &&
+        read_exact(fd, &record, sizeof(record));
+    if (fd >= 0) close(fd);
+    if (ok) hex(record.identity.epoch, 16, epoch);
+    ok = ok && !memcmp(record.magic, "LATJREG1", 8) && !strcmp(epoch, stream) &&
+        !memcmp(record.identity.build_sha256, build, 32) &&
+        !memcmp(record.identity.codegen_sha256, codegen, 32) &&
+        record.capacity && record.capacity <= LAT_KEY_JOURNAL_MAX_SLOTS;
+    fd = ok ? readonly_file(directory, "config", sizeof(input->config), true, &st) : -1;
+    ok = ok && fd >= 0 && read_exact(fd, input->config, st.st_size);
+    if (ok) input->config_size = st.st_size;
+    if (fd >= 0) close(fd);
+    LatTranslationConfig decoded;
+    ok = ok && !lat_translation_config_decode(input->config, input->config_size,
+        build, &decoded, error, error_size) &&
+        !lat_translation_config_digest(&decoded, digest, error, error_size) &&
+        !memcmp(digest, record.identity.config_sha256, 32);
+    input->source_fd = ok ? readonly_file(directory, "source", max_bytes, false, &st) : -1;
+    ok = ok && input->source_fd >= 0 && hash_fd(input->source_fd, digest) &&
+        !memcmp(digest, record.identity.source_sha256, 32);
+    input->receipt_fd = ok ? readonly_file(directory, "received.tbset",
+        64 + record.capacity * sizeof(LatTbKey), true, &st) : -1;
+    LatTbKeySet set = {0};
+    uint8_t receipt_before[32];
+    ok = ok && input->receipt_fd >= 0 &&
+        hash_fd(input->receipt_fd, receipt_before) &&
+        !lat_tb_key_set_read_fd(input->receipt_fd, record.identity.source_sha256,
+                                &set, error, error_size) &&
+        !set.sequence && executable_keys(input->source_fd, &set) &&
+        hash_fd(input->receipt_fd, input->receipt_sha256) &&
+        !memcmp(receipt_before, input->receipt_sha256, sizeof(receipt_before));
+    lat_tb_key_set_destroy(&set);
+    if (ok) input->identity = record.identity;
+    if (directory >= 0) close(directory);
+    if (root >= 0) close(root);
+    if (!ok) {
+        latcd_journal_close_compile_input(input);
+        return fail(error, error_size, "invalid journal compile input %s", stream);
+    }
+    return 0;
+}
+
 static int scan(int root, const uint8_t build[32], const uint8_t codegen[32],
                  uint64_t max_bytes, unsigned *count, uint64_t *bytes,
                  uint64_t *received, char *error, size_t error_size)
