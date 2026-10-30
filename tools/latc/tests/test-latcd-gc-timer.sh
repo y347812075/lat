@@ -240,6 +240,7 @@ while kill -0 "$pid" 2>/dev/null; do
 done
 if wait "$pid"; then echo 'expected busy handoff crash' >&2; exit 1; fi
 pid=
+grep -q 'test page discovery yielded' "$work/server.err"
 rm -f "$socket"
 test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
 test ! -e "$cache/.gc/tombstones/$(printf '%064x' 7).so"
