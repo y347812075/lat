@@ -10,7 +10,7 @@ work=$7
 mode=${8:-pin}
 case "$mode" in pin|pin-restart|unreferenced) ;; *) exit 2 ;; esac
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-mkdir -m 700 "$work" "$work/cache"
+mkdir -m 700 "$work" "$work/cache" "$work/broker"
 cache=$work/cache
 socket=$work/latcd.sock
 pid=
@@ -20,6 +20,8 @@ cleanup() {
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || :; wait "$pid" 2>/dev/null || :; fi
 }
 trap cleanup EXIT
+unset LATCD_TEST_BROKER_DIRECTORY
+if [ "$mode" = pin ]; then export LATCD_TEST_BROKER_DIRECTORY="$work/broker"; fi
 LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
     "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" --latc "$latc" \
     --runner "$runner" --runtime-dir "$runtime" --stats "$work/stats.json" \
@@ -33,6 +35,9 @@ python3 "$script_dir/make-tbset.py" "$guest" "$work/initial.tbset"
 "$latcd" --submit --socket "$socket" --tbset "$work/initial.tbset" "$guest" >"$work/initial-submit"
 "$latcd" --flush-source --socket "$socket" "$guest" >"$work/initial-flush"
 grep -q '^status=0$' "$work/initial-flush"
+if [ "$mode" = pin ]; then
+    python3 "$script_dir/test-broker-publication.py" "$work/broker/broker.sock" "$cache" "$guest"
+fi
 python3 - "$cache" "$guest" "$work" "$script_dir" <<'PY'
 import hashlib, json, pathlib, struct, sys
 cache, guest, work = map(pathlib.Path, sys.argv[1:4])
@@ -159,6 +164,9 @@ else
 import json, sys
 assert json.load(open(sys.argv[1]))['retirement_timer_wakeups'] > 0
 PY
+fi
+if [ "$mode" = pin ]; then
+    python3 "$script_dir/test-broker-publication.py" "$work/broker/broker.sock" "$cache" "$guest"
 fi
 python3 - "$cache" "$guest" "$work" <<'PY'
 import hashlib, json, pathlib, sys
