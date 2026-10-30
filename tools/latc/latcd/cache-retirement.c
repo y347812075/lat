@@ -2542,18 +2542,16 @@ int latcd_retirement_test_page_budget_matches(const char *root, const uint8_t id
 }
 
 #endif
-static int page_budget_result(const char *root, uint64_t now_us,
+static int page_budget_result_locked(const char *root, uint64_t now_us,
                                     const uint8_t identity[32], LatcdPageBudget *budget,
                                     const LatcdRetirementPageDeadline *entry,
                                     LatcdRetirementResultKind kind, bool require_bound,
-                                    char *error, size_t error_size)
+                                    int scheduler, char *error, size_t error_size)
 {
-    if (!root || !identity || !budget || !budget->capacity ||
+    if (scheduler < 0 || !root || !identity || !budget || !budget->capacity ||
         !budget->page_identity_bound || memcmp(identity, budget->page_identity, 32) || !entry ||
         strnlen(entry->name, sizeof(entry->name)) == sizeof(entry->name))
         return fail(error, error_size, "invalid budget result");
-    int scheduler = scheduler_lock(root, error, error_size);
-    if (scheduler < 0) return -1;
     LatcdRetirementPageState page;
     uint8_t actual[32], membership[32];
     bool legacy = false, member = false;
@@ -2586,8 +2584,22 @@ static int page_budget_result(const char *root, uint64_t now_us,
     if (capacity_root >= 0) close(capacity_root);
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
-    close(scheduler);
     return result ? fail(error, error_size, "budget result write failed") : 0;
+}
+
+static int page_budget_result(const char *root, uint64_t now_us,
+                                    const uint8_t identity[32], LatcdPageBudget *budget,
+                                    const LatcdRetirementPageDeadline *entry,
+                                    LatcdRetirementResultKind kind, bool require_bound,
+                                    char *error, size_t error_size)
+{
+    if (!root) return fail(error, error_size, "invalid budget result");
+    int scheduler = scheduler_lock(root, error, error_size);
+    if (scheduler < 0) return -1;
+    int result = page_budget_result_locked(root, now_us, identity, budget, entry, kind,
+                                           require_bound, scheduler, error, error_size);
+    close(scheduler);
+    return result;
 }
 int latcd_retirement_page_budget_result(const char *root, uint64_t now_us,
                                     const uint8_t identity[32], LatcdPageBudget *budget,
