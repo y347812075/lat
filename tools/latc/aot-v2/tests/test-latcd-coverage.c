@@ -26,6 +26,7 @@
 #undef flock
 #undef lat_tb_key_set_read_file
 #include <glib/gstdio.h>
+#include <sys/mman.h>
 
 extern int flock(int fd, int operation);
 extern int rename(const char *oldpath, const char *newpath);
@@ -382,6 +383,69 @@ static void daemon_fixture(const char *path, const LatAotTbV2 *keys, size_t coun
     g_assert_true(g_file_set_contents(path, data, size, NULL));
     g_assert_cmpint(g_chmod(path, 0444), ==, 0);
     g_free(data);
+}
+
+static void remove_fixture_tree(const char *path);
+static void test_broker_export_request(void)
+{
+    char *data = NULL, error[256] = {0}; gsize size = 0;
+    g_assert_true(g_file_get_contents("build/tests/x86-exit42", &data, &size, NULL));
+    GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
+    g_checksum_update(sum, (const guchar *)data, size);
+    LatcdBrokerExportRequest request = {.version = LATCD_BROKER_EXPORT_VERSION, .source_size = size};
+    gsize digest_size = sizeof(request.source_sha256);
+    g_checksum_get_digest(sum, request.source_sha256, &digest_size);
+    g_checksum_free(sum);
+    int source = memfd_create("broker-source", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    g_assert_cmpint(source, >=, 0);
+    g_assert_cmpint(write(source, data, size), ==, (ssize_t)size);
+    g_free(data);
+    char hex[65]; digest_hex(request.source_sha256, hex);
+    char *root = g_dir_make_tmp("latcd-broker-export-XXXXXX", NULL);
+    g_assert_nonnull(root);
+    g_assert_cmpint(prepare_metadata_directories(root), ==, 0);
+    char *name = g_strdup_printf("%s.so", hex);
+    char *path = g_build_filename(root, name, NULL);
+    LatAotTbV2 keys[] = {{.guest_rva = 0x100, .flags = 3}};
+    daemon_fixture(path, keys, 1);
+    g_assert_true(g_file_get_contents(path, &data, &size, NULL));
+    LatAotNoteV2 *note = (void *)(data + LAT_AOT_TEST_NOTE_OFFSET + 16);
+    memcpy(note->source_sha256, request.source_sha256, 32);
+    g_assert_true(g_file_set_contents(path, data, size, NULL));
+    g_assert_cmpint(g_chmod(path, 0444), ==, 0);
+    sum = g_checksum_new(G_CHECKSUM_SHA256);
+    g_checksum_update(sum, (const guchar *)data, size);
+    char *hash = g_strdup(g_checksum_get_string(sum));
+    g_checksum_free(sum); g_free(data);
+    char *manifest = g_strdup_printf("{\"version\":2,\"module\":\"%s\",\"native\":\"%s.native\",\"tbset\":\"\",\"source_sha256\":\"%s\",\"codegen_id\":\"%064x\",\"module_sha256\":\"%s\",\"native_sha256\":\"%064x\",\"published_sequence\":1}", name, hex, hex, 1, hash, 1);
+    char *current_name = g_strdup_printf("%s.current", hex);
+    char *current = g_build_filename(root, current_name, NULL);
+    g_assert_true(g_file_set_contents(current, manifest, -1, NULL));
+    int gate = lat_aot_v2_cache_source_lock(root, hex, LOCK_SH | LOCK_NB, true, error, sizeof(error));
+    g_assert_cmpint(gate, >=, 0); close(gate);
+    LatcdConfig config = {.cache_dir = root, .max_input = UINT64_C(1) << 30, .file_size_limit = UINT64_C(1) << 30};
+    for (unsigned attempt = 0; attempt < 3; attempt++) {
+        if (attempt == 1) g_assert_cmpint(fcntl(source, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL), ==, 0);
+        if (attempt == 2) request.source_sha256[0] ^= 1;
+        int sockets[2]; uid_t uid; gid_t gid;
+        g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sockets), ==, 0);
+        g_assert_cmpint(latcd_broker_peer(sockets[0], getuid(), &uid, &gid), ==, 0);
+        g_assert_cmpint(latcd_broker_peer(sockets[1], getuid(), &uid, &gid), ==, 0);
+        g_assert_cmpint(latcd_broker_send(sockets[1], &request, sizeof(request), source), ==, 0);
+        g_assert_cmpint(broker_export_request(&config, sockets[0], getuid()), ==, 0);
+        LatcdBrokerExportResponse response; int exported = -1;
+        g_assert_cmpint(latcd_broker_receive(sockets[1], uid, gid, &response, sizeof(response), &exported), ==, 0);
+        g_assert_cmpint(response.status, ==, attempt == 1 ? 0 : 1);
+        if (attempt == 1) {
+            g_assert_cmpint(exported, >=, 0);
+            g_assert_cmpint(fcntl(exported, F_GET_SEALS) & F_SEAL_WRITE, ==, F_SEAL_WRITE);
+            close(exported);
+        } else g_assert_cmpint(exported, ==, -1);
+        close(sockets[0]); close(sockets[1]);
+    }
+    close(source);
+    remove_fixture_tree(root);
+    g_free(current); g_free(current_name); g_free(manifest); g_free(hash); g_free(path); g_free(name); g_free(root);
 }
 
 static void remove_fixture_tree(const char *path)
@@ -1315,6 +1379,7 @@ int main(int argc, char **argv)
     }
     if (argc == 1) {
         test_broker_read_bounds();
+        test_broker_export_request();
         test_owner_binding_swap(false, false);
         test_owner_binding_swap(true, false);
         test_owner_binding_swap(false, true);

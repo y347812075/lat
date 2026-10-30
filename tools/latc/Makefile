@@ -140,6 +140,7 @@ $(BUILD)/tests/latcd-gc-timer: $(BUILD)/tests/latcd-gc-timer-main.o $(BUILD)/lat
 	$(BUILD)/latcd/precompile.o $(BUILD)/latcd/journal-store.o $(BUILD)/latcd/cache-retirement.o \
 	$(BUILD)/latcd/cache-capacity.o $(BUILD)/latcd/parson/parson.o $(BUILD)/latcd/source-elf.o \
 	$(BUILD)/latcd/cache-export.o $(BUILD)/aot-v2/common/key-journal.o \
+	$(BUILD)/latcd/broker-source.o $(BUILD)/latcd/broker-transport.o \
 	$(BUILD)/aot-v2/common/translation-config.o $(BUILD)/aot-v2/common/tb-key-set.o \
 	$(BUILD)/aot-v2/runtime/cache-domain.o $(BUILD)/aot-v2/runtime/cache-lifecycle.o \
 	$(BUILD)/aot-v2/runtime/internal-fd-registry.o $(BUILD)/aot-v2/compiler/module-inspect.o \
@@ -179,7 +180,7 @@ $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
 		$(BUILD)/latcd/parson/parson.o \
 		$(BUILD)/aot-v2/runtime/cache-domain.o
 
-$(BUILD)/latcd/latcd $(BUILD)/tests/test-journal-store $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/source-elf.o $(BUILD)/latcd/cache-export.o
+$(BUILD)/latcd/latcd $(BUILD)/tests/test-journal-store $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/source-elf.o $(BUILD)/latcd/cache-export.o $(BUILD)/latcd/broker-source.o $(BUILD)/latcd/broker-transport.o
 
 $(BUILD)/tests/cache-capacity-testing.o: latcd/cache-capacity.c latcd/cache-capacity.h
 	@mkdir -p $(dir $@)

@@ -14,6 +14,8 @@
 #include "cache-capacity.h"
 #include "source-elf.h"
 #include "cache-export.h"
+#include "broker-source.h"
+#include "broker-transport.h"
 
 #include <dlfcn.h>
 #include <dirent.h>
@@ -3673,6 +3675,30 @@ static int G_GNUC_UNUSED broker_export_current(const LatcdConfig *config,
     current_manifest_clear(&manifest);
     errno = saved;
     return output;
+}
+
+/* A successful export is an offline snapshot, not execution authorization. */
+static int G_GNUC_UNUSED broker_export_request(const LatcdConfig *config,
+                                                int socket_fd, uid_t client_uid)
+{
+    uid_t uid; gid_t gid;
+    LatcdBrokerExportRequest request;
+    LatcdBrokerExportResponse response = { LATCD_BROKER_EXPORT_VERSION, 1 };
+    int source = -1, output = -1;
+    char error[256] = {0};
+    uint8_t verified[32];
+    if (latcd_broker_peer(socket_fd, client_uid, &uid, &gid) ||
+        latcd_broker_receive(socket_fd, uid, gid, &request, sizeof(request), &source))
+        return -1;
+    if (source >= 0 && request.version == LATCD_BROKER_EXPORT_VERSION && !request.reserved &&
+        !latcd_broker_source_validate(source, request.source_size, config->max_input,
+                                      request.source_sha256, verified, error, sizeof(error)))
+        output = broker_export_current(config, verified, error, sizeof(error));
+    if (source >= 0) close(source);
+    if (output >= 0) response.status = 0;
+    int result = latcd_broker_send(socket_fd, &response, sizeof(response), output);
+    if (output >= 0) close(output);
+    return result;
 }
 
 /* Publish a newer complete observed-key set when the current module already
