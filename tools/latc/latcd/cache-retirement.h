@@ -544,6 +544,16 @@ int latcd_retirement_queue_retry_completed_resume(LatcdRetirementQueue *queue,
 /* Owner lease and controlled access required; commit under the retained scan witness. */
 int latcd_retirement_queue_retry_completed_commit(LatcdRetirementQueue *queue,
     struct LatcdPageBudget *budget, char *error, size_t error_size);
+/* Bounded recovery of an already budget-restored retry page. The caller owns
+ * the cache lease and guarantees controlled readers, writers and mounts for
+ * the entire recovery. This is not domain admission. Return 1 for more work,
+ * 0 after commit, or -1; discard the cursor and reload on error. */
+typedef struct LatcdRetryRecovery LatcdRetryRecovery;
+LatcdRetryRecovery *latcd_retry_recovery_new(const char *root, uint64_t grace_us,
+                                             struct LatcdPageBudget *budget);
+int latcd_retry_recovery_step(LatcdRetryRecovery *recovery, unsigned entries,
+                              uint64_t time_us, char *error, size_t error_size);
+void latcd_retry_recovery_free(LatcdRetryRecovery *recovery);
 /* Internal executor: caller holds owner lease and guarantees controlled access.
  * Consumes only the schedule shard after receipt rediscovery; intent remains. */
 int latcd_retirement_queue_retry_receipt_consume(LatcdRetirementQueue *queue,

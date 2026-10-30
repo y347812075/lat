@@ -8112,7 +8112,7 @@ static void publish_page_fixture(const char *root, unsigned id)
     g_free(evidence); g_free(current); g_free(previous); g_free(next_manifest); g_free(src);
 }
 
-static void test_retry_multiple_receipts(bool mixed)
+static void test_retry_multiple_receipts(unsigned mixed)
 {
     char *root = root_new(), error[256], *boot = NULL;
     simulated_boottime_us = 100;
@@ -8159,6 +8159,36 @@ static void test_retry_multiple_receipts(bool mixed)
         do { step = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); } while (step > 0);
         assert(step < 0 && !latcd_retirement_queue_retry_receipt_stage_next(queue, &budget, error, sizeof(error)));
         latcd_retirement_queue_free(queue);
+        if (mixed == 2) {
+            latcd_cache_capacity_close(&capacity);
+            capacity = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
+            memset(&budget, 0, sizeof(budget));
+            assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+            assert(!latcd_cache_capacity_recovery_begin(&capacity));
+            latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+            assert(!latcd_retirement_retry_page_restore_budget(root, &capacity, UINT64_MAX, 1,
+                                                               &budget, page, error, sizeof(error)));
+            assert(page->deletion_intent && !latcd_cache_capacity_recovery_finish(&capacity));
+            LatcdRetryRecovery *recovery = latcd_retry_recovery_new(root, 1, &budget);
+            assert(recovery);
+            unsigned steps = 0;
+            do {
+                step = latcd_retry_recovery_step(recovery, 1, 10000, error, sizeof(error));
+                assert(++steps < 1000);
+            } while (step > 0);
+            if (step) fprintf(stderr, "retry recovery: %s\n", error);
+            assert(!step);
+            latcd_retry_recovery_free(recovery);
+            assert(!latcd_retirement_page_state_load(root, &state, error, sizeof(error)) &&
+                   !strcmp(state.retry_cursor, page->items[1].hint.name));
+            char *retained = g_build_filename(root, page->items[1].hint.name, NULL);
+            assert(!access(retained, F_OK));
+            g_free(retained);
+            latcd_cache_capacity_close(&capacity);
+            g_free(page); g_free(schedule); g_free(boot); simulated_boottime_us = 0;
+            remove_root(root); g_free(root);
+            return;
+        }
         queue = latcd_retirement_queue_new(root, 1);
         assert(!latcd_retirement_queue_retry_receipt_resume(queue, &budget, error, sizeof(error)));
         do { step = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); } while (step > 0);
@@ -9173,8 +9203,9 @@ int main(int argc, char **argv)
     test_queue_overflow_fixture();
     test_retry_not_due(false);
     test_retry_not_due(true);
-    test_retry_multiple_receipts(false);
-    test_retry_multiple_receipts(true);
+    test_retry_multiple_receipts(0);
+    test_retry_multiple_receipts(1);
+    test_retry_multiple_receipts(2);
     test_page_round_insertions();
     test_deletion_report(NULL, false);
     test_roots_latch();

@@ -6695,6 +6695,79 @@ int latcd_retirement_queue_retry_receipt_stage_next(LatcdRetirementQueue *queue,
     return retry_witness_finish(queue, false, false, NULL, NULL, budget, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
 }
 
+struct LatcdRetryRecovery {
+    char *root;
+    uint64_t grace;
+    LatcdPageBudget *budget;
+    LatcdRetirementQueue *queue;
+    bool completed_scan;
+};
+
+LatcdRetryRecovery *latcd_retry_recovery_new(const char *root, uint64_t grace_us,
+                                             LatcdPageBudget *budget)
+{
+    if (!root || !budget || !budget->capacity || !budget->page_identity_bound) return NULL;
+    LatcdRetryRecovery *recovery = g_new0(LatcdRetryRecovery, 1);
+    recovery->root = g_strdup(root);
+    recovery->grace = grace_us;
+    recovery->budget = budget;
+    return recovery;
+}
+
+void latcd_retry_recovery_free(LatcdRetryRecovery *recovery)
+{
+    if (!recovery) return;
+    latcd_retirement_queue_free(recovery->queue);
+    g_free(recovery->root);
+    g_free(recovery);
+}
+
+int latcd_retry_recovery_step(LatcdRetryRecovery *recovery, unsigned entries,
+                              uint64_t time_us, char *error, size_t error_size)
+{
+    if (!recovery || !entries || !time_us)
+        return fail(error, error_size, "invalid retry recovery budget");
+    if (recovery->queue) {
+        LatcdRetirementQueueStats stats;
+        int step = latcd_retirement_queue_step(recovery->queue, entries, time_us,
+                                               &stats, error, error_size);
+        if (step > 0) return 1;
+        int result = recovery->completed_scan ?
+            latcd_retirement_queue_retry_completed_commit(recovery->queue, recovery->budget, error, error_size) :
+            latcd_retirement_queue_retry_receipt_consume(recovery->queue, recovery->budget, error, error_size);
+        latcd_retirement_queue_free(recovery->queue);
+        recovery->queue = NULL;
+        return result ? -1 : recovery->completed_scan ? 0 : 1;
+    }
+    LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
+    int result = -1;
+    if (latcd_retirement_retry_page_load(recovery->root, page, error, error_size) ||
+        page->grace_us != recovery->grace) goto out;
+    if (page->deletion_intent || page->completed == page->count) {
+        bool deleted = false;
+        for (unsigned i = 0; i < page->completed; i++) deleted |= page->deleted[i];
+        if (!page->deletion_intent && !deleted) {
+            result = latcd_retirement_retry_page_commit(recovery->root, recovery->budget, error, error_size);
+            goto out;
+        }
+        recovery->completed_scan = !page->deletion_intent;
+        recovery->queue = latcd_retirement_queue_new(recovery->root, recovery->grace);
+        int started = recovery->completed_scan ?
+            latcd_retirement_queue_retry_completed_resume(recovery->queue, recovery->budget, error, error_size) :
+            latcd_retirement_queue_retry_receipt_resume(recovery->queue, recovery->budget, error, error_size);
+        if (started) { latcd_retirement_queue_free(recovery->queue); recovery->queue = NULL; goto out; }
+        result = 1;
+    } else if (!page->intent_present) {
+        result = latcd_retirement_retry_page_begin_deferred(recovery->root, recovery->budget, error, error_size) ? -1 : 1;
+    } else if (latcd_retirement_retry_page_apply_unmatched(recovery->root, recovery->budget, error, error_size) ||
+               latcd_retirement_retry_page_finish_unmatched(recovery->root, recovery->budget, error, error_size)) {
+        result = -1;
+    } else result = 1;
+out:
+    g_free(page);
+    return result;
+}
+
 int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,
                                          char *error, size_t error_size)
 {
