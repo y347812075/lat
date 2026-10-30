@@ -2119,6 +2119,7 @@ typedef struct LatcdTaskRecovery {
 static LatcdPageBudget test_page_budget;
 static bool test_page_staged;
 static bool test_page_waiting;
+static bool test_page_executing;
 /* The caller owns the sole scheduler queue and the page budget. */
 static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueue *executor,
                                   uint64_t *deadline, char *error, size_t error_size)
@@ -2140,6 +2141,7 @@ static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueu
     }
     if (latcd_retirement_page_snapshot(config->cache_dir, now, &page, results,
                                         &inventory, error, error_size) < 0) return -1;
+    if (test_page_executing) goto execute;
     unsigned remaining = 0;
     for (unsigned i = 0; i < page.count; i++) {
         if (results[i] == LATCD_RETIREMENT_RESULT_DONE) continue;
@@ -2184,11 +2186,18 @@ static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueu
     if (result || stop_requested || !stats.complete ||
         latcd_retirement_queue_restrict_to_waiting_page(executor, &page, &test_page_budget,
                                                         deadline, error, error_size)) return -1;
+execute:
     LatcdRetirementDeletionReport report;
     uint64_t hashed;
-    do { result = latcd_retirement_queue_execute_step(executor, 65536, 10000, &hashed,
-                                                       &report, error, error_size); }
-    while (result == 2 && !stop_requested);
+    uint64_t hash_budget = getenv("LATCD_TEST_SMALL_HASH_BUDGET") ? 3 : 65536;
+    result = latcd_retirement_queue_execute_step(executor, hash_budget, 10000, &hashed,
+                                                 &report, error, error_size);
+    test_page_executing = result == 2;
+    if (test_page_executing) {
+        fprintf(stderr, "latcd: test retirement hash yielded\n");
+        if (getenv("LATCD_TEST_STOP_ON_HASH_YIELD")) kill(getpid(), SIGTERM);
+        return 2;
+    }
     if (stop_requested) return -1;
     if (result == 1 && report.receipt_durable) return 2;
     if (result == 0) {
@@ -2523,6 +2532,13 @@ static void *compiler_input_recovery_worker(void *opaque)
     /* Explicit stop may reach this thread before a publisher finishes. The
      * main thread requests the final handoff only after joining publishers. */
     while (!atomic_load(&work->stopping)) poll(NULL, 0, 50);
+#ifdef LATCD_GC_TIMER_TEST
+    if (test_page_executing) {
+        if (latcd_retirement_queue_cancel(retirement, retirement_error, sizeof(retirement_error)))
+            fprintf(stderr, "latcd: test retirement cancellation failed: %s\n", retirement_error);
+        else fprintf(stderr, "latcd: test retirement cancellation persisted\n");
+    }
+#endif
     if (retirement_safe
 #ifdef LATCD_GC_TIMER_TEST
         && !test_page_waiting

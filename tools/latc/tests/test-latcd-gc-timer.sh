@@ -154,6 +154,26 @@ old=$cache/$(printf '%064x' 7)
 test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
 stop
 test "$before" = "$(sha256sum "$scheduler")"
+cache=$work/hash-stop-cache
+socket=$work/hash-stop.sock
+stats=$work/hash-stop-stats.json
+mkdir -m 700 "$cache"
+start
+stop
+"$fixture" --timer-fixture "$cache"
+LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
+    LATCD_TEST_SMALL_HASH_BUDGET=1 LATCD_TEST_STOP_ON_HASH_YIELD=1 start
+wait "$pid"; pid=
+grep -q 'test retirement hash yielded' "$work/server.err"
+grep -q 'test retirement cancellation persisted' "$work/server.err"
+old=$cache/$(printf '%064x' 7)
+test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
+python3 - "$cache/.gc/retirement-scheduler.ini" <<'PY'
+import configparser, sys
+c = configparser.ConfigParser(); assert c.read(sys.argv[1])
+assert any(c.getint(s, 'busy_count') >= 1 and c.getint(s, 'retry_at') > 0
+           for s in c.sections() if s != 'queue')
+PY
 cache=$work/busy-fair-cache
 socket=$work/busy-fair.sock
 stats=$work/busy-fair-stats.json
@@ -172,7 +192,8 @@ n=0
 while [ ! -f "$work/fair-pin-ready" ]; do
     kill -0 "$pin_pid"; n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
 done
-LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 start
+LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
+    LATCD_TEST_SMALL_HASH_BUDGET=1 start
 n=0
 while ! grep -q 'test page busy retry=' "$work/server.err"; do
     if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then
@@ -188,6 +209,7 @@ while [ -e "$old.so" ] || [ -e "$old.tbset" ]; do
     n=$((n + 1)); [ "$n" -lt 400 ]; sleep 0.05
 done
 test -f "$old.native"
+grep -q 'test retirement hash yielded' "$work/server.err"
 kill "$pin_pid"; wait "$pin_pid" 2>/dev/null || :; pin_pid=
 stop
 cache=$work/busy-timer-cache
