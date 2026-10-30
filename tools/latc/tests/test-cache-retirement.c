@@ -1788,9 +1788,29 @@ static void test_retry_page_stage(bool crash_commit)
     assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
     do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
     while (result > 0);
+    retry_scan_hook_called = false; retry_scan_change = true;
+    latcd_retirement_test_retry_scanned = retry_scan_hook;
+    assert(result < 0 && latcd_retirement_queue_retry_page_stage(queue, &capacity, UINT64_MAX,
+                                                                 &budget, error, sizeof(error)) < 0);
+    latcd_retirement_test_retry_scanned = NULL; retry_scan_change = false;
+    assert(retry_scan_hook_called && !budget.capacity &&
+           !latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
+    latcd_retirement_queue_free(queue);
+    assert(!latcd_cache_capacity_poll(&capacity));
+    latcd_cache_capacity_close(&capacity);
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    queue = latcd_retirement_queue_new(root, 100);
+    assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
     assert(result < 0);
+    retry_scan_hook_called = false;
+    latcd_retirement_test_retry_scanned = retry_scan_hook;
     assert(!latcd_retirement_queue_retry_page_stage(queue, &capacity, UINT64_MAX,
                                                    &budget, error, sizeof(error)));
+    latcd_retirement_test_retry_scanned = NULL;
+    assert(retry_scan_hook_called);
     LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
     assert(!latcd_retirement_retry_page_load(root, page, error, sizeof(error)) && page->count == 2 &&
            !strcmp(page->items[0].hint.name, hint.name) && page->round_sequence == state.sequence);

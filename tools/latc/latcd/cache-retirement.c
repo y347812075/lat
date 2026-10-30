@@ -355,7 +355,8 @@ void (*latcd_retirement_test_before_page_finish)(LatcdPageBudget *budget);
 
 static int write_record_encoded(int directory, const char *name, char *data, gsize size,
                                 bool scheduling, bool fixed_schedule_size, bool recovery,
-                                LatcdPageBudget *budget, bool *not_installed)
+                                LatcdPageBudget *budget, bool *not_installed,
+                                int (*before_install)(void *), void *install_context)
 {
     if (not_installed) *not_installed = true;
     if (fixed_schedule_size) {
@@ -433,6 +434,7 @@ static int write_record_encoded(int directory, const char *name, char *data, gsi
     if (record_write_fault("written") || fchmod(fd, 0400) ||
         record_write_fault("chmod") || fsync(fd) ||
         record_write_fault("file-synced")) goto close_out;
+    if (before_install && before_install(install_context)) goto close_out;
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
     if (latcd_retirement_test_before_target_revalidate)
         latcd_retirement_test_before_target_revalidate();
@@ -511,7 +513,7 @@ static int write_record_kind(int directory, const char *name, GKeyFile *record,
     gsize size;
     char *data = g_key_file_to_data(record, &size, NULL);
     return write_record_encoded(directory, name, data, size, scheduling,
-                                fixed_schedule_size, recovery, budget, not_installed);
+                                fixed_schedule_size, recovery, budget, not_installed, NULL, NULL);
 }
 
 static int write_record(int directory, const char *name, GKeyFile *record)
@@ -5910,6 +5912,35 @@ out:
     return result < 0 ? fail(error, error_size, "retirement queue discovery incomplete or unsafe") : result;
 }
 
+typedef struct {
+    LatcdRetirementQueue *queue;
+    int scheduler, root, gc, store, tombstones, roots;
+    struct stat cache;
+    char *error;
+    size_t error_size;
+} RetryInstallContext;
+
+static int retry_install_lock(void *opaque)
+{
+    RetryInstallContext *context = opaque;
+    LatcdRetirementQueue *queue = context->queue;
+    struct stat path;
+#if defined(LATCD_RETIREMENT_TESTING)
+    if (latcd_retirement_test_retry_scanned) latcd_retirement_test_retry_scanned(queue->root);
+#endif
+    context->roots = roots_lock_gc(context->gc, LOCK_EX | LOCK_NB,
+                                   context->error, context->error_size);
+    if (context->roots < 0 || !same_directory(context->scheduler, context->gc) ||
+        !queue_bind_root(queue, context->root) || lstat(queue->root, &path) ||
+        !object_stat_equal(&context->cache, &path) ||
+        !directory_matches_at(context->root, ".gc", context->gc) ||
+        !lock_matches_at(context->gc, "reference-roots.lock", context->roots) ||
+        !directory_matches_at(context->gc, "transactions", context->store) ||
+        !directory_matches_at(context->gc, "tombstones", context->tombstones) ||
+        !queue_watch_clean(queue->discovery_watch)) return -1;
+    return 0;
+}
+
 static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatched,
                                 LatcdRetirementRetryPage *page,
                                 LatcdCacheCapacity *capacity, uint64_t limit, LatcdPageBudget *budget,
@@ -5924,7 +5955,7 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
         return fail(error, error_size, "missing retry discovery witness");
     queue->retry_witness = false;
     int scheduler = scheduler_lock(queue->root, error, error_size);
-    int root = -1, gc = -1, roots = -1, store = -1, tombstones = -1, result = -1;
+    int root = -1, gc = -1, store = -1, tombstones = -1, result = -1;
     char *boot = NULL;
     uint64_t now = 0;
     uint64_t sequence = 0;
@@ -5936,6 +5967,7 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
     size_t page_size = 0;
     uint64_t page_bytes = 0;
     struct stat cache, path, transactions, tombstone_stat;
+    RetryInstallContext install = {.queue = queue, .roots = -1, .error = error, .error_size = error_size};
     if (scheduler < 0) goto out;
     root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     gc = root < 0 ? -1 : open_directory(root, ".gc", false);
@@ -6015,17 +6047,11 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
                     RETIREMENT_SCHEDULE_RECORD_BYTES, RECORD_LIMIT, &page_bytes)) goto out;
         }
     }
-#if defined(LATCD_RETIREMENT_TESTING)
-    if (latcd_retirement_test_retry_scanned) latcd_retirement_test_retry_scanned(queue->root);
-#endif
-    roots = roots_lock_gc(gc, LOCK_EX | LOCK_NB, error, error_size);
-    if (roots < 0 || !same_directory(scheduler, gc) || !queue_bind_root(queue, root) ||
-        lstat(queue->root, &path) || !object_stat_equal(&cache, &path) ||
-        !directory_matches_at(root, ".gc", gc) ||
-        !lock_matches_at(gc, "reference-roots.lock", roots) ||
-        !directory_matches_at(gc, "transactions", store) ||
-        !directory_matches_at(gc, "tombstones", tombstones) ||
-        !queue_watch_clean(queue->discovery_watch)) goto out;
+    install.scheduler = scheduler; install.root = root; install.gc = gc;
+    install.store = store; install.tombstones = tombstones; install.cache = cache;
+    if (!(page && budget)) {
+        if (retry_install_lock(&install)) goto out;
+    }
     if (receipts) {
         for (unsigned i = 0; i < queue->retry_count; i++)
             receipts[i] = g_hash_table_contains(queue->removed_second, queue->retry_order[i]) &&
@@ -6043,11 +6069,13 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
                  * replacement. Reserve full growth for every member. */
                 !latcd_cache_capacity_reserve_page(capacity, page_bytes, limit, page_identity, budget)) {
                 staged = write_record_encoded(gc, "retirement-page.ini", page_data, page_size,
-                                              true, false, false, budget, &not_installed);
+                                              true, false, false, budget, &not_installed,
+                                              retry_install_lock, &install);
                 page_data = NULL;
                 if (staged && not_installed) {
                     int saved = errno;
-                    latcd_cache_capacity_cancel_page(capacity, budget);
+                    if (latcd_cache_capacity_cancel_page(capacity, budget))
+                        latcd_cache_capacity_abandon_page(capacity, budget);
                     errno = saved;
                 }
             }
@@ -6067,7 +6095,7 @@ out:
     g_free(boot);
     if (tombstones >= 0) close(tombstones);
     if (store >= 0) close(store);
-    if (roots >= 0) close(roots);
+    if (install.roots >= 0) close(install.roots);
     if (gc >= 0) close(gc);
     if (root >= 0) close(root);
     if (scheduler >= 0) close(scheduler);
