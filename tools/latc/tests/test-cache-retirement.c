@@ -58,7 +58,8 @@ static const char *lock_swap_root, *lock_swap_old, *lock_swap_new;
 static bool lock_swap_after;
 static const char *lock_wrong_root;
 static const char *schedule_scan_mutation;
-static bool retry_scan_hook_called, retry_scan_change;
+static bool retry_scan_hook_called, retry_scan_change, retry_scan_hold;
+static int retry_scan_held_fd = -1;
 static void retry_scan_hook(const char *root)
 {
     int fd = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, NULL, 0);
@@ -72,7 +73,8 @@ static void retry_scan_hook(const char *root)
         assert(!unlink(path));
         g_free(path);
     }
-    close(fd);
+    if (retry_scan_hold) retry_scan_held_fd = fd;
+    else close(fd);
 }
 static const char *schedule_mutation_file;
 static const char *snapshot_swap_store, *snapshot_swap_gc, *snapshot_swap_old;
@@ -1800,6 +1802,20 @@ static void test_retry_page_stage(bool crash_commit)
     latcd_cache_capacity_close(&capacity);
     assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    queue = latcd_retirement_queue_new(root, 100);
+    assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (result > 0);
+    retry_scan_hook_called = false; retry_scan_hold = true;
+    latcd_retirement_test_retry_scanned = retry_scan_hook;
+    assert(result < 0 && latcd_retirement_queue_retry_page_stage(queue, &capacity, UINT64_MAX,
+                                                                 &budget, error, sizeof(error)) < 0);
+    latcd_retirement_test_retry_scanned = NULL; retry_scan_hold = false;
+    assert(retry_scan_hook_called && retry_scan_held_fd >= 0 && !budget.capacity &&
+           latcd_cache_capacity_poll(&capacity) &&
+           !latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)));
+    close(retry_scan_held_fd); retry_scan_held_fd = -1;
+    latcd_retirement_queue_free(queue);
     queue = latcd_retirement_queue_new(root, 100);
     assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
     do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
