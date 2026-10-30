@@ -6512,6 +6512,20 @@ static int run_service(const LatcdConfig *config)
     int64_t last_activity = g_get_monotonic_time();
     int64_t last_journal_admission = last_activity;
     bool journal_admission_error = false;
+#ifdef LATCD_GC_TIMER_TEST
+    LatcdBrokerServer test_broker;
+    bool test_broker_started = false;
+    const char *test_broker_directory = getenv("LATCD_TEST_BROKER_DIRECTORY");
+    if (test_broker_directory) {
+        int directory = open(test_broker_directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (directory < 0 || broker_server_start(&test_broker, config, directory,
+                "broker.sock", geteuid(), 10 * G_TIME_SPAN_SECOND)) {
+            fprintf(stderr, "latcd: test broker startup failed: %s\n", strerror(errno));
+            stop_requested = 1;
+        } else test_broker_started = true;
+        if (directory >= 0) close(directory);
+    }
+#endif
     LatcdTaskRecovery task_recovery = {.config = config};
     int retirement_event = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     atomic_store(&retirement_notify_fd, retirement_event);
@@ -6534,6 +6548,13 @@ static int run_service(const LatcdConfig *config)
     int previous_budget_recovery = -2;
     int64_t last_retirement_stats = 0;
     while (!stop_requested) {
+#ifdef LATCD_GC_TIMER_TEST
+        if (test_broker_started && broker_server_step(&test_broker)) {
+            fprintf(stderr, "latcd: test broker failed: %s\n", strerror(errno));
+            stop_requested = 1;
+            break;
+        }
+#endif
         int budget_recovery = atomic_load(&compiler_budget_recovery_state);
         if (budget_recovery != previous_budget_recovery ||
             g_get_monotonic_time() - last_retirement_stats >= G_USEC_PER_SEC) {
@@ -6754,6 +6775,9 @@ static int run_service(const LatcdConfig *config)
         }
         close(client);
     }
+#ifdef LATCD_GC_TIMER_TEST
+    if (test_broker_started) broker_server_stop(&test_broker);
+#endif
     for (nfds_t i = 1; i < channel_count; i++) {
         close(channels[i].fd);
     }

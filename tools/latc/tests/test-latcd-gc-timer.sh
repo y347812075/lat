@@ -56,6 +56,20 @@ PY
 }
 start
 stop
+mkdir -m 700 "$work/broker"
+LATCD_TEST_BROKER_DIRECTORY="$work/broker" start
+n=0
+while [ ! -S "$work/broker/broker.sock" ]; do
+    kill -0 "$pid"; n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+done
+python3 - "$work/broker/broker.sock" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+s.connect(sys.argv[1])
+s.close()
+PY
+stop
+test ! -e "$work/broker/broker.sock"
 test_daemon_saved=$test_daemon
 test_daemon=$(dirname "$test_daemon")/../latcd/latcd
 cache=$work/production-invalid-cache
