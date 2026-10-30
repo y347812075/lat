@@ -2145,8 +2145,11 @@ static int test_consume_retirement_page(const LatcdConfig *config,
                                             results, &inventory, error, error_size) < 0) goto fail;
         unsigned remaining = 0;
         for (unsigned i = 0; i < page.count; i++) {
-            if (results[i] == LATCD_RETIREMENT_RESULT_DONE ||
-                results[i] == LATCD_RETIREMENT_RESULT_DEFERRED) continue;
+            if (results[i] == LATCD_RETIREMENT_RESULT_DONE) continue;
+            if (results[i] == LATCD_RETIREMENT_RESULT_DEFERRED) {
+                fail(error, error_size, "test retirement page has unresolved deferred member");
+                goto fail;
+            }
             if (results[i] != 0 && results[i] != 4) goto fail;
             bool receipts[128], matches[128];
             unsigned receipt_count, match_count;
@@ -2259,6 +2262,23 @@ static void *compiler_input_recovery_worker(void *opaque)
                     fprintf(stderr, "latcd: test page stage failed: %s\n", error);
                 else {
                     fprintf(stderr, "latcd: test page staged\n");
+                    if (getenv("LATCD_TEST_DEFER_PAGE")) {
+                        LatcdRetirementPageState page;
+                        uint8_t identity[32];
+                        struct timespec ts;
+                        if (latcd_retirement_page_state_load(work->config->cache_dir, &page, error, sizeof(error)) ||
+                            clock_gettime(CLOCK_BOOTTIME, &ts) ||
+                            latcd_retirement_page_budget_identity(&page, identity)) {
+                            fprintf(stderr, "latcd: test defer setup failed\n");
+                        } else {
+                            uint64_t now_us = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+                            if (latcd_retirement_page_budget_result(work->config->cache_dir, now_us,
+                                identity, &test_page_budget, &page.entries[0],
+                                LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)))
+                                fprintf(stderr, "latcd: test defer failed: %s\n", error);
+                            else fprintf(stderr, "latcd: test page deferred\n");
+                        }
+                    }
                     if (getenv("LATCD_TEST_CONSUME_PAGE")) {
                         if (test_consume_retirement_page(work->config, error, sizeof(error)))
                             fprintf(stderr, "latcd: test page consume failed: %s\n", error);

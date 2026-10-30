@@ -106,6 +106,31 @@ m = json.loads((root / (source + '.current')).read_text())
 assert all((root / m[key]).is_file() for key in ('module', 'native', 'tbset'))
 PY
 stop
+cache=$work/deferred-guard-cache
+socket=$work/deferred-guard.sock
+stats=$work/deferred-guard-stats.json
+mkdir -m 700 "$cache"
+start
+stop
+"$fixture" --timer-fixture "$cache"
+LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_DEFER_PAGE=1 start
+n=0
+while ! grep -q 'latcd: test page deferred' "$work/server.err"; do
+    if ! kill -0 "$pid" 2>/dev/null || grep -q 'latcd: test defer .*failed' "$work/server.err"; then
+        cat "$work/server.err" >&2; exit 1
+    fi
+    n=$((n + 1)); [ "$n" -lt 300 ]; sleep 0.05
+done
+stop
+if LATCD_TEST_RECOVER_PAGE=1 "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" \
+    --latc "$compiler" --runner "$daemon" --runtime-dir "$runtime" \
+    --stats "$stats" --workers 1 >"$work/restart.out" 2>"$work/restart.err"; then
+    echo 'daemon consumed unresolved deferred page' >&2; exit 1
+fi
+grep -q 'unresolved deferred member' "$work/restart.err"
+test -f "$cache/.gc/retirement-page.ini"
+old=$cache/$(printf '%064x' 7)
+test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
 cache=$work/crash-cache
 socket=$work/crash.sock
 stats=$work/crash-stats.json
