@@ -159,6 +159,16 @@ test-latcd-gc-timer: all $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-cache
 	    "$(abspath $(BUILD)/tests/test-cache-retirement)" "$$work" "$(abspath $(BUILD)/tests/gc-timer-runtime)"
 test: test-latcd-gc-timer
 
+# Integration requires a matching configured installation and an x86 guest
+# built from tests/x86-cache-retirement.S on the designated x86 toolchain.
+.PHONY: test-latcd-gc-publication
+test-latcd-gc-publication: $(BUILD)/tests/latcd-gc-timer
+	@test -n "$(GC_INSTALL_PREFIX)" -a -n "$(GC_X86_GUEST)" -a -n "$(GC_TEST_WORK)"
+	sh tests/test-latcd-gc-publication.sh "$(abspath $(BUILD)/tests/latcd-gc-timer)" \
+	  "$(GC_INSTALL_PREFIX)/bin/latcd" "$(GC_INSTALL_PREFIX)/bin/latc" \
+	  "$(GC_INSTALL_PREFIX)/bin/latx-x86_64" "$(GC_INSTALL_PREFIX)/lib" \
+	  "$(GC_X86_GUEST)" "$(GC_TEST_WORK)"
+
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
