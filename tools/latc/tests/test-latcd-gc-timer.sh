@@ -70,6 +70,15 @@ s.close()
 PY
 stop
 test ! -e "$work/broker/broker.sock"
+if LATCD_TEST_BROKER_DIRECTORY="$work/missing-broker" \
+    "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" \
+    --latc "$compiler" --runner "$daemon" --runtime-dir "$runtime" \
+    --stats "$stats" --workers 1 >"$work/broker-failure.out" 2>"$work/broker-failure.err"; then
+    echo 'broker startup failure returned success' >&2
+    exit 1
+fi
+grep -q 'test broker startup failed' "$work/broker-failure.err"
+test ! -e "$socket"
 LATCD_TEST_BROKER_DIRECTORY="$work/broker" \
     "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" \
     --latc "$compiler" --runner "$daemon" --runtime-dir "$runtime" \

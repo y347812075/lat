@@ -6444,6 +6444,7 @@ static int request_is_ready(int fd)
 static int run_service(const LatcdConfig *config)
 {
     char error[256] = {0};
+    int service_status = 0;
     char *temporary_dir = g_build_filename(config->cache_dir, ".tmp", NULL);
     if (ensure_private_directory(config->cache_dir, error, sizeof(error)) ||
         ensure_private_directory(temporary_dir, error, sizeof(error))) {
@@ -6548,6 +6549,7 @@ static int run_service(const LatcdConfig *config)
                                    journal_codegen, true, &recovered)) {
             fprintf(stderr, "latcd: journal receipt admission failed: %s\n",
                     recovered.message);
+            service_status = 1;
             stop_requested = 1;
         } else {
             fprintf(stderr,
@@ -6568,6 +6570,7 @@ static int run_service(const LatcdConfig *config)
         fprintf(stderr, "latcd: cannot start precompile worker: %s\n",
                 pool_error ? pool_error->message : "unknown error");
         g_clear_error(&pool_error);
+        service_status = 1;
         stop_requested = 1;
     }
     int64_t last_activity = g_get_monotonic_time();
@@ -6582,6 +6585,7 @@ static int run_service(const LatcdConfig *config)
         if (directory < 0 || broker_server_start(&test_broker, config, directory,
                 "broker.sock", geteuid(), 10 * G_TIME_SPAN_SECOND)) {
             fprintf(stderr, "latcd: test broker startup failed: %s\n", strerror(errno));
+            service_status = 1;
             stop_requested = 1;
         } else test_broker_started = true;
         if (directory >= 0) close(directory);
@@ -6592,6 +6596,7 @@ static int run_service(const LatcdConfig *config)
     atomic_store(&retirement_notify_fd, retirement_event);
     if (retirement_event < 0) {
         fprintf(stderr, "latcd: cannot create recovery notification: %s\n", strerror(errno));
+        service_status = 1;
         stop_requested = 1;
     }
     pthread_t recovery_thread;
@@ -6599,6 +6604,7 @@ static int run_service(const LatcdConfig *config)
         compiler_input_recovery_worker, &task_recovery);
     if (!recovery_started) {
         fprintf(stderr, "latcd: cannot start compiler input recovery worker\n");
+        service_status = 1;
         stop_requested = 1;
     }
     struct pollfd channels[LATCD_MAX_CHANNELS + 1] = {
@@ -6612,6 +6618,7 @@ static int run_service(const LatcdConfig *config)
 #ifdef LATCD_GC_TIMER_TEST
         if (test_broker_started && broker_server_step(&test_broker)) {
             fprintf(stderr, "latcd: test broker failed: %s\n", strerror(errno));
+            service_status = 1;
             stop_requested = 1;
             break;
         }
@@ -6647,7 +6654,12 @@ static int run_service(const LatcdConfig *config)
         if (available < 0 && errno == EINTR) {
             continue;
         }
-        if (available <= 0) {
+        if (available < 0) {
+            fprintf(stderr, "latcd: service poll failed: %s\n", strerror(errno));
+            service_status = 1;
+            break;
+        }
+        if (available == 0) {
             pthread_mutex_lock(&service.lock);
             bool busy = channel_count > 1 || pending_flushes->len || service.queue->len ||
                 g_hash_table_size(service.running_sources);
@@ -6907,7 +6919,7 @@ static int run_service(const LatcdConfig *config)
     g_free(service.workers);
     pthread_cond_destroy(&service.ready);
     pthread_mutex_destroy(&service.lock);
-    return 0;
+    return service_status;
 }
 
 static int run_client_request(const char *socket_path, uint32_t operation,
