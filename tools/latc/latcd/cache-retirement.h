@@ -528,6 +528,10 @@ int latcd_retirement_queue_diagnostic_retry(LatcdRetirementQueue *queue,
  * Returns 1 when scanning is configured, 0 when no retry is due, or -1. */
 int latcd_retirement_queue_retry_begin(LatcdRetirementQueue *queue,
     char *error, size_t error_size);
+/* Resume discovery for a persisted receipt intent with its recovered budget.
+ * Observations remain diagnostic and do not authorize removal. */
+int latcd_retirement_queue_retry_receipt_resume(LatcdRetirementQueue *queue,
+    struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Preserve input retry order and report transaction rediscovery only. A false
  * match is not proof that a shard or its object can be removed. */
 int latcd_retirement_queue_retry_matches(const LatcdRetirementQueue *queue,

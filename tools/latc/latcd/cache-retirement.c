@@ -5340,6 +5340,9 @@ struct LatcdRetirementQueue {
     char retry_order[128][138];
     unsigned retry_count;
     bool retry_snapshot_bound;
+    bool receipt_resume;
+    uint8_t receipt_page_identity[32], receipt_expected[32], receipt_shard_digest[32];
+    uint64_t receipt_shard_sequence;
     uint64_t retry_snapshot_time, retry_snapshot_sequence;
     uint64_t retry_item_sequence[128];
     uint8_t retry_item_digest[128][32];
@@ -5489,6 +5492,35 @@ int latcd_retirement_queue_retry_begin(LatcdRetirementQueue *queue,
 out:
     g_free(boot);
     return result < 0 ? fail(error, error_size, "cannot begin retry snapshot") : result;
+}
+
+int latcd_retirement_queue_retry_receipt_resume(LatcdRetirementQueue *queue,
+    LatcdPageBudget *budget, char *error, size_t error_size)
+{
+    if (!queue || !budget || !budget->capacity || budget->invalid || !budget->page_identity_bound)
+        return fail(error, error_size, "missing retry receipt budget");
+    int scheduler = scheduler_lock(queue->root, error, error_size);
+    LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
+    LatcdRetirementPageDeadline hint;
+    uint8_t identity[32];
+    int result = -1;
+    if (scheduler < 0) goto out;
+    if (latcd_retirement_retry_page_load(queue->root, page, error, error_size) ||
+        !page->deletion_intent || page->grace_us != queue->grace ||
+        latcd_retirement_retry_page_budget_identity(page, identity) ||
+        memcmp(identity, budget->page_identity, 32)) goto out;
+    hint = page->items[page->completed].hint;
+    if (latcd_retirement_queue_diagnostic_retry(queue, page->boot, page->round_cutoff, &hint, 1)) goto out;
+    if (latcd_retirement_retry_page_identity(page, queue->receipt_page_identity)) goto out;
+    memcpy(queue->receipt_expected, page->receipt_digest[page->completed], 32);
+    memcpy(queue->receipt_shard_digest, page->items[page->completed].shard_digest, 32);
+    queue->receipt_shard_sequence = page->items[page->completed].shard_sequence;
+    queue->receipt_resume = true;
+    result = 0;
+out:
+    if (scheduler >= 0) close(scheduler);
+    g_free(page);
+    return result ? fail(error, error_size, "cannot resume retry receipt discovery") : 0;
 }
 
 int latcd_retirement_queue_retry_matches(const LatcdRetirementQueue *queue,
@@ -6172,6 +6204,26 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
         if (!hint || !found || found->enqueued != hint->enqueued ||
             found->last_attempt != hint->last_attempt || found->retry_at != hint->retry_at ||
             found->busy_count != hint->busy_count || found->retry_at > now) goto out;
+    }
+    if (queue->receipt_resume) {
+        LatcdRetirementRetryPage *stored = g_new0(LatcdRetirementRetryPage, 1);
+        uint8_t identity[32];
+        const uint8_t *receipt = g_hash_table_lookup(queue->removed_second, queue->retry_order[0]);
+        bool found = false;
+        for (unsigned i = 0; i < snapshot->len; i++) {
+            RetrySnapshotEntry *entry = &g_array_index(snapshot, RetrySnapshotEntry, i);
+            if (!strcmp(entry->hint.name, queue->retry_order[0]) &&
+                entry->sequence == queue->receipt_shard_sequence &&
+                !memcmp(entry->digest, queue->receipt_shard_digest, 32)) found = true;
+        }
+        bool valid = found && receipt && !memcmp(receipt, queue->receipt_expected, 32) &&
+            !g_hash_table_contains(queue->confirmed_keys, queue->retry_order[0]) &&
+            !g_hash_table_contains(queue->retry_transaction_roots, queue->retry_order[0]) &&
+            !latcd_retirement_retry_page_load(queue->root, stored, error, error_size) &&
+            !latcd_retirement_retry_page_identity(stored, identity) &&
+            !memcmp(identity, queue->receipt_page_identity, 32);
+        g_free(stored);
+        if (!valid) goto out;
     }
     if ((advance_unmatched || page) && !queue->retry_snapshot_bound) goto out;
     if (stage_receipt && (!page || !budget || !queue->retry_count ||

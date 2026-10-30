@@ -7634,6 +7634,21 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         assert(!latcd_retirement_retry_page_restore_budget(root, &receipt_capacity, UINT64_MAX, 1,
                                                            &receipt_budget, receipt_page, error, sizeof(error)) &&
                receipt_page->deletion_intent && !latcd_cache_capacity_recovery_finish(&receipt_capacity));
+        for (unsigned variant = 0; variant < 2; variant++) {
+            receipt_queue = latcd_retirement_queue_new(root, 1);
+            assert(!latcd_retirement_queue_retry_receipt_resume(receipt_queue, &receipt_budget, error, sizeof(error)));
+            do {
+                queued = latcd_retirement_queue_step(receipt_queue, 32, 10000, &receipt_stats,
+                                                      error, sizeof(error));
+            } while (queued > 0);
+            assert(queued < 0 && !latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count) &&
+                   receipt_count == 1 && receipts[0]);
+            if (variant) put(marker, receipt);
+            int verified = latcd_retirement_queue_retry_receipts_revalidate(receipt_queue, receipts, &receipt_count,
+                                                                             error, sizeof(error));
+            assert(variant ? verified < 0 : !verified && receipt_count == 1 && receipts[0]);
+            latcd_retirement_queue_free(receipt_queue);
+        }
         assert(latcd_retirement_retry_page_commit(root, &receipt_budget, error, sizeof(error)) < 0);
         latcd_cache_capacity_close(&receipt_capacity);
         char *receipt_shard_name = g_strconcat(names[0], ".ini", NULL);
