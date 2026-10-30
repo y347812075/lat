@@ -47,6 +47,27 @@ PY
 }
 start
 stop
+test_daemon_saved=$test_daemon
+test_daemon=$(dirname "$test_daemon")/../latcd/latcd
+cache=$work/production-invalid-cache
+socket=$work/production-invalid.sock
+stats=$work/production-invalid-stats.json
+mkdir -m 700 "$cache"
+start
+wait_stats 's["retirement_discovery_complete"]'
+"$fixture" --timer-fixture "$cache"
+printf 'invalid\n' > "$cache/.gc/transactions/invalid"
+n=0
+while ! grep -q 'retirement discovery stopped:' "$work/server.err"; do
+    kill -0 "$pid"
+    n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+done
+sleep 6
+test "$(grep -c 'retirement discovery stopped:' "$work/server.err")" -eq 1
+old=$cache/$(printf '%064x' 7)
+test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
+stop
+test_daemon=$test_daemon_saved
 for fault in unlinked unlink-synced; do
     cache=$work/object-$fault-cache
     socket=$work/object-$fault.sock

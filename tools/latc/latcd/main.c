@@ -2396,10 +2396,15 @@ static void *compiler_input_recovery_worker(void *opaque)
 #endif
             now >= next_retirement) {
             LatcdRetirementQueueStats stats;
-            char error[256];
+            char error[256] = {0};
             int result = latcd_retirement_queue_step(retirement, 32, 10000,
                 &stats, error, sizeof(error));
-            if (!result && latcd_retirement_queue_checkpoint(retirement, error, sizeof(error))) {
+            if (result < 0) {
+                stats.complete = false;
+                retirement_safe = false;
+                fprintf(stderr, "latcd: retirement discovery stopped: %s\n",
+                        error[0] ? error : "unknown error");
+            } else if (!result && latcd_retirement_queue_checkpoint(retirement, error, sizeof(error))) {
                 stats.complete = false;
                 retirement_safe = false;
                 fprintf(stderr, "latcd: %s\n", error);
