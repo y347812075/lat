@@ -69,6 +69,11 @@
 #define LATCD_SUPERSEDED_DIRNAME ".superseded"
 #define LATCD_MAX_CHANNELS 128u
 #define LATCD_MAX_FLUSHES 128u
+#ifdef LATCD_GC_TIMER_TEST
+#define LATCD_RETIREMENT_GRACE_US UINT64_C(3000000)
+#else
+#define LATCD_RETIREMENT_GRACE_US (UINT64_C(600) * 1000000)
+#endif
 
 typedef struct LatcdConfig {
     const char *socket_path;
@@ -2119,7 +2124,7 @@ static void *compiler_input_recovery_worker(void *opaque)
     bool failed = false;
     int timer = timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC | TFD_NONBLOCK);
     LatcdRetirementQueue *retirement = latcd_retirement_queue_new(work->config->cache_dir,
-        UINT64_C(600) * 1000000);
+        LATCD_RETIREMENT_GRACE_US);
     char retirement_error[256];
     bool retirement_safe = !latcd_retirement_queue_restore(retirement, retirement_error, sizeof(retirement_error));
     if (!retirement_safe) fprintf(stderr, "latcd: %s\n", retirement_error);
@@ -6668,7 +6673,7 @@ int main(int argc, char **argv)
         if (latcd_retirement_retry_page_load(config.cache_dir, retry_page, retry_error, sizeof(retry_error)))
             budget_result = -1;
         else if (latcd_retirement_retry_page_restore_budget(config.cache_dir, &generation_capacity,
-                config.max_cache_bytes, UINT64_C(600) * 1000000, &retry_budget, retry_page,
+                config.max_cache_bytes, LATCD_RETIREMENT_GRACE_US, &retry_budget, retry_page,
                 error, sizeof(error))) budget_result = -1;
         else retry_recovered = true;
     }
@@ -6676,7 +6681,7 @@ int main(int argc, char **argv)
         budget_result = fail(error, sizeof(error), "capacity index invalid after compiler budget recovery");
     if (!budget_result && retry_recovered) {
         LatcdRetryRecovery *retry = latcd_retry_recovery_new(config.cache_dir,
-            UINT64_C(600) * 1000000, &retry_budget, false);
+            LATCD_RETIREMENT_GRACE_US, &retry_budget, false);
         if (!retry) budget_result = fail(error, sizeof(error), "cannot create retry recovery");
         else {
             do {

@@ -9411,6 +9411,14 @@ static void test_queue_overflow_fixture(void)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && (!strcmp(argv[1], "build-id") || !strcmp(argv[1], "--latc-build-id"))) {
+        puts(LATC_BUILD_ID);
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "--timer-fixture")) {
+        publish_page_fixture(argv[2], 7);
+        return 0;
+    }
     if (argc == 3 && (!strcmp(argv[1], "--startup-retry-fixture") ||
                       !strcmp(argv[1], "--startup-retry-intent") ||
                       !strcmp(argv[1], "--startup-retry-applied"))) {

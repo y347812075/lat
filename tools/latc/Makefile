@@ -132,6 +132,32 @@ $(BUILD)/latcd/latcd: $(BUILD)/latcd/main.o $(BUILD)/latcd/protocol.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread -ldl
 
+$(BUILD)/tests/latcd-gc-timer-main.o: latcd/main.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DLATCD_GC_TIMER_TEST -MMD -MP -c -o $@ $<
+
+$(BUILD)/tests/latcd-gc-timer: $(BUILD)/tests/latcd-gc-timer-main.o $(BUILD)/latcd/protocol.o \
+	$(BUILD)/latcd/precompile.o $(BUILD)/latcd/journal-store.o $(BUILD)/latcd/cache-retirement.o \
+	$(BUILD)/latcd/cache-capacity.o $(BUILD)/latcd/parson/parson.o $(BUILD)/latcd/source-elf.o \
+	$(BUILD)/latcd/cache-export.o $(BUILD)/aot-v2/common/key-journal.o \
+	$(BUILD)/aot-v2/common/translation-config.o $(BUILD)/aot-v2/common/tb-key-set.o \
+	$(BUILD)/aot-v2/runtime/cache-domain.o $(BUILD)/aot-v2/runtime/cache-lifecycle.o \
+	$(BUILD)/aot-v2/runtime/internal-fd-registry.o $(BUILD)/aot-v2/compiler/module-inspect.o \
+	$(BUILD)/aot-v2/runtime/elf-validate.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread -ldl
+
+.PHONY: test-latcd-gc-timer
+$(BUILD)/tests/gc-timer-runtime/liblat-aot-runtime.so.2: tests/gc-timer-runtime.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared -o $@ $<
+test-latcd-gc-timer: all $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-cache-retirement $(BUILD)/tests/gc-timer-runtime/liblat-aot-runtime.so.2
+	@work=$$(mktemp -d "$(TMPDIR)/latcd-gc-timer.XXXXXX"); \
+	  trap 'if ! findmnt -rn -o TARGET | grep -F "$$work" >/dev/null && ! lsof +D "$$work" >/dev/null 2>&1; then rm -rf "$$work"; else echo "retained busy test directory: $$work" >&2; fi' EXIT; \
+	  sh tests/test-latcd-gc-timer.sh "$(abspath $(BUILD)/tests/latcd-gc-timer)" \
+	    "$(abspath $(BUILD)/tests/test-cache-retirement)" "$(abspath $(BUILD)/tests/test-cache-retirement)" \
+	    "$(abspath $(BUILD)/tests/test-cache-retirement)" "$$work" "$(abspath $(BUILD)/tests/gc-timer-runtime)"
+test: test-latcd-gc-timer
+
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
