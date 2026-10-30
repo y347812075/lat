@@ -2133,9 +2133,10 @@ static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueu
     uint64_t now = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
     if (latcd_retirement_page_state_load(config->cache_dir, &page, error, error_size)) return -1;
     if (page.committed_pending) {
-        do { result = latcd_retirement_consumption_recover_step(config->cache_dir, now,
-                    &test_page_budget, error, error_size); } while (result > 0 && !stop_requested);
-        return stop_requested ? -1 : result;
+        result = latcd_retirement_consumption_recover_step(config->cache_dir, now,
+                    &test_page_budget, error, error_size);
+        if (result >= 0) fprintf(stderr, "latcd: test consumption recovery step=%d\n", result);
+        return result > 0 ? 2 : result;
     }
     if (latcd_retirement_page_snapshot(config->cache_dir, now, &page, results,
                                         &inventory, error, error_size) < 0) return -1;
@@ -2176,9 +2177,7 @@ static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueu
     if (!remaining) {
         if (latcd_retirement_page_budget_commit(config->cache_dir, now, &page,
                                                  &test_page_budget, error, error_size)) return -1;
-        do { result = latcd_retirement_consumption_recover_step(config->cache_dir, now,
-                    &test_page_budget, error, error_size); } while (result > 0 && !stop_requested);
-        return stop_requested ? -1 : result;
+        return 2;
     }
     do { result = latcd_retirement_queue_step(executor, 32, 10000, &stats, error, error_size); }
     while (result > 0 && !stop_requested);

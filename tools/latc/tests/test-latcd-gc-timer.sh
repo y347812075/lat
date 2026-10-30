@@ -281,6 +281,7 @@ while ! grep -q 'test waiting page consumed' "$work/server.err"; do
     n=$((n + 1)); [ "$n" -lt 1600 ]; sleep 0.1
 done
 grep -q 'test waiting timer woke' "$work/server.err"
+test "$(grep -c 'test consumption recovery step=' "$work/server.err")" -ge 2
 test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
 python3 - "$cache" <<'PY'
 import json, pathlib, sys
