@@ -5372,7 +5372,9 @@ struct LatcdRetirementQueue {
     unsigned retry_count;
     bool retry_snapshot_bound;
     bool receipt_resume;
+    bool receipt_completed_scan;
     uint8_t receipt_page_identity[32], receipt_expected[32], receipt_shard_digest[32];
+    uint8_t receipt_completed_digest[128][32];
     uint64_t receipt_shard_sequence;
     uint64_t retry_snapshot_time, retry_snapshot_sequence;
     uint64_t retry_item_sequence[128];
@@ -5552,6 +5554,36 @@ out:
     if (scheduler >= 0) close(scheduler);
     g_free(page);
     return result ? fail(error, error_size, "cannot resume retry receipt discovery") : 0;
+}
+
+int latcd_retirement_queue_retry_completed_resume(LatcdRetirementQueue *queue,
+    LatcdPageBudget *budget, char *error, size_t error_size)
+{
+    if (!queue || !budget || !budget->capacity || budget->invalid || !budget->page_identity_bound)
+        return fail(error, error_size, "missing completed retry budget");
+    int scheduler = scheduler_lock(queue->root, error, error_size);
+    LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
+    LatcdRetirementPageDeadline hints[128];
+    uint8_t identity[32]; unsigned count = 0;
+    int result = -1;
+    if (scheduler < 0) goto out;
+    if (latcd_retirement_retry_page_load(queue->root, page, error, error_size) ||
+        page->deletion_intent || page->intent_present || page->completed != page->count ||
+        page->grace_us != queue->grace || latcd_retirement_retry_page_budget_identity(page, identity) ||
+        memcmp(identity, budget->page_identity, 32)) goto out;
+    for (unsigned i = 0; i < page->count; i++) {
+        if (!page->deleted[i]) continue;
+        hints[count] = page->items[i].hint;
+        memcpy(queue->receipt_completed_digest[count++], page->receipt_digest[i], 32);
+    }
+    if (!count || latcd_retirement_retry_page_identity(page, queue->receipt_page_identity) ||
+        latcd_retirement_queue_diagnostic_retry(queue, page->boot, page->round_cutoff, hints, count)) goto out;
+    queue->receipt_completed_scan = true;
+    result = 0;
+out:
+    if (scheduler >= 0) close(scheduler);
+    g_free(page);
+    return result ? fail(error, error_size, "cannot resume completed receipt discovery") : 0;
 }
 
 int latcd_retirement_queue_retry_matches(const LatcdRetirementQueue *queue,
@@ -6235,7 +6267,7 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
             const LatcdRetirementPageDeadline *entry = &g_array_index(snapshot, RetrySnapshotEntry, j).hint;
             if (!strcmp(entry->name, queue->retry_order[i])) { found = entry; break; }
         }
-        if (queue->receipt_resume && !found) continue;
+        if ((queue->receipt_resume || queue->receipt_completed_scan) && !found) continue;
         if (!hint || !found || found->enqueued != hint->enqueued ||
             found->last_attempt != hint->last_attempt || found->retry_at != hint->retry_at ||
             found->busy_count != hint->busy_count || found->retry_at > now) goto out;
@@ -6264,6 +6296,24 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
             !latcd_retirement_retry_page_load(queue->root, stored, error, error_size) &&
             !latcd_retirement_retry_page_identity(stored, identity) &&
             !memcmp(identity, queue->receipt_page_identity, 32);
+        g_free(stored);
+        if (!valid) goto out;
+    }
+    if (queue->receipt_completed_scan) {
+        LatcdRetirementRetryPage *stored = g_new0(LatcdRetirementRetryPage, 1);
+        uint8_t identity[32];
+        bool valid = !latcd_retirement_retry_page_load(queue->root, stored, error, error_size) &&
+            !latcd_retirement_retry_page_identity(stored, identity) &&
+            !memcmp(identity, queue->receipt_page_identity, 32);
+        for (unsigned i = 0; valid && i < queue->retry_count; i++) {
+            const char *name = queue->retry_order[i];
+            const uint8_t *receipt = g_hash_table_lookup(queue->removed_second, name);
+            valid = receipt && !memcmp(receipt, queue->receipt_completed_digest[i], 32) &&
+                !g_hash_table_contains(queue->confirmed_keys, name) &&
+                !g_hash_table_contains(queue->retry_transaction_roots, name);
+            for (unsigned j = 0; valid && j < snapshot->len; j++)
+                if (!strcmp(g_array_index(snapshot, RetrySnapshotEntry, j).hint.name, name)) valid = false;
+        }
         g_free(stored);
         if (!valid) goto out;
     }
