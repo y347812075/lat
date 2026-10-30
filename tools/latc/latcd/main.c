@@ -2135,29 +2135,48 @@ static int test_consume_retirement_page(const LatcdConfig *config,
         while (result > 0 && !stop_requested);
         return stop_requested ? -1 : result;
     }
-    queue = latcd_retirement_queue_new(config->cache_dir, LATCD_RETIREMENT_GRACE_US);
-    if (latcd_retirement_queue_bind_capacity(queue, &generation_capacity)) goto out;
-    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, error_size); }
-    while (result > 0 && !stop_requested);
-    if (result || stop_requested || !stats.complete ||
-        latcd_retirement_queue_restrict_to_page(queue, &page, error, error_size)) goto fail;
-    for (unsigned i = 0; i < page.count; i++) {
+    for (;;) {
+        uint8_t results[128];
+        LatcdRetirementPageInventory inventory;
+        struct timespec scan_ts;
+        if (clock_gettime(CLOCK_BOOTTIME, &scan_ts)) goto fail;
+        uint64_t scan_now = (uint64_t)scan_ts.tv_sec * 1000000 + scan_ts.tv_nsec / 1000;
+        if (latcd_retirement_page_snapshot(config->cache_dir, scan_now, &page,
+                                            results, &inventory, error, error_size) < 0) goto fail;
+        unsigned remaining = 0;
+        for (unsigned i = 0; i < page.count; i++) {
+            if (results[i] == LATCD_RETIREMENT_RESULT_DONE ||
+                results[i] == LATCD_RETIREMENT_RESULT_DEFERRED) continue;
+            if (results[i] != 0 && results[i] != 4) goto fail;
+            bool receipts[128], matches[128];
+            unsigned receipt_count, match_count;
+            queue = latcd_retirement_queue_new(config->cache_dir, LATCD_RETIREMENT_GRACE_US);
+            if (latcd_retirement_queue_page_receipt_begin(queue, &test_page_budget, i, error, error_size)) goto fail;
+            do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, error_size); }
+            while (result > 0 && !stop_requested);
+            if (stop_requested || result >= 0 ||
+                latcd_retirement_queue_retry_receipts(queue, receipts, &receipt_count) || receipt_count != 1 ||
+                latcd_retirement_queue_retry_matches(queue, matches, &match_count) || match_count != 1 ||
+                receipts[0] == matches[0]) goto fail;
+            if (receipts[0]) {
+                if (latcd_retirement_queue_page_receipt_done(queue, &test_page_budget, error, error_size)) goto fail;
+            } else remaining++;
+            latcd_retirement_queue_free(queue);
+            queue = NULL;
+        }
+        if (!remaining) break;
+        queue = latcd_retirement_queue_new(config->cache_dir, LATCD_RETIREMENT_GRACE_US);
+        if (latcd_retirement_queue_bind_capacity(queue, &generation_capacity)) goto fail;
+        do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, error_size); }
+        while (result > 0 && !stop_requested);
+        if (result || stop_requested || !stats.complete ||
+            latcd_retirement_queue_restrict_to_page(queue, &page, error, error_size)) goto fail;
         LatcdRetirementDeletionReport report;
         uint64_t hashed;
         do { result = latcd_retirement_queue_execute_step(queue, 65536, 10000,
                                                           &hashed, &report, error, error_size); }
         while (result == 2 && !stop_requested);
         if (result != 1 || !report.receipt_durable || stop_requested) goto fail;
-    }
-    latcd_retirement_queue_free(queue);
-    queue = NULL;
-    for (unsigned i = 0; i < page.count; i++) {
-        queue = latcd_retirement_queue_new(config->cache_dir, LATCD_RETIREMENT_GRACE_US);
-        if (latcd_retirement_queue_page_receipt_begin(queue, &test_page_budget, i, error, error_size)) goto fail;
-        do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, error_size); }
-        while (result > 0 && !stop_requested);
-        if (stop_requested || result >= 0 ||
-            latcd_retirement_queue_page_receipt_done(queue, &test_page_budget, error, error_size)) goto fail;
         latcd_retirement_queue_free(queue);
         queue = NULL;
     }
@@ -2173,7 +2192,6 @@ static int test_consume_retirement_page(const LatcdConfig *config,
     return 0;
 fail:
     result = -1;
-out:
     if (queue) latcd_retirement_queue_free(queue);
     return result;
 }

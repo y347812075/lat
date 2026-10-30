@@ -45,6 +45,35 @@ PY
 }
 start
 stop
+for fault in unlinked unlink-synced; do
+    cache=$work/object-$fault-cache
+    socket=$work/object-$fault.sock
+    stats=$work/object-$fault-stats.json
+    mkdir -m 700 "$cache"
+    start
+    stop
+    "$fixture" --timer-fixture "$cache"
+    LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_RETIREMENT_IO=crash:$fault start
+    n=0
+    while kill -0 "$pid" 2>/dev/null; do
+        n=$((n + 1)); if [ "$n" -ge 300 ]; then cat "$work/server.err" >&2; exit 1; fi
+        sleep 0.05
+    done
+    if wait "$pid"; then echo "expected $fault crash" >&2; exit 1; fi
+    pid=
+    rm -f "$socket"
+    LATCD_TEST_RECOVER_PAGE=1 start
+    grep -q 'latcd: test recovered page consumed' "$work/server.err"
+    old=$cache/$(printf '%064x' 7)
+    test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
+    python3 - "$cache" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1]); source = f'{7:064x}'
+m = json.loads((root / (source + '.current')).read_text())
+assert all((root / m[key]).is_file() for key in ('module', 'native', 'tbset'))
+PY
+    stop
+done
 cache=$work/crash-cache
 socket=$work/crash.sock
 stats=$work/crash-stats.json

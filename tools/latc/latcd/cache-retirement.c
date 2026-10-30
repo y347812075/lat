@@ -5604,6 +5604,9 @@ int latcd_retirement_queue_restrict_to_page(LatcdRetirementQueue *queue,
     LatcdRetirementPageState current;
     bool legacy = false;
     uint8_t expected[32], actual[32];
+    uint8_t results[128];
+    char *boot = NULL;
+    uint64_t now;
     if (scheduler < 0) return -1;
     root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     gc = root < 0 ? -1 : open_directory(root, ".gc", false);
@@ -5612,16 +5615,16 @@ int latcd_retirement_queue_restrict_to_page(LatcdRetirementQueue *queue,
         !current.budget_bound || current.committed_pending || current.consumption_bound ||
         latcd_retirement_page_budget_identity(page, expected) ||
         latcd_retirement_page_budget_identity(&current, actual) ||
-        memcmp(expected, actual, sizeof(expected))) goto out;
+        memcmp(expected, actual, sizeof(expected)) || retirement_clock(&boot, &now) ||
+        strcmp(boot, current.boot) ||
+        schedule_page_results(queue->root, now, &current, results, NULL, error, error_size) < 0) goto out;
     g_hash_table_remove_all(queue->page_members);
     for (unsigned i = 0; i < current.count; i++) {
-        if (current.results[i] != 0) continue;
+        if (results[i] == LATCD_RETIREMENT_RESULT_DONE ||
+            results[i] == LATCD_RETIREMENT_RESULT_DEFERRED) continue;
+        if (results[i] != 0 && results[i] != 4) goto clear;
         if (!g_hash_table_contains(queue->candidates, current.entries[i].name)) goto clear;
         g_hash_table_add(queue->page_members, g_strdup(current.entries[i].name));
-    }
-    if (!g_hash_table_size(queue->page_members)) {
-        errno = ENOENT;
-        goto clear;
     }
     queue->page_restricted = true;
     result = 0;
@@ -5633,6 +5636,7 @@ out:
     if (gc >= 0) close(gc);
     if (root >= 0) close(root);
     close(scheduler);
+    g_free(boot);
     return result ? fail(error, error_size, "retirement page members unavailable") : 0;
 }
 
