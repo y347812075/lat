@@ -811,8 +811,7 @@ int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
         bool has_receipt = false;
         for (unsigned j = 0; j < 32; j++) has_receipt |= page->receipt_digest[i][j] != 0;
         bool deleting = page->deleted[i] || (page->deletion_intent && i == page->completed);
-        if ((page->deleted[i] && i >= page->completed) ||
-            (deleting && !item->matched) || has_receipt != deleting ||
+        if ((page->deleted[i] && i >= page->completed) || has_receipt != deleting ||
             has_replacement != ((i < page->completed && !page->deleted[i]) ||
                                 (page->intent_present && i == page->completed))) return -1;
         has_deletion |= page->deleted[i];
@@ -5380,8 +5379,8 @@ LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grac
     queue->discovered = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     queue->discovered_keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     queue->confirmed_keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    queue->removed_first = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    queue->removed_second = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    queue->removed_first = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    queue->removed_second = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     queue->retry_transaction_roots = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     queue->retry_hints = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     return queue;
@@ -5673,7 +5672,7 @@ static bool queue_outside_page(const LatcdRetirementQueue *queue, const char *na
 /* Completed namespace removal only, never physical-space or domain admission.
  * Bind the receipt to this transaction's object, not merely its basename. */
 static int queue_object_removed(LatcdRetirementQueue *queue, const char *source,
-                                 const char *name, GKeyFile *objects)
+                                 const char *name, GKeyFile *objects, uint8_t digest[32])
 {
     int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int store = queue->discovery_tombstones;
@@ -5728,7 +5727,14 @@ static int queue_object_removed(LatcdRetirementQueue *queue, const char *source,
             uint64_t value;
             matches = record_uint64(objects, group, fields[j], &value) && value == values[j];
         }
-        if (matches) result = 1;
+        if (matches) {
+            GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+            gsize length = 32;
+            g_checksum_update(checksum, (const guchar *)raw, size);
+            g_checksum_get_digest(checksum, digest, &length);
+            g_checksum_free(checksum);
+            if (length == 32) result = 1;
+        }
         break;
     }
 out:
@@ -5798,12 +5804,16 @@ static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t si
     valid = valid && g_key_file_load_from_data(object_record, (char *)objects, object_size, 0, NULL);
     while (valid && g_hash_table_iter_next(&iterator, &key, NULL)) {
         if (g_hash_table_contains(next_refs, key)) continue;
-        int removed = queue_object_removed(queue, source, key, object_record);
+        uint8_t receipt_digest[32];
+        int removed = queue_object_removed(queue, source, key, object_record, receipt_digest);
         if (removed < 0) { valid = false; break; }
         if (removed) {
-            if (g_hash_table_contains(queue->retry_hints, key))
-                g_hash_table_add(queue->aggregating ? queue->removed_second : queue->removed_first,
-                                 g_strdup(key));
+            if (g_hash_table_contains(queue->retry_hints, key)) {
+                GHashTable *removed_set = queue->aggregating ? queue->removed_second : queue->removed_first;
+                const uint8_t *previous = g_hash_table_lookup(removed_set, key);
+                if (previous && memcmp(previous, receipt_digest, 32)) { valid = false; break; }
+                if (!previous) g_hash_table_insert(removed_set, g_strdup(key), g_memdup2(receipt_digest, 32));
+            }
             continue;
         }
         bool nominated = !queue->diagnostic_cutoff || stamp < queue->diagnostic_cutoff;
@@ -5976,10 +5986,12 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
                    g_hash_table_size(queue->removed_second)) result = -1;
     if (!result) {
         GHashTableIter removed_iter;
-        gpointer removed_key;
+        gpointer removed_key, removed_digest;
         g_hash_table_iter_init(&removed_iter, queue->removed_first);
-        while (g_hash_table_iter_next(&removed_iter, &removed_key, NULL))
-            if (!g_hash_table_contains(queue->removed_second, removed_key)) { result = -1; break; }
+        while (g_hash_table_iter_next(&removed_iter, &removed_key, &removed_digest)) {
+            const uint8_t *second = g_hash_table_lookup(queue->removed_second, removed_key);
+            if (!second || memcmp(removed_digest, second, 32)) { result = -1; break; }
+        }
     }
     if (!result) {
         GHashTableIter iterator;

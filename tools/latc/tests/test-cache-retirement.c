@@ -4325,10 +4325,17 @@ static void test_retry_page_identity(void)
            decoded->deleted[1] && !decoded->deletion_intent);
     assert(!latcd_retirement_retry_page_budget_identity(decoded, changed_budget) &&
            !memcmp(budget_identity, changed_budget, 32));
+    g_free(encoded);
     page->items[1].matched = false;
-    assert(latcd_retirement_retry_page_identity(page, changed) < 0);
+    memset(&page->items[1].aggregate, 0, sizeof(page->items[1].aggregate));
+    assert(!latcd_retirement_retry_page_encode(page, &encoded, &encoded_size));
+    assert(!latcd_retirement_retry_page_decode(encoded, encoded_size, decoded) &&
+           decoded->deleted[1] && !decoded->items[1].matched);
+    g_free(encoded);
     page->items[1].matched = true;
-    g_free(decoded); g_free(encoded);
+    page->items[1].aggregate = page->items[1].hint;
+    page->items[1].aggregate.deadline = 190;
+    g_free(decoded);
     page->completed = 0; page->deleted[1] = false;
     memset(page->replacement_digest, 0, sizeof(page->replacement_digest));
     memset(page->receipt_digest, 0, sizeof(page->receipt_digest));
