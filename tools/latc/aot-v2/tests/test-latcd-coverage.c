@@ -109,7 +109,9 @@ static void test_broker_read_bounds(void)
     uint8_t digest[32] = {0}; char hex[65], error[256];
     digest_hex(digest, hex);
     LatcdConfig config = {.cache_dir = root, .file_size_limit = 1 << 20};
-    g_assert_cmpint(broker_export_current(&config, digest, error, sizeof(error)), ==, -1);
+    LatcdBrokerExportResponse response = {0};
+    g_assert_cmpint(broker_export_current(&config, digest, error, sizeof(error),
+                                          0, NULL, NULL, &response), ==, -1);
     char *gc = g_build_filename(root, ".gc", NULL);
     g_assert_false(g_file_test(gc, G_FILE_TEST_EXISTS));
     char *name = g_strdup_printf("%s.current", hex);
@@ -426,6 +428,16 @@ static void test_broker_export_request(void)
     LatcdConfig config = {.cache_dir = root, .max_input = UINT64_C(1) << 30, .file_size_limit = UINT64_C(1) << 30};
     for (unsigned attempt = 0; attempt < 3; attempt++) {
         if (attempt == 1) g_assert_cmpint(fcntl(source, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL), ==, 0);
+        if (attempt == 1) {
+            LatcdBrokerExportResponse timed;
+            g_assert_cmpint(broker_export_job(&config, source, &request,
+                g_get_monotonic_time() - 1, NULL, NULL, &timed), ==, -1);
+            g_assert_cmpint(timed.status, ==, 1);
+            g_assert_cmpint(timed.execution_authorized, ==, 0);
+            g_assert_cmpuint(timed.module_size, ==, 0);
+            uint8_t zero[32] = {0};
+            g_assert_cmpmem(timed.module_sha256, 32, zero, 32);
+        }
         if (attempt == 2) request.source_sha256[0] ^= 1;
         int sockets[2]; uid_t uid; gid_t gid;
         g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sockets), ==, 0);
@@ -436,8 +448,18 @@ static void test_broker_export_request(void)
         LatcdBrokerExportResponse response; int exported = -1;
         g_assert_cmpint(latcd_broker_receive(sockets[1], uid, gid, &response, sizeof(response), &exported), ==, 0);
         g_assert_cmpint(response.status, ==, attempt == 1 ? 0 : 1);
+        g_assert_cmpint(response.version, ==, LATCD_BROKER_EXPORT_VERSION);
+        g_assert_cmpint(response.purpose, ==, LATCD_BROKER_PURPOSE_OFFLINE_SNAPSHOT);
+        g_assert_cmpint(response.execution_authorized, ==, 0);
         if (attempt == 1) {
             g_assert_cmpint(exported, >=, 0);
+            struct stat exported_stat;
+            g_assert_cmpint(fstat(exported, &exported_stat), ==, 0);
+            g_assert_cmpuint(response.module_size, ==, exported_stat.st_size);
+            g_assert_cmpmem(response.source_sha256, 32, request.source_sha256, 32);
+            for (unsigned i = 0; i < 32; i++)
+                g_assert_cmpint(response.module_sha256[i], ==,
+                    (g_ascii_xdigit_value(hash[i * 2]) << 4) | g_ascii_xdigit_value(hash[i * 2 + 1]));
             g_assert_cmpint(fcntl(exported, F_GET_SEALS) & F_SEAL_WRITE, ==, F_SEAL_WRITE);
             close(exported);
         } else g_assert_cmpint(exported, ==, -1);
@@ -1488,7 +1510,9 @@ int main(int argc, char **argv)
     int pair_pins[4] = {-1, -1, -1, -1};
     g_assert_nonnull(paired.module_sha256);
     g_assert_nonnull(paired.native_sha256);
-    int exported = broker_export_current(&config, digest, error, sizeof(error));
+    LatcdBrokerExportResponse export_response = {0};
+    int exported = broker_export_current(&config, digest, error, sizeof(error),
+                                         0, NULL, NULL, &export_response);
     g_assert_cmpint(exported, >=, 0);
     int seals = fcntl(exported, F_GET_SEALS);
     g_assert_cmpint(seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL),
@@ -1497,7 +1521,8 @@ int main(int argc, char **argv)
     int source_gate = lat_aot_v2_cache_source_lock(directory, hex,
         LOCK_EX | LOCK_NB, false, error, sizeof(error));
     g_assert_cmpint(source_gate, >=, 0);
-    g_assert_cmpint(broker_export_current(&config, digest, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(broker_export_current(&config, digest, error, sizeof(error),
+                                          0, NULL, NULL, &export_response), ==, -1);
     g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
         &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, -1);
     g_assert_cmpint(pthread_mutex_trylock(&cache_lock), ==, EBUSY);

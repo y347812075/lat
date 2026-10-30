@@ -4,7 +4,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#define LATCD_BROKER_EXPORT_VERSION 1u
+#define LATCD_BROKER_EXPORT_VERSION 2u
+#define LATCD_BROKER_PURPOSE_OFFLINE_SNAPSHOT 1u
 typedef struct LatcdBrokerExportRequest {
     uint32_t version;
     uint32_t reserved;
@@ -15,6 +16,11 @@ typedef struct LatcdBrokerExportRequest {
 typedef struct LatcdBrokerExportResponse {
     uint32_t version;
     uint32_t status;
+    uint32_t purpose;
+    uint32_t execution_authorized;
+    uint64_t module_size;
+    uint8_t source_sha256[32];
+    uint8_t module_sha256[32];
 } LatcdBrokerExportResponse;
 
 /* Call before bind/listen so credentials are attached to early packets. */
