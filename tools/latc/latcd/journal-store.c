@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/random.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -94,6 +95,33 @@ static bool read_exact(int fd, void *bytes, size_t size)
         done += count;
     }
     return true;
+}
+
+static int sealed_copy(int source, off_t size)
+{
+    int target = memfd_create("latcd-journal-receipt", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (target < 0) return -1;
+    uint8_t buffer[65536];
+    off_t offset = 0;
+    while (offset < size) {
+        ssize_t n = pread(source, buffer, MIN(sizeof(buffer), (size_t)(size - offset)), offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) goto fail;
+        size_t written = 0;
+        while (written < (size_t)n) {
+            ssize_t count = write(target, buffer + written, n - written);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) goto fail;
+            written += count;
+        }
+        offset += n;
+    }
+    if (fcntl(target, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW |
+              F_SEAL_SHRINK | F_SEAL_SEAL)) goto fail;
+    return target;
+fail:
+    close(target);
+    return -1;
 }
 
 static bool write_file(int directory, const char *name, const void *bytes, size_t size)
@@ -380,17 +408,16 @@ int latcd_journal_open_compile_input(const char *cache, const char *stream,
     input->source_fd = ok ? readonly_file(directory, "source", max_bytes, false, &st) : -1;
     ok = ok && input->source_fd >= 0 && hash_fd(input->source_fd, digest) &&
         !memcmp(digest, record.identity.source_sha256, 32);
-    input->receipt_fd = ok ? readonly_file(directory, "received.tbset",
+    fd = ok ? readonly_file(directory, "received.tbset",
         64 + record.capacity * sizeof(LatTbKey), true, &st) : -1;
+    input->receipt_fd = fd >= 0 ? sealed_copy(fd, st.st_size) : -1;
+    if (fd >= 0) close(fd);
     LatTbKeySet set = {0};
-    uint8_t receipt_before[32];
     ok = ok && input->receipt_fd >= 0 &&
-        hash_fd(input->receipt_fd, receipt_before) &&
         !lat_tb_key_set_read_fd(input->receipt_fd, record.identity.source_sha256,
                                 &set, error, error_size) &&
         !set.sequence && executable_keys(input->source_fd, &set) &&
-        hash_fd(input->receipt_fd, input->receipt_sha256) &&
-        !memcmp(receipt_before, input->receipt_sha256, sizeof(receipt_before));
+        hash_fd(input->receipt_fd, input->receipt_sha256);
     lat_tb_key_set_destroy(&set);
     if (ok) input->identity = record.identity;
     if (directory >= 0) close(directory);

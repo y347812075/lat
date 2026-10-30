@@ -788,6 +788,11 @@ int main(void)
     gsize captured_size;
     const void *captured_data = g_bytes_get_data(bytes, &captured_size);
     g_assert_cmpmem(input.config, input.config_size, captured_data, captured_size);
+    int seals = fcntl(input.receipt_fd, F_GET_SEALS);
+    g_assert_cmpint(seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL),
+        ==, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);
+    g_assert_cmpint(pwrite(input.receipt_fd, "x", 1, 0), ==, -1);
+    g_assert_cmpint(errno, ==, EPERM);
     char receipt_hash[65], after_hash[65];
     g_assert_true(receipt_digest(input.receipt_fd, receipt_hash));
     g_assert_cmpint(renameat(stream_fd, "received.tbset", stream_fd, "receipt.saved"), ==, 0);
