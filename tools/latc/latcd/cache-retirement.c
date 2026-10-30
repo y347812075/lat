@@ -2091,6 +2091,9 @@ static int retirement_schedule_access(const char *root, const char *boot,
                     if (inventory) {
                         inventory->members[i].present = true;
                         inventory->members[i].snapshot = record_snapshot;
+                        inventory->members[i].last_attempt = attempted;
+                        inventory->members[i].retry_at = retry;
+                        inventory->members[i].busy_count = busy;
                         GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
                         g_checksum_update(checksum, (const guchar *)raw, size);
                         gsize digest_size = sizeof(inventory->members[i].digest);

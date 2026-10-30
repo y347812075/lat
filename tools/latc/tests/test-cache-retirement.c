@@ -2820,6 +2820,11 @@ static void test_schedule_check_page(void)
     assert(results[0] == LATCD_RETIREMENT_RESULT_DONE && !results[1]);
     assert(inventory.occupied_slots == 1 && inventory.occupied_bytes == 1024 && !inventory.undersized_member);
     assert(inventory.members[0].present && !inventory.members[1].present);
+    assert(inventory.members[0].last_attempt == page.entries[0].last_attempt &&
+           inventory.members[0].retry_at == page.entries[0].retry_at &&
+           inventory.members[0].busy_count == page.entries[0].busy_count &&
+           !inventory.members[1].last_attempt && !inventory.members[1].retry_at &&
+           !inventory.members[1].busy_count);
     char *inventory_name = g_strconcat(page.entries[0].name, ".ini", NULL);
     char *inventory_path = g_build_filename(store, inventory_name, NULL);
     char *inventory_data = NULL;
@@ -2866,6 +2871,12 @@ static void test_schedule_check_page(void)
     assert(!latcd_retirement_schedule_check_page(root, 150, &page, error, sizeof(error)));
     assert(!latcd_retirement_schedule_page_results(root, 150, &page, results, error, sizeof(error)));
     assert(results[0] == LATCD_RETIREMENT_RESULT_DONE && results[1] == LATCD_RETIREMENT_RESULT_DEFERRED);
+    assert(!latcd_retirement_page_snapshot(root, 150, &snapshot_page, results, &inventory,
+                                            error, sizeof(error)));
+    assert(inventory.members[1].present && inventory.members[1].last_attempt == deferred.last_attempt &&
+           inventory.members[1].retry_at == deferred.retry_at &&
+           inventory.members[1].busy_count == deferred.busy_count &&
+           inventory.members[1].retry_at != snapshot_page.entries[1].retry_at);
     memset(results, 0xff, sizeof(results));
     assert(latcd_retirement_schedule_page_results(root, 0, &page, results, error, sizeof(error)) < 0);
     for (unsigned i = 0; i < sizeof(results); i++) assert(!results[i]);

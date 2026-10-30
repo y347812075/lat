@@ -271,6 +271,8 @@ typedef struct LatcdRetirementPageInventory {
         bool present;
         struct stat snapshot;
         uint8_t digest[32];
+        uint64_t last_attempt, retry_at;
+        unsigned busy_count;
     } members[128];
 } LatcdRetirementPageInventory;
 /* Classify a pending-page inventory for consumption recovery. This does not
