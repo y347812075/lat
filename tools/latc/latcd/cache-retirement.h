@@ -346,6 +346,7 @@ int latcd_retirement_test_guarded_budget_result(const char *root, uint64_t now_u
 extern void (*latcd_retirement_test_before_settlement)(void);
 extern void (*latcd_retirement_test_before_target_revalidate)(void);
 extern void (*latcd_retirement_test_before_page_finish)(struct LatcdPageBudget *budget);
+extern void (*latcd_retirement_test_page_scanned)(const char *root);
 /* Fixture-only bound result, including synthetic DONE without a receipt. */
 int latcd_retirement_test_bound_budget_result(const char *root, uint64_t now_us,
                                     const uint8_t identity[32], struct LatcdPageBudget *budget,
@@ -655,6 +656,14 @@ int latcd_retirement_queue_diagnostic_resume(LatcdRetirementQueue *queue,
  * authorize staging or deletion; discard the queue after any failed scan. */
 int latcd_retirement_queue_page_discovery_begin(LatcdRetirementQueue *queue,
                                                 char *error, size_t error_size);
+/* Owner lease and controlled readers, writers and mounts required. Build and
+ * stage one capacity-bound page from the retained monitored scan; the install
+ * callback revalidates the idle round, aggregate identity and directory watches.
+ * It does not provide domain admission or authorize deletion. Once staging
+ * begins, the scan witness is consumed; discard the queue before retrying. */
+int latcd_retirement_queue_page_stage(LatcdRetirementQueue *queue,
+    struct LatcdCacheCapacity *capacity, uint64_t limit, struct LatcdPageBudget *budget,
+    char *error, size_t error_size);
 /* Owner lease and controlled writers required. Consume an empty monitored
  * resumed scan to advance the persisted round; no deletion authorization. */
 int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,

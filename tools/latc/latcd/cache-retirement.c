@@ -266,6 +266,7 @@ int latcd_retirement_roots_lock(const char *root, int operation,
 #ifdef LATCD_RETIREMENT_TESTING
 void (*latcd_retirement_test_after_read)(void);
 void (*latcd_retirement_test_retry_scanned)(const char *root);
+void (*latcd_retirement_test_page_scanned)(const char *root);
 #endif
 /* ENOENT is separate from a malformed, unsafe or unreadable root. */
 static int read_file_snapshot(int directory, const char *name, size_t limit,
@@ -1744,6 +1745,7 @@ static int page_stage(const char *root, const LatcdRetirementPageState *page,
     if (!root || !page || (!!capacity != !!budget) || page->budget_bound ||
         latcd_retirement_page_identity(page, identity))
         return fail(error, error_size, "invalid retirement page stage");
+    if (error && error_size) error[0] = 0;
     int scheduler = scheduler_lock(root, error, error_size);
     if (scheduler < 0) return -1;
     LatcdRetirementPageState previous;
@@ -1774,16 +1776,29 @@ static int page_stage(const char *root, const LatcdRetirementPageState *page,
         int matching = latcd_cache_capacity_open_matching_root(capacity, root, directory);
         if (matching < 0) goto out;
         close(matching);
-        if (schedule_page_results(root, now, page, results, &inventory, error, error_size) < 0 ||
-            latcd_retirement_page_budget_identity(page, binding) ||
-            latcd_retirement_page_budget_estimate(page, results, &inventory, &bytes) ||
-            latcd_cache_capacity_reserve_page(capacity, bytes, limit, binding, budget)) goto out;
+        if (schedule_page_results(root, now, page, results, &inventory, error, error_size) < 0) {
+            fail(error, error_size, "retirement page schedule scan failed");
+            goto out;
+        }
+        if (latcd_retirement_page_budget_identity(page, binding)) {
+            fail(error, error_size, "retirement page budget identity failed");
+            goto out;
+        }
+        if (latcd_retirement_page_budget_estimate(page, results, &inventory, &bytes)) {
+            fail(error, error_size, "retirement page budget estimate failed");
+            goto out;
+        }
+        if (latcd_cache_capacity_reserve_page(capacity, bytes, limit, binding, budget)) {
+            fail(error, error_size, "retirement page budget reservation failed");
+            goto out;
+        }
         bool not_installed = false;
         result = page_state_store_guarded(directory, gc, page, budget, &not_installed,
                                           before_install, install_context);
         if (result && not_installed) {
             int saved = errno;
-            latcd_cache_capacity_cancel_page(capacity, budget);
+            if (latcd_cache_capacity_cancel_page(capacity, budget))
+                latcd_cache_capacity_page_uncertain(capacity, budget);
             errno = saved;
         }
     } else result = page_state_store_guarded(directory, gc, page, NULL, NULL,
@@ -1793,7 +1808,9 @@ out:
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
     close(scheduler);
-    return result ? fail(error, error_size, "retirement page stage failed; reload") : 0;
+    if (result && (!error || !error_size || !error[0]))
+        return fail(error, error_size, "retirement page stage failed; reload");
+    return result ? -1 : 0;
 }
 
 int latcd_retirement_page_stage(const char *root, const LatcdRetirementPageState *page,
@@ -5471,7 +5488,7 @@ struct LatcdRetirementQueue {
     unsigned visited;
     bool aggregating, aggregation_verified, discovery_overflow;
     bool round_resumed, empty_round_verified, retry_witness;
-    bool page_witness_requested, page_witness;
+    bool page_witness_requested, page_witness, page_witness_consumed;
     LatcdRetirementPageState round_state;
     DIR *cursor;
     int discovery_watch;
@@ -5594,6 +5611,142 @@ int latcd_retirement_queue_page_discovery_begin(LatcdRetirementQueue *queue,
     if (!queue->round_resumed)
         return fail(error, error_size, "page discovery requires an idle round");
     queue->page_witness_requested = true;
+    return 0;
+}
+
+typedef struct {
+    LatcdRetirementQueue *queue;
+    LatcdRetirementPageState page;
+    uint8_t snapshot[32];
+    char *error;
+    size_t error_size;
+} PageInstallContext;
+
+static int page_install_lock(void *opaque)
+{
+    PageInstallContext *context = opaque;
+    LatcdRetirementQueue *queue = context->queue;
+#ifdef LATCD_RETIREMENT_TESTING
+    if (latcd_retirement_test_page_scanned) latcd_retirement_test_page_scanned(queue->root);
+#endif
+    int root = -1, gc = -1, store = -1, tombstones = -1, roots = -1;
+    char *boot = NULL;
+    uint64_t now = 0;
+    LatcdRetirementPageState current, aggregate, observed;
+    bool legacy = false;
+    struct stat cache, path, transactions, tombstone_stat;
+    int result = -1;
+    if (!queue->page_witness || queue->retry_witness || !queue->aggregation_verified ||
+        !queue->cursor || queue->discovery_watch < 0 || queue->discovery_tombstones < 0) {
+        fail(context->error, context->error_size, "page witness is not active");
+        goto out;
+    }
+    root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    gc = root < 0 ? -1 : open_directory(root, ".gc", false);
+    store = root < 0 ? -1 : open_store(root, false);
+    tombstones = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
+    if (!queue_bind_root(queue, root) || gc < 0 || store < 0 || tombstones < 0 ||
+        !same_directory(store, dirfd(queue->cursor)) ||
+        !same_directory(tombstones, queue->discovery_tombstones)) {
+        fail(context->error, context->error_size, "page witness directory unavailable");
+        goto out;
+    }
+    roots = roots_lock_gc(gc, LOCK_EX | LOCK_NB, context->error, context->error_size);
+    if (roots < 0) goto out;
+    if (fstat(root, &cache) || lstat(queue->root, &path) ||
+        !object_stat_equal(&cache, &path) || cache.st_dev != (dev_t)context->page.cache_device ||
+        cache.st_ino != (ino_t)context->page.cache_inode ||
+        !directory_matches_at(root, ".gc", gc) ||
+        !lock_matches_at(gc, "reference-roots.lock", roots) ||
+        !directory_matches_at(gc, "transactions", store) ||
+        !directory_matches_at(gc, "tombstones", tombstones) ||
+        fstat(store, &transactions) || fstat(tombstones, &tombstone_stat) ||
+        !object_stat_equal(&transactions, &queue->discovery_store) ||
+        !object_stat_equal(&tombstone_stat, &queue->discovery_tombstone_store)) {
+        fail(context->error, context->error_size, "page witness directories changed");
+        goto out;
+    }
+    if (page_state_load(queue->root, &current, &legacy, context->error, context->error_size) ||
+        legacy || current.count || current.cursor[0] || current.committed_pending ||
+        current.budget_bound || current.consumption_bound ||
+        current.cache_device != context->page.cache_device || current.cache_inode != context->page.cache_inode ||
+        current.grace_us != context->page.grace_us || current.round_cutoff != context->page.round_cutoff ||
+        current.sequence != context->page.sequence || strcmp(current.boot, context->page.boot) ||
+        strcmp(current.committed_cursor, context->page.committed_cursor) ||
+        strcmp(current.retry_cursor, context->page.retry_cursor)) {
+        fail(context->error, context->error_size, "page witness round changed");
+        goto out;
+    }
+    if (retirement_clock(&boot, &now) || strcmp(boot, context->page.boot) ||
+        now < queue->diagnostic_last_time || now < queue->diagnostic_cutoff) {
+        fail(context->error, context->error_size, "page witness clock changed");
+        goto out;
+    }
+    if (latcd_retirement_queue_aggregated_page(queue, &aggregate)) {
+        fail(context->error, context->error_size, "page witness aggregate unavailable");
+        goto out;
+    }
+    observed = current;
+    observed.count = aggregate.count;
+    memcpy(observed.entries, aggregate.entries, sizeof(observed.entries));
+    g_strlcpy(observed.cursor, aggregate.cursor, sizeof(observed.cursor));
+    uint8_t actual[32];
+    if (page_snapshot_identity(&observed, actual) ||
+        memcmp(actual, context->snapshot, sizeof(actual))) {
+        fail(context->error, context->error_size, "page witness snapshot changed");
+        goto out;
+    }
+    if (!queue_watch_clean(queue->discovery_watch)) {
+        fail(context->error, context->error_size, "page witness watch changed");
+        goto out;
+    }
+    result = 0;
+out:
+    g_free(boot);
+    if (roots >= 0) close(roots);
+    if (tombstones >= 0) close(tombstones);
+    if (store >= 0) close(store);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    return result;
+}
+
+int latcd_retirement_queue_page_stage(LatcdRetirementQueue *queue,
+    LatcdCacheCapacity *capacity, uint64_t limit, LatcdPageBudget *budget,
+    char *error, size_t error_size)
+{
+    if (!queue || !queue->page_witness || !queue->aggregation_verified || !queue->cursor ||
+        !capacity || !budget)
+        return fail(error, error_size, "missing monitored retirement page");
+    LatcdRetirementPageState aggregate, page = queue->round_state;
+    if (latcd_retirement_queue_aggregated_page(queue, &aggregate) || !aggregate.count ||
+        page.count || page.cursor[0] || page.committed_pending || page.budget_bound ||
+        page.consumption_bound)
+        return fail(error, error_size, "invalid monitored retirement page");
+    page.count = aggregate.count;
+    memcpy(page.entries, aggregate.entries, sizeof(page.entries));
+    g_strlcpy(page.cursor, aggregate.cursor, sizeof(page.cursor));
+    char witness_error[256] = {0};
+    PageInstallContext context = {.queue = queue, .page = page, .error = witness_error,
+                                  .error_size = sizeof(witness_error)};
+    if (page_snapshot_identity(&page, context.snapshot))
+        return fail(error, error_size, "cannot identify monitored retirement page");
+    int result = page_stage(queue->root, &page, capacity, limit, budget,
+                            page_install_lock, &context, error, error_size);
+    queue->page_witness = false;
+    queue->page_witness_consumed = true;
+    queue->aggregation_verified = false;
+    if (queue->cursor) { closedir(queue->cursor); queue->cursor = NULL; }
+    if (queue->discovery_watch >= 0) { close(queue->discovery_watch); queue->discovery_watch = -1; }
+    if (queue->discovery_tombstones >= 0) {
+        close(queue->discovery_tombstones);
+        queue->discovery_tombstones = -1;
+    }
+    if (result) {
+        queue->persistence_uncertain = true;
+        if (witness_error[0]) return fail(error, error_size, "%s", witness_error);
+        return -1;
+    }
     return 0;
 }
 
@@ -6113,7 +6266,8 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
                                  uint64_t time_us, LatcdRetirementQueueStats *stats,
                                  char *error, size_t error_size)
 {
-    if (!queue || queue->empty_round_verified || queue->retry_witness || queue->page_witness || !entries || !time_us || time_us > INT64_MAX / 2 || !stats)
+    if (!queue || queue->empty_round_verified || queue->retry_witness || queue->page_witness ||
+        queue->page_witness_consumed || !entries || !time_us || time_us > INT64_MAX / 2 || !stats)
         return fail(error, error_size, "invalid retirement queue budget");
     if (queue->execution)
         return fail(error, error_size, "cannot scan while retirement execution is active");

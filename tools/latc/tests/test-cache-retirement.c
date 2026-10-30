@@ -8206,10 +8206,46 @@ static void test_page_discovery_witness(void)
     do { step = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
     while (step > 0);
     assert(step < 0 && !latcd_retirement_queue_aggregated_page(queue, &page) && page.count == 3);
+    char *schedule = g_build_filename(root, ".gc", "retirement-schedule", NULL);
+    assert(!mkdir(schedule, 0700));
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget budget = {0};
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    retry_scan_hook_called = false;
+    retry_scan_change = true;
+    latcd_retirement_test_page_scanned = retry_scan_hook;
+    assert(latcd_retirement_queue_page_stage(queue, &capacity, UINT64_MAX, &budget,
+                                             error, sizeof(error)) < 0);
+    latcd_retirement_test_page_scanned = NULL;
+    retry_scan_change = false;
+    assert(retry_scan_hook_called);
+    assert(strstr(error, "page witness"));
+    assert(!capacity.ready && budget.invalid &&
+           !latcd_retirement_page_state_load(root, &page, error, sizeof(error)) && !page.count);
+    latcd_cache_capacity_close(&capacity);
+    latcd_retirement_queue_free(queue);
+
+    memset(&budget, 0, sizeof(budget));
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(!latcd_retirement_queue_page_discovery_begin(queue, error, sizeof(error)));
+    do { step = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (step > 0);
+    assert(step < 0 && !latcd_retirement_queue_aggregated_page(queue, &page) && page.count == 3);
+    capacity = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    int page_stage_result = latcd_retirement_queue_page_stage(queue, &capacity, UINT64_MAX,
+                                                               &budget, error, sizeof(error));
+    assert(!page_stage_result);
+    assert(!latcd_retirement_page_state_load(root, &page, error, sizeof(error)) &&
+           page.count == 3 && page.budget_bound);
     LatcdRetirementAttempt attempt;
     assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));
     assert(latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)) < 0);
+    latcd_cache_capacity_close(&capacity);
     latcd_retirement_queue_free(queue);
+    g_free(schedule);
     simulated_boottime_us = 0;
     remove_root(root); g_free(root);
 }
