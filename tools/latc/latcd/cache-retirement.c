@@ -3153,6 +3153,22 @@ int latcd_retirement_retry_page_restore_budget(const char *root,
             &sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
             NULL, scheduler, snapshot, error, error_size)) goto out;
     validation = g_memdup2(persisted, sizeof(*persisted));
+    for (unsigned index = 0; index < validation->completed; index++) {
+        if (!validation->deleted[index]) continue;
+        for (unsigned i = 0; i < snapshot->len; i++) {
+            RetrySnapshotEntry *entry = &g_array_index(snapshot, RetrySnapshotEntry, i);
+            if (!strcmp(entry->hint.name, validation->items[index].hint.name)) goto out;
+        }
+        RetrySnapshotEntry missing = {0};
+        missing.hint = validation->items[index].hint;
+        missing.sequence = validation->items[index].shard_sequence;
+        memcpy(missing.digest, validation->items[index].shard_digest, 32);
+        g_array_append_val(snapshot, missing);
+        sequence = MAX(sequence, missing.sequence);
+        validation->deleted[index] = false;
+        memset(validation->receipt_digest[index], 0, 32);
+        memcpy(validation->replacement_digest[index], validation->items[index].shard_digest, 32);
+    }
     if (validation->deletion_intent) {
         unsigned index = validation->completed;
         bool found = false;
@@ -6321,21 +6337,35 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
             !latcd_retirement_retry_page_load(queue->root, stored, error, error_size) &&
             !latcd_retirement_retry_page_budget_identity(stored, identity) &&
             !memcmp(identity, consume_budget->page_identity, 32);
-        g_free(stored);
         if (matching >= 0) close(matching);
-        if (!valid) goto out;
+        if (!valid) { g_free(stored); goto out; }
         int schedule = open_directory(gc, "retirement-schedule", false);
         char *filename = g_strconcat(queue->retry_order[0], ".ini", NULL);
         if (schedule < 0 || !directory_matches_at(gc, "retirement-schedule", schedule)) {
             if (schedule >= 0) close(schedule);
-            g_free(filename); goto out;
+            g_free(filename); g_free(stored); goto out;
         }
         close(install.roots); install.roots = -1;
         int consumed = receipt_shard_present ?
             latcd_cache_capacity_page_remove_checked(schedule, filename, &receipt_shard, consume_budget) :
             latcd_cache_capacity_page_sync_absent(schedule, filename, consume_budget);
         close(schedule); g_free(filename);
-        if (consumed) goto out;
+        if (consumed) { g_free(stored); goto out; }
+        if (record_write_fault("retry-receipt-unlinked")) { g_free(stored); goto out; }
+        unsigned index = stored->completed;
+        stored->deletion_intent = false;
+        stored->deleted[index] = true;
+        stored->completed++;
+        char *data = NULL; size_t size = 0;
+        GKeyFile *record = g_key_file_new();
+        int written = latcd_retirement_retry_page_encode(stored, &data, &size) ||
+            !g_key_file_load_from_data(record, data, size, 0, NULL) ||
+            write_record_kind(gc, "retirement-page.ini", record, true, false, false, consume_budget, NULL);
+        g_key_file_unref(record); g_free(data); g_free(stored);
+        if (written) {
+            latcd_cache_capacity_page_uncertain(consume_budget->capacity, consume_budget);
+            goto out;
+        }
     }
     if (receipts) {
         for (unsigned i = 0; i < queue->retry_count; i++)

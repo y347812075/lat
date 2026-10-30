@@ -7662,6 +7662,30 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         assert(!latcd_retirement_retry_page_restore_budget(root, &receipt_capacity, UINT64_MAX, 1,
                                                            &receipt_budget, receipt_page, error, sizeof(error)) &&
                !latcd_cache_capacity_recovery_finish(&receipt_capacity));
+        pid_t receipt_child = fork();
+        assert(receipt_child >= 0);
+        if (!receipt_child) {
+            LatcdRetirementQueue *crash_queue = latcd_retirement_queue_new(root, 1);
+            assert(!latcd_retirement_queue_retry_receipt_resume(crash_queue, &receipt_budget, error, sizeof(error)));
+            int step;
+            do { step = latcd_retirement_queue_step(crash_queue, 32, 10000, &receipt_stats, error, sizeof(error)); }
+            while (step > 0);
+            assert(step < 0 && !setenv("LATCD_TEST_RETIREMENT_IO", "crash:retry-receipt-unlinked", 1));
+            latcd_retirement_queue_retry_receipt_consume(crash_queue, &receipt_budget, error, sizeof(error));
+            _exit(1);
+        }
+        int receipt_status;
+        assert(waitpid(receipt_child, &receipt_status, 0) == receipt_child &&
+               WIFSIGNALED(receipt_status) && WTERMSIG(receipt_status) == SIGKILL);
+        latcd_cache_capacity_close(&receipt_capacity);
+        receipt_capacity = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
+        memset(&receipt_budget, 0, sizeof(receipt_budget));
+        assert(!latcd_cache_capacity_scan(&receipt_capacity, root, error, sizeof(error)));
+        assert(!latcd_cache_capacity_recovery_begin(&receipt_capacity));
+        latcd_cache_capacity_metadata_bind(&receipt_capacity, UINT64_MAX);
+        assert(!latcd_retirement_retry_page_restore_budget(root, &receipt_capacity, UINT64_MAX, 1,
+                                                           &receipt_budget, receipt_page, error, sizeof(error)) &&
+               receipt_page->deletion_intent && !latcd_cache_capacity_recovery_finish(&receipt_capacity));
         receipt_queue = latcd_retirement_queue_new(root, 1);
         assert(!latcd_retirement_queue_retry_receipt_resume(receipt_queue, &receipt_budget, error, sizeof(error)));
         do {
@@ -7670,6 +7694,8 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         assert(queued < 0 && !latcd_retirement_queue_retry_receipt_consume(
             receipt_queue, &receipt_budget, error, sizeof(error)) && access(receipt_shard, F_OK) < 0 && errno == ENOENT);
         latcd_retirement_queue_free(receipt_queue);
+        assert(!latcd_retirement_retry_page_load(root, receipt_page, error, sizeof(error)) &&
+               receipt_page->completed == 1 && receipt_page->deleted[0] && !receipt_page->deletion_intent);
         assert(latcd_retirement_retry_page_commit(root, &receipt_budget, error, sizeof(error)) < 0);
         latcd_cache_capacity_close(&receipt_capacity);
         for (unsigned variant = 0; variant < 2; variant++) {
@@ -7686,15 +7712,7 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
                        latcd_cache_capacity_recovery_finish(&receipt_capacity) < 0);
             } else {
                 assert(!restored && !latcd_cache_capacity_recovery_finish(&receipt_capacity));
-                receipt_queue = latcd_retirement_queue_new(root, 1);
-                assert(!latcd_retirement_queue_retry_receipt_resume(receipt_queue, &receipt_budget, error, sizeof(error)));
-                do {
-                    queued = latcd_retirement_queue_step(receipt_queue, 32, 10000, &receipt_stats, error, sizeof(error));
-                } while (queued > 0);
-                assert(queued < 0 && !latcd_retirement_queue_retry_receipts_revalidate(
-                    receipt_queue, receipts, &receipt_count, error, sizeof(error)) && receipt_count == 1 && receipts[0]);
                 assert(latcd_retirement_retry_page_commit(root, &receipt_budget, error, sizeof(error)) < 0);
-                latcd_retirement_queue_free(receipt_queue);
             }
             latcd_cache_capacity_close(&receipt_capacity);
             if (variant) shard_data[0] ^= 1;
