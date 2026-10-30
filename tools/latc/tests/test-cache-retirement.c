@@ -8336,6 +8336,11 @@ static void test_page_execution_restriction(void)
     invalid.busy_observation_durable = false;
     assert(latcd_retirement_page_wait_busy(root, &budget, 0, &invalid,
                                             simulated_boottime_us, error, sizeof(error)) < 0);
+    invalid = report;
+    invalid.attempt_started_boottime_us = simulated_boottime_us + 1;
+    assert(latcd_retirement_page_wait_busy(root, &budget, 0, &invalid,
+                                            simulated_boottime_us, error, sizeof(error)) < 0);
+    assert(report.attempt_started_boottime_us == simulated_boottime_us);
     assert(!latcd_retirement_page_wait_busy(root, &budget, 0, &report,
                                              simulated_boottime_us, error, sizeof(error)));
     assert(latcd_retirement_page_wait_busy(root, &budget, 0, &report,

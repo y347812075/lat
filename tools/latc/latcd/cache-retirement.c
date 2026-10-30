@@ -6645,6 +6645,7 @@ int latcd_retirement_page_wait_busy(const char *root, LatcdPageBudget *budget,
     if (!root || !budget || !budget->capacity || budget->invalid ||
         !budget->page_identity_bound || !report || !report->busy_observation_durable ||
         !report->scheduler_deferral_durable || !report->attempt_sequence ||
+        !report->attempt_started_boottime_us || report->attempt_started_boottime_us > now_us ||
         report->object_unlinked || report->namespace_durable || report->receipt_durable ||
         report->scheduler_busy_count != 1 || report->retry_at_boottime_us <= now_us ||
         report->retry_at_boottime_us - now_us > RETIREMENT_BUSY_MAX_US)
@@ -7537,6 +7538,7 @@ out:
     if (report) {
         g_strlcpy(report->attempt_name, attempt.name, sizeof(report->attempt_name));
         report->attempt_sequence = attempt.sequence;
+        report->attempt_started_boottime_us = queue->execution_started;
     }
     if (result == 2) return 2;
     if (!result && record_write_fault("before-scheduler-checkpoint")) {

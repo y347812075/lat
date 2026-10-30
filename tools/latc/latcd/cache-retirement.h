@@ -510,7 +510,7 @@ typedef struct LatcdRetirementDeletionReport {
     /* Queue checkpoint only, not a page-bound deferral or deletion authority. */
     bool scheduler_deferral_durable;
     char attempt_name[138];
-    uint64_t attempt_sequence, retry_at_boottime_us;
+    uint64_t attempt_sequence, attempt_started_boottime_us, retry_at_boottime_us;
     unsigned scheduler_busy_count;
 } LatcdRetirementDeletionReport;
 
