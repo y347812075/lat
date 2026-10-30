@@ -5449,6 +5449,9 @@ struct LatcdRetirementQueue {
     bool receipt_resume;
     bool receipt_next_scan;
     bool receipt_completed_scan;
+    bool page_receipt_scan;
+    LatcdRetirementPageDeadline page_receipt_entry;
+    uint8_t page_receipt_binding[32];
     uint8_t receipt_page_identity[32], receipt_expected[32], receipt_shard_digest[32];
     uint8_t receipt_completed_digest[128][32];
     uint64_t receipt_shard_sequence;
@@ -6309,6 +6312,80 @@ static int retry_install_lock(void *opaque)
         !directory_matches_at(context->gc, "tombstones", context->tombstones) ||
         !queue_watch_clean(queue->discovery_watch)) return -1;
     return 0;
+}
+
+int latcd_retirement_queue_page_receipt_begin(LatcdRetirementQueue *queue,
+    LatcdPageBudget *budget, unsigned index, char *error, size_t error_size)
+{
+    if (!queue || !budget || !budget->capacity || !budget->page_identity_bound)
+        return fail(error, error_size, "missing page receipt budget");
+    int scheduler = scheduler_lock(queue->root, error, error_size);
+    LatcdRetirementPageState page;
+    uint8_t identity[32]; bool legacy = false;
+    int result = -1;
+    if (scheduler < 0) return -1;
+    if (page_state_load(queue->root, &page, &legacy, error, error_size) || legacy ||
+        !page.budget_bound || page.committed_pending || index >= page.count ||
+        page.grace_us != queue->grace || latcd_retirement_page_budget_identity(&page, identity) ||
+        memcmp(identity, budget->page_identity, 32) ||
+        latcd_retirement_queue_diagnostic_retry(queue, page.boot, page.round_cutoff,
+                                                 &page.entries[index], 1)) goto out;
+    queue->page_receipt_entry = page.entries[index];
+    memcpy(queue->page_receipt_binding, identity, 32);
+    queue->page_receipt_scan = true;
+    result = 0;
+out:
+    close(scheduler);
+    return result ? fail(error, error_size, "cannot begin page receipt discovery") : 0;
+}
+
+int latcd_retirement_queue_page_receipt_done(LatcdRetirementQueue *queue,
+    LatcdPageBudget *budget, char *error, size_t error_size)
+{
+    if (!queue || !queue->page_receipt_scan || !queue->retry_witness || !queue->cursor ||
+        !budget || !budget->capacity || !budget->page_identity_bound ||
+        memcmp(budget->page_identity, queue->page_receipt_binding, 32))
+        return fail(error, error_size, "missing page receipt witness");
+    queue->retry_witness = false;
+    const char *name = queue->page_receipt_entry.name;
+    if (!g_hash_table_contains(queue->removed_second, name) ||
+        g_hash_table_contains(queue->confirmed_keys, name) ||
+        g_hash_table_contains(queue->retry_transaction_roots, name))
+        return fail(error, error_size, "page receipt not established");
+    int scheduler = scheduler_lock(queue->root, error, error_size);
+    int root = -1, gc = -1, store = -1, tombstones = -1, result = -1;
+    char *boot = NULL; uint64_t now = 0;
+    struct stat cache, path, transactions, tombstone_stat;
+    RetryInstallContext install = {.queue = queue, .roots = -1, .error = error, .error_size = error_size};
+    if (scheduler < 0) goto out;
+    root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    gc = root < 0 ? -1 : open_directory(root, ".gc", false);
+    store = root < 0 ? -1 : open_store(root, false);
+    tombstones = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
+    if (!same_directory(scheduler, gc) || !queue_bind_root(queue, root) ||
+        store < 0 || tombstones < 0 || fstat(root, &cache) || lstat(queue->root, &path) ||
+        !object_stat_equal(&cache, &path) || !directory_matches_at(root, ".gc", gc) ||
+        fstat(store, &transactions) || fstat(tombstones, &tombstone_stat) ||
+        !object_stat_equal(&queue->discovery_store, &transactions) ||
+        !same_directory(store, dirfd(queue->cursor)) ||
+        !object_stat_equal(&queue->discovery_tombstone_store, &tombstone_stat) ||
+        !same_directory(tombstones, queue->discovery_tombstones) ||
+        retirement_clock(&boot, &now) || strcmp(boot, queue->diagnostic_boot) ||
+        now < queue->diagnostic_last_time || !queue_watch_clean(queue->discovery_watch)) goto out;
+    install.scheduler = scheduler; install.root = root; install.gc = gc;
+    install.store = store; install.tombstones = tombstones; install.cache = cache;
+    result = page_budget_result_locked(queue->root, now, queue->page_receipt_binding,
+        budget, &queue->page_receipt_entry, LATCD_RETIREMENT_RESULT_DONE, true,
+        scheduler, retry_install_lock, &install, error, error_size);
+out:
+    if (install.roots >= 0) close(install.roots);
+    if (tombstones >= 0) close(tombstones);
+    if (store >= 0) close(store);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    if (scheduler >= 0) close(scheduler);
+    g_free(boot);
+    return result ? fail(error, error_size, "page receipt result unsafe") : 0;
 }
 
 static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatched, bool stage_receipt,

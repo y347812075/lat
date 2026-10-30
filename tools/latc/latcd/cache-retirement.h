@@ -571,6 +571,13 @@ int latcd_retirement_queue_retry_matches(const LatcdRetirementQueue *queue,
  * deletion, DONE results, or schedule-shard consumption. */
 int latcd_retirement_queue_retry_receipts(const LatcdRetirementQueue *queue,
     bool receipts[128], unsigned *count);
+/* Owner lease and controlled readers, writers and mounts required throughout.
+ * Scan one in-flight page member, then persist DONE only with its retained
+ * two-pass receipt witness. Neither entry provides domain admission. */
+int latcd_retirement_queue_page_receipt_begin(LatcdRetirementQueue *queue,
+    struct LatcdPageBudget *budget, unsigned index, char *error, size_t error_size);
+int latcd_retirement_queue_page_receipt_done(LatcdRetirementQueue *queue,
+    struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Consumes the witness after locked revalidation. Locks are released before
  * return; the output is diagnostic, not durable or removal authority. */
 int latcd_retirement_queue_retry_receipts_revalidate(LatcdRetirementQueue *queue,
