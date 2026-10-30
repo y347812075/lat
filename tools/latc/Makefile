@@ -73,6 +73,14 @@ test-broker-transport: $(BUILD)/tests/test-broker-transport
 	$(BUILD)/tests/test-broker-transport
 test: test-broker-transport
 
+$(BUILD)/tests/test-broker-source: tests/test-broker-source.c latcd/broker-source.c latcd/source-elf.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+.PHONY: test-broker-source
+test-broker-source: $(BUILD)/tests/test-broker-source $(BUILD)/tests/x86-exit42
+	$(BUILD)/tests/test-broker-source $(BUILD)/tests/x86-exit42
+test: test-broker-source
+
 test-native-config-replay:
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)" || \
 	  { echo "usage: make test-native-config-replay INSTALL_PREFIX=... X86_GUEST=... TBSET=... WORK=..."; exit 2; }
