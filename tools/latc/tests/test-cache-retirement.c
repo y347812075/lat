@@ -8080,6 +8080,77 @@ static void publish_page_fixture(const char *root, unsigned id)
     g_free(evidence); g_free(current); g_free(previous); g_free(next_manifest); g_free(src);
 }
 
+static void test_retry_multiple_receipts(void)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    simulated_boottime_us = 100;
+    for (unsigned i = 7; i < 9; i++) {
+        publish_page_fixture(root, i);
+        char *src = g_strdup_printf("%064x", i);
+        char *name = g_strconcat(src, ".so", NULL);
+        char *path = g_build_filename(root, name, NULL);
+        const char *objects[] = {name};
+        char *evidence = latcd_retirement_capture_objects(root, src, objects, 1);
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        assert(evidence && fd >= 0 && !latcd_retirement_tombstone(root, src, name, fd, evidence, error, sizeof(error)));
+        close(fd);
+        assert(!latcd_tombstone_delete_due(root, name, 0, error, sizeof(error)));
+        g_free(evidence); g_free(path); g_free(name); g_free(src);
+    }
+    simulated_boottime_us = 101;
+    LatcdRetirementPageState state;
+    assert(!latcd_retirement_page_round_begin(root, 1, &state, error, sizeof(error)));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    char *schedule = g_build_filename(root, ".gc", "retirement-schedule", NULL);
+    assert(!mkdir(schedule, 0700));
+    for (unsigned i = 7; i < 9; i++) {
+        LatcdRetirementPageDeadline hint = {.enqueued = 100, .retry_at = 100};
+        snprintf(hint.name, sizeof(hint.name), "%064x.so", i);
+        assert(!latcd_retirement_schedule_store(root, boot, 1, 101, 3, &hint, error, sizeof(error)));
+    }
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget budget = {0};
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 1);
+    LatcdRetirementQueueStats stats; int step;
+    assert(latcd_retirement_queue_retry_begin(queue, error, sizeof(error)) == 1);
+    do { step = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); } while (step > 0);
+    assert(step < 0 && !latcd_retirement_queue_retry_page_stage(queue, &capacity, UINT64_MAX, &budget, error, sizeof(error)));
+    latcd_retirement_queue_free(queue);
+    LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
+    for (unsigned i = 0; i < 2; i++) {
+        queue = latcd_retirement_queue_new(root, 1);
+        assert(!latcd_retirement_queue_retry_receipt_next(queue, &budget, error, sizeof(error)));
+        do { step = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); } while (step > 0);
+        assert(step < 0 && !latcd_retirement_queue_retry_receipt_stage_next(queue, &budget, error, sizeof(error)));
+        latcd_retirement_queue_free(queue);
+        queue = latcd_retirement_queue_new(root, 1);
+        assert(!latcd_retirement_queue_retry_receipt_resume(queue, &budget, error, sizeof(error)));
+        do { step = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); } while (step > 0);
+        assert(step < 0 && !latcd_retirement_queue_retry_receipt_consume(queue, &budget, error, sizeof(error)));
+        latcd_retirement_queue_free(queue);
+        latcd_cache_capacity_close(&capacity);
+        capacity = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
+        memset(&budget, 0, sizeof(budget));
+        assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+        assert(!latcd_cache_capacity_recovery_begin(&capacity));
+        latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+        assert(!latcd_retirement_retry_page_restore_budget(root, &capacity, UINT64_MAX, 1, &budget, page, error, sizeof(error)) &&
+               page->completed == i + 1 && !latcd_cache_capacity_recovery_finish(&capacity));
+    }
+    queue = latcd_retirement_queue_new(root, 1);
+    assert(!latcd_retirement_queue_retry_completed_resume(queue, &budget, error, sizeof(error)));
+    do { step = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); } while (step > 0);
+    assert(step < 0 && !latcd_retirement_queue_retry_completed_commit(queue, &budget, error, sizeof(error)));
+    assert(!latcd_retirement_page_state_load(root, &state, error, sizeof(error)) &&
+           !strcmp(state.retry_cursor, page->items[1].hint.name));
+    latcd_retirement_queue_free(queue); latcd_cache_capacity_close(&capacity);
+    g_free(page); g_free(schedule); g_free(boot); simulated_boottime_us = 0;
+    remove_root(root); g_free(root);
+}
+
 static void make_startup_retry_fixture(const char *root, unsigned phase)
 {
     const uint64_t grace = UINT64_C(600) * 1000000;
@@ -9053,6 +9124,7 @@ int main(int argc, char **argv)
     test_queue_overflow_fixture();
     test_retry_not_due(false);
     test_retry_not_due(true);
+    test_retry_multiple_receipts();
     test_page_round_insertions();
     test_deletion_report(NULL, false);
     test_roots_latch();
