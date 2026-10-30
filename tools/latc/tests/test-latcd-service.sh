@@ -90,6 +90,13 @@ stop_service()
     server_pid=
 }
 
+start_service admin-socket-replaced "$latc"
+wait_stats 's["retirement_discovery_complete"]'
+rm "$socket"
+printf 'replacement\n' > "$socket"
+stop_service
+test "$(cat "$socket")" = replacement
+
 for retry_mode in fixture intent applied; do
 start_service "startup-retry-$retry_mode" "$latc"
 stop_service

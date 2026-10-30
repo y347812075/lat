@@ -6082,8 +6082,31 @@ static void finish_flush_requests(LatcdService *service, GPtrArray *pending,
     }
 }
 
-static int make_server(const char *path, char *error, size_t error_size)
+typedef struct LatcdAdminSocket {
+    int directory;
+    char *name;
+    dev_t device;
+    ino_t inode;
+} LatcdAdminSocket;
+
+static void close_admin_socket(LatcdAdminSocket *socket)
 {
+    struct stat status;
+    if (socket->directory >= 0 && socket->name &&
+        !fstatat(socket->directory, socket->name, &status, AT_SYMLINK_NOFOLLOW) &&
+        S_ISSOCK(status.st_mode) && status.st_dev == socket->device &&
+        status.st_ino == socket->inode)
+        unlinkat(socket->directory, socket->name, 0);
+    if (socket->directory >= 0) close(socket->directory);
+    g_free(socket->name);
+    socket->directory = -1;
+    socket->name = NULL;
+}
+
+static int make_server(const char *path, LatcdAdminSocket *owned,
+                       char *error, size_t error_size)
+{
+    *owned = (LatcdAdminSocket) {.directory = -1};
     char *parent = g_path_get_dirname(path);
     struct stat parent_status;
     if (lstat(parent, &parent_status) || !S_ISDIR(parent_status.st_mode) ||
@@ -6124,9 +6147,22 @@ static int make_server(const char *path, char *error, size_t error_size)
         fail(error, error_size, "cannot listen on %s: %s", path,
              strerror(errno));
         close(fd);
-        unlink(path);
         return -1;
     }
+    char *directory = g_path_get_dirname(path);
+    owned->name = g_path_get_basename(path);
+    owned->directory = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    g_free(directory);
+    if (owned->directory < 0 || fstatat(owned->directory, owned->name, &status, AT_SYMLINK_NOFOLLOW) ||
+        !S_ISSOCK(status.st_mode) || status.st_uid != geteuid()) {
+        fail(error, error_size, "cannot bind admin socket identity");
+        close(fd);
+        if (owned->directory >= 0) close(owned->directory);
+        g_free(owned->name);
+        owned->directory = -1; owned->name = NULL;
+        return -1;
+    }
+    owned->device = status.st_dev; owned->inode = status.st_ino;
     return fd;
 }
 
@@ -6230,7 +6266,8 @@ static void precompile_request_worker(gpointer data, gpointer user_data)
 static int run_once(const LatcdConfig *config)
 {
     char error[256] = {0};
-    int server = make_server(config->socket_path, error, sizeof(error));
+    LatcdAdminSocket owned;
+    int server = make_server(config->socket_path, &owned, error, sizeof(error));
     if (server < 0) {
         fprintf(stderr, "latcd: %s\n", error);
         return 1;
@@ -6276,7 +6313,7 @@ static int run_once(const LatcdConfig *config)
         close(tbset);
     }
     close(server);
-    unlink(config->socket_path);
+    close_admin_socket(&owned);
     return response.status == LATCD_STATUS_OK ? 0 : 1;
 }
 
@@ -6431,7 +6468,8 @@ static int run_service(const LatcdConfig *config)
         fprintf(stderr, "latcd: recovered %u journal streams; receipt admission pending\n",
                 recovered_journals);
     }
-    int server = make_server(config->socket_path, error, sizeof(error));
+    LatcdAdminSocket owned;
+    int server = make_server(config->socket_path, &owned, error, sizeof(error));
     if (server < 0) {
         fprintf(stderr, "latcd: %s\n", error);
         return 1;
@@ -6488,7 +6526,7 @@ static int run_service(const LatcdConfig *config)
             pthread_join(service.workers[i], NULL);
         }
         close(server);
-        unlink(config->socket_path);
+        close_admin_socket(&owned);
         g_free(worker_args);
         g_free(service.workers);
         g_ptr_array_free(service.queue, TRUE);
@@ -6822,7 +6860,7 @@ static int run_service(const LatcdConfig *config)
         close(channels[i].fd);
     }
     close(server);
-    unlink(config->socket_path);
+    close_admin_socket(&owned);
     finish_flush_requests(&service, pending_flushes, true);
     g_ptr_array_free(pending_flushes, TRUE);
     if (precompile_pool) {
