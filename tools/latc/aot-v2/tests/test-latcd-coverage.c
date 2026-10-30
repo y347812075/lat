@@ -496,6 +496,32 @@ static void test_broker_export_request(void)
             g_assert_cmpint(broker_worker_submit(&worker, owned, &request,
                 g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND, &generation), ==, 0);
             broker_worker_stop(&worker);
+            int broker_dir = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            g_assert_cmpint(broker_dir, >=, 0);
+            LatcdBrokerServer broker;
+            g_assert_cmpint(broker_server_start(&broker, &config, broker_dir, "broker.sock",
+                                                getuid(), 10 * G_TIME_SPAN_SECOND), ==, 0);
+            struct sockaddr_un address = {.sun_family = AF_UNIX};
+            g_assert_cmpint(snprintf(address.sun_path, sizeof(address.sun_path),
+                "/proc/self/fd/%d/broker.sock", broker_dir), <, (int)sizeof(address.sun_path));
+            int client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+            g_assert_cmpint(client, >=, 0);
+            g_assert_cmpint(latcd_broker_peer(client, getuid(), &peer_uid, &peer_gid), ==, -1);
+            g_assert_cmpint(connect(client, (struct sockaddr *)&address, sizeof(address)), ==, 0);
+            g_assert_cmpint(latcd_broker_peer(client, getuid(), &peer_uid, &peer_gid), ==, 0);
+            g_assert_cmpint(latcd_broker_send(client, &request, sizeof(request), source), ==, 0);
+            output = -1;
+            for (unsigned retry = 0; retry < 1000; retry++) {
+                g_assert_cmpint(broker_server_step(&broker), ==, 0);
+                if (!latcd_broker_receive(client, peer_uid, peer_gid, &done, sizeof(done), &output)) break;
+                g_assert_true(errno == EAGAIN || errno == EWOULDBLOCK);
+                g_usleep(1000);
+            }
+            g_assert_cmpint(output, >=, 0);
+            g_assert_cmpint(done.status, ==, 0); close(output); close(client);
+            broker_server_stop(&broker);
+            g_assert_cmpint(faccessat(broker_dir, "broker.sock", F_OK, 0), ==, -1);
+            close(broker_dir);
         }
         if (attempt == 2) request.source_sha256[0] ^= 1;
         int sockets[2]; uid_t uid; gid_t gid;

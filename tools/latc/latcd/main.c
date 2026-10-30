@@ -3903,6 +3903,74 @@ static int G_GNUC_UNUSED broker_connection_reap(LatcdBrokerConnection *connectio
     return 0;
 }
 
+#define LATCD_BROKER_CONNECTIONS 8
+typedef struct LatcdBrokerServer {
+    LatcdBrokerListener listener;
+    LatcdBrokerWorker worker;
+    LatcdBrokerConnection connections[LATCD_BROKER_CONNECTIONS];
+    bool used[LATCD_BROKER_CONNECTIONS];
+    uid_t client_uid;
+    int64_t timeout_us;
+} LatcdBrokerServer;
+
+static int G_GNUC_UNUSED broker_server_start(LatcdBrokerServer *server,
+    const LatcdConfig *config, int directory, const char *name, uid_t uid, int64_t timeout_us)
+{
+    memset(server, 0, sizeof(*server));
+    if (timeout_us <= 0 || timeout_us > G_TIME_SPAN_HOUR) { errno = EINVAL; return -1; }
+    if (latcd_broker_listener_open(&server->listener, directory, name)) return -1;
+    if (broker_worker_start(&server->worker, config)) {
+        int saved = errno; latcd_broker_listener_close(&server->listener); errno = saved; return -1;
+    }
+    server->client_uid = uid;
+    server->timeout_us = timeout_us;
+    return 0;
+}
+
+/* Nonblocking service step; the owning event loop supplies the wakeup cadence. */
+static int G_GNUC_UNUSED broker_server_step(LatcdBrokerServer *server)
+{
+    for (unsigned accepted = 0; accepted < LATCD_BROKER_CONNECTIONS; accepted++) {
+        int fd = accept4(server->listener.fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        if (fd < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) break;
+            return -1;
+        }
+        unsigned slot;
+        for (slot = 0; slot < LATCD_BROKER_CONNECTIONS && server->used[slot]; slot++) {}
+        if (slot == LATCD_BROKER_CONNECTIONS || broker_connection_open(
+                &server->connections[slot], fd, server->client_uid,
+                g_get_monotonic_time() + server->timeout_us)) { close(fd); continue; }
+        server->used[slot] = true;
+    }
+    for (unsigned i = 0; i < LATCD_BROKER_CONNECTIONS; i++) {
+        if (!server->used[i]) continue;
+        LatcdBrokerConnection *connection = &server->connections[i];
+        if (connection->fd >= 0) {
+            struct pollfd peer = {.fd = connection->fd, .events = POLLIN};
+            int ready = poll(&peer, 1, 0);
+            if (ready > 0 && (peer.revents & (POLLERR | POLLHUP | POLLNVAL)))
+                broker_connection_close(connection);
+            else if (broker_connection_step(connection, &server->worker) <= 0)
+                broker_connection_close(connection);
+        }
+        if (connection->fd < 0) {
+            int result = broker_connection_reap(connection, &server->worker);
+            if (result < 0) return -1;
+            if (!result) server->used[i] = false;
+        }
+    }
+    return 0;
+}
+
+static void G_GNUC_UNUSED broker_server_stop(LatcdBrokerServer *server)
+{
+    for (unsigned i = 0; i < LATCD_BROKER_CONNECTIONS; i++)
+        if (server->used[i]) broker_connection_close(&server->connections[i]);
+    broker_worker_stop(&server->worker);
+    latcd_broker_listener_close(&server->listener);
+}
+
 static int G_GNUC_UNUSED broker_export_request(const LatcdConfig *config,
                                                 int socket_fd, uid_t client_uid)
 {
