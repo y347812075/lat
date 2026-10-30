@@ -134,6 +134,8 @@ $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
 		$(BUILD)/latcd/parson/parson.o \
 		$(BUILD)/aot-v2/runtime/cache-domain.o
 
+$(BUILD)/latcd/latcd $(BUILD)/tests/test-journal-store $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/source-elf.o
+
 $(BUILD)/tests/cache-capacity-testing.o: latcd/cache-capacity.c latcd/cache-capacity.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DLATCD_CAPACITY_TESTING -MMD -MP -c -o $@ $<

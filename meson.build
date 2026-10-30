@@ -665,6 +665,7 @@ if 'CONFIG_LATX' in config_host
     'latcd',
     files(
       'tools/latc/latcd/main.c',
+      'tools/latc/latcd/source-elf.c',
       'tools/latc/latcd/protocol.c',
       'tools/latc/latcd/precompile.c',
       'tools/latc/latcd/journal-store.c',

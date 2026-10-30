@@ -12,6 +12,7 @@
 #include "journal-store.h"
 #include "cache-retirement.h"
 #include "cache-capacity.h"
+#include "source-elf.h"
 
 #include <dlfcn.h>
 #include <dirent.h>
@@ -686,44 +687,6 @@ static int acquire_cache_owner(const LatcdConfig *config, char *error,
     return fd;
 }
 
-static int validate_x86_elf(int fd, uint64_t file_size, char *error,
-                            size_t error_size)
-{
-    Elf64_Ehdr header;
-    if (file_size < sizeof(header) ||
-        pread(fd, &header, sizeof(header), 0) != sizeof(header)) {
-        return fail(error, error_size, "source is too small for an ELF header");
-    }
-    if (memcmp(header.e_ident, ELFMAG, SELFMAG) ||
-        header.e_ident[EI_CLASS] != ELFCLASS64 ||
-        header.e_ident[EI_DATA] != ELFDATA2LSB ||
-        header.e_machine != EM_X86_64 ||
-        (header.e_type != ET_EXEC && header.e_type != ET_DYN) ||
-        header.e_phentsize != sizeof(Elf64_Phdr) || !header.e_phnum ||
-        header.e_phoff > file_size ||
-        header.e_phnum > (file_size - header.e_phoff) / sizeof(Elf64_Phdr)) {
-        return fail(error, error_size,
-                    "source is not a supported x86-64 executable ELF");
-    }
-    int executable_load = 0;
-    for (uint16_t i = 0; i < header.e_phnum; i++) {
-        Elf64_Phdr program;
-        off_t offset = header.e_phoff + (off_t)i * sizeof(program);
-        if (pread(fd, &program, sizeof(program), offset) != sizeof(program) ||
-            program.p_offset > file_size ||
-            program.p_filesz > file_size - program.p_offset) {
-            return fail(error, error_size, "source ELF program headers are invalid");
-        }
-        if (program.p_type == PT_LOAD && (program.p_flags & PF_X)) {
-            executable_load = 1;
-        }
-    }
-    if (!executable_load) {
-        return fail(error, error_size, "source ELF has no executable PT_LOAD");
-    }
-    return 0;
-}
-
 static int metadata_equal(const struct stat *before, const struct stat *after)
 {
     return before->st_dev == after->st_dev &&
@@ -749,7 +712,7 @@ static int snapshot_source_copy(int source_fd, const char *temporary_dir,
         return fail(error, error_size,
                     "source descriptor must be a bounded read-only regular file");
     }
-    if (validate_x86_elf(source_fd, before.st_size, error, error_size)) {
+    if (latcd_validate_x86_elf(source_fd, before.st_size, error, error_size)) {
         return -1;
     }
     char *path = anonymous_fd ? NULL : g_build_filename(temporary_dir, "source-XXXXXX", NULL);
@@ -848,7 +811,7 @@ static int hash_source(int source_fd, uint64_t max_input, uint8_t digest[32],
         return fail(error, error_size,
                     "source descriptor must be a bounded read-only regular file");
     }
-    if (validate_x86_elf(source_fd, before.st_size, error, error_size)) {
+    if (latcd_validate_x86_elf(source_fd, before.st_size, error, error_size)) {
         return -1;
     }
     GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
