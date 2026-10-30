@@ -8400,6 +8400,19 @@ static void test_page_receipt_witness(unsigned mode)
     latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
     assert(!latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
                                                   &budget, error, sizeof(error)));
+    if (mode == 3) {
+        latcd_cache_capacity_close(&capacity);
+        capacity = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
+        memset(&budget, 0, sizeof(budget));
+        assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+        latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+        assert(!latcd_cache_capacity_recovery_begin(&capacity));
+        LatcdRetirementPageState recovered;
+        assert(!latcd_retirement_page_restore_budget(root, &capacity, UINT64_MAX, 1,
+                                                     &budget, &recovered, error, sizeof(error)));
+        assert(!latcd_cache_capacity_recovery_finish(&capacity));
+        assert(recovered.count == 1 && recovered.budget_bound && !recovered.committed_pending);
+    }
     LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 1);
     LatcdRetirementQueueStats stats; int step;
     assert(!latcd_retirement_queue_page_receipt_begin(queue, &budget, 0, error, sizeof(error)));
