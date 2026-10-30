@@ -9477,8 +9477,11 @@ int main(int argc, char **argv)
         puts(LATC_BUILD_ID);
         return 0;
     }
-    if (argc == 3 && !strcmp(argv[1], "--timer-fixture")) {
+    if (argc == 3 && (!strcmp(argv[1], "--timer-fixture") ||
+                      !strcmp(argv[1], "--aged-timer-fixture"))) {
+        if (!strcmp(argv[1], "--aged-timer-fixture")) simulated_boottime_us = 1;
         publish_page_fixture(argv[2], 7);
+        simulated_boottime_us = 0;
         char digest[65], error[256];
         snprintf(digest, sizeof(digest), "%064x", 7);
         int fd = lat_aot_v2_cache_source_lock(argv[2], digest, LOCK_SH | LOCK_NB,

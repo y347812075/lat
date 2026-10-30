@@ -67,6 +67,22 @@ test "$(grep -c 'retirement discovery stopped:' "$work/server.err")" -eq 1
 old=$cache/$(printf '%064x' 7)
 test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
 stop
+cache=$work/production-blocked-cache
+socket=$work/production-blocked.sock
+stats=$work/production-blocked-stats.json
+mkdir -m 700 "$cache"
+start
+wait_stats 's["retirement_discovery_complete"]'
+"$fixture" --aged-timer-fixture "$cache"
+n=0
+while ! grep -q 'retirement page blocked: controlled access and complete roots unavailable' "$work/server.err"; do
+    kill -0 "$pid"; n=$((n + 1)); [ "$n" -lt 300 ]; sleep 0.05
+done
+old=$cache/$(printf '%064x' 7)
+test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
+test ! -e "$cache/.gc/retirement-page.ini"
+test "$(grep -c 'retirement page blocked:' "$work/server.err")" -eq 1
+stop
 test_daemon=$test_daemon_saved
 for fault in unlinked unlink-synced; do
     cache=$work/object-$fault-cache
