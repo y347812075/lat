@@ -56,6 +56,15 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 
 all: $(BUILD)/latc $(BUILD)/latcd/latcd $(BUILD)/liblatc_cfg.a
 
+$(BUILD)/tests/test-cache-export: tests/test-cache-export.c latcd/cache-export.c latcd/cache-export.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test-cache-export.c latcd/cache-export.c $(LDLIBS)
+
+.PHONY: test-cache-export
+test-cache-export: $(BUILD)/tests/test-cache-export
+	$(BUILD)/tests/test-cache-export
+test: test-cache-export
+
 test-native-config-replay:
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)" || \
 	  { echo "usage: make test-native-config-replay INSTALL_PREFIX=... X86_GUEST=... TBSET=... WORK=..."; exit 2; }
