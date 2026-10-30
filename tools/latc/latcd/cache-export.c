@@ -12,7 +12,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-int latcd_cache_export_copy(int source, const char *sha256, uint64_t max_bytes)
+int latcd_cache_export_copy_bounded(int source, const char *sha256, uint64_t max_bytes,
+                                    int64_t deadline_us, LatcdBrokerCancelled cancelled,
+                                    void *opaque)
 {
     struct stat before, after;
     if (source < 0 || !sha256 || strlen(sha256) != 64 ||
@@ -31,6 +33,10 @@ int latcd_cache_export_copy(int source, const char *sha256, uint64_t max_bytes)
     off_t position = 0;
     bool valid = checksum != NULL;
     while (valid && position < before.st_size) {
+        if ((cancelled && cancelled(opaque)) ||
+            (deadline_us && g_get_monotonic_time() >= deadline_us)) {
+            errno = ECANCELED; valid = false; break;
+        }
         size_t wanted = MIN(sizeof(buffer), (uint64_t)(before.st_size - position));
         ssize_t count = pread(source, buffer, wanted, position);
         if (count < 0 && errno == EINTR) continue;
@@ -54,4 +60,9 @@ int latcd_cache_export_copy(int source, const char *sha256, uint64_t max_bytes)
     if (checksum) g_checksum_free(checksum);
     if (!valid) { int saved = errno ? errno : EIO; close(output); errno = saved; return -1; }
     return output;
+}
+
+int latcd_cache_export_copy(int source, const char *sha256, uint64_t max_bytes)
+{
+    return latcd_cache_export_copy_bounded(source, sha256, max_bytes, 0, NULL, NULL);
 }

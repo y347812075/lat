@@ -3,12 +3,15 @@
 #endif
 #include "../latcd/broker-source.h"
 #include <assert.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <glib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+static bool cancelled(void *opaque) { return *(bool *)opaque; }
 
 int main(int argc, char **argv)
 {
@@ -26,6 +29,15 @@ int main(int argc, char **argv)
     assert(!fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL));
     assert(!latcd_broker_source_validate(fd, size, size, digest, verified, error, sizeof(error)));
     assert(!memcmp(digest, verified, sizeof(digest)));
+    bool stop = true;
+    assert(latcd_broker_source_validate_bounded(fd, size, size, digest, verified,
+        error, sizeof(error), 0, cancelled, &stop) < 0 && errno == ECANCELED);
+    for (unsigned i = 0; i < sizeof(verified); i++) assert(!verified[i]);
+    assert(latcd_broker_source_validate_bounded(fd, size, size, digest, verified,
+        error, sizeof(error), g_get_monotonic_time() - 1, NULL, NULL) < 0 && errno == ECANCELED);
+    stop = false;
+    assert(!latcd_broker_source_validate_bounded(fd, size, size, digest, verified,
+        error, sizeof(error), g_get_monotonic_time() + G_TIME_SPAN_SECOND, cancelled, &stop));
     memcpy(verified, digest, sizeof(digest));
     assert(!latcd_broker_source_validate(fd, size, size, verified, verified, error, sizeof(error)));
     assert(!memcmp(digest, verified, sizeof(digest)));

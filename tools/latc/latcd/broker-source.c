@@ -10,9 +10,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-int latcd_broker_source_validate(int fd, uint64_t size, uint64_t limit,
+int latcd_broker_source_validate_bounded(int fd, uint64_t size, uint64_t limit,
                                  const uint8_t claimed[32], uint8_t verified[32],
-                                 char *error, size_t error_size)
+                                 char *error, size_t error_size, int64_t deadline_us,
+                                 LatcdBrokerCancelled cancelled, void *opaque)
 {
     uint8_t expected[32];
     if (claimed) memcpy(expected, claimed, sizeof(expected));
@@ -32,6 +33,10 @@ int latcd_broker_source_validate(int fd, uint64_t size, uint64_t limit,
     unsigned char buffer[128 * 1024], digest[32];
     uint64_t offset = 0;
     while (offset < size) {
+        if ((cancelled && cancelled(opaque)) ||
+            (deadline_us && g_get_monotonic_time() >= deadline_us)) {
+            g_checksum_free(sum); errno = ECANCELED; return -1;
+        }
         size_t wanted = MIN(sizeof(buffer), size - offset);
         ssize_t count = pread(fd, buffer, wanted, offset);
         if (count < 0 && errno == EINTR) continue;
@@ -48,4 +53,12 @@ int latcd_broker_source_validate(int fd, uint64_t size, uint64_t limit,
     }
     memcpy(verified, digest, sizeof(digest));
     return 0;
+}
+
+int latcd_broker_source_validate(int fd, uint64_t size, uint64_t limit,
+                                 const uint8_t claimed[32], uint8_t verified[32],
+                                 char *error, size_t error_size)
+{
+    return latcd_broker_source_validate_bounded(fd, size, limit, claimed, verified,
+                                                error, error_size, 0, NULL, NULL);
 }
