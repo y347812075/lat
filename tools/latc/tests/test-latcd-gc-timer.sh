@@ -29,6 +29,15 @@ start() {
     done
 }
 stop() { kill -TERM "$pid"; wait "$pid"; pid=; }
+wait_page_consumed() {
+    n=0
+    while ! grep -q 'test waiting page consumed' "$work/server.err"; do
+        if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then
+            cat "$work/server.err" >&2; return 1
+        fi
+        n=$((n + 1)); [ "$n" -lt 600 ]; sleep 0.05
+    done
+}
 wait_stats() {
     n=0
     while ! python3 - "$stats" "$1" <<'PY' 2>/dev/null
@@ -102,7 +111,8 @@ for fault in unlinked unlink-synced; do
     pid=
     rm -f "$socket"
     LATCD_TEST_RECOVER_PAGE=1 start
-    grep -q 'latcd: test recovered page consumed' "$work/server.err"
+    wait_page_consumed
+    grep -q 'test retirement witness yielded\|test consumption recovery step=' "$work/server.err"
     old=$cache/$(printf '%064x' 7)
     test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
     python3 - "$cache" <<'PY'
@@ -136,7 +146,7 @@ for suffix in so native tbset; do
 done
 test "$remaining" -eq 2
 LATCD_TEST_RECOVER_PAGE=1 start
-grep -q 'latcd: test recovered page consumed' "$work/server.err"
+wait_page_consumed
 test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
 python3 - "$cache" <<'PY'
 import json, pathlib, sys
@@ -381,7 +391,7 @@ rm -f "$socket"
 old=$cache/$(printf '%064x' 7)
 test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
 LATCD_TEST_RECOVER_PAGE=1 start
-grep -q 'latcd: test recovered page consumed' "$work/server.err"
+wait_page_consumed
 python3 - "$cache" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1]); source = f'{7:064x}'
@@ -423,7 +433,7 @@ fi
 grep -q 'retirement page budget recovery unavailable or checkpoint unsafe' "$work/restart.err"
 test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
 LATCD_TEST_RECOVER_PAGE=1 start
-grep -q 'latcd: test recovered page consumed' "$work/server.err"
+wait_page_consumed
 test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
 stop
 cache=$work/consume-cache

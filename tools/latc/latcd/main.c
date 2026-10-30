@@ -2126,6 +2126,7 @@ typedef struct LatcdPageDriver {
     unsigned member;
     unsigned remaining;
     bool blocked_reported;
+    bool recovery_auto;
 } LatcdPageDriver;
 
 static LatcdPageDriver page_driver_state;
@@ -2435,7 +2436,8 @@ static void *compiler_input_recovery_worker(void *opaque)
     char retirement_error[256];
     bool retirement_safe = !latcd_retirement_queue_restore(retirement, retirement_error, sizeof(retirement_error));
 #ifdef LATCD_GC_TIMER_TEST
-    bool test_page_driver = getenv("LATCD_TEST_WAITING_DRIVER") != NULL;
+    bool test_page_driver = getenv("LATCD_TEST_WAITING_DRIVER") != NULL ||
+                            page_driver_state.recovery_auto;
 #else
     bool test_page_driver = true;
 #endif
@@ -7137,11 +7139,13 @@ int main(int argc, char **argv)
         page_driver_state.staged = true;
         int deferred = test_retirement_page_has_deferred(&config, error, sizeof(error));
         if (deferred < 0) budget_result = -1;
-        else if (deferred || getenv("LATCD_TEST_WAITING_DRIVER")) {
+        else {
             page_driver_state.waiting = true;
-            fprintf(stderr, "latcd: test recovered page waiting; automatic retry unavailable\n");
-        } else if (test_consume_retirement_page(&page_driver_state, &config, error, sizeof(error))) budget_result = -1;
-        else fprintf(stderr, "latcd: test recovered page consumed\n");
+            page_driver_state.recovery_auto = !deferred;
+            fprintf(stderr, deferred && !getenv("LATCD_TEST_WAITING_DRIVER") ?
+                "latcd: test recovered page waiting; automatic retry unavailable\n" :
+                "latcd: test recovered page waiting; worker recovery enabled\n");
+        }
     }
 #endif
     if (!budget_result && retry_recovered) {
