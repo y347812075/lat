@@ -4975,6 +4975,16 @@ static int recover_tombstone(const char *root_path, int root, int store,
     const char *observation = unknown ? "UNKNOWN" : "MATCHED";
     bool missing = false;
     struct stat before = {0}, after, path;
+    before.st_dev = (dev_t)values[0];
+    before.st_ino = (ino_t)values[1];
+    before.st_size = (off_t)values[2];
+    before.st_blocks = (blkcnt_t)(values[3] / 512);
+    if ((uint64_t)before.st_dev != values[0] || (uint64_t)before.st_ino != values[1] ||
+        before.st_size < 0 || (uint64_t)before.st_size != values[2] || values[3] % 512 ||
+        before.st_blocks < 0 || (uint64_t)before.st_blocks != values[3] / 512) {
+        g_free(prior);
+        goto out;
+    }
     /* Hash outside S. Release this pin before S acquisition; final metadata
      * equality under S+G detects replacement/mutation during the handoff. */
     if (!unknown) {
@@ -5050,11 +5060,12 @@ static int recover_tombstone(const char *root_path, int root, int store,
                 observation = "UNKNOWN";
         }
     }
-    if (remove_object && !strcmp(observation, "MATCHED")) {
+    if (remove_object && (!strcmp(observation, "MATCHED") || !strcmp(observation, "MISSING"))) {
+        const struct stat *identity = !strcmp(observation, "MATCHED") ? &after : &before;
         int held = object_current_status(root, name);
-        if (!held) held = object_hold_status(root, name, &after);
-        if (!held) held = object_task_status(root, name, &after);
-        if (!held) held = object_transaction_status(root, name, &after, grace_us);
+        if (!held) held = object_hold_status(root, name, identity);
+        if (!held) held = object_task_status(root, name, identity);
+        if (!held) held = object_transaction_status(root, name, identity, grace_us);
         if (held) observation = held < 0 ? "UNKNOWN" : "BUSY";
     }
     if (remove_object && (!strcmp(observation, "MATCHED") || !strcmp(observation, "MISSING"))) {

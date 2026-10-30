@@ -6993,6 +6993,20 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
                                                 error, sizeof(error)));
         assert(deletion_report.object_unlinked && !deletion_report.receipt_durable);
         assert(!unsetenv("LATCD_TEST_RETIREMENT_IO"));
+        GKeyFile *pending = g_key_file_new();
+        assert(g_key_file_load_from_data(pending, raw, -1, 0, NULL));
+        g_key_file_set_string(pending, "transaction", "state", "PREPARED");
+        char *pending_data = g_key_file_to_data(pending, NULL, NULL);
+        char *pending_id = g_uuid_string_random();
+        char *pending_name = g_strdup_printf("%s.ini", pending_id);
+        char *pending_path = g_build_filename(root, ".gc", "transactions", pending_name, NULL);
+        put(pending_path, pending_data);
+        assert(latcd_tombstone_delete_due_report(root, names[0], 0, &deletion_report,
+                                                 error, sizeof(error)) < 0);
+        assert(!deletion_report.receipt_durable && !deletion_report.object_unlinked);
+        assert(!unlink(pending_path));
+        g_free(pending_path); g_free(pending_name); g_free(pending_id); g_free(pending_data);
+        g_key_file_unref(pending);
         LatcdRetirementQueue *partial = latcd_retirement_queue_new(root, 0);
         LatcdRetirementQueueStats partial_stats;
         int step;
