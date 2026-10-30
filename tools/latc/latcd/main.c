@@ -13,6 +13,7 @@
 #include "cache-retirement.h"
 #include "cache-capacity.h"
 #include "source-elf.h"
+#include "cache-export.h"
 
 #include <dlfcn.h>
 #include <dirent.h>
@@ -3279,6 +3280,38 @@ static int current_manifest_read(const LatcdConfig *config, const char *hex,
         errno = ENOEXEC;
     }
     return result;
+}
+
+/* The caller must authorize the source and effective configuration first. */
+static int G_GNUC_UNUSED broker_export_current(const LatcdConfig *config,
+                                const uint8_t digest[32],
+                                char *error, size_t error_size)
+{
+    char hex[65];
+    digest_hex(digest, hex);
+    int gate = lat_aot_v2_cache_source_lock(config->cache_dir, hex,
+                         LOCK_SH | LOCK_NB, false, error, error_size);
+    if (gate < 0) return -1;
+    LatcdCurrentManifest manifest = {0};
+    int result = current_manifest_read(config, hex, &manifest);
+    int input = -1;
+    if (!result && manifest.module_sha256) {
+        char *path = g_build_filename(config->cache_dir, manifest.module, NULL);
+        input = open_cached_file(path, config->file_size_limit, error, error_size);
+        g_free(path);
+    } else if (!result) {
+        errno = ENOEXEC;
+    }
+    int saved = errno;
+    close(gate);
+    errno = saved;
+    int output = input < 0 ? -1 : latcd_cache_export_copy(
+        input, manifest.module_sha256, config->file_size_limit);
+    saved = errno;
+    if (input >= 0) close(input);
+    current_manifest_clear(&manifest);
+    errno = saved;
+    return output;
 }
 
 /* Publish a newer complete observed-key set when the current module already

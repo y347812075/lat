@@ -1398,9 +1398,16 @@ int main(int argc, char **argv)
     int pair_pins[4] = {-1, -1, -1, -1};
     g_assert_nonnull(paired.module_sha256);
     g_assert_nonnull(paired.native_sha256);
+    int exported = broker_export_current(&config, digest, error, sizeof(error));
+    g_assert_cmpint(exported, >=, 0);
+    int seals = fcntl(exported, F_GET_SEALS);
+    g_assert_cmpint(seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL),
+                    ==, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);
+    close(exported);
     int source_gate = lat_aot_v2_cache_source_lock(directory, hex,
         LOCK_EX | LOCK_NB, false, error, sizeof(error));
     g_assert_cmpint(source_gate, >=, 0);
+    g_assert_cmpint(broker_export_current(&config, digest, error, sizeof(error)), ==, -1);
     g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
         &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, -1);
     g_assert_cmpint(pthread_mutex_trylock(&cache_lock), ==, EBUSY);
