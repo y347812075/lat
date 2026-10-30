@@ -3149,14 +3149,27 @@ int latcd_retirement_retry_page_restore_budget(const char *root,
         persisted->grace_us != expected_grace_us || persisted->snapshot_time > now ||
         retirement_schedule_access(root, boot, expected_grace_us, now, 0, NULL, true,
             &sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
-            NULL, scheduler, snapshot, error, error_size) ||
-        sequence != persisted->snapshot_sequence) goto out;
+            NULL, scheduler, snapshot, error, error_size)) goto out;
     validation = g_memdup2(persisted, sizeof(*persisted));
     if (validation->deletion_intent) {
+        unsigned index = validation->completed;
+        bool found = false;
+        for (unsigned i = 0; i < snapshot->len; i++) {
+            RetrySnapshotEntry *entry = &g_array_index(snapshot, RetrySnapshotEntry, i);
+            if (!strcmp(entry->hint.name, validation->items[index].hint.name)) found = true;
+        }
+        if (!found) {
+            RetrySnapshotEntry missing = {0};
+            missing.hint = validation->items[index].hint;
+            missing.sequence = validation->items[index].shard_sequence;
+            memcpy(missing.digest, validation->items[index].shard_digest, 32);
+            g_array_append_val(snapshot, missing);
+            sequence = MAX(sequence, missing.sequence);
+        }
         validation->deletion_intent = false;
-        memset(validation->receipt_digest[validation->completed], 0, 32);
+        memset(validation->receipt_digest[index], 0, 32);
     }
-    if (retry_validate_snapshot(validation, snapshot, now, NULL)) goto out;
+    if (sequence != persisted->snapshot_sequence || retry_validate_snapshot(validation, snapshot, now, NULL)) goto out;
     if (!directory_matches_at(directory, ".gc", gc) || !directory_matches_at(gc, "retirement-schedule", store) ||
         fsync(gc) ||
         latcd_retirement_retry_page_budget_identity(persisted, identity) ||
@@ -6201,6 +6214,7 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
             const LatcdRetirementPageDeadline *entry = &g_array_index(snapshot, RetrySnapshotEntry, j).hint;
             if (!strcmp(entry->name, queue->retry_order[i])) { found = entry; break; }
         }
+        if (queue->receipt_resume && !found) continue;
         if (!hint || !found || found->enqueued != hint->enqueued ||
             found->last_attempt != hint->last_attempt || found->retry_at != hint->retry_at ||
             found->busy_count != hint->busy_count || found->retry_at > now) goto out;
@@ -6216,7 +6230,12 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
                 entry->sequence == queue->receipt_shard_sequence &&
                 !memcmp(entry->digest, queue->receipt_shard_digest, 32)) found = true;
         }
-        bool valid = found && receipt && !memcmp(receipt, queue->receipt_expected, 32) &&
+        bool missing = true;
+        for (unsigned i = 0; i < snapshot->len; i++) {
+            RetrySnapshotEntry *entry = &g_array_index(snapshot, RetrySnapshotEntry, i);
+            if (!strcmp(entry->hint.name, queue->retry_order[0])) missing = false;
+        }
+        bool valid = (found || missing) && receipt && !memcmp(receipt, queue->receipt_expected, 32) &&
             !g_hash_table_contains(queue->confirmed_keys, queue->retry_order[0]) &&
             !g_hash_table_contains(queue->retry_transaction_roots, queue->retry_order[0]) &&
             !latcd_retirement_retry_page_load(queue->root, stored, error, error_size) &&

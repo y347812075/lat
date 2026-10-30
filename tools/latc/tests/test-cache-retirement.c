@@ -7663,9 +7663,23 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
             assert(!latcd_cache_capacity_scan(&receipt_capacity, root, error, sizeof(error)));
             assert(!latcd_cache_capacity_recovery_begin(&receipt_capacity));
             latcd_cache_capacity_metadata_bind(&receipt_capacity, UINT64_MAX);
-            assert(latcd_retirement_retry_page_restore_budget(root, &receipt_capacity, UINT64_MAX, 1,
-                                                              &receipt_budget, receipt_page, error, sizeof(error)) < 0);
-            assert(!receipt_budget.capacity && latcd_cache_capacity_recovery_finish(&receipt_capacity) < 0);
+            int restored = latcd_retirement_retry_page_restore_budget(root, &receipt_capacity, UINT64_MAX, 1,
+                                                                      &receipt_budget, receipt_page, error, sizeof(error));
+            if (variant) {
+                assert(restored < 0 && !receipt_budget.capacity &&
+                       latcd_cache_capacity_recovery_finish(&receipt_capacity) < 0);
+            } else {
+                assert(!restored && !latcd_cache_capacity_recovery_finish(&receipt_capacity));
+                receipt_queue = latcd_retirement_queue_new(root, 1);
+                assert(!latcd_retirement_queue_retry_receipt_resume(receipt_queue, &receipt_budget, error, sizeof(error)));
+                do {
+                    queued = latcd_retirement_queue_step(receipt_queue, 32, 10000, &receipt_stats, error, sizeof(error));
+                } while (queued > 0);
+                assert(queued < 0 && !latcd_retirement_queue_retry_receipts_revalidate(
+                    receipt_queue, receipts, &receipt_count, error, sizeof(error)) && receipt_count == 1 && receipts[0]);
+                assert(latcd_retirement_retry_page_commit(root, &receipt_budget, error, sizeof(error)) < 0);
+                latcd_retirement_queue_free(receipt_queue);
+            }
             latcd_cache_capacity_close(&receipt_capacity);
             if (variant) shard_data[0] ^= 1;
             assert(g_file_set_contents(receipt_shard, shard_data, shard_size, NULL));
