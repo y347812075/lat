@@ -8345,9 +8345,15 @@ static void test_page_execution_restriction(void)
                                              simulated_boottime_us, error, sizeof(error)));
     assert(latcd_retirement_page_wait_busy(root, &budget, 0, &report,
                                             simulated_boottime_us, error, sizeof(error)) < 0);
+    uint64_t next_attempt;
+    assert(!latcd_retirement_queue_restrict_to_waiting_page(executor, &page, &budget,
+                                                             &next_attempt, error, sizeof(error)));
+    assert(next_attempt == retry_at);
     close(pin);
     assert(!latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error)));
     simulated_boottime_us = retry_at;
+    assert(!latcd_retirement_queue_restrict_to_waiting_page(executor, &page, &budget,
+                                                             &next_attempt, error, sizeof(error)));
     int execute_result = latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error));
     if (execute_result != 1) fprintf(stderr, "page execute: %d %s\n", execute_result, error);
     assert(execute_result == 1);

@@ -689,6 +689,11 @@ int latcd_retirement_queue_page_stage(LatcdRetirementQueue *queue,
  * filter is in-memory only and does not authorize deletion. */
 int latcd_retirement_queue_restrict_to_page(LatcdRetirementQueue *queue,
     const struct LatcdRetirementPageState *page, char *error, size_t error_size);
+/* Include due deferred members only, preserving the later queue/page deadline.
+ * This filter and its deadline do not authorize deletion or prove isolation. */
+int latcd_retirement_queue_restrict_to_waiting_page(LatcdRetirementQueue *queue,
+    const struct LatcdRetirementPageState *page, const struct LatcdPageBudget *budget,
+    uint64_t *next_attempt, char *error, size_t error_size);
 /* Owner lease and controlled writers required. Consume an empty monitored
  * resumed scan to advance the persisted round; no deletion authorization. */
 int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,

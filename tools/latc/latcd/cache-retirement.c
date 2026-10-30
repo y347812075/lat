@@ -5596,9 +5596,11 @@ LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grac
     return queue;
 }
 
-int latcd_retirement_queue_restrict_to_page(LatcdRetirementQueue *queue,
-    const LatcdRetirementPageState *page, char *error, size_t error_size)
+static int queue_restrict_page(LatcdRetirementQueue *queue,
+    const LatcdRetirementPageState *page, const LatcdPageBudget *budget,
+    uint64_t *next_attempt, char *error, size_t error_size)
 {
+    if (next_attempt) *next_attempt = 0;
     if (!queue || !page || !queue->complete || queue->persistence_uncertain ||
         queue->active.sequence || queue->execution || queue->diagnostic_cutoff ||
         latcd_retirement_page_state_valid(page) || !page->count || !page->budget_bound ||
@@ -5610,6 +5612,7 @@ int latcd_retirement_queue_restrict_to_page(LatcdRetirementQueue *queue,
     bool legacy = false;
     uint8_t expected[32], actual[32];
     uint8_t results[128];
+    LatcdRetirementPageInventory inventory = {0};
     char *boot = NULL;
     uint64_t now;
     if (scheduler < 0) return -1;
@@ -5621,14 +5624,24 @@ int latcd_retirement_queue_restrict_to_page(LatcdRetirementQueue *queue,
         latcd_retirement_page_budget_identity(page, expected) ||
         latcd_retirement_page_budget_identity(&current, actual) ||
         memcmp(expected, actual, sizeof(expected)) || retirement_clock(&boot, &now) ||
+        (budget && (!budget->capacity || budget->invalid || !budget->page_identity_bound ||
+                    memcmp(actual, budget->page_identity, sizeof(actual)))) ||
         strcmp(boot, current.boot) ||
-        schedule_page_results(queue->root, now, &current, results, NULL, error, error_size) < 0) goto out;
+        schedule_page_results(queue->root, now, &current, results, &inventory, error, error_size) < 0) goto out;
     g_hash_table_remove_all(queue->page_members);
     for (unsigned i = 0; i < current.count; i++) {
-        if (results[i] == LATCD_RETIREMENT_RESULT_DONE ||
-            results[i] == LATCD_RETIREMENT_RESULT_DEFERRED) continue;
-        if (results[i] != 0 && results[i] != 4) goto clear;
+        if (results[i] == LATCD_RETIREMENT_RESULT_DONE) continue;
+        if (results[i] == LATCD_RETIREMENT_RESULT_DEFERRED) {
+            if (!budget) continue;
+            if (!inventory.members[i].present || inventory.undersized_member) goto clear;
+        } else if (results[i] != 0 && results[i] != 4) goto clear;
         if (!g_hash_table_contains(queue->candidates, current.entries[i].name)) goto clear;
+        RetirementCandidate *candidate = g_hash_table_lookup(queue->candidates, current.entries[i].name);
+        uint64_t eligible = MAX(candidate->deadline, candidate->retry_at);
+        if (results[i] == LATCD_RETIREMENT_RESULT_DEFERRED)
+            eligible = MAX(eligible, inventory.members[i].retry_at);
+        if (next_attempt && (!*next_attempt || eligible < *next_attempt)) *next_attempt = eligible;
+        if (eligible > now) continue;
         g_hash_table_add(queue->page_members, g_strdup(current.entries[i].name));
     }
     queue->page_restricted = true;
@@ -5643,6 +5656,20 @@ out:
     close(scheduler);
     g_free(boot);
     return result ? fail(error, error_size, "retirement page members unavailable") : 0;
+}
+
+int latcd_retirement_queue_restrict_to_page(LatcdRetirementQueue *queue,
+    const LatcdRetirementPageState *page, char *error, size_t error_size)
+{
+    return queue_restrict_page(queue, page, NULL, NULL, error, error_size);
+}
+
+int latcd_retirement_queue_restrict_to_waiting_page(LatcdRetirementQueue *queue,
+    const LatcdRetirementPageState *page, const LatcdPageBudget *budget,
+    uint64_t *next_attempt, char *error, size_t error_size)
+{
+    if (!budget || !next_attempt) return fail(error, error_size, "missing waiting page budget or deadline");
+    return queue_restrict_page(queue, page, budget, next_attempt, error, error_size);
 }
 
 int latcd_retirement_queue_diagnostic_round(LatcdRetirementQueue *queue,
