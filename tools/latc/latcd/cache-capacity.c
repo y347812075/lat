@@ -665,9 +665,11 @@ int latcd_cache_capacity_open_matching_root(LatcdCacheCapacity *capacity,
 }
 
 int latcd_cache_capacity_remove_generation(LatcdCacheCapacity *capacity, int directory,
-                                           const char *name, const struct stat *expected)
+                                           const char *name, const struct stat *expected,
+                                           bool *unlinked)
 {
-    if (!capacity || directory < 0 || !name || !generated_name(name) || !expected) {
+    if (unlinked) *unlinked = false;
+    if (!capacity || directory < 0 || !name || !generated_name(name) || !expected || !unlinked) {
         errno = EINVAL;
         return -1;
     }
@@ -696,7 +698,9 @@ int latcd_cache_capacity_remove_generation(LatcdCacheCapacity *capacity, int dir
         !S_ISREG(actual.st_mode) || actual.st_uid != geteuid() || actual.st_nlink != 1 ||
         actual.st_size < 0 || !same_file_snapshot(expected, &actual) ||
         (uint64_t)actual.st_size > capacity->committed ||
-        unlinkat(directory, name, 0) || fsync(directory)) goto invalid_expected;
+        unlinkat(directory, name, 0)) goto invalid_expected;
+    *unlinked = true;
+    if (fsync(directory)) goto invalid_expected;
     capacity->committed -= (uint64_t)actual.st_size;
     check_changes(capacity);
     if (!inotify_rm_watch(capacity->watch_fd, found))

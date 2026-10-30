@@ -5111,14 +5111,17 @@ static int recover_tombstone(const char *root_path, int root, int store,
                 report->logical_bytes = before.st_size;
                 report->allocated_bytes_before = (uint64_t)before.st_blocks * 512;
             }
-            if (record_write_fault("before-unlink") ||
-                (capacity ? latcd_cache_capacity_remove_generation(capacity, root, name, &after) :
-                            unlinkat(root, name, 0))) {
-                g_free(prior); goto out;
-            }
-            if (report) {
+            bool unlinked = false;
+            int removed = record_write_fault("before-unlink") ? -1 :
+                capacity ? latcd_cache_capacity_remove_generation(capacity, root, name, &after, &unlinked) :
+                unlinkat(root, name, 0);
+            if (!capacity && !removed) unlinked = true;
+            if (report && unlinked) {
                 report->object_unlinked = true;
                 report->unlinked_allocated_bytes = report->allocated_bytes_before;
+            }
+            if (removed) {
+                g_free(prior); goto out;
             }
             if (record_write_fault("unlinked")) { g_free(prior); goto out; }
         }

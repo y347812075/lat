@@ -68,7 +68,8 @@ int latcd_cache_capacity_open_matching_root(LatcdCacheCapacity *capacity,
 /* Caller holds the owner and object/reference locks and supplies the verified
  * snapshot. This accounts namespace removal, not physical block release. */
 int latcd_cache_capacity_remove_generation(LatcdCacheCapacity *capacity, int directory,
-                                           const char *name, const struct stat *expected);
+                                           const char *name, const struct stat *expected,
+                                           bool *unlinked);
 int latcd_cache_capacity_reserve(LatcdCacheCapacity *capacity, uint64_t bytes,
                                  uint64_t limit, char *error, size_t error_size);
 /* Release only after cleanup proved removal. Otherwise commit conservatively. */

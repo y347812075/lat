@@ -55,14 +55,15 @@ static void test_generation_remove(void)
         struct stat snapshot;
         assert(directory >= 0 && !fstatat(directory, name, &snapshot, AT_SYMLINK_NOFOLLOW));
         remove_fault = fault;
-        int result = latcd_cache_capacity_remove_generation(&capacity, directory, name, &snapshot);
+        bool unlinked = false;
+        int result = latcd_cache_capacity_remove_generation(&capacity, directory, name, &snapshot, &unlinked);
         remove_fault = 0;
         if (!fault) {
-            assert(!result && capacity.ready && !capacity.committed && access(path, F_OK));
+            assert(!result && unlinked && capacity.ready && !capacity.committed && access(path, F_OK));
             assert(!latcd_cache_capacity_reserve(&capacity, 1, 10, NULL, 0));
             latcd_cache_capacity_finish(&capacity, 1, false);
         } else {
-            assert(result < 0 && !capacity.ready && capacity.committed == 7);
+            assert(result < 0 && unlinked == (fault == 2) && !capacity.ready && capacity.committed == 7);
         }
         close(directory);
         latcd_cache_capacity_close(&capacity);
