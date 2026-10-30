@@ -3132,6 +3132,7 @@ int latcd_retirement_retry_page_restore_budget(const char *root,
     uint64_t now = 0, sequence = 0, bytes = 0;
     uint8_t identity[32];
     LatcdRetirementRetryPage *persisted = g_new0(LatcdRetirementRetryPage, 1);
+    LatcdRetirementRetryPage *validation = NULL;
     GArray *snapshot = g_array_new(FALSE, FALSE, sizeof(RetrySnapshotEntry));
     struct stat held, path;
     if (scheduler < 0) goto out;
@@ -3149,7 +3150,13 @@ int latcd_retirement_retry_page_restore_budget(const char *root,
         retirement_schedule_access(root, boot, expected_grace_us, now, 0, NULL, true,
             &sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
             NULL, scheduler, snapshot, error, error_size) ||
-        sequence != persisted->snapshot_sequence || retry_validate_snapshot(persisted, snapshot, now, NULL)) goto out;
+        sequence != persisted->snapshot_sequence) goto out;
+    validation = g_memdup2(persisted, sizeof(*persisted));
+    if (validation->deletion_intent) {
+        validation->deletion_intent = false;
+        memset(validation->receipt_digest[validation->completed], 0, 32);
+    }
+    if (retry_validate_snapshot(validation, snapshot, now, NULL)) goto out;
     if (!directory_matches_at(directory, ".gc", gc) || !directory_matches_at(gc, "retirement-schedule", store) ||
         fsync(gc) ||
         latcd_retirement_retry_page_budget_identity(persisted, identity) ||
@@ -3163,7 +3170,7 @@ out:
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
     if (scheduler >= 0) close(scheduler);
-    g_free(boot); g_free(persisted); g_array_free(snapshot, TRUE);
+    g_free(boot); g_free(validation); g_free(persisted); g_array_free(snapshot, TRUE);
     if (result) latcd_cache_capacity_recovery_fail(capacity);
     return result ? fail(error, error_size, "retry budget recovery unsafe") : 0;
 }

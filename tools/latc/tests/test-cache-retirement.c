@@ -7626,6 +7626,36 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         assert(latcd_retirement_retry_page_commit(root, &receipt_budget, error, sizeof(error)) < 0);
         latcd_retirement_queue_free(receipt_queue);
         latcd_cache_capacity_close(&receipt_capacity);
+        receipt_capacity = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
+        memset(&receipt_budget, 0, sizeof(receipt_budget));
+        assert(!latcd_cache_capacity_scan(&receipt_capacity, root, error, sizeof(error)));
+        assert(!latcd_cache_capacity_recovery_begin(&receipt_capacity));
+        latcd_cache_capacity_metadata_bind(&receipt_capacity, UINT64_MAX);
+        assert(!latcd_retirement_retry_page_restore_budget(root, &receipt_capacity, UINT64_MAX, 1,
+                                                           &receipt_budget, receipt_page, error, sizeof(error)) &&
+               receipt_page->deletion_intent && !latcd_cache_capacity_recovery_finish(&receipt_capacity));
+        assert(latcd_retirement_retry_page_commit(root, &receipt_budget, error, sizeof(error)) < 0);
+        latcd_cache_capacity_close(&receipt_capacity);
+        char *receipt_shard_name = g_strconcat(names[0], ".ini", NULL);
+        char *receipt_shard = g_build_filename(root, ".gc", "retirement-schedule", receipt_shard_name, NULL);
+        char *shard_data = NULL; gsize shard_size = 0;
+        assert(g_file_get_contents(receipt_shard, &shard_data, &shard_size, NULL));
+        for (unsigned variant = 0; variant < 2; variant++) {
+            if (!variant) assert(!unlink(receipt_shard));
+            else { shard_data[0] ^= 1; assert(g_file_set_contents(receipt_shard, shard_data, shard_size, NULL)); }
+            receipt_capacity = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
+            memset(&receipt_budget, 0, sizeof(receipt_budget));
+            assert(!latcd_cache_capacity_scan(&receipt_capacity, root, error, sizeof(error)));
+            assert(!latcd_cache_capacity_recovery_begin(&receipt_capacity));
+            latcd_cache_capacity_metadata_bind(&receipt_capacity, UINT64_MAX);
+            assert(latcd_retirement_retry_page_restore_budget(root, &receipt_capacity, UINT64_MAX, 1,
+                                                              &receipt_budget, receipt_page, error, sizeof(error)) < 0);
+            assert(!receipt_budget.capacity && latcd_cache_capacity_recovery_finish(&receipt_capacity) < 0);
+            latcd_cache_capacity_close(&receipt_capacity);
+            if (variant) shard_data[0] ^= 1;
+            assert(g_file_set_contents(receipt_shard, shard_data, shard_size, NULL));
+        }
+        g_free(shard_data); g_free(receipt_shard); g_free(receipt_shard_name);
         g_free(receipt_page);
         g_free(receipt); g_free(marker);
     }
