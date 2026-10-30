@@ -2,6 +2,7 @@
 #include "../latcd/broker-transport.h"
 #include <assert.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -107,6 +108,8 @@ int main(void)
     assert(!latcd_broker_peer(s[1], getuid(), &uid, &gid));
     int file = open("/dev/null", O_RDONLY | O_CLOEXEC), received = -1;
     char sent = 'a', got = 0;
+    assert(latcd_broker_receive(s[0], uid, gid, &got, 1, &received) < 0 &&
+           (errno == EAGAIN || errno == EWOULDBLOCK) && received == -1);
     assert(file >= 0 && !latcd_broker_send(s[1], &sent, 1, file));
     assert(!latcd_broker_receive(s[0], uid, gid, &got, 1, &received));
     assert(got == sent && received >= 0 && (fcntl(received, F_GETFD) & FD_CLOEXEC));
@@ -123,5 +126,12 @@ int main(void)
     assert(latcd_broker_receive(s[0], uid + 1, gid, &got, 1, &received) < 0 && received == -1);
     assert(fd_count() == before);
     close(file); close(s[0]); close(s[1]);
+    assert(!socketpair(AF_UNIX, SOCK_SEQPACKET, 0, s));
+    int buffer = 4096;
+    assert(!setsockopt(s[0], SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer)));
+    unsigned packets = 0;
+    while (!latcd_broker_send(s[0], &sent, 1, -1)) assert(++packets < 100000);
+    assert(packets && (errno == EAGAIN || errno == EWOULDBLOCK));
+    close(s[0]); close(s[1]);
     return 0;
 }

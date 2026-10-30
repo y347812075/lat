@@ -112,8 +112,7 @@ int latcd_broker_send(int fd, const void *packet, size_t size, int passed)
         c->cmsg_level = SOL_SOCKET; c->cmsg_type = SCM_RIGHTS; c->cmsg_len = CMSG_LEN(sizeof(int));
         memcpy(CMSG_DATA(c), &passed, sizeof(passed));
     }
-    ssize_t result;
-    do { result = sendmsg(fd, &msg, MSG_NOSIGNAL); } while (result < 0 && errno == EINTR);
+    ssize_t result = sendmsg(fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
     if (result == (ssize_t)size) return 0;
     if (result >= 0) errno = EIO;
     return -1;
@@ -127,8 +126,7 @@ int latcd_broker_receive(int fd, uid_t uid, gid_t gid, void *packet, size_t size
     union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(struct ucred)) + CMSG_SPACE(sizeof(int) * 8)]; } control = {0};
     struct msghdr msg = {.msg_iov = &iov, .msg_iovlen = 1,
                          .msg_control = control.bytes, .msg_controllen = sizeof(control.bytes)};
-    ssize_t count;
-    do { count = recvmsg(fd, &msg, MSG_CMSG_CLOEXEC); } while (count < 0 && errno == EINTR);
+    ssize_t count = recvmsg(fd, &msg, MSG_CMSG_CLOEXEC | MSG_DONTWAIT);
     if (count < 0) return -1;
     bool valid = count == (ssize_t)size && !(msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC));
     bool credentials = false; unsigned fds = 0;
