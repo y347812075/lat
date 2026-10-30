@@ -6700,7 +6700,7 @@ struct LatcdRetryRecovery {
     uint64_t grace;
     LatcdPageBudget *budget;
     LatcdRetirementQueue *queue;
-    bool completed_scan;
+    enum { RETRY_SCAN_RECEIPT, RETRY_SCAN_COMPLETED, RETRY_SCAN_NEXT } scan;
 };
 
 LatcdRetryRecovery *latcd_retry_recovery_new(const char *root, uint64_t grace_us,
@@ -6732,12 +6732,22 @@ int latcd_retry_recovery_step(LatcdRetryRecovery *recovery, unsigned entries,
         int step = latcd_retirement_queue_step(recovery->queue, entries, time_us,
                                                &stats, error, error_size);
         if (step > 0) return 1;
-        int result = recovery->completed_scan ?
-            latcd_retirement_queue_retry_completed_commit(recovery->queue, recovery->budget, error, error_size) :
-            latcd_retirement_queue_retry_receipt_consume(recovery->queue, recovery->budget, error, error_size);
+        int result;
+        if (recovery->scan == RETRY_SCAN_NEXT) {
+            bool receipts[128]; unsigned count = 0;
+            result = latcd_retirement_queue_retry_receipts(recovery->queue, receipts, &count);
+            if (!result && count != 1) result = -1;
+            if (!result && receipts[0])
+                result = latcd_retirement_queue_retry_receipt_stage_next(recovery->queue, recovery->budget, error, error_size);
+            else if (!result)
+                result = latcd_retirement_retry_page_begin_deferred(recovery->root, recovery->budget, error, error_size);
+        } else if (recovery->scan == RETRY_SCAN_COMPLETED)
+            result = latcd_retirement_queue_retry_completed_commit(recovery->queue, recovery->budget, error, error_size);
+        else
+            result = latcd_retirement_queue_retry_receipt_consume(recovery->queue, recovery->budget, error, error_size);
         latcd_retirement_queue_free(recovery->queue);
         recovery->queue = NULL;
-        return result ? -1 : recovery->completed_scan ? 0 : 1;
+        return result ? -1 : recovery->scan == RETRY_SCAN_COMPLETED ? 0 : 1;
     }
     LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
     int result = -1;
@@ -6750,15 +6760,19 @@ int latcd_retry_recovery_step(LatcdRetryRecovery *recovery, unsigned entries,
             result = latcd_retirement_retry_page_commit(recovery->root, recovery->budget, error, error_size);
             goto out;
         }
-        recovery->completed_scan = !page->deletion_intent;
+        recovery->scan = page->deletion_intent ? RETRY_SCAN_RECEIPT : RETRY_SCAN_COMPLETED;
         recovery->queue = latcd_retirement_queue_new(recovery->root, recovery->grace);
-        int started = recovery->completed_scan ?
+        int started = recovery->scan == RETRY_SCAN_COMPLETED ?
             latcd_retirement_queue_retry_completed_resume(recovery->queue, recovery->budget, error, error_size) :
             latcd_retirement_queue_retry_receipt_resume(recovery->queue, recovery->budget, error, error_size);
         if (started) { latcd_retirement_queue_free(recovery->queue); recovery->queue = NULL; goto out; }
         result = 1;
     } else if (!page->intent_present) {
-        result = latcd_retirement_retry_page_begin_deferred(recovery->root, recovery->budget, error, error_size) ? -1 : 1;
+        recovery->scan = RETRY_SCAN_NEXT;
+        recovery->queue = latcd_retirement_queue_new(recovery->root, recovery->grace);
+        if (latcd_retirement_queue_retry_receipt_next(recovery->queue, recovery->budget, error, error_size)) {
+            latcd_retirement_queue_free(recovery->queue); recovery->queue = NULL;
+        } else result = 1;
     } else if (latcd_retirement_retry_page_apply_unmatched(recovery->root, recovery->budget, error, error_size) ||
                latcd_retirement_retry_page_finish_unmatched(recovery->root, recovery->budget, error, error_size)) {
         result = -1;

@@ -8118,7 +8118,7 @@ static void test_retry_multiple_receipts(unsigned mixed)
     simulated_boottime_us = 100;
     for (unsigned i = 7; i < 9; i++) {
         publish_page_fixture(root, i);
-        if (mixed && i == 8) continue;
+        if (mixed && mixed != 3 && i == 8) continue;
         char *src = g_strdup_printf("%064x", i);
         char *name = g_strconcat(src, ".so", NULL);
         char *path = g_build_filename(root, name, NULL);
@@ -8159,7 +8159,7 @@ static void test_retry_multiple_receipts(unsigned mixed)
         do { step = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); } while (step > 0);
         assert(step < 0 && !latcd_retirement_queue_retry_receipt_stage_next(queue, &budget, error, sizeof(error)));
         latcd_retirement_queue_free(queue);
-        if (mixed == 2) {
+        if (mixed >= 2) {
             latcd_cache_capacity_close(&capacity);
             capacity = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
             memset(&budget, 0, sizeof(budget));
@@ -8181,9 +8181,15 @@ static void test_retry_multiple_receipts(unsigned mixed)
             latcd_retry_recovery_free(recovery);
             assert(!latcd_retirement_page_state_load(root, &state, error, sizeof(error)) &&
                    !strcmp(state.retry_cursor, page->items[1].hint.name));
-            char *retained = g_build_filename(root, page->items[1].hint.name, NULL);
-            assert(!access(retained, F_OK));
-            g_free(retained);
+            char *second = g_build_filename(root, page->items[1].hint.name, NULL);
+            if (mixed == 2) assert(!access(second, F_OK));
+            else assert(access(second, F_OK) < 0 && errno == ENOENT);
+            g_free(second);
+            char *shard_name = g_strconcat(page->items[1].hint.name, ".ini", NULL);
+            char *shard = g_build_filename(schedule, shard_name, NULL);
+            if (mixed == 2) assert(!access(shard, F_OK));
+            else assert(access(shard, F_OK) < 0 && errno == ENOENT);
+            g_free(shard); g_free(shard_name);
             latcd_cache_capacity_close(&capacity);
             g_free(page); g_free(schedule); g_free(boot); simulated_boottime_us = 0;
             remove_root(root); g_free(root);
@@ -9206,6 +9212,7 @@ int main(int argc, char **argv)
     test_retry_multiple_receipts(0);
     test_retry_multiple_receipts(1);
     test_retry_multiple_receipts(2);
+    test_retry_multiple_receipts(3);
     test_page_round_insertions();
     test_deletion_report(NULL, false);
     test_roots_latch();
