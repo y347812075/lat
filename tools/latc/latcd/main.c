@@ -2126,6 +2126,15 @@ static int test_consume_retirement_page(const LatcdConfig *config,
     LatcdRetirementQueue *queue = NULL;
     int result = -1;
     if (latcd_retirement_page_state_load(config->cache_dir, &page, error, error_size)) return -1;
+    if (page.committed_pending) {
+        struct timespec ts;
+        if (clock_gettime(CLOCK_BOOTTIME, &ts)) return -1;
+        uint64_t now = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+        do { result = latcd_retirement_consumption_recover_step(config->cache_dir, now,
+                                                &test_page_budget, error, error_size); }
+        while (result > 0 && !stop_requested);
+        return stop_requested ? -1 : result;
+    }
     queue = latcd_retirement_queue_new(config->cache_dir, LATCD_RETIREMENT_GRACE_US);
     if (latcd_retirement_queue_bind_capacity(queue, &generation_capacity)) goto out;
     do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, error_size); }
@@ -6771,8 +6780,7 @@ int main(int argc, char **argv)
             LatcdRetirementPageState page;
             if (latcd_retirement_page_restore_budget(config.cache_dir, &generation_capacity,
                     config.max_cache_bytes, LATCD_RETIREMENT_GRACE_US,
-                    &test_page_budget, &page, error, sizeof(error)) ||
-                page.committed_pending || page.consumption_bound) budget_result = -1;
+                    &test_page_budget, &page, error, sizeof(error))) budget_result = -1;
             else test_page_recovered = true;
         } else
 #endif

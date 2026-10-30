@@ -45,6 +45,36 @@ PY
 }
 start
 stop
+cache=$work/crash-cache
+socket=$work/crash.sock
+stats=$work/crash-stats.json
+mkdir -m 700 "$cache"
+start
+stop
+"$fixture" --timer-fixture "$cache"
+LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_RETIREMENT_IO=crash:consumption-unlinked start
+n=0
+while kill -0 "$pid" 2>/dev/null; do
+    n=$((n + 1)); if [ "$n" -ge 300 ]; then cat "$work/server.err" >&2; exit 1; fi
+    sleep 0.05
+done
+if wait "$pid"; then echo 'expected consumption crash' >&2; exit 1; fi
+pid=
+rm -f "$socket"
+old=$cache/$(printf '%064x' 7)
+test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
+LATCD_TEST_RECOVER_PAGE=1 start
+grep -q 'latcd: test recovered page consumed' "$work/server.err"
+python3 - "$cache" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1]); source = f'{7:064x}'
+m = json.loads((root / (source + '.current')).read_text())
+assert all((root / m[key]).is_file() for key in ('module', 'native', 'tbset'))
+PY
+stop
+cache=$work/cache
+socket=$work/latcd.sock
+stats=$work/stats.json
 "$fixture" --timer-fixture "$cache"
 start
 wait_stats 's["retirement_discovery_complete"] and s["retirement_candidates"] >= 3 and s["retirement_next_attempt_boottime_us"] > 0'
