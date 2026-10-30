@@ -6993,6 +6993,20 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
                                                 error, sizeof(error)));
         assert(deletion_report.object_unlinked && !deletion_report.receipt_durable);
         assert(!unsetenv("LATCD_TEST_RETIREMENT_IO"));
+        char *identity_marker = g_build_filename(root, ".gc", "tombstones", names[0], NULL);
+        char *identity_original = NULL;
+        assert(g_file_get_contents(identity_marker, &identity_original, NULL, NULL));
+        GKeyFile *bad_identity = g_key_file_new();
+        assert(g_key_file_load_from_data(bad_identity, identity_original, -1, 0, NULL));
+        g_key_file_set_uint64(bad_identity, "tombstone", "allocated", 1);
+        char *bad_identity_data = g_key_file_to_data(bad_identity, NULL, NULL);
+        put(identity_marker, bad_identity_data);
+        assert(latcd_tombstone_delete_due_report(root, names[0], 0, &deletion_report,
+                                                 error, sizeof(error)) < 0);
+        assert(!deletion_report.receipt_durable && !deletion_report.object_unlinked);
+        put(identity_marker, identity_original);
+        g_free(bad_identity_data); g_key_file_unref(bad_identity);
+        g_free(identity_original); g_free(identity_marker);
         GKeyFile *pending = g_key_file_new();
         assert(g_key_file_load_from_data(pending, raw, -1, 0, NULL));
         g_key_file_set_string(pending, "transaction", "state", "PREPARED");
