@@ -337,6 +337,9 @@ int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t n
 int latcd_retirement_page_recover_deferred_step(const char *root, uint64_t now_us,
                                     struct LatcdPageBudget *budget, char *error, size_t error_size);
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
+int latcd_retirement_test_guarded_page_stage(const char *root, const LatcdRetirementPageState *page,
+    struct LatcdCacheCapacity *capacity, uint64_t limit, struct LatcdPageBudget *budget,
+    int (*guard)(void *), void *context, char *error, size_t error_size);
 int latcd_retirement_test_guarded_budget_result(const char *root, uint64_t now_us,
     const uint8_t identity[32], struct LatcdPageBudget *budget, const LatcdRetirementPageDeadline *entry,
     int (*guard)(void *), void *context, char *error, size_t error_size);

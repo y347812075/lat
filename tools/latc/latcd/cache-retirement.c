@@ -1737,6 +1737,7 @@ static int schedule_page_results(const char *root, uint64_t now_us,
 
 static int page_stage(const char *root, const LatcdRetirementPageState *page,
                       LatcdCacheCapacity *capacity, uint64_t limit, LatcdPageBudget *budget,
+                      int (*before_install)(void *), void *install_context,
                       char *error, size_t error_size)
 {
     uint8_t identity[32];
@@ -1778,13 +1779,15 @@ static int page_stage(const char *root, const LatcdRetirementPageState *page,
             latcd_retirement_page_budget_estimate(page, results, &inventory, &bytes) ||
             latcd_cache_capacity_reserve_page(capacity, bytes, limit, binding, budget)) goto out;
         bool not_installed = false;
-        result = page_state_store_fd(directory, gc, page, budget, &not_installed);
+        result = page_state_store_guarded(directory, gc, page, budget, &not_installed,
+                                          before_install, install_context);
         if (result && not_installed) {
             int saved = errno;
             latcd_cache_capacity_cancel_page(capacity, budget);
             errno = saved;
         }
-    } else result = page_state_store_fd(directory, gc, page, NULL, NULL);
+    } else result = page_state_store_guarded(directory, gc, page, NULL, NULL,
+                                              before_install, install_context);
 out:
     g_free(boot);
     if (gc >= 0) close(gc);
@@ -1796,7 +1799,7 @@ out:
 int latcd_retirement_page_stage(const char *root, const LatcdRetirementPageState *page,
                                 char *error, size_t error_size)
 {
-    return page_stage(root, page, NULL, 0, NULL, error, error_size);
+    return page_stage(root, page, NULL, 0, NULL, NULL, NULL, error, error_size);
 }
 
 int latcd_retirement_page_stage_budgeted(const char *root, const LatcdRetirementPageState *page,
@@ -1804,8 +1807,18 @@ int latcd_retirement_page_stage_budgeted(const char *root, const LatcdRetirement
                                 char *error, size_t error_size)
 {
     if (!capacity || !budget) return fail(error, error_size, "missing page capacity or budget");
-    return page_stage(root, page, capacity, limit, budget, error, error_size);
+    return page_stage(root, page, capacity, limit, budget, NULL, NULL, error, error_size);
 }
+
+#if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
+int latcd_retirement_test_guarded_page_stage(const char *root, const LatcdRetirementPageState *page,
+    LatcdCacheCapacity *capacity, uint64_t limit, LatcdPageBudget *budget,
+    int (*guard)(void *), void *context, char *error, size_t error_size)
+{
+    if (!capacity || !budget || !guard) return fail(error, error_size, "missing page stage guard");
+    return page_stage(root, page, capacity, limit, budget, guard, context, error, error_size);
+}
+#endif
 
 int latcd_retirement_page_round_begin(const char *root, uint64_t grace_us,
                                       LatcdRetirementPageState *state,

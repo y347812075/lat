@@ -3343,6 +3343,11 @@ static void test_budgeted_page_stage(void)
     LatcdPageBudget budget = {0};
     assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
     latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    int stage_guard_calls = 0;
+    assert(latcd_retirement_test_guarded_page_stage(root, &page, &capacity, UINT64_MAX,
+        &budget, test_result_guard, &stage_guard_calls, error, sizeof(error)) < 0);
+    assert(stage_guard_calls == 1 && capacity.ready && !budget.capacity && !capacity.metadata_reserved);
+    assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) && !loaded.count);
     LatcdRetirementPageState stale_retry = page;
     snprintf(stale_retry.retry_cursor, sizeof(stale_retry.retry_cursor), "%064x.so", 10);
     assert(latcd_retirement_page_stage_budgeted(root, &stale_retry, &capacity, UINT64_MAX,
