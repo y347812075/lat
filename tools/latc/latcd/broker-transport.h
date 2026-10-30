@@ -17,6 +17,9 @@ typedef struct LatcdBrokerExportResponse {
     uint32_t status;
 } LatcdBrokerExportResponse;
 
+/* Call before bind/listen so credentials are attached to early packets. */
+int latcd_broker_listener_socket(void);
+
 /* Set SO_PASSCRED before receiving. expected_uid comes from trusted policy. */
 int latcd_broker_peer(int socket_fd, uid_t expected_uid, uid_t *uid, gid_t *gid);
 /* Fixed-size packet; accepts exactly one credential and at most one fd. */

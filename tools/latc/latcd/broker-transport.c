@@ -6,6 +6,20 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+int latcd_broker_listener_socket(void)
+{
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    int enabled = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &enabled, sizeof(enabled))) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    return fd;
+}
+
 int latcd_broker_peer(int fd, uid_t expected_uid, uid_t *uid, gid_t *gid)
 {
     int type, enabled = 1;

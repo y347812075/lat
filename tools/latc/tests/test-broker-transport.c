@@ -3,8 +3,10 @@
 #include <assert.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 static int fd_count(void)
@@ -31,8 +33,37 @@ static void send_many(int socket, int file, unsigned count)
     assert(sendmsg(socket, &msg, 0) == 1);
 }
 
+static void test_early_packet(void)
+{
+    int listener = latcd_broker_listener_socket();
+    assert(listener >= 0);
+    assert(fcntl(listener, F_GETFL) & O_NONBLOCK);
+    assert(fcntl(listener, F_GETFD) & FD_CLOEXEC);
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    int n = snprintf(address.sun_path + 1, sizeof(address.sun_path) - 1,
+                     "latcd-broker-test-%ld", (long)getpid());
+    assert(n > 0 && (size_t)n < sizeof(address.sun_path) - 1);
+    socklen_t length = offsetof(struct sockaddr_un, sun_path) + 1 + n;
+    assert(!bind(listener, (struct sockaddr *)&address, length));
+    assert(!listen(listener, 1));
+    int client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    assert(client >= 0 && !connect(client, (struct sockaddr *)&address, length));
+    char sent = 'x', got = 0;
+    assert(!latcd_broker_send(client, &sent, 1, -1));
+    int accepted = accept4(listener, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    assert(accepted >= 0);
+    int passcred = 0; socklen_t option_size = sizeof(passcred);
+    assert(!getsockopt(accepted, SOL_SOCKET, SO_PASSCRED, &passcred, &option_size) && passcred);
+    uid_t uid; gid_t gid; int received = -1;
+    assert(!latcd_broker_peer(accepted, getuid(), &uid, &gid));
+    assert(!latcd_broker_receive(accepted, uid, gid, &got, 1, &received));
+    assert(got == sent && received == -1);
+    close(accepted); close(client); close(listener);
+}
+
 int main(void)
 {
+    test_early_packet();
     int s[2]; uid_t uid; gid_t gid;
     assert(!socketpair(AF_UNIX, SOCK_SEQPACKET, 0, s));
     assert(!latcd_broker_peer(s[0], getuid(), &uid, &gid));
