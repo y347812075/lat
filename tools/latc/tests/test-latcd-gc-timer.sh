@@ -445,8 +445,8 @@ stop
 "$fixture" --timer-fixture "$cache"
 LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 start
 n=0
-while ! grep -q 'latcd: test page consumed' "$work/server.err"; do
-    if grep -q 'latcd: test page .* failed' "$work/server.err" || ! kill -0 "$pid" 2>/dev/null; then
+while ! grep -q 'latcd: test waiting page consumed' "$work/server.err"; do
+    if grep -q 'latcd: test .*page .*failed' "$work/server.err" || ! kill -0 "$pid" 2>/dev/null; then
         cat "$work/server.err" >&2; exit 1
     fi
     n=$((n + 1)); if [ "$n" -ge 300 ]; then cat "$work/server.err" >&2; exit 1; fi
