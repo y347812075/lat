@@ -3069,9 +3069,7 @@ int latcd_retirement_retry_snapshot(const char *root, const char *boot,
 static int retry_validate_snapshot(const LatcdRetirementRetryPage *page, GArray *snapshot,
                                    uint64_t now, bool *replaced)
 {
-    /* Receipt-bound deletion recovery is not implemented yet. */
     if (page->deletion_intent) return -1;
-    for (unsigned i = 0; i < page->count; i++) if (page->deleted[i]) return -1;
     uint8_t digests[128][32] = {{0}};
     uint64_t sequences[128] = {0}; unsigned count = 0;
     LatcdRetirementPageDeadline selected[128];
@@ -3081,11 +3079,20 @@ static int retry_validate_snapshot(const LatcdRetirementRetryPage *page, GArray 
         for (unsigned j = 0; j < snapshot->len; j++) {
             RetrySnapshotEntry *entry = &g_array_index(snapshot, RetrySnapshotEntry, j);
             if (strcmp(entry->hint.name, page->items[i].hint.name)) continue;
+            if (page->deleted[i]) return -1;
             if (found || entry->sequence != page->items[i].shard_sequence ||
                 memcmp(entry->digest, page->replacement_digest[i], 32)) return -1;
             found = true;
             entry->hint = page->items[i].hint;
             memcpy(entry->digest, page->items[i].shard_digest, 32);
+        }
+        if (page->deleted[i]) {
+            RetrySnapshotEntry missing = {0};
+            missing.hint = page->items[i].hint;
+            missing.sequence = page->items[i].shard_sequence;
+            memcpy(missing.digest, page->items[i].shard_digest, 32);
+            g_array_append_val(snapshot, missing);
+            found = true;
         }
         if (!found) return -1;
     }
@@ -3128,6 +3135,16 @@ static int retry_validate_snapshot(const LatcdRetirementRetryPage *page, GArray 
             sequences[i] != page->items[i].shard_sequence ||
             memcmp(digests[i], page->items[i].shard_digest, 32)) return -1;
     return 0;
+}
+
+static int retry_validate_deferred_snapshot(const LatcdRetirementRetryPage *page,
+                                            GArray *snapshot, uint64_t now,
+                                            uint64_t sequence, bool *replaced)
+{
+    for (unsigned i = 0; i < page->completed; i++)
+        if (page->deleted[i]) sequence = MAX(sequence, page->items[i].shard_sequence);
+    return sequence != page->snapshot_sequence ||
+        retry_validate_snapshot(page, snapshot, now, replaced);
 }
 
 /* Reconstruct removed scheduling hints only for inventory validation. Receipt
@@ -3275,8 +3292,8 @@ static int retry_page_begin_deferral(const char *root, LatcdPageBudget *budget, 
         (mode == 2 && page->items[page->completed].aggregate.deadline > now) ||
         retirement_schedule_access(root, boot, page->grace_us, now, 0, NULL, true,
             &sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
-            NULL, scheduler, snapshot, error, error_size) || sequence != page->snapshot_sequence ||
-        retry_validate_snapshot(page, snapshot, now, NULL)) goto out;
+            NULL, scheduler, snapshot, error, error_size) ||
+        retry_validate_deferred_snapshot(page, snapshot, now, sequence, NULL)) goto out;
     filename = g_strconcat(page->items[page->completed].hint.name, ".ini", NULL);
     if (read_file(store, filename, 1024, &raw, &raw_size) ||
         retry_prepare_deferral(page, raw, raw_size, now, target)) goto out;
@@ -3353,8 +3370,8 @@ static int retry_apply_unmatched(const char *root, LatcdPageBudget *budget, bool
         strcmp(boot, page->boot) || now < page->snapshot_time ||
         retirement_schedule_access(root, boot, page->grace_us, now, 0, NULL, true,
             &sequence, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
-            NULL, scheduler, snapshot, error, error_size) || sequence != page->snapshot_sequence ||
-        retry_validate_snapshot(page, snapshot, now, &replaced) ||
+            NULL, scheduler, snapshot, error, error_size) ||
+        retry_validate_deferred_snapshot(page, snapshot, now, sequence, &replaced) ||
         !directory_matches_at(directory, ".gc", gc) || !directory_matches_at(gc, "retirement-schedule", store)) goto out;
     if (!replaced) {
         if (finish) goto out;
@@ -3424,6 +3441,7 @@ int latcd_retirement_retry_page_commit(const char *root, LatcdPageBudget *budget
             NULL, scheduler, snapshot, error, error_size) || sequence != page->snapshot_sequence ||
         retry_validate_snapshot(page, snapshot, now, NULL) ||
         !directory_matches_at(directory, ".gc", gc) || !directory_matches_at(gc, "retirement-schedule", store)) goto out;
+    for (unsigned i = 0; i < page->count; i++) if (page->deleted[i]) goto out;
     state.cache_device = page->cache_device; state.cache_inode = page->cache_inode;
     state.grace_us = page->grace_us; state.round_cutoff = page->round_cutoff;
     state.sequence = page->round_sequence;

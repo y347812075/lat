@@ -8080,12 +8080,13 @@ static void publish_page_fixture(const char *root, unsigned id)
     g_free(evidence); g_free(current); g_free(previous); g_free(next_manifest); g_free(src);
 }
 
-static void test_retry_multiple_receipts(void)
+static void test_retry_multiple_receipts(bool mixed)
 {
     char *root = root_new(), error[256], *boot = NULL;
     simulated_boottime_us = 100;
     for (unsigned i = 7; i < 9; i++) {
         publish_page_fixture(root, i);
+        if (mixed && i == 8) continue;
         char *src = g_strdup_printf("%064x", i);
         char *name = g_strconcat(src, ".so", NULL);
         char *path = g_build_filename(root, name, NULL);
@@ -8120,7 +8121,7 @@ static void test_retry_multiple_receipts(void)
     assert(step < 0 && !latcd_retirement_queue_retry_page_stage(queue, &capacity, UINT64_MAX, &budget, error, sizeof(error)));
     latcd_retirement_queue_free(queue);
     LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
-    for (unsigned i = 0; i < 2; i++) {
+    for (unsigned i = 0; i < (mixed ? 1u : 2u); i++) {
         queue = latcd_retirement_queue_new(root, 1);
         assert(!latcd_retirement_queue_retry_receipt_next(queue, &budget, error, sizeof(error)));
         do { step = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); } while (step > 0);
@@ -8139,6 +8140,22 @@ static void test_retry_multiple_receipts(void)
         latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
         assert(!latcd_retirement_retry_page_restore_budget(root, &capacity, UINT64_MAX, 1, &budget, page, error, sizeof(error)) &&
                page->completed == i + 1 && !latcd_cache_capacity_recovery_finish(&capacity));
+    }
+    if (mixed) {
+        assert(!latcd_retirement_retry_page_begin_deferred(root, &budget, error, sizeof(error)));
+        assert(!latcd_retirement_retry_page_apply_unmatched(root, &budget, error, sizeof(error)));
+        latcd_cache_capacity_close(&capacity);
+        capacity = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
+        memset(&budget, 0, sizeof(budget));
+        assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+        assert(!latcd_cache_capacity_recovery_begin(&capacity));
+        latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+        assert(!latcd_retirement_retry_page_restore_budget(root, &capacity, UINT64_MAX, 1, &budget, page, error, sizeof(error)));
+        assert(!latcd_cache_capacity_recovery_finish(&capacity));
+        assert(!latcd_retirement_retry_page_finish_unmatched(root, &budget, error, sizeof(error)));
+        assert(!latcd_retirement_retry_page_load(root, page, error, sizeof(error)) &&
+               page->completed == 2 && page->deleted[0] && !page->deleted[1]);
+        assert(latcd_retirement_retry_page_commit(root, &budget, error, sizeof(error)) < 0);
     }
     queue = latcd_retirement_queue_new(root, 1);
     assert(!latcd_retirement_queue_retry_completed_resume(queue, &budget, error, sizeof(error)));
@@ -9124,7 +9141,8 @@ int main(int argc, char **argv)
     test_queue_overflow_fixture();
     test_retry_not_due(false);
     test_retry_not_due(true);
-    test_retry_multiple_receipts();
+    test_retry_multiple_receipts(false);
+    test_retry_multiple_receipts(true);
     test_page_round_insertions();
     test_deletion_report(NULL, false);
     test_roots_latch();
