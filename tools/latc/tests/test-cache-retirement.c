@@ -7007,6 +7007,16 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         assert(!unlink(pending_path));
         g_free(pending_path); g_free(pending_name); g_free(pending_id); g_free(pending_data);
         g_key_file_unref(pending);
+        char *lease_id = g_uuid_string_random();
+        int lease = latcd_retirement_mount_lease(root, lease_id, "CACHE", NULL, NULL,
+                                                 error, sizeof(error));
+        assert(lease >= 0);
+        close(lease);
+        assert(latcd_tombstone_delete_due_report(root, names[0], 0, &deletion_report,
+                                                 error, sizeof(error)) < 0);
+        assert(!deletion_report.receipt_durable && !deletion_report.object_unlinked);
+        assert(!latcd_retirement_mount_release(root, lease_id, error, sizeof(error)));
+        g_free(lease_id);
         LatcdRetirementQueue *partial = latcd_retirement_queue_new(root, 0);
         LatcdRetirementQueueStats partial_stats;
         int step;
