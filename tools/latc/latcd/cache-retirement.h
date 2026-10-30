@@ -422,6 +422,9 @@ int latcd_cache_domain_init(const char *root, char id[37],
  * Returns 1 for pending, 0 for complete, -1 on error. No removal is authorized. */
 LatcdRecoveryCursor *latcd_recovery_open(const char *root, bool tombstones,
                                         char *error, size_t error_size);
+/* Startup without an enforced access domain must not complete deletion receipts. */
+LatcdRecoveryCursor *latcd_recovery_open_untrusted(const char *root, bool tombstones,
+                                                  char *error, size_t error_size);
 int latcd_recovery_step(LatcdRecoveryCursor *cursor, unsigned entries,
                         uint64_t hash_bytes, uint64_t time_us,
                         LatcdRecoveryProgress *progress, char *error, size_t error_size);

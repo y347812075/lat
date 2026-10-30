@@ -560,7 +560,12 @@ static void signal_stop(int signal_number)
 static int recover_lifecycle(const char *root, bool tombstones,
                              char *error, size_t error_size)
 {
+#ifdef LATCD_GC_TIMER_TEST
     LatcdRecoveryCursor *cursor = latcd_recovery_open(root, tombstones, error, error_size);
+#else
+    LatcdRecoveryCursor *cursor = latcd_recovery_open_untrusted(root, tombstones,
+                                                               error, error_size);
+#endif
     if (!cursor) return -1;
     LatcdRecoveryProgress progress = {0};
     int result = 1;

@@ -71,7 +71,7 @@ struct LatcdRecoveryCursor {
     char *root_path;
     int root;
     DIR *directory;
-    bool tombstones, done, failed, yielded;
+    bool tombstones, done, failed, yielded, deny_receipt_completion;
     char *pending;
     struct stat pending_identity;
     GHashTable *verified;
@@ -4824,7 +4824,7 @@ static bool tombstone_shape(GKeyFile *record, const char *name,
 
 static int completed_removal(int root, const char *root_path, const char *source,
                              const char *name, const uint64_t expected[4],
-                             const char *digest)
+                             const char *digest, bool deny_completion)
 {
     int gc = open_directory(root, ".gc", false);
     int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
@@ -4853,6 +4853,7 @@ static int completed_removal(int root, const char *root_path, const char *source
     char *current = g_strdup_printf("%s.current", source), *manifest = NULL;
     size_t manifest_size = 0;
     GHashTable *references = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    if (valid && !complete && deny_completion) { result = -1; goto out; }
     if (valid) valid = !read_file(root, current, MANIFEST_LIMIT, &manifest, &manifest_size) &&
         manifest_references(source, manifest, manifest_size, references) &&
         !g_hash_table_contains(references, name);
@@ -4947,7 +4948,8 @@ static int verify_objects(int root, const char *root_path, const char *source, c
             struct stat st;
             int status = fstatat(root, name, &st, AT_SYMLINK_NOFOLLOW);
             int removed = status && errno == ENOENT && allow_removed ?
-                completed_removal(root, root_path, source, name, values, hash) : 0;
+                completed_removal(root, root_path, source, name, values, hash,
+                                  cursor && cursor->deny_receipt_completion) : 0;
             if (removed < 0) result = -1;
             else if (removed) {
                 /* Durable exact-object receipt replaces only missing content. */
@@ -7966,6 +7968,14 @@ invalid:
     latcd_recovery_close(cursor);
     fail(error, error_size, "unsafe recovery store");
     return NULL;
+}
+
+LatcdRecoveryCursor *latcd_recovery_open_untrusted(const char *root, bool tombstones,
+                                                  char *error, size_t error_size)
+{
+    LatcdRecoveryCursor *cursor = latcd_recovery_open(root, tombstones, error, error_size);
+    if (cursor) cursor->deny_receipt_completion = true;
+    return cursor;
 }
 
 int latcd_recovery_step(LatcdRecoveryCursor *cursor, unsigned entries,

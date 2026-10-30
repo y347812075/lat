@@ -5420,6 +5420,27 @@ static void test_deleted_transaction_recovery(int mutation, const char *point, b
         put(marker, raw); g_free(raw); g_key_file_unref(record);
     }
     unsigned recovered;
+    if (mutation == 18 || mutation == 19) {
+        char *transaction = single_record(root), *before_tx = NULL, *before_marker = NULL;
+        char *after_tx = NULL, *after_marker = NULL;
+        assert(g_file_get_contents(transaction, &before_tx, NULL, NULL));
+        assert(g_file_get_contents(marker, &before_marker, NULL, NULL));
+        LatcdRecoveryCursor *cursor = latcd_recovery_open_untrusted(root, false,
+                                                                   error, sizeof(error));
+        assert(cursor);
+        LatcdRecoveryProgress progress;
+        int result;
+        do { result = latcd_recovery_step(cursor, 32, 4 * 1024 * 1024, 10000,
+                                           &progress, error, sizeof(error)); } while (result > 0);
+        assert(result < 0);
+        latcd_recovery_close(cursor);
+        assert(g_file_get_contents(transaction, &after_tx, NULL, NULL));
+        assert(g_file_get_contents(marker, &after_marker, NULL, NULL));
+        assert(!strcmp(before_tx, after_tx) && !strcmp(before_marker, after_marker));
+        assert(access(paths[0], F_OK) && !access(paths[3], F_OK));
+        g_free(transaction); g_free(before_tx); g_free(before_marker);
+        g_free(after_tx); g_free(after_marker);
+    }
     if (mutation == 24) {
         char *original_path = single_record(root), *original = NULL;
         assert(g_file_get_contents(original_path, &original, NULL, NULL));
