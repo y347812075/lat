@@ -2118,6 +2118,28 @@ typedef struct LatcdTaskRecovery {
 #ifdef LATCD_GC_TIMER_TEST
 static LatcdPageBudget test_page_budget;
 static bool test_page_staged;
+static bool test_page_waiting;
+static int test_retirement_page_has_deferred(const LatcdConfig *config,
+                                             char *error, size_t error_size)
+{
+    LatcdRetirementPageState page;
+    LatcdRetirementPageInventory inventory;
+    uint8_t results[128];
+    struct timespec ts;
+    if (clock_gettime(CLOCK_BOOTTIME, &ts)) return -1;
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+    if (latcd_retirement_page_snapshot(config->cache_dir, now, &page,
+                                        results, &inventory, error, error_size) < 0) return -1;
+    if (page.committed_pending) return 0;
+    for (unsigned i = 0; i < page.count; i++) {
+        if (results[i] == LATCD_RETIREMENT_RESULT_DEFERRED) {
+            if (!inventory.members[i].present || inventory.undersized_member)
+                return fail(error, error_size, "invalid deferred page inventory");
+            return 1;
+        }
+    }
+    return 0;
+}
 static int test_consume_retirement_page(const LatcdConfig *config,
                                         char *error, size_t error_size)
 {
@@ -2241,6 +2263,9 @@ static void *compiler_input_recovery_worker(void *opaque)
     while (!atomic_load(&work->stopping) && !stop_requested) {
         int64_t now = g_get_monotonic_time();
         if (retirement_safe && atomic_load(&compiler_budget_recovery_state) == 1 &&
+#ifdef LATCD_GC_TIMER_TEST
+            !test_page_waiting &&
+#endif
             now >= next_retirement) {
             LatcdRetirementQueueStats stats;
             char error[256];
@@ -2323,7 +2348,11 @@ static void *compiler_input_recovery_worker(void *opaque)
                 next = g_get_monotonic_time() + (result == 1 ? 100000 : 5000000);
             }
         }
-        int64_t wake = retirement_safe && atomic_load(&compiler_budget_recovery_state) == 1 ?
+        int64_t wake = retirement_safe && atomic_load(&compiler_budget_recovery_state) == 1 &&
+#ifdef LATCD_GC_TIMER_TEST
+            !test_page_waiting &&
+#endif
+            true ?
             MIN(next, next_retirement) : next;
         int64_t remaining = MAX(INT64_C(0), wake - g_get_monotonic_time());
         int timeout = (int)MIN(INT64_C(1000), (remaining + 999) / 1000);
@@ -2352,7 +2381,11 @@ static void *compiler_input_recovery_worker(void *opaque)
     /* Explicit stop may reach this thread before a publisher finishes. The
      * main thread requests the final handoff only after joining publishers. */
     while (!atomic_load(&work->stopping)) poll(NULL, 0, 50);
-    if (retirement_safe) {
+    if (retirement_safe
+#ifdef LATCD_GC_TIMER_TEST
+        && !test_page_waiting
+#endif
+       ) {
         LatcdRetirementQueueStats stats;
         latcd_retirement_queue_step(retirement, 32, 10000, &stats,
                                     retirement_error, sizeof(retirement_error));
@@ -6838,7 +6871,12 @@ int main(int argc, char **argv)
 #ifdef LATCD_GC_TIMER_TEST
     if (!budget_result && test_page_recovered) {
         test_page_staged = true;
-        if (test_consume_retirement_page(&config, error, sizeof(error))) budget_result = -1;
+        int deferred = test_retirement_page_has_deferred(&config, error, sizeof(error));
+        if (deferred < 0) budget_result = -1;
+        else if (deferred) {
+            test_page_waiting = true;
+            fprintf(stderr, "latcd: test recovered page waiting; automatic retry unavailable\n");
+        } else if (test_consume_retirement_page(&config, error, sizeof(error))) budget_result = -1;
         else fprintf(stderr, "latcd: test recovered page consumed\n");
     }
 #endif

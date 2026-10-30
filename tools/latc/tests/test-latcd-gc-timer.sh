@@ -122,15 +122,15 @@ while ! grep -q 'latcd: test page deferred' "$work/server.err"; do
     n=$((n + 1)); [ "$n" -lt 300 ]; sleep 0.05
 done
 stop
-if LATCD_TEST_RECOVER_PAGE=1 "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" \
-    --latc "$compiler" --runner "$daemon" --runtime-dir "$runtime" \
-    --stats "$stats" --workers 1 >"$work/restart.out" 2>"$work/restart.err"; then
-    echo 'daemon consumed unresolved deferred page' >&2; exit 1
-fi
-grep -q 'unresolved deferred member' "$work/restart.err"
+scheduler=$cache/.gc/retirement-scheduler.ini
+before=$(sha256sum "$scheduler")
+LATCD_TEST_RECOVER_PAGE=1 start
+grep -q 'test recovered page waiting; automatic retry unavailable' "$work/server.err"
 test -f "$cache/.gc/retirement-page.ini"
 old=$cache/$(printf '%064x' 7)
 test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
+stop
+test "$before" = "$(sha256sum "$scheduler")"
 cache=$work/crash-cache
 socket=$work/crash.sock
 stats=$work/crash-stats.json
