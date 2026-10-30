@@ -65,6 +65,14 @@ test-cache-export: $(BUILD)/tests/test-cache-export
 	$(BUILD)/tests/test-cache-export
 test: test-cache-export
 
+$(BUILD)/tests/test-broker-transport: tests/test-broker-transport.c latcd/broker-transport.c latcd/broker-transport.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test-broker-transport.c latcd/broker-transport.c
+.PHONY: test-broker-transport
+test-broker-transport: $(BUILD)/tests/test-broker-transport
+	$(BUILD)/tests/test-broker-transport
+test: test-broker-transport
+
 test-native-config-replay:
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)" || \
 	  { echo "usage: make test-native-config-replay INSTALL_PREFIX=... X86_GUEST=... TBSET=... WORK=..."; exit 2; }
