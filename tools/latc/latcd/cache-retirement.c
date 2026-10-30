@@ -4723,8 +4723,12 @@ static int retirement_tombstone(const char *root, const char *source,
         !directory_matches_at(gc, "tombstones", store) ||
         (source_latch >= 0 && (!directory_matches_at(gc, "source-locks", locks) ||
          !lock_matches_at(locks, source_lock_name, source_latch))) ||
-        !lock_matches_at(gc, "reference-roots.lock", roots) ||
-        flock(object_fd, LOCK_EX | LOCK_NB) ||
+        !lock_matches_at(gc, "reference-roots.lock", roots)) goto out;
+    if (flock(object_fd, LOCK_EX | LOCK_NB)) {
+        if (errno == EWOULDBLOCK || errno == EAGAIN) result = 1;
+        goto out;
+    }
+    if (
         fstat(object_fd, &before) || !S_ISREG(before.st_mode) ||
         before.st_uid != geteuid() || before.st_nlink != 1 ||
         (before.st_mode & 0222) || before.st_size <= 0 ||
@@ -4801,15 +4805,16 @@ out:
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
     if (roots >= 0) close(roots);
-    return result ? fail(error, error_size, "cannot persist object deletion intent") : 0;
+    return result == 1 ? 1 : result ? fail(error, error_size, "cannot persist object deletion intent") : 0;
 }
 
 int latcd_retirement_tombstone(const char *root, const char *source,
                                const char *name, int object_fd, const char *evidence,
                                char *error, size_t error_size)
 {
-    return retirement_tombstone(root, source, name, object_fd, evidence, -1,
-                                error, error_size);
+    int result = retirement_tombstone(root, source, name, object_fd, evidence, -1,
+                                      error, error_size);
+    return result == 1 ? fail(error, error_size, "object deletion intent blocked by pin") : result;
 }
 
 /* No pathname here is trusted until its source-bound basename is checked.
@@ -6670,7 +6675,8 @@ int latcd_retirement_page_wait_busy(const char *root, LatcdPageBudget *budget,
     uint64_t now_us, char *error, size_t error_size)
 {
     if (!root || !budget || !budget->capacity || budget->invalid ||
-        !budget->page_identity_bound || !report || !report->busy_observation_durable ||
+        !budget->page_identity_bound || !report ||
+        (!report->busy_observation_durable && !report->object_pin_busy_observed) ||
         !report->scheduler_deferral_durable || !report->attempt_sequence ||
         !report->attempt_started_boottime_us || report->attempt_started_boottime_us > now_us ||
         report->object_unlinked || report->namespace_durable || report->receipt_durable ||
@@ -7545,9 +7551,13 @@ int latcd_retirement_queue_execute_step(LatcdRetirementQueue *queue,
         latch = lat_aot_v2_cache_source_lock(queue->root, source, LOCK_EX | LOCK_NB,
                                              false, error, error_size);
         if (latch < 0 || fstat(object, &status) ||
-            object_transaction_status(root, attempt.name, &status, &queue->grace) ||
-            retirement_tombstone(queue->root, source, attempt.name, object,
-                                 evidence, latch, error, error_size)) goto out;
+            object_transaction_status(root, attempt.name, &status, &queue->grace)) goto out;
+        int intent = retirement_tombstone(queue->root, source, attempt.name, object,
+                                          evidence, latch, error, error_size);
+        if (intent) {
+            if (intent == 1 && report) report->object_pin_busy_observed = true;
+            goto out;
+        }
     }
     if (object >= 0) { close(object); object = -1; }
     if (latch >= 0) { close(latch); latch = -1; }

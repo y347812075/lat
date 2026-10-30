@@ -11,7 +11,9 @@ socket=$work/latcd.sock
 stats=$work/stats.json
 mkdir -m 700 "$cache"
 pid=
+pin_pid=
 cleanup() {
+    if [ -n "$pin_pid" ]; then kill "$pin_pid" 2>/dev/null || :; wait "$pin_pid" 2>/dev/null || :; fi
     if [ -n "$pid" ]; then kill -TERM "$pid" 2>/dev/null || :; wait "$pid" 2>/dev/null || :; fi
 }
 trap cleanup EXIT
@@ -131,6 +133,91 @@ old=$cache/$(printf '%064x' 7)
 test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
 stop
 test "$before" = "$(sha256sum "$scheduler")"
+cache=$work/busy-timer-cache
+socket=$work/busy-timer.sock
+stats=$work/busy-timer-stats.json
+mkdir -m 700 "$cache"
+start
+stop
+"$fixture" --timer-fixture "$cache"
+old=$cache/$(printf '%064x' 7)
+python3 - "$old" "$work/pins-ready" <<'PY' &
+import fcntl, pathlib, signal, sys
+files = [open(sys.argv[1] + suffix, 'rb') for suffix in ('.so', '.native', '.tbset')]
+for f in files: fcntl.flock(f, fcntl.LOCK_SH)
+pathlib.Path(sys.argv[2]).touch()
+signal.pause()
+PY
+pin_pid=$!
+n=0
+while [ ! -f "$work/pins-ready" ]; do
+    kill -0 "$pin_pid"; n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+done
+LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 start
+n=0
+while ! grep -q 'test page busy retry=' "$work/server.err"; do
+    if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then
+        cat "$work/server.err" >&2; exit 1
+    fi
+    n=$((n + 1)); [ "$n" -lt 400 ]; sleep 0.05
+done
+test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
+test ! -e "$cache/.gc/tombstones/$(printf '%064x' 7).so"
+test ! -e "$cache/.gc/tombstones/$(printf '%064x' 7).native"
+test ! -e "$cache/.gc/tombstones/$(printf '%064x' 7).tbset"
+kill -KILL "$pid"; wait "$pid" 2>/dev/null || :; pid=
+rm -f "$socket"
+LATCD_TEST_RECOVER_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 start
+grep -q 'test recovered page waiting' "$work/server.err"
+test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
+kill "$pin_pid"; wait "$pin_pid" 2>/dev/null || :; pin_pid=
+n=0
+while ! grep -q 'test waiting page consumed' "$work/server.err"; do
+    if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then
+        cat "$work/server.err" >&2; exit 1
+    fi
+    n=$((n + 1)); [ "$n" -lt 800 ]; sleep 0.1
+done
+grep -q 'test waiting timer woke' "$work/server.err"
+test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
+python3 - "$cache" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1]); source = f'{7:064x}'
+m = json.loads((root / (source + '.current')).read_text())
+assert all((root / m[key]).is_file() for key in ('module', 'native', 'tbset'))
+PY
+stop
+cache=$work/busy-checkpoint-error-cache
+socket=$work/busy-checkpoint-error.sock
+stats=$work/busy-checkpoint-error-stats.json
+mkdir -m 700 "$cache"
+start
+stop
+"$fixture" --timer-fixture "$cache"
+old=$cache/$(printf '%064x' 7)
+python3 - "$old" "$work/error-pins-ready" <<'PY' &
+import fcntl, pathlib, signal, sys
+files = [open(sys.argv[1] + suffix, 'rb') for suffix in ('.so', '.native', '.tbset')]
+for f in files: fcntl.flock(f, fcntl.LOCK_SH)
+pathlib.Path(sys.argv[2]).touch()
+signal.pause()
+PY
+pin_pid=$!
+n=0
+while [ ! -f "$work/error-pins-ready" ]; do
+    kill -0 "$pin_pid"; n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+done
+LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
+    LATCD_TEST_RETIREMENT_IO=error:completion-clock start
+n=0
+while ! grep -q 'test waiting page failed' "$work/server.err"; do
+    kill -0 "$pid"; n=$((n + 1)); [ "$n" -lt 400 ]; sleep 0.05
+done
+! grep -q 'test page busy retry=' "$work/server.err"
+test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
+test -f "$cache/.gc/retirement-page.ini"
+kill "$pin_pid"; wait "$pin_pid" 2>/dev/null || :; pin_pid=
+stop
 cache=$work/crash-cache
 socket=$work/crash.sock
 stats=$work/crash-stats.json

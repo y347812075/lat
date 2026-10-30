@@ -507,6 +507,8 @@ typedef struct LatcdRetirementDeletionReport {
     bool filesystem_before_valid, filesystem_after_valid;
     /* A BUSY observation persisted successfully; not a scheduler deferral. */
     bool busy_observation_durable;
+    /* This attempt observed an object pin before any deletion intent existed. */
+    bool object_pin_busy_observed;
     /* Queue checkpoint only, not a page-bound deferral or deletion authority. */
     bool scheduler_deferral_durable;
     char attempt_name[138];
@@ -515,7 +517,8 @@ typedef struct LatcdRetirementDeletionReport {
 } LatcdRetirementDeletionReport;
 
 /* Controlled owner only: persist the first page-bound wait for an observed
- * busy attempt. The report is evidence from the same execution, not an access
+ * busy attempt (a durable tombstone observation or an object pin conflict).
+ * The report is evidence from the same execution, not an access
  * domain or deletion authorization. Existing result shards are not replaced. */
 int latcd_retirement_page_wait_busy(const char *root, struct LatcdPageBudget *budget,
     unsigned index, const LatcdRetirementDeletionReport *report,
