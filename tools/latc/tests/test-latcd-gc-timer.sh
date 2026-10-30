@@ -70,6 +70,28 @@ s.close()
 PY
 stop
 test ! -e "$work/broker/broker.sock"
+LATCD_TEST_BROKER_DIRECTORY="$work/broker" \
+    "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" \
+    --latc "$compiler" --runner "$daemon" --runtime-dir "$runtime" \
+    --stats "$stats" --workers 1 --idle-seconds 1 >"$work/idle.out" 2>"$work/idle.err" &
+pid=$!
+n=0
+while [ ! -S "$work/broker/broker.sock" ]; do
+    kill -0 "$pid"; n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+done
+python3 - "$work/broker/broker.sock" "$pid" <<'PY'
+import os, socket, sys, time
+with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as s:
+    s.connect(sys.argv[1])
+    time.sleep(2)
+    os.kill(int(sys.argv[2]), 0)
+PY
+n=0
+while kill -0 "$pid" 2>/dev/null; do
+    n=$((n + 1)); [ "$n" -lt 100 ]; sleep 0.05
+done
+wait "$pid"; pid=
+test ! -e "$work/broker/broker.sock"
 test_daemon_saved=$test_daemon
 test_daemon=$(dirname "$test_daemon")/../latcd/latcd
 cache=$work/production-invalid-cache

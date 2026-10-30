@@ -3971,6 +3971,29 @@ static void G_GNUC_UNUSED broker_server_stop(LatcdBrokerServer *server)
     latcd_broker_listener_close(&server->listener);
 }
 
+static bool G_GNUC_UNUSED broker_server_busy(const LatcdBrokerServer *server)
+{
+    for (unsigned i = 0; i < LATCD_BROKER_CONNECTIONS; i++)
+        if (server->used[i]) return true;
+    return false;
+}
+
+static nfds_t G_GNUC_UNUSED broker_server_pollfds(const LatcdBrokerServer *server,
+                                                   struct pollfd *fds)
+{
+    nfds_t n = 0;
+    fds[n++] = (struct pollfd) {.fd = server->listener.fd, .events = POLLIN};
+    fds[n++] = (struct pollfd) {.fd = server->worker.event, .events = POLLIN};
+    for (unsigned i = 0; i < LATCD_BROKER_CONNECTIONS; i++) {
+        const LatcdBrokerConnection *connection = &server->connections[i];
+        if (!server->used[i] || connection->fd < 0) continue;
+        short events = !connection->submitted ? POLLIN :
+                       connection->response_ready ? POLLOUT : 0;
+        fds[n++] = (struct pollfd) {.fd = connection->fd, .events = events};
+    }
+    return n;
+}
+
 static int G_GNUC_UNUSED broker_export_request(const LatcdConfig *config,
                                                 int socket_fd, uid_t client_uid)
 {
@@ -6568,7 +6591,21 @@ static int run_service(const LatcdConfig *config)
         if (budget_recovery == 1) admit_journal_receipts_periodically(
             config, &service, journal_build, journal_codegen,
             &last_journal_admission, &journal_admission_error);
-        int available = poll(channels, channel_count, 250);
+        struct pollfd pollfds[LATCD_MAX_CHANNELS + 1 + LATCD_BROKER_CONNECTIONS + 2];
+        memcpy(pollfds, channels, channel_count * sizeof(*pollfds));
+        nfds_t poll_count = channel_count;
+#ifdef LATCD_GC_TIMER_TEST
+        if (test_broker_started)
+            poll_count += broker_server_pollfds(&test_broker, pollfds + poll_count);
+#endif
+        int available = poll(pollfds, poll_count, 250);
+        for (nfds_t i = 0; i < channel_count; i++) channels[i].revents = pollfds[i].revents;
+#ifdef LATCD_GC_TIMER_TEST
+        if (available > 0 && test_broker_started) {
+            for (nfds_t i = channel_count; i < poll_count; i++)
+                if (pollfds[i].revents) { last_activity = g_get_monotonic_time(); break; }
+        }
+#endif
         if (available < 0 && errno == EINTR) {
             continue;
         }
@@ -6579,6 +6616,9 @@ static int run_service(const LatcdConfig *config)
             pthread_mutex_unlock(&service.lock);
             busy |= atomic_load(&active_precompiles) ||
                 (precompile_pool && g_thread_pool_unprocessed(precompile_pool));
+#ifdef LATCD_GC_TIMER_TEST
+            busy |= test_broker_started && broker_server_busy(&test_broker);
+#endif
             if (busy) last_activity = g_get_monotonic_time();
             if (config->idle_seconds &&
                 g_get_monotonic_time() - last_activity >=
