@@ -6685,7 +6685,7 @@ int latcd_retirement_queue_page_receipt_begin(LatcdRetirementQueue *queue,
     LatcdRetirementPageState page;
     uint8_t identity[32]; bool legacy = false;
     uint8_t results[128];
-    LatcdRetirementPageInventory inventory;
+    LatcdRetirementPageInventory inventory = {0};
     char *boot = NULL;
     uint64_t now;
     int result = -1;
