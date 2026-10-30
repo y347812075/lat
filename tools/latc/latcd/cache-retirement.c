@@ -4593,6 +4593,19 @@ static int completed_removal(int root, const char *root_path, const char *source
     struct stat st;
     if (valid) valid = fstatat(root, name, &st, AT_SYMLINK_NOFOLLOW) && errno == ENOENT;
     if (valid && !complete) {
+        struct stat identity = {0};
+        identity.st_dev = (dev_t)values[0];
+        identity.st_ino = (ino_t)values[1];
+        identity.st_size = (off_t)values[2];
+        identity.st_blocks = (blkcnt_t)(values[3] / 512);
+        if ((uint64_t)identity.st_dev != values[0] || (uint64_t)identity.st_ino != values[1] ||
+            identity.st_size < 0 || (uint64_t)identity.st_size != values[2] || values[3] % 512 ||
+            identity.st_blocks < 0 || (uint64_t)identity.st_blocks != values[3] / 512 ||
+            object_current_status(root, name) || object_hold_status(root, name, &identity) ||
+            object_task_status(root, name, &identity) || object_transaction_status(root, name, &identity, NULL)) {
+            result = -1;
+            goto out;
+        }
         /* Observation only: make the already-absent name durable. Never unlink
          * here, and never infer physical block release from this receipt. */
         if (fsync(root) || record_write_fault("missing-synced")) result = -1;
@@ -4602,6 +4615,7 @@ static int completed_removal(int root, const char *root_path, const char *source
             result = write_recovery_record(store, name, record) ? -1 : 1;
         }
     } else if (valid) result = 1;
+out:
     if (latch >= 0) close(latch);
     g_hash_table_unref(references);
     g_free(manifest); g_free(current); g_free(deletion); g_free(observation);

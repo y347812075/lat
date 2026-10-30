@@ -5247,7 +5247,7 @@ static void test_deleted_transaction_recovery(int mutation, const char *point, b
         assert(single && fd >= 0 && !latcd_retirement_tombstone(root, source, names[i], fd,
             single, error, sizeof(error)));
         close(fd); g_free(single);
-        if (!i && (mutation == 18 || mutation == 19)) {
+        if (!i && (mutation == 18 || mutation == 19 || mutation == 24)) {
             pid_t child = fork();
             assert(child >= 0);
             if (!child) {
@@ -5293,6 +5293,22 @@ static void test_deleted_transaction_recovery(int mutation, const char *point, b
         put(marker, raw); g_free(raw); g_key_file_unref(record);
     }
     unsigned recovered;
+    if (mutation == 24) {
+        char *original_path = single_record(root), *original = NULL;
+        assert(g_file_get_contents(original_path, &original, NULL, NULL));
+        GKeyFile *pending = g_key_file_new();
+        assert(g_key_file_load_from_data(pending, original, -1, 0, NULL));
+        g_key_file_set_string(pending, "transaction", "state", "PREPARED");
+        char *pending_data = g_key_file_to_data(pending, NULL, NULL);
+        char *id = g_uuid_string_random(), *filename = g_strdup_printf("%s.ini", id);
+        char *pending_path = g_build_filename(root, ".gc", "transactions", filename, NULL);
+        put(pending_path, pending_data);
+        assert(latcd_retirement_recover(root, &recovered, error, sizeof(error)) < 0);
+        assert(!unlink(pending_path));
+        assert_state(root, "RETIRED");
+        g_free(pending_path); g_free(filename); g_free(id); g_free(pending_data);
+        g_key_file_unref(pending); g_free(original); g_free(original_path);
+    }
     if (point) {
         pid_t child = fork();
         assert(child >= 0);
@@ -5318,7 +5334,7 @@ static void test_deleted_transaction_recovery(int mutation, const char *point, b
     for (int pass = 0; pass < 2; pass++) {
         assert(!latcd_retirement_recover(root, &recovered, error, sizeof(error)) && recovered == 1);
         bool accepted = !mutation || mutation == 1 || mutation == 15 || mutation == 16 ||
-                        mutation == 18 || mutation == 19 || mutation == 20;
+                        mutation == 18 || mutation == 19 || mutation == 20 || mutation == 24;
         assert_state(root, accepted ? "RETIRED" : "UNKNOWN");
         if (accepted) {
             GKeyFile *record = g_key_file_new();
@@ -8795,7 +8811,7 @@ int main(int argc, char **argv)
         test_recovery_cursor(mutation, false);
         test_recovery_cursor(mutation, true);
     }
-    for (int mutation = 0; mutation < 24; mutation++)
+    for (int mutation = 0; mutation < 25; mutation++)
         test_deleted_transaction_recovery(mutation, NULL, false);
     test_manifest_binding();
     test_tombstone();
