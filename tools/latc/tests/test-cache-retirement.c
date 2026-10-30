@@ -4302,6 +4302,36 @@ static void test_retry_page_identity(void)
     g_free(tampered); g_free(decoded); g_free(encoded);
     memset(page->replacement_digest, 0, sizeof(page->replacement_digest));
     page->completed = 0; page->intent_present = false; page->intent_size = 0; page->intent_original_size = 0;
+    assert(!latcd_retirement_retry_page_budget_identity(page, budget_identity));
+    page->completed = 1;
+    memset(page->replacement_digest[0], 0x12, 32);
+    page->deletion_intent = true;
+    memset(page->receipt_digest[1], 0x34, 32);
+    assert(!latcd_retirement_retry_page_budget_identity(page, changed_budget) &&
+           !memcmp(budget_identity, changed_budget, 32));
+    assert(!latcd_retirement_retry_page_encode(page, &encoded, &encoded_size));
+    assert(strstr(encoded, "version=6\n"));
+    decoded = g_new0(LatcdRetirementRetryPage, 1);
+    assert(!latcd_retirement_retry_page_decode(encoded, encoded_size, decoded) &&
+           decoded->deletion_intent && !decoded->deleted[1] &&
+           !memcmp(decoded->receipt_digest[1], page->receipt_digest[1], 32));
+    tampered = g_strdup(encoded); field = strstr(tampered, "receipt_digest=");
+    assert(field); field[strlen("receipt_digest=")] = 'A';
+    assert(latcd_retirement_retry_page_decode(tampered, encoded_size, decoded) < 0);
+    g_free(tampered); g_free(encoded);
+    page->deletion_intent = false; page->deleted[1] = true; page->completed = 2;
+    assert(!latcd_retirement_retry_page_encode(page, &encoded, &encoded_size));
+    assert(!latcd_retirement_retry_page_decode(encoded, encoded_size, decoded) &&
+           decoded->deleted[1] && !decoded->deletion_intent);
+    assert(!latcd_retirement_retry_page_budget_identity(decoded, changed_budget) &&
+           !memcmp(budget_identity, changed_budget, 32));
+    page->items[1].matched = false;
+    assert(latcd_retirement_retry_page_identity(page, changed) < 0);
+    page->items[1].matched = true;
+    g_free(decoded); g_free(encoded);
+    page->completed = 0; page->deleted[1] = false;
+    memset(page->replacement_digest, 0, sizeof(page->replacement_digest));
+    memset(page->receipt_digest, 0, sizeof(page->receipt_digest));
     assert(!latcd_retirement_retry_page_identity(page, original));
     assert(!latcd_retirement_retry_page_budget_identity(page, budget_identity));
     page->items[0].shard_sequence++;

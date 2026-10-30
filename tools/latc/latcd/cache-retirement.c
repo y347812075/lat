@@ -783,7 +783,8 @@ int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
         (page->retry_cursor[0] && !page_object_name_valid(page->retry_cursor)) ||
         strnlen(page->end_cursor, sizeof(page->end_cursor)) == sizeof(page->end_cursor) ||
         !page->count || page->count > 128 || page->completed > page->count ||
-        (page->intent_present && page->completed == page->count) ||
+        ((page->intent_present || page->deletion_intent) && page->completed == page->count) ||
+        (page->intent_present && page->deletion_intent) ||
         (page->intent_present ? (!page->intent_size || page->intent_size > sizeof(page->intent_data) ||
             !page->intent_original_size || page->intent_original_size > sizeof(page->intent_original)) :
             page->intent_size != 0 || page->intent_original_size != 0)) return -1;
@@ -801,13 +802,20 @@ int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
         if (length != sizeof(intent_digest) ||
             memcmp(intent_digest, page->items[page->completed].shard_digest, sizeof(intent_digest))) return -1;
     }
-    bool wrapped = false;
+    bool wrapped = false, has_deletion = page->deletion_intent;
     for (unsigned i = 0; i < page->count; i++) {
         const LatcdRetirementRetryItem *item = &page->items[i];
         const LatcdRetirementPageDeadline *hint = &item->hint, *aggregate = &item->aggregate;
         bool has_replacement = false;
         for (unsigned j = 0; j < 32; j++) has_replacement |= page->replacement_digest[i][j] != 0;
-        if (has_replacement != (i < page->completed || (page->intent_present && i == page->completed))) return -1;
+        bool has_receipt = false;
+        for (unsigned j = 0; j < 32; j++) has_receipt |= page->receipt_digest[i][j] != 0;
+        bool deleting = page->deleted[i] || (page->deletion_intent && i == page->completed);
+        if ((page->deleted[i] && i >= page->completed) ||
+            (deleting && !item->matched) || has_receipt != deleting ||
+            has_replacement != ((i < page->completed && !page->deleted[i]) ||
+                                (page->intent_present && i == page->completed))) return -1;
+        has_deletion |= page->deleted[i];
         if (strnlen(hint->name, sizeof(hint->name)) == sizeof(hint->name) ||
             !page_object_name_valid(hint->name) || !hint->enqueued ||
             hint->enqueued > page->snapshot_time || hint->last_attempt > item->shard_sequence ||
@@ -866,6 +874,15 @@ int latcd_retirement_retry_page_identity(const LatcdRetirementRetryPage *page,
         page_identity_u64(checksum, item->matched);
         page_identity_u64(checksum, item->aggregate.deadline);
     }
+    if (has_deletion) {
+        static const char deletion_domain[] = "latcd-retirement-retry-deletion-v1";
+        g_checksum_update(checksum, (const guchar *)deletion_domain, sizeof(deletion_domain));
+        page_identity_u64(checksum, page->deletion_intent);
+        for (unsigned i = 0; i < page->count; i++) {
+            page_identity_u64(checksum, page->deleted[i]);
+            g_checksum_update(checksum, page->receipt_digest[i], 32);
+        }
+    }
     gsize length = 32;
     g_checksum_get_digest(checksum, digest, &length);
     g_checksum_free(checksum);
@@ -885,6 +902,9 @@ int latcd_retirement_retry_page_budget_identity(const LatcdRetirementRetryPage *
     copy->intent_size = 0;
     copy->intent_original_size = 0;
     memset(copy->replacement_digest, 0, sizeof(copy->replacement_digest));
+    copy->deletion_intent = false;
+    memset(copy->deleted, 0, sizeof(copy->deleted));
+    memset(copy->receipt_digest, 0, sizeof(copy->receipt_digest));
     int result = latcd_retirement_retry_page_identity(copy, initial);
     g_free(copy);
     if (result) return -1;
@@ -1027,7 +1047,10 @@ int latcd_retirement_retry_page_encode(const LatcdRetirementRetryPage *page,
     GKeyFile *record = g_key_file_new();
     char hex[65];
     encode_hex(digest, sizeof(digest), hex);
-    g_key_file_set_integer(record, "retry", "version", 5);
+    bool deletion = page->deletion_intent;
+    for (unsigned i = 0; i < page->count; i++) deletion |= page->deleted[i];
+    g_key_file_set_integer(record, "retry", "version", deletion ? 6 : 5);
+    if (deletion) g_key_file_set_uint64(record, "retry", "deletion_intent", page->deletion_intent);
     g_key_file_set_uint64(record, "retry", "cache_device", page->cache_device);
     g_key_file_set_uint64(record, "retry", "cache_inode", page->cache_inode);
     g_key_file_set_uint64(record, "retry", "grace_us", page->grace_us);
@@ -1062,7 +1085,11 @@ int latcd_retirement_retry_page_encode(const LatcdRetirementRetryPage *page,
         char *shard64 = g_base64_encode(item->shard_digest, sizeof(item->shard_digest));
         g_key_file_set_string(record, group, "shard_digest", shard64);
         g_free(shard64);
-        if (i < page->completed || (page->intent_present && i == page->completed)) {
+        if (page->deleted[i] || (page->deletion_intent && i == page->completed)) {
+            char *receipt64 = g_base64_encode(page->receipt_digest[i], 32);
+            g_key_file_set_string(record, group, "receipt_digest", receipt64);
+            g_free(receipt64);
+        } else if (i < page->completed || (page->intent_present && i == page->completed)) {
             char *replacement64 = g_base64_encode(page->replacement_digest[i], 32);
             g_key_file_set_string(record, group, "replacement_digest", replacement64);
             g_free(replacement64);
@@ -1087,12 +1114,19 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
     GKeyFile *record = g_key_file_new();
     const char *header[] = {"version", "cache_device", "cache_inode", "grace_us", "round_cutoff", "round_sequence",
         "snapshot_time", "snapshot_sequence", "boot", "committed_cursor", "retry_cursor", "end_cursor", "count", "completed", "intent", "intent_data", "intent_original", "identity"};
+    const char *header6[] = {"version", "cache_device", "cache_inode", "grace_us", "round_cutoff", "round_sequence",
+        "snapshot_time", "snapshot_sequence", "boot", "committed_cursor", "retry_cursor", "end_cursor", "count", "completed", "intent", "intent_data", "intent_original", "identity", "deletion_intent"};
     const char *fields[] = {"name", "enqueued", "last_attempt", "retry_at", "busy_count", "sequence", "shard_digest", "replacement_digest", "matched", "deadline"};
+    const char *deleted_fields[] = {"name", "enqueued", "last_attempt", "retry_at", "busy_count", "sequence", "shard_digest", "receipt_digest", "matched", "deadline"};
     const char *pending_fields[] = {"name", "enqueued", "last_attempt", "retry_at", "busy_count", "sequence", "shard_digest", "matched", "deadline"};
-    uint64_t count = 0, completed = 0, intent = 0;
-    bool valid = g_key_file_load_from_data(record, data, size, 0, NULL) &&
-        exact_keys(record, "retry", header, G_N_ELEMENTS(header)) &&
-        record_string_is(record, "retry", "version", "5") &&
+    uint64_t count = 0, completed = 0, intent = 0, deletion_intent = 0;
+    bool loaded = g_key_file_load_from_data(record, data, size, 0, NULL);
+    bool v6 = loaded && record_string_is(record, "retry", "version", "6");
+    bool valid = loaded &&
+        (v6 ? (exact_keys(record, "retry", header6, G_N_ELEMENTS(header6)) &&
+               record_uint64(record, "retry", "deletion_intent", &deletion_intent) && deletion_intent <= 1) :
+              (exact_keys(record, "retry", header, G_N_ELEMENTS(header)) &&
+               record_string_is(record, "retry", "version", "5"))) &&
         record_uint64(record, "retry", "cache_device", &page->cache_device) &&
         record_uint64(record, "retry", "cache_inode", &page->cache_inode) &&
         record_uint64(record, "retry", "grace_us", &page->grace_us) &&
@@ -1132,6 +1166,7 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
         g_strlcpy(page->end_cursor, end, sizeof(page->end_cursor));
         page->count = count;
         page->completed = completed; page->intent_present = intent;
+        page->deletion_intent = deletion_intent;
         page->intent_size = intent_size;
         memcpy(page->intent_data, intent_bytes, intent_size);
         page->intent_original_size = original_size;
@@ -1144,17 +1179,24 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
         char *name = g_key_file_get_string(record, group, "name", NULL);
         char *shard_digest = g_key_file_get_string(record, group, "shard_digest", NULL);
         char *replacement = g_key_file_get_string(record, group, "replacement_digest", NULL);
-        bool requires_replacement = i < page->completed || (page->intent_present && i == page->completed);
+        char *receipt = v6 ? g_key_file_get_string(record, group, "receipt_digest", NULL) : NULL;
+        bool deleting = receipt != NULL;
+        bool requires_replacement = !deleting && (i < page->completed || (page->intent_present && i == page->completed));
         gsize shard_size = 0, replacement_size = 0;
         guchar *shard_bytes = shard_digest ? g_base64_decode(shard_digest, &shard_size) : NULL;
         guchar *replacement_bytes = replacement ? g_base64_decode(replacement, &replacement_size) : NULL;
         char *shard_canonical = shard_bytes ? g_base64_encode(shard_bytes, shard_size) : NULL;
         char *replacement_canonical = replacement_bytes ? g_base64_encode(replacement_bytes, replacement_size) : NULL;
-        valid = (requires_replacement ? exact_keys(record, group, fields, G_N_ELEMENTS(fields)) :
+        gsize receipt_size = 0;
+        guchar *receipt_bytes = receipt ? g_base64_decode(receipt, &receipt_size) : NULL;
+        char *receipt_canonical = receipt_bytes ? g_base64_encode(receipt_bytes, receipt_size) : NULL;
+        valid = (deleting ? exact_keys(record, group, deleted_fields, G_N_ELEMENTS(deleted_fields)) :
+                 requires_replacement ? exact_keys(record, group, fields, G_N_ELEMENTS(fields)) :
                     exact_keys(record, group, pending_fields, G_N_ELEMENTS(pending_fields))) && name &&
             shard_size == 32 && shard_canonical && !strcmp(shard_digest, shard_canonical) &&
             (!requires_replacement || (replacement_size == 32 && replacement_canonical &&
              !strcmp(replacement, replacement_canonical))) &&
+            (!deleting || (receipt_size == 32 && receipt_canonical && !strcmp(receipt, receipt_canonical))) &&
             strlen(name) < sizeof(item->hint.name) &&
             record_uint64(record, group, "enqueued", &item->hint.enqueued) &&
             record_uint64(record, group, "last_attempt", &item->hint.last_attempt) &&
@@ -1166,6 +1208,10 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
         if (valid) {
             memcpy(item->shard_digest, shard_bytes, 32);
             if (requires_replacement) memcpy(page->replacement_digest[i], replacement_bytes, 32);
+            if (deleting) {
+                page->deleted[i] = i < page->completed;
+                memcpy(page->receipt_digest[i], receipt_bytes, 32);
+            }
             g_strlcpy(item->hint.name, name, sizeof(item->hint.name));
             item->hint.busy_count = busy; item->shard_sequence_bound = true; item->matched = matched;
             if (matched) { item->aggregate = item->hint; item->aggregate.deadline = deadline; }
@@ -1173,11 +1219,17 @@ int latcd_retirement_retry_page_decode(const char *data, size_t size,
         }
         g_free(name); g_free(shard_digest); g_free(replacement);
         g_free(shard_bytes); g_free(replacement_bytes); g_free(shard_canonical); g_free(replacement_canonical);
+        g_free(receipt); g_free(receipt_bytes); g_free(receipt_canonical);
     }
     uint8_t digest[32]; char expected[65];
     if (valid && !latcd_retirement_retry_page_identity(page, digest)) {
         encode_hex(digest, sizeof(digest), expected);
         valid = !strcmp(expected, identity);
+        if (v6) {
+            bool deletion = page->deletion_intent;
+            for (unsigned i = 0; i < page->count; i++) deletion |= page->deleted[i];
+            valid = valid && deletion;
+        }
     } else valid = false;
     g_strfreev(groups); g_free(boot); g_free(committed); g_free(cursor); g_free(end); g_free(identity);
     g_free(intent_data); g_free(intent_bytes); g_free(canonical_intent);
@@ -3006,6 +3058,9 @@ int latcd_retirement_retry_snapshot(const char *root, const char *boot,
 static int retry_validate_snapshot(const LatcdRetirementRetryPage *page, GArray *snapshot,
                                    uint64_t now, bool *replaced)
 {
+    /* Receipt-bound deletion recovery is not implemented yet. */
+    if (page->deletion_intent) return -1;
+    for (unsigned i = 0; i < page->count; i++) if (page->deleted[i]) return -1;
     uint8_t digests[128][32] = {{0}};
     uint64_t sequences[128] = {0}; unsigned count = 0;
     LatcdRetirementPageDeadline selected[128];

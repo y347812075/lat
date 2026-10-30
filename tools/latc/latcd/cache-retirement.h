@@ -57,6 +57,10 @@ typedef struct LatcdRetirementRetryPage {
     unsigned completed;
     bool intent_present;
     uint8_t replacement_digest[128][32];
+    /* Receipt bindings are checkpoint data, not proof or deletion authority. */
+    bool deletion_intent;
+    bool deleted[128];
+    uint8_t receipt_digest[128][32];
     size_t intent_size;
     uint8_t intent_data[1024];
     size_t intent_original_size;
