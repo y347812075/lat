@@ -532,6 +532,12 @@ int latcd_retirement_queue_retry_begin(LatcdRetirementQueue *queue,
  * Observations remain diagnostic and do not authorize removal. */
 int latcd_retirement_queue_retry_receipt_resume(LatcdRetirementQueue *queue,
     struct LatcdPageBudget *budget, char *error, size_t error_size);
+/* Rediscover the next member of an active retry page. */
+int latcd_retirement_queue_retry_receipt_next(LatcdRetirementQueue *queue,
+    struct LatcdPageBudget *budget, char *error, size_t error_size);
+/* Owner lease and controlled access required; persist a witnessed receipt intent. */
+int latcd_retirement_queue_retry_receipt_stage_next(LatcdRetirementQueue *queue,
+    struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Rediscover every deleted member of a completed retry page. */
 int latcd_retirement_queue_retry_completed_resume(LatcdRetirementQueue *queue,
     struct LatcdPageBudget *budget, char *error, size_t error_size);

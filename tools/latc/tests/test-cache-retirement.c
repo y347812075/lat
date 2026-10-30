@@ -7610,9 +7610,16 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         } while (queued > 0);
         assert(!latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count) &&
                receipt_count == 1 && receipts[0]);
-        int stage_receipt = latcd_retirement_queue_retry_page_stage_receipt(
+        int stage_receipt = latcd_retirement_queue_retry_page_stage(
             receipt_queue, &receipt_capacity, UINT64_MAX, &receipt_budget, error, sizeof(error));
         assert(queued < 0 && !stage_receipt);
+        latcd_retirement_queue_free(receipt_queue);
+        receipt_queue = latcd_retirement_queue_new(root, 1);
+        assert(!latcd_retirement_queue_retry_receipt_next(receipt_queue, &receipt_budget, error, sizeof(error)));
+        do { queued = latcd_retirement_queue_step(receipt_queue, 32, 10000, &receipt_stats, error, sizeof(error)); }
+        while (queued > 0);
+        assert(queued < 0 && !latcd_retirement_queue_retry_receipt_stage_next(
+            receipt_queue, &receipt_budget, error, sizeof(error)));
         LatcdRetirementRetryPage *receipt_page = g_new0(LatcdRetirementRetryPage, 1);
         assert(!latcd_retirement_retry_page_load(root, receipt_page, error, sizeof(error)) &&
                receipt_page->deletion_intent && !receipt_page->completed &&
