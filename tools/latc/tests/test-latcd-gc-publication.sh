@@ -8,7 +8,7 @@ runtime=$5
 guest=$6
 work=$7
 mode=${8:-pin}
-case "$mode" in pin|unreferenced) ;; *) exit 2 ;; esac
+case "$mode" in pin|pin-restart|unreferenced) ;; *) exit 2 ;; esac
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 mkdir -m 700 "$work" "$work/cache"
 cache=$work/cache
@@ -51,7 +51,7 @@ delta = (entry + 14 - base, 3)
 assert delta not in old
 write_key_set(guest, work / 'delta.tbset', [delta])
 PY
-if [ "$mode" = pin ]; then
+if [ "$mode" != unreferenced ]; then
 python3 - "$cache" "$work/old.json" "$work/pins-ready" <<'PY' &
 import fcntl, json, pathlib, signal, sys
 cache = pathlib.Path(sys.argv[1]); m = json.loads(pathlib.Path(sys.argv[2]).read_text())
@@ -103,7 +103,7 @@ assert time.clock_gettime(time.CLOCK_BOOTTIME) < deadline
 assert all((cache / name).is_file() for name in retired)
 PY
 fi
-if [ "$mode" = pin ]; then
+if [ "$mode" != unreferenced ]; then
 n=0
 while ! grep -q 'test page busy retry=' "$work/server.err"; do
     if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then cat "$work/server.err" >&2; exit 1; fi
@@ -114,15 +114,46 @@ import json, pathlib, sys
 root = pathlib.Path(sys.argv[1]); names = json.loads(pathlib.Path(sys.argv[2]).read_text())
 assert all((root / name).is_file() for name in names)
 PY
+if [ "$mode" = pin-restart ]; then
+    kill -KILL "$pid"; wait "$pid" 2>/dev/null || :; pid=
+    rm -f "$socket"
+    LATCD_TEST_RECOVER_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
+        "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" --latc "$latc" \
+        --runner "$runner" --runtime-dir "$runtime" --stats "$work/stats.json" \
+        --workers 1 --flush-only --idle-seconds 0 >"$work/restart.out" 2>"$work/restart.err" &
+    pid=$!
+    n=0
+    while [ ! -S "$socket" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then cat "$work/restart.err" >&2; exit 1; fi
+        n=$((n + 1)); [ "$n" -lt 500 ]; sleep 0.05
+    done
+    grep -q 'test recovered page waiting' "$work/restart.err"
+    cp "$work/restart.err" "$work/restart-startup.err"
+    python3 - "$cache" "$guest" "$work" <<'PY'
+import hashlib, json, pathlib, sys
+cache, guest, work = map(pathlib.Path, sys.argv[1:])
+retired = json.loads((work / 'retired.json').read_text())
+current = json.loads((work / 'new.json').read_text())
+source = hashlib.sha256(guest.read_bytes()).hexdigest()
+assert all((cache / name).is_file() for name in retired)
+assert json.loads((cache / (source + '.current')).read_text()) == current
+assert all((cache / current[k]).is_file() for k in ('module', 'native', 'tbset'))
+PY
+    log=$work/restart.err
+else
+    log=$work/server.err
+fi
 kill "$pin_pid"; wait "$pin_pid" 2>/dev/null || :; pin_pid=
+else
+    log=$work/server.err
 fi
 n=0
-while ! grep -q 'test waiting page consumed' "$work/server.err"; do
-    if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then cat "$work/server.err" >&2; exit 1; fi
+while ! grep -q 'test waiting page consumed' "$log"; do
+    if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$log"; then cat "$log" >&2; exit 1; fi
     n=$((n + 1)); [ "$n" -lt 1000 ]; sleep 0.1
 done
-if [ "$mode" = pin ]; then
-    grep -q 'test waiting timer woke' "$work/server.err"
+if [ "$mode" != unreferenced ]; then
+    grep -q 'test waiting timer woke' "$log"
 else
     python3 - "$work/stats.json" <<'PY'
 import json, sys
