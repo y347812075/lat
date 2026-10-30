@@ -7478,6 +7478,10 @@ out:
     if (root >= 0) close(root);
     g_free(evidence);
     if (hashed_bytes) *hashed_bytes = cursor->progress.hashed_bytes - before_bytes;
+    if (report) {
+        g_strlcpy(report->attempt_name, attempt.name, sizeof(report->attempt_name));
+        report->attempt_sequence = attempt.sequence;
+    }
     if (result == 2) return 2;
     if (!result && record_write_fault("before-scheduler-checkpoint")) {
         latcd_recovery_close(queue->execution);
@@ -7497,6 +7501,12 @@ out:
     g_free(boot);
     if (execution_defer_persist(queue, completed, result != 0, error, error_size))
         return fail(error, error_size, "cannot defer retirement consumer attempt");
+    if (report) {
+        RetirementCandidate *candidate = g_hash_table_lookup(queue->candidates, attempt.name);
+        if (!candidate) return fail(error, error_size, "retirement attempt disappeared after checkpoint");
+        report->scheduler_deferral_durable = true;
+        report->retry_at_boottime_us = candidate->retry_at;
+    }
     return result ? fail(error, error_size, "retirement consumer deferred or rejected") : 1;
 }
 

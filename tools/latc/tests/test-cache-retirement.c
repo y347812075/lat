@@ -8309,6 +8309,21 @@ static void test_page_execution_restriction(void)
     assert(stats.complete && stats.ready >= 2);
     assert(!latcd_retirement_queue_restrict_to_page(executor, &page, error, sizeof(error)));
     LatcdRetirementDeletionReport report;
+    const char *selected_names[] = {selected};
+    char *evidence = latcd_retirement_capture_objects(root, src, selected_names, 1);
+    int pin = open(selected_path, O_RDONLY | O_CLOEXEC);
+    assert(evidence && pin >= 0 && !latcd_retirement_tombstone(root, src, selected, pin,
+                                                                 evidence, error, sizeof(error)));
+    g_free(evidence);
+    assert(pin >= 0 && !flock(pin, LOCK_SH | LOCK_NB));
+    assert(latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error)) < 0);
+    assert(report.busy_observation_durable && report.scheduler_deferral_durable &&
+           !strcmp(report.attempt_name, selected) && report.attempt_sequence &&
+           report.retry_at_boottime_us > simulated_boottime_us && !access(selected_path, F_OK));
+    uint64_t retry_at = report.retry_at_boottime_us;
+    close(pin);
+    assert(!latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error)));
+    simulated_boottime_us = retry_at;
     int execute_result = latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error));
     if (execute_result != 1) fprintf(stderr, "page execute: %d %s\n", execute_result, error);
     assert(execute_result == 1);
@@ -8334,20 +8349,20 @@ static void test_page_execution_restriction(void)
     assert(!latcd_retirement_page_state_load(root, &page, error, sizeof(error)) &&
            page.budget_bound && page.results[0] == 0);
     uint8_t page_results[128] = {0};
-    assert(!latcd_retirement_schedule_page_results(root, 102, &page, page_results,
+    assert(!latcd_retirement_schedule_page_results(root, simulated_boottime_us, &page, page_results,
                                                     error, sizeof(error)) &&
            page_results[0] == LATCD_RETIREMENT_RESULT_DONE);
-    assert(!latcd_retirement_page_budget_commit(root, 102, &page, &budget,
+    assert(!latcd_retirement_page_budget_commit(root, simulated_boottime_us, &page, &budget,
                                                  error, sizeof(error)));
     assert(!latcd_retirement_page_state_load(root, &page, error, sizeof(error)) &&
            page.committed_pending && page.results[0] == LATCD_RETIREMENT_RESULT_DONE);
-    assert(!latcd_retirement_consumption_begin(root, 102, &budget,
+    assert(!latcd_retirement_consumption_begin(root, simulated_boottime_us, &budget,
                                                 error, sizeof(error)));
-    assert(!latcd_retirement_consumption_prepare(root, 102, 0, &budget,
+    assert(!latcd_retirement_consumption_prepare(root, simulated_boottime_us, 0, &budget,
                                                   error, sizeof(error)));
-    assert(!latcd_retirement_consumption_apply(root, 102, &budget,
+    assert(!latcd_retirement_consumption_apply(root, simulated_boottime_us, &budget,
                                                 error, sizeof(error)));
-    assert(!latcd_retirement_consumption_finish(root, 102, &budget,
+    assert(!latcd_retirement_consumption_finish(root, simulated_boottime_us, &budget,
                                                  error, sizeof(error)));
     assert(!latcd_retirement_page_state_load(root, &page, error, sizeof(error)) &&
            !page.count && !page.committed_pending);

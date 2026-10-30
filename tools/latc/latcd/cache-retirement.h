@@ -505,6 +505,10 @@ typedef struct LatcdRetirementDeletionReport {
     bool filesystem_before_valid, filesystem_after_valid;
     /* A BUSY observation persisted successfully; not a scheduler deferral. */
     bool busy_observation_durable;
+    /* Queue checkpoint only, not a page-bound deferral or deletion authority. */
+    bool scheduler_deferral_durable;
+    char attempt_name[138];
+    uint64_t attempt_sequence, retry_at_boottime_us;
 } LatcdRetirementDeletionReport;
 
 /* Same internal-only admission contract as above. Reports partial progress even
