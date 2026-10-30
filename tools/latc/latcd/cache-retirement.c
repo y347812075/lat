@@ -4989,7 +4989,8 @@ static bool tombstone_shape(GKeyFile *record, const char *name,
 
 static int recover_tombstone(const char *root_path, int root, int store,
                               const char *name, bool remove_object, LatcdRecoveryCursor *cursor,
-                              const uint64_t *grace_us, LatcdRetirementDeletionReport *report)
+                              const uint64_t *grace_us, LatcdRetirementDeletionReport *report,
+                              LatcdCacheCapacity *capacity)
 {
     char *raw = NULL, *source = NULL, *hash = NULL;
     size_t size;
@@ -5111,7 +5112,8 @@ static int recover_tombstone(const char *root_path, int root, int store,
                 report->allocated_bytes_before = (uint64_t)before.st_blocks * 512;
             }
             if (record_write_fault("before-unlink") ||
-                unlinkat(root, name, 0)) {
+                (capacity ? latcd_cache_capacity_remove_generation(capacity, root, name, &after) :
+                            unlinkat(root, name, 0))) {
                 g_free(prior); goto out;
             }
             if (report) {
@@ -5173,7 +5175,7 @@ static bool filesystem_available(int fd, uint64_t *bytes)
 static int tombstone_delete_cursor(const char *root, const char *name, const uint64_t *grace_us,
                              LatcdRecoveryCursor *cursor,
                              LatcdRetirementDeletionReport *report,
-                             char *error, size_t error_size)
+                             char *error, size_t error_size, LatcdCacheCapacity *capacity)
 {
     if (report) memset(report, 0, sizeof(*report));
     if (!name || strlen(name) < 64 || strchr(name, '/'))
@@ -5187,7 +5189,7 @@ static int tombstone_delete_cursor(const char *root, const char *name, const uin
     int store = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
     if (report && directory >= 0)
         report->filesystem_before_valid = filesystem_available(directory, &report->filesystem_available_before);
-    int result = store < 0 ? -1 : recover_tombstone(root, directory, store, name, true, cursor, grace_us, report);
+    int result = store < 0 ? -1 : recover_tombstone(root, directory, store, name, true, cursor, grace_us, report, capacity);
     if (store >= 0) close(store);
     if (gc >= 0) close(gc);
     if (report && directory >= 0)
@@ -5201,7 +5203,7 @@ static int tombstone_delete(const char *root, const char *name, const uint64_t *
                              LatcdRetirementDeletionReport *report,
                              char *error, size_t error_size)
 {
-    return tombstone_delete_cursor(root, name, grace_us, NULL, report, error, error_size);
+    return tombstone_delete_cursor(root, name, grace_us, NULL, report, error, error_size, NULL);
 }
 
 int latcd_tombstone_delete(const char *root, const char *name, char *error, size_t error_size)
@@ -5235,6 +5237,7 @@ typedef struct RetirementCandidate {
 
 struct LatcdRetirementQueue {
     char *root;
+    LatcdCacheCapacity *capacity;
     dev_t root_device;
     ino_t root_inode;
     bool root_bound;
@@ -6483,7 +6486,7 @@ int latcd_retirement_queue_execute_step(LatcdRetirementQueue *queue,
     if (object >= 0) { close(object); object = -1; }
     if (latch >= 0) { close(latch); latch = -1; }
     result = tombstone_delete_cursor(queue->root, attempt.name, &queue->grace,
-                                     cursor, report, error, error_size);
+                                     cursor, report, error, error_size, queue->capacity);
     if (result == 1 && cursor->yielded) result = 2;
 out:
     if (object >= 0) close(object);
@@ -6513,6 +6516,20 @@ out:
     if (execution_defer_persist(queue, completed, result != 0, error, error_size))
         return fail(error, error_size, "cannot defer retirement consumer attempt");
     return result ? fail(error, error_size, "retirement consumer deferred or rejected") : 1;
+}
+
+int latcd_retirement_queue_bind_capacity(LatcdRetirementQueue *queue,
+                                         LatcdCacheCapacity *capacity)
+{
+    if (!queue || !capacity || queue->execution || queue->active.sequence || queue->capacity)
+        return -1;
+    int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int matching = root < 0 ? -1 : latcd_cache_capacity_open_matching_root(capacity, queue->root, root);
+    if (root >= 0) close(root);
+    if (matching < 0) return -1;
+    close(matching);
+    queue->capacity = capacity;
+    return 0;
 }
 
 int latcd_retirement_queue_execute_one(LatcdRetirementQueue *queue,
@@ -6929,7 +6946,7 @@ int latcd_recovery_step(LatcdRecoveryCursor *cursor, unsigned entries,
         if (fstatat(dirfd(cursor->directory), cursor->pending, &record, AT_SYMLINK_NOFOLLOW) ||
             !object_stat_equal(&record, &cursor->pending_identity)) goto invalid;
         int result = cursor->tombstones ? recover_tombstone(cursor->root_path, cursor->root,
-            dirfd(cursor->directory), cursor->pending, false, cursor, NULL, NULL) :
+            dirfd(cursor->directory), cursor->pending, false, cursor, NULL, NULL, NULL) :
             recover_record(cursor->root, dirfd(cursor->directory), cursor->pending, true, cursor);
         if (result < 0) goto invalid;
         if (result > 0) break;

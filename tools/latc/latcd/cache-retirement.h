@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 
 typedef struct LatcdRecoveryCursor LatcdRecoveryCursor;
+typedef struct LatcdCacheCapacity LatcdCacheCapacity;
 /* Owner lease required. Acquire after source latch, never wait under cache_lock.
  * Publishers hold SH through transaction finish; retirement/deletion holds EX.
  * Returned CLOEXEC fd is released by close only. Not domain admission. */
@@ -650,6 +651,10 @@ int latcd_retirement_queue_execute_one(LatcdRetirementQueue *queue,
 int latcd_retirement_queue_execute_step(LatcdRetirementQueue *queue,
     uint64_t hash_bytes, uint64_t time_us, uint64_t *hashed_bytes,
     LatcdRetirementDeletionReport *report, char *error, size_t error_size);
+/* Capacity must outlive the queue; bind before any execution. Does not grant
+ * domain admission or replace the executor's reference protection contract. */
+int latcd_retirement_queue_bind_capacity(LatcdRetirementQueue *queue,
+                                         LatcdCacheCapacity *capacity);
 /* Releases resumable state/pin and persistently busy-defers its attempt; no
  * unlink. On failure discard and reload the queue. Queue destruction also
  * releases pins. Persistent intent is never rolled back. */

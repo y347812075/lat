@@ -5900,6 +5900,7 @@ static void test_queue_root_replacement(bool replace, bool execute)
 static void test_queue_consumer(unsigned mutation, bool bounded)
 {
     char *root = root_new(), error[256];
+    LatcdCacheCapacity execution_capacity = LATCD_CACHE_CAPACITY_INIT;
     char *original_record = NULL;
     char *names[6], *paths[6];
     const char *suffixes[] = {".so", ".native", ".tbset"};
@@ -5929,6 +5930,22 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
     put(current, following);
     assert(!latcd_retirement_publication_finish(publication, error, sizeof(error)));
     latcd_retirement_publication_close(publication);
+    if (mutation == 26) {
+        char *gc = g_build_filename(root, ".gc", NULL);
+        const char *stores[] = {"tombstones", "holds", "tasks", "compiler-releases", "mount-leases"};
+        for (unsigned i = 0; i < G_N_ELEMENTS(stores); i++) {
+            char *store = g_build_filename(gc, stores[i], NULL);
+            if (mkdir(store, 0700)) assert(errno == EEXIST);
+            g_free(store);
+        }
+        g_free(gc);
+        int latch = lat_aot_v2_cache_source_lock(root, source, LOCK_EX | LOCK_NB,
+                                                  false, error, sizeof(error));
+        assert(latch >= 0);
+        close(latch);
+        assert(!latcd_cache_capacity_scan(&execution_capacity, root, error, sizeof(error)));
+        latcd_cache_capacity_metadata_bind(&execution_capacity, UINT64_MAX);
+    }
     if (!mutation && !bounded) {
         char *path = single_record(root);
         GKeyFile *record = g_key_file_new();
@@ -6000,6 +6017,7 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
         g_key_file_unref(record); g_free(path);
     }
     LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, mutation >= 15 && mutation <= 22 ? 1000000 : 0);
+    if (mutation == 26) assert(!latcd_retirement_queue_bind_capacity(queue, &execution_capacity));
     LatcdRetirementQueueStats stats = sweep_queue(queue);
     if (mutation >= 15 && mutation <= 22) {
         uint64_t deadline = simulated_boottime_us + 1000000;
@@ -6383,6 +6401,10 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
             if (mutation != 7) assert(!report.object_unlinked);
             else assert(report.object_unlinked);
         } else {
+            if (mutation == 26 && result != 1)
+                fprintf(stderr, "accounted execution: result=%d error=%s ready=%d committed=%llu unlinked=%d durable=%d receipt=%d\n",
+                        result, error, execution_capacity.ready, (unsigned long long)execution_capacity.committed,
+                        report.object_unlinked, report.namespace_durable, report.receipt_durable);
             assert(result == 1 && report.object_unlinked && report.namespace_durable &&
                    report.receipt_durable && report.logical_bytes > 0);
             completed++;
@@ -6413,6 +6435,15 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
     } else if (mutation != 7) {
         stats = sweep_queue(queue);
         assert(completed == 3 && !stats.candidates);
+        if (mutation == 26) {
+            uint64_t remaining = 0;
+            struct stat st;
+            for (unsigned i = 3; i < 6; i++) {
+                assert(!stat(paths[i], &st));
+                remaining += st.st_size;
+            }
+            assert(execution_capacity.ready && execution_capacity.committed == remaining);
+        }
     }
     if (mutation == 7) {
         latcd_retirement_queue_free(queue);
@@ -6432,6 +6463,10 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
 cleanup:
     simulated_boottime_us = 0;
     latcd_retirement_queue_free(queue);
+    if (mutation == 26) {
+        latcd_cache_capacity_close(&execution_capacity);
+        pthread_mutex_destroy(&execution_capacity.lock);
+    }
     for (unsigned i = 3; i < 6; i++) assert(!access(paths[i], F_OK));
     for (unsigned i = 0; i < 3; i++) if (pins[i] >= 0) close(pins[i]);
     if (gate >= 0) close(gate);
@@ -8855,6 +8890,7 @@ int main(int argc, char **argv)
     test_queue_consumer(23, true);
     test_queue_consumer(24, true);
     test_queue_consumer(25, true);
+    test_queue_consumer(26, true);
     for (unsigned phase = 0; phase < 3; phase++)
         for (unsigned fault = 1; fault <= 8; fault++) test_clock_failure(phase, fault);
     for (int mutation = 0; mutation < 7; mutation++) test_object_identity(mutation);
