@@ -8051,8 +8051,13 @@ static void test_deletion_report(const char *parent, bool isolated)
             assert(fd >= 0 && !flock(fd, LOCK_SH | LOCK_NB));
             void *mapping = mmap(NULL, length, PROT_READ, MAP_PRIVATE, fd, 0);
             assert(mapping != MAP_FAILED);
+            assert(!setenv("LATCD_TEST_RETIREMENT_IO", "error:created", 1));
             assert(latcd_tombstone_delete_report(root, name, &report, error, sizeof(error)) < 0);
-            assert(!report.object_unlinked && !report.unlinked_allocated_bytes && !access(path, F_OK));
+            assert(!report.busy_observation_durable && !report.object_unlinked);
+            unsetenv("LATCD_TEST_RETIREMENT_IO");
+            assert(latcd_tombstone_delete_report(root, name, &report, error, sizeof(error)) < 0);
+            assert(report.busy_observation_durable && !report.object_unlinked &&
+                   !report.unlinked_allocated_bytes && !access(path, F_OK));
             assert(((char *)mapping)[length - 1] == 'x');
             assert(!munmap(mapping, length));
             close(fd);
@@ -8061,6 +8066,7 @@ static void test_deletion_report(const char *parent, bool isolated)
         int result = latcd_tombstone_delete_report(root, name, &report, error, sizeof(error));
         unsetenv("LATCD_TEST_RETIREMENT_IO");
         assert((result == 0) == (mode != 2));
+        assert(!report.busy_observation_durable);
         assert(report.object_unlinked && report.logical_bytes == length &&
                report.allocated_bytes_before == allocated && report.unlinked_allocated_bytes == allocated);
         assert(report.namespace_durable == (mode != 2) && report.receipt_durable == (mode != 2));

@@ -503,6 +503,8 @@ typedef struct LatcdRetirementDeletionReport {
     uint64_t filesystem_available_before, filesystem_available_after;
     bool object_unlinked, namespace_durable, receipt_durable;
     bool filesystem_before_valid, filesystem_after_valid;
+    /* A BUSY observation persisted successfully; not a scheduler deferral. */
+    bool busy_observation_durable;
 } LatcdRetirementDeletionReport;
 
 /* Same internal-only admission contract as above. Reports partial progress even

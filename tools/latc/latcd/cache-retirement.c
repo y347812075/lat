@@ -5396,6 +5396,8 @@ static int recover_tombstone(const char *root_path, int root, int store,
     else if (!strcmp(observation, "MISSING"))
         result = write_recovery_record(store, name, record);
     else result = write_record(store, name, record);
+    if (report && !result && remove_object && !strcmp(observation, "BUSY"))
+        report->busy_observation_durable = true;
     if (remove_object && strcmp(observation, "MISSING")) result = -1;
     if (report && !result && remove_object) report->receipt_durable = true;
     g_free(prior);
