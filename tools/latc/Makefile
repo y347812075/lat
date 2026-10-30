@@ -86,6 +86,16 @@ test-broker-export: $(BUILD)/tests/x86-exit42
 	python3 tests/test-broker-export.py latcd/broker-export.py $(BUILD)/tests/x86-exit42
 test: test-broker-export
 
+$(BUILD)/tests/test-managed-environment: tests/test-managed-environment.c \
+		$(BUILD)/latcd/managed-config.o $(BUILD)/latcd/managed-path.o \
+		$(BUILD)/latcd/parson/parson.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+.PHONY: test-managed-environment
+test-managed-environment: $(BUILD)/tests/test-managed-environment
+	$(BUILD)/tests/test-managed-environment
+test: test-managed-environment
+
 test-native-config-replay:
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)" || \
 	  { echo "usage: make test-native-config-replay INSTALL_PREFIX=... X86_GUEST=... TBSET=... WORK=..."; exit 2; }
@@ -186,6 +196,10 @@ $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
 		$(BUILD)/aot-v2/runtime/cache-domain.o
 
 $(BUILD)/latcd/latcd $(BUILD)/tests/test-journal-store $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/source-elf.o $(BUILD)/latcd/cache-export.o $(BUILD)/latcd/broker-source.o $(BUILD)/latcd/broker-transport.o
+
+$(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer \
+$(BUILD)/tests/test-journal-store $(BUILD)/tests/test-latcd-channel \
+$(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/managed-config.o $(BUILD)/latcd/managed-path.o
 
 $(BUILD)/tests/cache-capacity-testing.o: latcd/cache-capacity.c latcd/cache-capacity.h
 	@mkdir -p $(dir $@)
@@ -718,7 +732,7 @@ $(BUILD)/tests/test-journal-store: aot-v2/tests/test-journal-store.c latcd/main.
 		$(BUILD)/aot-v2/runtime/internal-fd-registry.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ aot-v2/tests/test-journal-store.c \
-	  $(filter %.o,$^) $(LDLIBS) -pthread -ldl
+	  $(filter %.o,$^) $(LDLIBS) -pthread -ldl -Wl,--wrap=linkat
 
 $(BUILD)/tests/test-key-journal: aot-v2/tests/test-key-journal.c \
 		aot-v2/common/key-journal.c aot-v2/include/lat-key-journal.h

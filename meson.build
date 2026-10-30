@@ -675,6 +675,8 @@ if 'CONFIG_LATX' in config_host
       'tools/latc/latcd/cache-export.c',
       'tools/latc/latcd/broker-source.c',
       'tools/latc/latcd/broker-transport.c',
+      'tools/latc/latcd/managed-config.c',
+      'tools/latc/latcd/managed-path.c',
       'tools/latc/latcd/protocol.c',
       'tools/latc/latcd/precompile.c',
       'tools/latc/latcd/journal-store.c',

@@ -16,6 +16,8 @@
 #include "cache-export.h"
 #include "broker-source.h"
 #include "broker-transport.h"
+#include "managed-config.h"
+#include "managed-path.h"
 
 #include <dlfcn.h>
 #include <dirent.h>
@@ -98,6 +100,9 @@ typedef struct LatcdConfig {
     uint32_t open_files;
     bool flush_only;
     uint32_t idle_seconds;
+    bool managed;
+    const char *broker_dir;
+    uid_t broker_uid;
 } LatcdConfig;
 
 typedef struct LatcdCurrentManifest {
@@ -1397,6 +1402,7 @@ static int persist_task_record(int directory, const char *id, GKeyFile *record)
         return -1;
     }
     bool installed = false, leftover = false;
+    int failure_errno = 0;
     int lease = openat(directory, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
     if (lease < 0 || flock(lease, LOCK_SH | LOCK_NB)) goto failed;
     const char *point = getenv("LATCD_TEST_TASK_RECORD_CRASH");
@@ -1426,22 +1432,37 @@ static int persist_task_record(int directory, const char *id, GKeyFile *record)
     if (inject && !strcmp(point, "linked")) raise(SIGKILL);
     int readonly = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat writer, reader;
-    if (readonly < 0 || fstat(lease, &writer) || fstat(readonly, &reader) ||
-        writer.st_dev != reader.st_dev || writer.st_ino != reader.st_ino ||
-        reader.st_nlink != 1 || flock(readonly, LOCK_SH | LOCK_NB)) {
-        if (readonly >= 0) close(readonly);
+    if (readonly < 0) goto failed;
+    if (fstat(lease, &writer) || fstat(readonly, &reader)) {
+        int saved = errno;
+        close(readonly);
+        errno = saved;
+        goto failed;
+    }
+    if (writer.st_dev != reader.st_dev || writer.st_ino != reader.st_ino ||
+        reader.st_nlink != 1) {
+        close(readonly);
+        errno = ESTALE;
+        goto failed;
+    }
+    if (flock(readonly, LOCK_SH | LOCK_NB)) {
+        int saved = errno;
+        close(readonly);
+        errno = saved;
         goto failed;
     }
     close(lease);
     lease = readonly;
     goto out;
 failed:
+    failure_errno = errno;
     if (lease >= 0 && close(lease)) leftover = true;
     lease = -1;
 out:
     latcd_cache_capacity_metadata_finish(&reservation, installed, leftover);
     g_free(data);
     g_free(name);
+    if (lease < 0) errno = failure_errno;
     return lease;
 }
 
@@ -1491,8 +1512,11 @@ static int record_task(const LatcdConfig *config, bool copying,
     struct stat st;
     if (fstat(root, &st)) goto failed;
     task_object_identity(record, "cache", &st);
-    if (fstat(temporary, &st) || st.st_uid != geteuid() ||
-        (st.st_mode & 0077)) goto failed;
+    if (fstat(temporary, &st)) goto failed;
+    if (st.st_uid != geteuid() || (st.st_mode & 0077)) {
+        errno = EACCES;
+        goto failed;
+    }
     task_object_identity(record, "temporary", &st);
     g_key_file_set_string(record, "task", "version", copying ? "2" : "1");
     if (copying) g_key_file_set_string(record, "task", "kind", "COPY");
@@ -1553,7 +1577,7 @@ static int record_task(const LatcdConfig *config, bool copying,
         if (valid) g_key_file_set_string(record, roles[i], "name", basename);
         g_free(parent);
         g_free(basename);
-        if (!valid) goto failed;
+        if (!valid) { errno = ESTALE; goto failed; }
     }
     lease = persist_task_record(tasks, id, record);
     if (lease < 0) goto failed;
@@ -1561,9 +1585,13 @@ static int record_task(const LatcdConfig *config, bool copying,
     if (task_id) *task_id = g_strdup(id);
     goto out;
 failed:
-    if (lease >= 0) close(lease);
-    lease = -1;
-    fail(error, error_size, "cannot persist %s task root", copying ? "copy" : "compiler");
+    {
+        int saved = errno;
+        if (lease >= 0) close(lease);
+        lease = -1;
+        fail(error, error_size, "cannot persist %s task root: %s",
+             copying ? "copy" : "compiler", strerror(saved));
+    }
 out:
     if (roots >= 0) close(roots);
     if (collected >= 0) close(collected);
@@ -2606,7 +2634,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     }
     char *library_path = g_strdup_printf("LD_LIBRARY_PATH=%s",
                                          config->runtime_dir);
-    const char *compile_tmpdir = getenv("LATCD_COMPILE_TMPDIR");
+    char *managed_tmpdir = config->managed ?
+        g_build_filename(config->cache_dir, ".tmp", NULL) : NULL;
+    const char *compile_tmpdir = managed_tmpdir ? managed_tmpdir : getenv("LATCD_COMPILE_TMPDIR");
     if (!compile_tmpdir || !*compile_tmpdir) {
         compile_tmpdir = access("/dev/shm", W_OK | X_OK) == 0 ?
                          "/dev/shm" : "/tmp";
@@ -2614,6 +2644,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     uint64_t cache_peak = 0;
     if (compile_space_admit(worker_index, compile_tmpdir, output, source, tbset,
                               base_native, base_module, &cache_peak, error, error_size)) {
+        g_free(managed_tmpdir);
         g_free(library_path);
         return -1;
     }
@@ -2621,12 +2652,14 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         if (latcd_cache_capacity_reserve_transient(&generation_capacity,
             cache_peak - *transient_reservation, config->max_cache_bytes, error, error_size)) {
             release_compile_space(worker_index);
+            g_free(managed_tmpdir);
             g_free(library_path);
             return -1;
         }
         *transient_reservation = cache_peak;
     }
     char *temporary_path = g_strdup_printf("TMPDIR=%s", compile_tmpdir);
+    g_free(managed_tmpdir);
     char *guest_prefix = config->x86_rootfs ?
         g_strdup_printf("LAT_LD_PREFIX=%s", config->x86_rootfs) : NULL;
     const char *compile_timing = getenv("LATCD_COMPILE_TIMING") ?
@@ -6576,21 +6609,29 @@ static int run_service(const LatcdConfig *config)
     int64_t last_activity = g_get_monotonic_time();
     int64_t last_journal_admission = last_activity;
     bool journal_admission_error = false;
-#ifdef LATCD_GC_TIMER_TEST
     LatcdBrokerServer test_broker;
     bool test_broker_started = false;
-    const char *test_broker_directory = getenv("LATCD_TEST_BROKER_DIRECTORY");
+    const char *test_broker_directory = config->broker_dir;
+    uid_t broker_uid = config->broker_uid;
+#ifdef LATCD_GC_TIMER_TEST
+    if (!test_broker_directory) {
+        test_broker_directory = getenv("LATCD_TEST_BROKER_DIRECTORY");
+        broker_uid = geteuid();
+    }
+#endif
     if (test_broker_directory) {
-        int directory = open(test_broker_directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int directory = config->managed ?
+            latcd_managed_directory(test_broker_directory, geteuid(), 0755) :
+            open(test_broker_directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (directory < 0 || broker_server_start(&test_broker, config, directory,
-                "broker.sock", geteuid(), 10 * G_TIME_SPAN_SECOND)) {
-            fprintf(stderr, "latcd: test broker startup failed: %s\n", strerror(errno));
+                "broker.sock", broker_uid, 10 * G_TIME_SPAN_SECOND)) {
+            fprintf(stderr, "latcd: %sbroker startup failed: %s\n",
+                    config->managed ? "" : "test ", strerror(errno));
             service_status = 1;
             stop_requested = 1;
         } else test_broker_started = true;
         if (directory >= 0) close(directory);
     }
-#endif
     LatcdTaskRecovery task_recovery = {.config = config};
     int retirement_event = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     atomic_store(&retirement_notify_fd, retirement_event);
@@ -6615,14 +6656,12 @@ static int run_service(const LatcdConfig *config)
     int previous_budget_recovery = -2;
     int64_t last_retirement_stats = 0;
     while (!stop_requested) {
-#ifdef LATCD_GC_TIMER_TEST
         if (test_broker_started && broker_server_step(&test_broker)) {
-            fprintf(stderr, "latcd: test broker failed: %s\n", strerror(errno));
+            fprintf(stderr, "latcd: broker failed: %s\n", strerror(errno));
             service_status = 1;
             stop_requested = 1;
             break;
         }
-#endif
         int budget_recovery = atomic_load(&compiler_budget_recovery_state);
         if (budget_recovery != previous_budget_recovery ||
             g_get_monotonic_time() - last_retirement_stats >= G_USEC_PER_SEC) {
@@ -6639,18 +6678,14 @@ static int run_service(const LatcdConfig *config)
         struct pollfd pollfds[LATCD_MAX_CHANNELS + 1 + LATCD_BROKER_CONNECTIONS + 2];
         memcpy(pollfds, channels, channel_count * sizeof(*pollfds));
         nfds_t poll_count = channel_count;
-#ifdef LATCD_GC_TIMER_TEST
         if (test_broker_started)
             poll_count += broker_server_pollfds(&test_broker, pollfds + poll_count);
-#endif
         int available = poll(pollfds, poll_count, 250);
         for (nfds_t i = 0; i < channel_count; i++) channels[i].revents = pollfds[i].revents;
-#ifdef LATCD_GC_TIMER_TEST
         if (available > 0 && test_broker_started) {
             for (nfds_t i = channel_count; i < poll_count; i++)
                 if (pollfds[i].revents) { last_activity = g_get_monotonic_time(); break; }
         }
-#endif
         if (available < 0 && errno == EINTR) {
             continue;
         }
@@ -6666,9 +6701,7 @@ static int run_service(const LatcdConfig *config)
             pthread_mutex_unlock(&service.lock);
             busy |= atomic_load(&active_precompiles) ||
                 (precompile_pool && g_thread_pool_unprocessed(precompile_pool));
-#ifdef LATCD_GC_TIMER_TEST
             busy |= test_broker_started && broker_server_busy(&test_broker);
-#endif
             if (busy) last_activity = g_get_monotonic_time();
             if (config->idle_seconds &&
                 g_get_monotonic_time() - last_activity >=
@@ -6865,9 +6898,7 @@ static int run_service(const LatcdConfig *config)
         }
         close(client);
     }
-#ifdef LATCD_GC_TIMER_TEST
     if (test_broker_started) broker_server_stop(&test_broker);
-#endif
     for (nfds_t i = 1; i < channel_count; i++) {
         close(channels[i].fd);
     }
@@ -7202,6 +7233,15 @@ static int run_gc_plan(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+    LatcdManagedConfig managed_config = {0};
+    bool managed_entry = argc == 3 && !strcmp(argv[1], "--managed-config");
+    if (managed_entry && (latcd_managed_environment_validate(environ) ||
+        latcd_managed_config_load(argv[2], &managed_config) ||
+        latcd_managed_config_validate(&managed_config))) {
+        fprintf(stderr, "latcd: managed configuration rejected: %s\n", strerror(errno));
+        latcd_managed_config_clear(&managed_config);
+        return 1;
+    }
     if (argc >= 2 && !strcmp(argv[1], "gc")) {
         return run_gc_plan(argc, argv);
     }
@@ -7228,7 +7268,18 @@ int main(int argc, char **argv)
         .cpu_seconds = LATCD_DEFAULT_CPU_SECONDS,
         .open_files = LATCD_DEFAULT_OPEN_FILES,
     };
-    for (int i = 1; i < argc; i++) {
+    if (managed_entry) {
+        serve = 1;
+        config.managed = true;
+        config.cache_dir = managed_config.cache;
+        config.socket_path = g_build_filename(managed_config.admin, "admin.sock", NULL);
+        config.compiler = managed_config.compiler;
+        config.runner = managed_config.runner;
+        config.runtime_dir = managed_config.runtime;
+        config.broker_dir = managed_config.broker;
+        config.broker_uid = managed_config.client_uid;
+    }
+    for (int i = managed_entry ? argc : 1; i < argc; i++) {
         if (!strcmp(argv[i], "--once")) once = 1;
         else if (!strcmp(argv[i], "--daemonize")) daemonize = 1;
         else if (!strcmp(argv[i], "--serve")) serve = 1;

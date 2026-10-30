@@ -7,6 +7,16 @@
 #include <sys/mman.h>
 #include <sys/inotify.h>
 
+static bool fail_task_link;
+int __real_linkat(int olddirfd, const char *oldpath, int newdirfd,
+                  const char *newpath, int flags);
+int __wrap_linkat(int olddirfd, const char *oldpath, int newdirfd,
+                  const char *newpath, int flags)
+{
+    if (fail_task_link) { errno = EIO; return -1; }
+    return __real_linkat(olddirfd, oldpath, newdirfd, newpath, flags);
+}
+
 static void wait_ok(pid_t child)
 {
     int status;
@@ -648,6 +658,41 @@ int main(void)
     char *socket_path = g_build_filename(directory, "socket", NULL);
     char *source_path = g_build_filename(directory, "original", NULL);
     char *cache = g_build_filename(directory, "cache", NULL);
+    int task_dir = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    g_assert_cmpint(task_dir, >=, 0);
+    GKeyFile *task_record = g_key_file_new();
+    g_key_file_set_string(task_record, "task", "state", "BOUND");
+    fail_task_link = true;
+    errno = 0;
+    g_assert_cmpint(persist_task_record(task_dir, "fault", task_record), ==, -1);
+    g_assert_cmpint(errno, ==, EIO);
+    fail_task_link = false;
+    g_key_file_free(task_record);
+    close(task_dir);
+    char *fault_cache = g_build_filename(directory, "fault-cache", NULL);
+    g_assert_cmpint(mkdir(fault_cache, 0700), ==, 0);
+    g_assert_cmpint(prepare_metadata_directories(fault_cache), ==, 0);
+    LatcdCacheCapacity fault_capacity = LATCD_CACHE_CAPACITY_INIT;
+    g_assert_cmpint(latcd_cache_capacity_scan(&fault_capacity, fault_cache, NULL, 0), ==, 0);
+    latcd_cache_capacity_metadata_bind(&fault_capacity, 1024 * 1024);
+    char *tasks = g_build_filename(fault_cache, ".gc", "tasks", NULL);
+    task_dir = open(tasks, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    g_assert_cmpint(task_dir, >=, 0);
+    task_record = g_key_file_new();
+    g_key_file_set_string(task_record, "task", "state", "BOUND");
+    fail_task_link = true;
+    errno = 0;
+    g_assert_cmpint(persist_task_record(task_dir, "fault", task_record), ==, -1);
+    g_assert_cmpint(errno, ==, EIO);
+    g_assert_cmpuint(fault_capacity.metadata_reserved, ==, 0);
+    fail_task_link = false;
+    g_key_file_free(task_record);
+    close(task_dir);
+    latcd_cache_capacity_close(&fault_capacity);
+    pthread_mutex_destroy(&fault_capacity.lock);
+    remove_tree(fault_cache);
+    g_free(tasks);
+    g_free(fault_cache);
     struct { Elf64_Ehdr header; Elf64_Phdr loads[3]; } elf = {0};
     memcpy(elf.header.e_ident, ELFMAG, SELFMAG);
     elf.header.e_ident[EI_CLASS] = ELFCLASS64;
