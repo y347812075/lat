@@ -6638,6 +6638,44 @@ static int retry_install_lock(void *opaque)
     return 0;
 }
 
+int latcd_retirement_page_wait_busy(const char *root, LatcdPageBudget *budget,
+    unsigned index, const LatcdRetirementDeletionReport *report,
+    uint64_t now_us, char *error, size_t error_size)
+{
+    if (!root || !budget || !budget->capacity || budget->invalid ||
+        !budget->page_identity_bound || !report || !report->busy_observation_durable ||
+        !report->scheduler_deferral_durable || !report->attempt_sequence ||
+        report->object_unlinked || report->namespace_durable || report->receipt_durable ||
+        report->scheduler_busy_count != 1 || report->retry_at_boottime_us <= now_us ||
+        report->retry_at_boottime_us - now_us > RETIREMENT_BUSY_MAX_US)
+        return fail(error, error_size, "invalid page busy observation");
+    int scheduler = scheduler_lock(root, error, error_size);
+    if (scheduler < 0) return -1;
+    LatcdRetirementPageState page;
+    LatcdRetirementPageInventory inventory = {0};
+    uint8_t results[128] = {0}, identity[32];
+    bool legacy = false;
+    int result = -1;
+    if (page_state_load(root, &page, &legacy, error, error_size) || legacy ||
+        !page.budget_bound || page.committed_pending || page.consumption_bound ||
+        index >= page.count || strcmp(report->attempt_name, page.entries[index].name) ||
+        latcd_retirement_page_budget_identity(&page, identity) ||
+        memcmp(identity, budget->page_identity, sizeof(identity)) ||
+        schedule_page_results(root, now_us, &page, results, &inventory, error, error_size) < 0 ||
+        results[index] != 0 ||
+        inventory.members[index].present || inventory.undersized_member)
+        goto out;
+    LatcdRetirementPageDeadline entry = page.entries[index];
+    entry.last_attempt = page.sequence;
+    entry.retry_at = report->retry_at_boottime_us;
+    entry.busy_count = 1;
+    result = page_budget_result_locked(root, now_us, identity, budget, &entry,
+        LATCD_RETIREMENT_RESULT_DEFERRED, true, scheduler, NULL, NULL, error, error_size);
+out:
+    close(scheduler);
+    return result ? fail(error, error_size, "cannot persist page busy wait") : 0;
+}
+
 int latcd_retirement_queue_page_receipt_begin(LatcdRetirementQueue *queue,
     LatcdPageBudget *budget, unsigned index, char *error, size_t error_size)
 {
@@ -7524,6 +7562,7 @@ out:
         if (!candidate) return fail(error, error_size, "retirement attempt disappeared after checkpoint");
         report->scheduler_deferral_durable = true;
         report->retry_at_boottime_us = candidate->retry_at;
+        report->scheduler_busy_count = candidate->busy_count;
     }
     return result ? fail(error, error_size, "retirement consumer deferred or rejected") : 1;
 }

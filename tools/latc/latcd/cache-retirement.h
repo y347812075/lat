@@ -511,7 +511,15 @@ typedef struct LatcdRetirementDeletionReport {
     bool scheduler_deferral_durable;
     char attempt_name[138];
     uint64_t attempt_sequence, retry_at_boottime_us;
+    unsigned scheduler_busy_count;
 } LatcdRetirementDeletionReport;
+
+/* Controlled owner only: persist the first page-bound wait for an observed
+ * busy attempt. The report is evidence from the same execution, not an access
+ * domain or deletion authorization. Existing result shards are not replaced. */
+int latcd_retirement_page_wait_busy(const char *root, struct LatcdPageBudget *budget,
+    unsigned index, const LatcdRetirementDeletionReport *report,
+    uint64_t now_us, char *error, size_t error_size);
 
 /* Same internal-only admission contract as above. Reports partial progress even
  * on error. AFTER is sampled after closing the executor's object fd. Free-space
