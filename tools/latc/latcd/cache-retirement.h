@@ -518,6 +518,7 @@ typedef struct LatcdRetirementDeletionReport {
 
 /* Controlled owner only: persist the first page-bound wait for an observed
  * busy attempt (a durable tombstone observation or an object pin conflict).
+ * The scheduler count may include earlier attempts before this page result.
  * The report is evidence from the same execution, not an access
  * domain or deletion authorization. Existing result shards are not replaced. */
 int latcd_retirement_page_wait_busy(const char *root, struct LatcdPageBudget *budget,

@@ -153,18 +153,20 @@ n=0
 while [ ! -f "$work/pins-ready" ]; do
     kill -0 "$pin_pid"; n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
 done
-LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 start
+LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
+    LATCD_TEST_CRASH_BEFORE_BUSY_PAGE=1 start
 n=0
-while ! grep -q 'test page busy retry=' "$work/server.err"; do
-    if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then
-        cat "$work/server.err" >&2; exit 1
-    fi
+while kill -0 "$pid" 2>/dev/null; do
     n=$((n + 1)); [ "$n" -lt 400 ]; sleep 0.05
 done
+if wait "$pid"; then echo 'expected busy handoff crash' >&2; exit 1; fi
+pid=
+rm -f "$socket"
 test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
 test ! -e "$cache/.gc/tombstones/$(printf '%064x' 7).so"
 test ! -e "$cache/.gc/tombstones/$(printf '%064x' 7).native"
 test ! -e "$cache/.gc/tombstones/$(printf '%064x' 7).tbset"
+LATCD_TEST_RECOVER_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 start
 # Keep the pins across a second attempt and inspect the persisted scheduler,
 # rather than assuming that two BUSY log lines refer to the same object.
 n=0
@@ -182,6 +184,13 @@ do
         cat "$work/server.err" >&2; exit 1
     fi
     n=$((n + 1)); [ "$n" -lt 2800 ]; sleep 0.1
+done
+n=0
+while ! grep -q 'test page busy retry=' "$work/server.err"; do
+    if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then
+        cat "$work/server.err" >&2; exit 1
+    fi
+    n=$((n + 1)); [ "$n" -lt 400 ]; sleep 0.05
 done
 test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
 kill -KILL "$pid"; wait "$pid" 2>/dev/null || :; pid=

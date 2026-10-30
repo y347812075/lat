@@ -2203,6 +2203,7 @@ static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueu
         for (i = 0; i < page.count && strcmp(page.entries[i].name, report.attempt_name); i++) {}
         if (i == page.count) return fail(error, error_size, "busy attempt outside page");
         if (results[i] == 0) {
+            if (getenv("LATCD_TEST_CRASH_BEFORE_BUSY_PAGE")) kill(getpid(), SIGKILL);
             if (clock_gettime(CLOCK_BOOTTIME, &ts)) return -1;
             now = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
             if (latcd_retirement_page_wait_busy(config->cache_dir, &test_page_budget, i,

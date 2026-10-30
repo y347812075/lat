@@ -6680,7 +6680,8 @@ int latcd_retirement_page_wait_busy(const char *root, LatcdPageBudget *budget,
         !report->scheduler_deferral_durable || !report->attempt_sequence ||
         !report->attempt_started_boottime_us || report->attempt_started_boottime_us > now_us ||
         report->object_unlinked || report->namespace_durable || report->receipt_durable ||
-        report->scheduler_busy_count != 1 || report->retry_at_boottime_us <= now_us ||
+        !report->scheduler_busy_count || report->scheduler_busy_count > 7 ||
+        report->retry_at_boottime_us <= now_us ||
         report->retry_at_boottime_us - now_us > RETIREMENT_BUSY_MAX_US)
         return fail(error, error_size, "invalid page busy observation");
     int scheduler = scheduler_lock(root, error, error_size);
@@ -6702,7 +6703,7 @@ int latcd_retirement_page_wait_busy(const char *root, LatcdPageBudget *budget,
     LatcdRetirementPageDeadline entry = page.entries[index];
     entry.last_attempt = page.sequence;
     entry.retry_at = report->retry_at_boottime_us;
-    entry.busy_count = 1;
+    entry.busy_count = report->scheduler_busy_count;
     result = page_budget_result_locked(root, now_us, identity, budget, &entry,
         LATCD_RETIREMENT_RESULT_DEFERRED, true, scheduler, NULL, NULL, error, error_size);
 out:
