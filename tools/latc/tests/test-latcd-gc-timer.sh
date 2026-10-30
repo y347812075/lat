@@ -154,6 +154,42 @@ old=$cache/$(printf '%064x' 7)
 test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
 stop
 test "$before" = "$(sha256sum "$scheduler")"
+cache=$work/busy-fair-cache
+socket=$work/busy-fair.sock
+stats=$work/busy-fair-stats.json
+mkdir -m 700 "$cache"
+start
+stop
+"$fixture" --timer-fixture "$cache"
+old=$cache/$(printf '%064x' 7)
+python3 - "$old.native" "$work/fair-pin-ready" <<'PY' &
+import fcntl, pathlib, signal, sys
+f = open(sys.argv[1], 'rb'); fcntl.flock(f, fcntl.LOCK_SH)
+pathlib.Path(sys.argv[2]).touch(); signal.pause()
+PY
+pin_pid=$!
+n=0
+while [ ! -f "$work/fair-pin-ready" ]; do
+    kill -0 "$pin_pid"; n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+done
+LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 start
+n=0
+while ! grep -q 'test page busy retry=' "$work/server.err"; do
+    if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then
+        cat "$work/server.err" >&2; exit 1
+    fi
+    n=$((n + 1)); [ "$n" -lt 400 ]; sleep 0.05
+done
+n=0
+while [ -e "$old.so" ] || [ -e "$old.tbset" ]; do
+    if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then
+        cat "$work/server.err" >&2; exit 1
+    fi
+    n=$((n + 1)); [ "$n" -lt 400 ]; sleep 0.05
+done
+test -f "$old.native"
+kill "$pin_pid"; wait "$pin_pid" 2>/dev/null || :; pin_pid=
+stop
 cache=$work/busy-timer-cache
 socket=$work/busy-timer.sock
 stats=$work/busy-timer-stats.json

@@ -2146,8 +2146,8 @@ static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueu
             if (!inventory.members[i].present || inventory.undersized_member)
                 return fail(error, error_size, "invalid deferred page inventory");
             if (inventory.members[i].retry_at > now) {
-                *deadline = inventory.members[i].retry_at;
-                return 1;
+                remaining++;
+                continue;
             }
         } else if (results[i] != 0 && results[i] != 4)
             return fail(error, error_size, "invalid page member result");
