@@ -42,6 +42,37 @@ static void put(const char *path, const char *contents)
     assert(!chmod(path, 0400));
 }
 
+static void test_generation_remove(void)
+{
+    for (unsigned fault = 0; fault < 3; fault++) {
+        char *root = g_dir_make_tmp("capacity-generation-remove-XXXXXX", NULL);
+        char *name = g_strconcat("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ".so", NULL);
+        char *path = g_build_filename(root, name, NULL);
+        put(path, "1234567");
+        LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+        assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+        int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        struct stat snapshot;
+        assert(directory >= 0 && !fstatat(directory, name, &snapshot, AT_SYMLINK_NOFOLLOW));
+        remove_fault = fault;
+        int result = latcd_cache_capacity_remove_generation(&capacity, directory, name, &snapshot);
+        remove_fault = 0;
+        if (!fault) {
+            assert(!result && capacity.ready && !capacity.committed && access(path, F_OK));
+            assert(!latcd_cache_capacity_reserve(&capacity, 1, 10, NULL, 0));
+            latcd_cache_capacity_finish(&capacity, 1, false);
+        } else {
+            assert(result < 0 && !capacity.ready && capacity.committed == 7);
+        }
+        close(directory);
+        latcd_cache_capacity_close(&capacity);
+        pthread_mutex_destroy(&capacity.lock);
+        if (!access(path, F_OK)) assert(!unlink(path));
+        assert(!rmdir(root));
+        g_free(path); g_free(name); g_free(root);
+    }
+}
+
 static void test_matching_root(void)
 {
     char *root = g_dir_make_tmp("capacity-root-XXXXXX", NULL);
@@ -1133,6 +1164,7 @@ static void test_state_changes(unsigned store, unsigned mutation)
 
 int main(void)
 {
+    test_generation_remove();
     uint64_t peak = 99;
     assert(!latcd_cache_capacity_page_peak(2, 2, 1024, 65536, &peak) && peak == 133120);
     assert(!latcd_cache_capacity_page_peak(0, 0, 1024, 512, &peak) && peak == 1536);

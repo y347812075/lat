@@ -29,6 +29,7 @@ typedef struct LatcdCacheCapacity {
     int root_fd;
     int root_watch;
     void *expected_names;
+    const char *removing_generation;
     void *file_watches;
     void *state_directories;
     void *state_files;
@@ -64,6 +65,10 @@ void latcd_cache_capacity_recovery_fail(LatcdCacheCapacity *capacity);
  * Startup/shutdown and rescans must not race this operation. */
 int latcd_cache_capacity_open_matching_root(LatcdCacheCapacity *capacity,
                                             const char *root, int caller_fd);
+/* Caller holds the owner and object/reference locks and supplies the verified
+ * snapshot. This accounts namespace removal, not physical block release. */
+int latcd_cache_capacity_remove_generation(LatcdCacheCapacity *capacity, int directory,
+                                           const char *name, const struct stat *expected);
 int latcd_cache_capacity_reserve(LatcdCacheCapacity *capacity, uint64_t bytes,
                                  uint64_t limit, char *error, size_t error_size);
 /* Release only after cleanup proved removal. Otherwise commit conservatively. */

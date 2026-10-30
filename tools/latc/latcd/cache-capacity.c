@@ -224,7 +224,13 @@ static void check_changes(LatcdCacheCapacity *capacity)
                 g_free(key);
                 continue;
             }
-            if (event->mask & (IN_Q_OVERFLOW | IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED))
+            bool expected_file = event->wd != capacity->root_watch &&
+                watched_name_expected(capacity, event->wd);
+            GHashTable *generation_names = g_hash_table_lookup(capacity->file_watches, watch);
+            bool removing_file = capacity->removing_generation && generation_names &&
+                g_hash_table_contains(generation_names, capacity->removing_generation);
+            if (event->mask & IN_Q_OVERFLOW ||
+                ((event->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED)) && !removing_file))
                 capacity->ready = false;
             if (event->wd == capacity->root_watch && !event->len && (event->mask & IN_ATTRIB)) {
                 struct stat st;
@@ -232,7 +238,8 @@ static void check_changes(LatcdCacheCapacity *capacity)
                     (st.st_mode & 0077)) capacity->ready = false;
             }
             if (event->wd != capacity->root_watch && event->mask != IN_Q_OVERFLOW &&
-                (!(event->mask & (IN_MODIFY | IN_ATTRIB)) || !watched_name_expected(capacity, event->wd)))
+                !((event->mask & (IN_MODIFY | IN_ATTRIB) && expected_file) ||
+                  (event->mask & (IN_DELETE_SELF | IN_IGNORED) && removing_file)))
                 capacity->ready = false;
             if (event->wd == capacity->root_watch && event->len &&
                 (current_name(event->name) || state_store_name(event->name))) {
@@ -655,6 +662,59 @@ int latcd_cache_capacity_open_matching_root(LatcdCacheCapacity *capacity,
     pthread_mutex_unlock(&capacity->lock);
     if (fd < 0) errno = saved;
     return fd;
+}
+
+int latcd_cache_capacity_remove_generation(LatcdCacheCapacity *capacity, int directory,
+                                           const char *name, const struct stat *expected)
+{
+    if (!capacity || directory < 0 || !name || !generated_name(name) || !expected) {
+        errno = EINVAL;
+        return -1;
+    }
+    pthread_mutex_lock(&capacity->lock);
+    check_changes(capacity);
+    struct stat root, caller, actual;
+    GHashTableIter iterator;
+    gpointer watch, value;
+    int found = -1, result = -1;
+    if (!capacity->ready || capacity->recovery_gate || capacity->root_fd < 0 ||
+        fstat(capacity->root_fd, &root) || fstat(directory, &caller) ||
+        root.st_dev != caller.st_dev || root.st_ino != caller.st_ino ||
+        g_hash_table_contains(capacity->expected_names, name)) goto out;
+    g_hash_table_iter_init(&iterator, capacity->file_watches);
+    while (g_hash_table_iter_next(&iterator, &watch, &value)) {
+        GHashTable *names = value;
+        if (g_hash_table_contains(names, name)) {
+            if (found >= 0 || g_hash_table_size(names) != 1) goto invalid;
+            found = GPOINTER_TO_INT(watch);
+        }
+    }
+    if (found < 0) goto invalid;
+    g_hash_table_add(capacity->expected_names, g_strdup(name));
+    capacity->removing_generation = name;
+    if (fstatat(directory, name, &actual, AT_SYMLINK_NOFOLLOW) ||
+        !S_ISREG(actual.st_mode) || actual.st_uid != geteuid() || actual.st_nlink != 1 ||
+        actual.st_size < 0 || !same_file_snapshot(expected, &actual) ||
+        (uint64_t)actual.st_size > capacity->committed ||
+        unlinkat(directory, name, 0) || fsync(directory)) goto invalid_expected;
+    capacity->committed -= (uint64_t)actual.st_size;
+    check_changes(capacity);
+    if (!inotify_rm_watch(capacity->watch_fd, found))
+        g_hash_table_add(capacity->state_ignored, GINT_TO_POINTER(found));
+    g_hash_table_remove(capacity->file_watches, GINT_TO_POINTER(found));
+    check_changes(capacity);
+    g_hash_table_remove(capacity->expected_names, name);
+    capacity->removing_generation = NULL;
+    if (capacity->ready) result = 0;
+    goto out;
+invalid_expected:
+    g_hash_table_remove(capacity->expected_names, name);
+    capacity->removing_generation = NULL;
+invalid:
+    capacity->ready = false;
+out:
+    pthread_mutex_unlock(&capacity->lock);
+    return result;
 }
 
 int latcd_cache_capacity_poll(LatcdCacheCapacity *capacity)
