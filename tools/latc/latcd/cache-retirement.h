@@ -331,6 +331,11 @@ int latcd_retirement_page_budget_commit(const char *root, uint64_t now_us,
  * failure reload and re-inventory before releasing an uncertain budget. */
 int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t now_us,
                                     struct LatcdPageBudget *budget, char *error, size_t error_size);
+/* Owner lease and controlled writers required. Resolve at most one missing
+ * result per call as deferred; return 1 for more work, 0 when finished.
+ * DONE and consumption checkpoints require a separate witness protocol. */
+int latcd_retirement_page_recover_deferred_step(const char *root, uint64_t now_us,
+                                    struct LatcdPageBudget *budget, char *error, size_t error_size);
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
 int latcd_retirement_test_guarded_budget_result(const char *root, uint64_t now_us,
     const uint8_t identity[32], struct LatcdPageBudget *budget, const LatcdRetirementPageDeadline *entry,

@@ -2989,6 +2989,35 @@ int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t n
     return page_finish(root, now_us, false, budget, error, error_size);
 }
 
+int latcd_retirement_page_recover_deferred_step(const char *root, uint64_t now_us,
+                                                 LatcdPageBudget *budget, char *error, size_t error_size)
+{
+    LatcdRetirementPageState page;
+    uint8_t results[128] = {0}, identity[32];
+    if (!root || !budget || !budget->capacity || !budget->page_identity_bound ||
+        latcd_retirement_page_state_load(root, &page, error, error_size) ||
+        !page.budget_bound || !page.count || page.consumption_bound ||
+        latcd_retirement_page_budget_identity(&page, identity) ||
+        memcmp(identity, budget->page_identity, sizeof(identity)) ||
+        latcd_retirement_schedule_page_results(root, now_us, &page, results, error, error_size) < 0)
+        return fail(error, error_size, "unsafe deferred page recovery");
+    for (unsigned i = 0; i < page.count; i++)
+        if (results[i] == LATCD_RETIREMENT_RESULT_DONE ||
+            (results[i] != 0 && results[i] != 4 && results[i] != LATCD_RETIREMENT_RESULT_DEFERRED))
+            return fail(error, error_size, "page recovery requires receipt witness");
+    if (!page.committed_pending) {
+        for (unsigned i = 0; i < page.count; i++) {
+            if (results[i] == LATCD_RETIREMENT_RESULT_DEFERRED) continue;
+            if (latcd_retirement_page_budget_result(root, now_us, identity, budget,
+                    &page.entries[i], LATCD_RETIREMENT_RESULT_DEFERRED, error, error_size)) return -1;
+            return 1;
+        }
+        if (latcd_retirement_page_budget_commit(root, now_us, &page, budget, error, error_size)) return -1;
+        return 1;
+    }
+    return latcd_retirement_page_finish_preserving_results(root, now_us, budget, error, error_size);
+}
+
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
 int latcd_retirement_test_budget_commit(const char *root, uint64_t now_us,
                                     const LatcdRetirementPageState *page, LatcdPageBudget *budget,

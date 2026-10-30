@@ -3255,6 +3255,66 @@ static int test_result_guard(void *context)
     return -1;
 }
 
+static void test_deferred_page_recovery(bool done)
+{
+    char *root = root_new(), error[256], *boot = NULL;
+    char *gc = g_build_filename(root, ".gc", NULL);
+    char *store = g_build_filename(gc, "retirement-schedule", NULL);
+    assert(!mkdir(gc, 0700) && !mkdir(store, 0700));
+    struct stat st;
+    assert(!stat(root, &st));
+    assert(g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL));
+    g_strchomp(boot);
+    LatcdRetirementPageState page = {.cache_device = st.st_dev, .cache_inode = st.st_ino,
+        .grace_us = 100, .round_cutoff = 120, .sequence = 3}, loaded;
+    g_strlcpy(page.boot, boot, sizeof(page.boot));
+    assert(!latcd_retirement_page_state_store(root, &page, error, sizeof(error)));
+    page.count = 2;
+    for (unsigned i = 0; i < page.count; i++) {
+        snprintf(page.entries[i].name, sizeof(page.entries[i].name), "%064x.so", i + 1);
+        page.entries[i].deadline = 140; page.entries[i].enqueued = 100;
+    }
+    g_strlcpy(page.cursor, page.entries[1].name, sizeof(page.cursor));
+    simulated_boottime_us = 150;
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    LatcdPageBudget budget = {0};
+    assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    assert(!latcd_retirement_page_stage_budgeted(root, &page, &capacity, UINT64_MAX,
+                                                  &budget, error, sizeof(error)));
+    if (done) {
+        uint8_t identity[32];
+        assert(!latcd_retirement_page_budget_identity(&page, identity));
+        assert(!latcd_retirement_test_bound_budget_result(root, 150, identity, &budget,
+            &page.entries[0], LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)));
+        assert(latcd_retirement_page_recover_deferred_step(root, 150, &budget, error, sizeof(error)) < 0);
+    } else {
+        for (unsigned phase = 0; phase < 3; phase++) {
+            assert(latcd_retirement_page_recover_deferred_step(root, 150, &budget, error, sizeof(error)) == 1);
+            latcd_cache_capacity_close(&capacity);
+            capacity = (LatcdCacheCapacity)LATCD_CACHE_CAPACITY_INIT;
+            memset(&budget, 0, sizeof(budget));
+            assert(!latcd_cache_capacity_scan(&capacity, root, error, sizeof(error)));
+            latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+            assert(!latcd_cache_capacity_recovery_begin(&capacity));
+            assert(!latcd_retirement_page_restore_budget(root, &capacity, UINT64_MAX, 100,
+                                                          &budget, &loaded, error, sizeof(error)));
+            assert(!latcd_cache_capacity_recovery_finish(&capacity));
+        }
+        assert(!latcd_retirement_page_recover_deferred_step(root, 150, &budget, error, sizeof(error)));
+        assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
+               !loaded.count && !strcmp(loaded.committed_cursor, page.cursor));
+        for (unsigned i = 0; i < page.count; i++) {
+            LatcdRetirementPageDeadline saved; uint64_t sequence;
+            assert(!latcd_retirement_schedule_load(root, boot, 100, 150, page.entries[i].name,
+                                                   &sequence, &saved, error, sizeof(error)));
+        }
+    }
+    latcd_cache_capacity_close(&capacity);
+    simulated_boottime_us = 0;
+    g_free(boot); g_free(store); g_free(gc); remove_root(root); g_free(root);
+}
+
 static void test_budgeted_page_stage(void)
 {
     char *root = root_new(), error[256], *boot = NULL;
@@ -9229,6 +9289,8 @@ int main(int argc, char **argv)
     test_schedule_result_upgrade();
     test_schedule_check_page();
     test_page_stage();
+    test_deferred_page_recovery(false);
+    test_deferred_page_recovery(true);
     test_budgeted_page_stage();
     test_budgeted_max_page(0);
     test_budgeted_max_page(1);
