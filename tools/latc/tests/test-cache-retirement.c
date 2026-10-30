@@ -8169,7 +8169,10 @@ static void test_retry_multiple_receipts(unsigned mixed)
             assert(!latcd_retirement_retry_page_restore_budget(root, &capacity, UINT64_MAX, 1,
                                                                &budget, page, error, sizeof(error)));
             assert(page->deletion_intent && !latcd_cache_capacity_recovery_finish(&capacity));
-            LatcdRetryRecovery *recovery = latcd_retry_recovery_new(root, 1, &budget);
+            LatcdRetryRecovery *recovery = latcd_retry_recovery_new(root, 1, &budget, false);
+            assert(recovery && latcd_retry_recovery_step(recovery, 1, 10000, error, sizeof(error)) < 0);
+            latcd_retry_recovery_free(recovery);
+            recovery = latcd_retry_recovery_new(root, 1, &budget, true);
             assert(recovery);
             unsigned steps = 0;
             do {

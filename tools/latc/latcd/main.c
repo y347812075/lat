@@ -6669,22 +6669,15 @@ int main(int argc, char **argv)
     }
     if (!budget_result && latcd_cache_capacity_recovery_finish(&generation_capacity))
         budget_result = fail(error, sizeof(error), "capacity index invalid after compiler budget recovery");
-    while (!budget_result && retry_recovered && !stop_requested) {
-        if (latcd_retirement_retry_page_load(config.cache_dir, retry_page, error, sizeof(error))) {
-            budget_result = -1;
-        } else if (retry_page->completed == retry_page->count) {
-            budget_result = latcd_retirement_retry_page_commit(config.cache_dir, &retry_budget,
-                                                                error, sizeof(error));
-            retry_recovered = false;
-        } else {
-            if (!retry_page->intent_present) {
-                budget_result = latcd_retirement_retry_page_begin_deferred(config.cache_dir, &retry_budget,
-                                                                           error, sizeof(error));
-            }
-            if (!budget_result) budget_result = latcd_retirement_retry_page_apply_unmatched(
-                config.cache_dir, &retry_budget, error, sizeof(error));
-            if (!budget_result) budget_result = latcd_retirement_retry_page_finish_unmatched(
-                config.cache_dir, &retry_budget, error, sizeof(error));
+    if (!budget_result && retry_recovered) {
+        LatcdRetryRecovery *retry = latcd_retry_recovery_new(config.cache_dir,
+            UINT64_C(600) * 1000000, &retry_budget, false);
+        if (!retry) budget_result = fail(error, sizeof(error), "cannot create retry recovery");
+        else {
+            do {
+                budget_result = latcd_retry_recovery_step(retry, 32, 10000, error, sizeof(error));
+            } while (budget_result > 0 && !stop_requested);
+            latcd_retry_recovery_free(retry);
         }
     }
     g_free(retry_page);

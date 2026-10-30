@@ -545,12 +545,13 @@ int latcd_retirement_queue_retry_completed_resume(LatcdRetirementQueue *queue,
 int latcd_retirement_queue_retry_completed_commit(LatcdRetirementQueue *queue,
     struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Bounded recovery of an already budget-restored retry page. The caller owns
- * the cache lease and guarantees controlled readers, writers and mounts for
- * the entire recovery. This is not domain admission. Return 1 for more work,
- * 0 after commit, or -1; discard the cursor and reload on error. */
+ * the cache lease. With controlled_access=true it must also guarantee controlled
+ * readers, writers and mounts throughout; this flag is not domain admission.
+ * Without it receipt states are rejected and other members are only deferred.
+ * Return 1 for more work, 0 after commit, or -1; discard and reload on error. */
 typedef struct LatcdRetryRecovery LatcdRetryRecovery;
 LatcdRetryRecovery *latcd_retry_recovery_new(const char *root, uint64_t grace_us,
-                                             struct LatcdPageBudget *budget);
+                                             struct LatcdPageBudget *budget, bool controlled_access);
 int latcd_retry_recovery_step(LatcdRetryRecovery *recovery, unsigned entries,
                               uint64_t time_us, char *error, size_t error_size);
 void latcd_retry_recovery_free(LatcdRetryRecovery *recovery);

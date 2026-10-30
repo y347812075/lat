@@ -6700,17 +6700,19 @@ struct LatcdRetryRecovery {
     uint64_t grace;
     LatcdPageBudget *budget;
     LatcdRetirementQueue *queue;
+    bool controlled_access;
     enum { RETRY_SCAN_RECEIPT, RETRY_SCAN_COMPLETED, RETRY_SCAN_NEXT } scan;
 };
 
 LatcdRetryRecovery *latcd_retry_recovery_new(const char *root, uint64_t grace_us,
-                                             LatcdPageBudget *budget)
+                                             LatcdPageBudget *budget, bool controlled_access)
 {
     if (!root || !budget || !budget->capacity || !budget->page_identity_bound) return NULL;
     LatcdRetryRecovery *recovery = g_new0(LatcdRetryRecovery, 1);
     recovery->root = g_strdup(root);
     recovery->grace = grace_us;
     recovery->budget = budget;
+    recovery->controlled_access = controlled_access;
     return recovery;
 }
 
@@ -6753,6 +6755,14 @@ int latcd_retry_recovery_step(LatcdRetryRecovery *recovery, unsigned entries,
     int result = -1;
     if (latcd_retirement_retry_page_load(recovery->root, page, error, error_size) ||
         page->grace_us != recovery->grace) goto out;
+    if (!recovery->controlled_access) {
+        bool deleted = false;
+        for (unsigned i = 0; i < page->completed; i++) deleted |= page->deleted[i];
+        if (page->deletion_intent || deleted) {
+            fail(error, error_size, "receipt recovery requires controlled cache access");
+            goto out;
+        }
+    }
     if (page->deletion_intent || page->completed == page->count) {
         bool deleted = false;
         for (unsigned i = 0; i < page->completed; i++) deleted |= page->deleted[i];
@@ -6768,6 +6778,10 @@ int latcd_retry_recovery_step(LatcdRetryRecovery *recovery, unsigned entries,
         if (started) { latcd_retirement_queue_free(recovery->queue); recovery->queue = NULL; goto out; }
         result = 1;
     } else if (!page->intent_present) {
+        if (!recovery->controlled_access) {
+            result = latcd_retirement_retry_page_begin_deferred(recovery->root, recovery->budget, error, error_size) ? -1 : 1;
+            goto out;
+        }
         recovery->scan = RETRY_SCAN_NEXT;
         recovery->queue = latcd_retirement_queue_new(recovery->root, recovery->grace);
         if (latcd_retirement_queue_retry_receipt_next(recovery->queue, recovery->budget, error, error_size)) {
