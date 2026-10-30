@@ -2116,17 +2116,21 @@ typedef struct LatcdTaskRecovery {
 } LatcdTaskRecovery;
 
 #ifdef LATCD_GC_TIMER_TEST
-static LatcdPageBudget test_page_budget;
-static bool test_page_staged;
-static bool test_page_waiting;
-static bool test_page_executing;
-static bool test_page_scanning;
-static LatcdRetirementQueue *test_page_witness;
-static LatcdRetirementQueue *test_page_discovery;
-static unsigned test_page_member;
-static unsigned test_page_remaining;
+typedef struct LatcdPageDriver {
+    LatcdPageBudget budget;
+    bool staged;
+    bool waiting;
+    bool executing;
+    bool scanning;
+    LatcdRetirementQueue *witness;
+    LatcdRetirementQueue *discovery;
+    unsigned member;
+    unsigned remaining;
+} LatcdPageDriver;
+
+static LatcdPageDriver test_page_driver_state;
 /* The caller owns the sole scheduler queue and the page budget. */
-static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueue *executor,
+static int test_waiting_page_step(LatcdPageDriver *driver, const LatcdConfig *config, LatcdRetirementQueue *executor,
                                   uint64_t *deadline, char *error, size_t error_size)
 {
     LatcdRetirementPageState page;
@@ -2140,7 +2144,7 @@ static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueu
     if (latcd_retirement_page_state_load(config->cache_dir, &page, error, error_size)) return -1;
     if (page.committed_pending) {
         result = latcd_retirement_consumption_recover_step(config->cache_dir, now,
-                    &test_page_budget, error, error_size);
+                    &driver->budget, error, error_size);
         if (result >= 0) fprintf(stderr, "latcd: test consumption recovery step=%d\n", result);
         return result > 0 ? 2 : result;
     }
@@ -2148,72 +2152,72 @@ static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueu
                                         &inventory, error, error_size) < 0) return -1;
     uint8_t page_identity[32];
     if (latcd_retirement_page_budget_identity(&page, page_identity) ||
-        !test_page_budget.page_identity_bound ||
-        memcmp(page_identity, test_page_budget.page_identity, sizeof(page_identity)))
+        !driver->budget.page_identity_bound ||
+        memcmp(page_identity, driver->budget.page_identity, sizeof(page_identity)))
         return fail(error, error_size, "waiting page identity changed");
-    if (test_page_executing) goto execute;
-    if (test_page_scanning) goto scan;
-    for (unsigned i = test_page_member; i < page.count; i++) {
+    if (driver->executing) goto execute;
+    if (driver->scanning) goto scan;
+    for (unsigned i = driver->member; i < page.count; i++) {
         if (results[i] == LATCD_RETIREMENT_RESULT_DONE) continue;
         if (results[i] == LATCD_RETIREMENT_RESULT_DEFERRED) {
             if (!inventory.members[i].present || inventory.undersized_member)
                 return fail(error, error_size, "invalid deferred page inventory");
             if (inventory.members[i].retry_at > now) {
-                test_page_remaining++;
-                test_page_member = i + 1;
+                driver->remaining++;
+                driver->member = i + 1;
                 continue;
             }
         } else if (results[i] != 0 && results[i] != 4)
             return fail(error, error_size, "invalid page member result");
         bool receipts[128], matches[128];
         unsigned receipt_count, match_count;
-        if (!test_page_witness) {
-            test_page_witness = latcd_retirement_queue_new(config->cache_dir,
+        if (!driver->witness) {
+            driver->witness = latcd_retirement_queue_new(config->cache_dir,
                                                             LATCD_RETIREMENT_GRACE_US);
-            result = latcd_retirement_queue_page_receipt_begin(test_page_witness,
-                &test_page_budget, i, error, error_size);
+            result = latcd_retirement_queue_page_receipt_begin(driver->witness,
+                &driver->budget, i, error, error_size);
             if (result) return -1;
-            test_page_member = i;
+            driver->member = i;
         }
         {
-            result = latcd_retirement_queue_step(test_page_witness, 32, 10000, &stats,
+            result = latcd_retirement_queue_step(driver->witness, 32, 10000, &stats,
                                                  error, error_size);
             if (result > 0) {
                 fprintf(stderr, "latcd: test retirement witness yielded\n");
                 return 2;
             }
             if (stop_requested || result >= 0 ||
-                latcd_retirement_queue_retry_receipts(test_page_witness, receipts, &receipt_count) || receipt_count != 1 ||
-                latcd_retirement_queue_retry_matches(test_page_witness, matches, &match_count) || match_count != 1 ||
+                latcd_retirement_queue_retry_receipts(driver->witness, receipts, &receipt_count) || receipt_count != 1 ||
+                latcd_retirement_queue_retry_matches(driver->witness, matches, &match_count) || match_count != 1 ||
                 receipts[0] == matches[0]) result = -1;
             else if (receipts[0])
-                result = latcd_retirement_queue_page_receipt_done(test_page_witness, &test_page_budget,
+                result = latcd_retirement_queue_page_receipt_done(driver->witness, &driver->budget,
                                                                   error, error_size);
-            else { test_page_remaining++; result = 0; }
+            else { driver->remaining++; result = 0; }
         }
-        latcd_retirement_queue_free(test_page_witness);
-        test_page_witness = NULL;
+        latcd_retirement_queue_free(driver->witness);
+        driver->witness = NULL;
         if (result) return -1;
-        test_page_member = i + 1;
+        driver->member = i + 1;
         return 2;
     }
-    unsigned remaining = test_page_remaining;
-    test_page_member = test_page_remaining = 0;
+    unsigned remaining = driver->remaining;
+    driver->member = driver->remaining = 0;
     if (!remaining) {
         if (latcd_retirement_page_budget_commit(config->cache_dir, now, &page,
-                                                 &test_page_budget, error, error_size)) return -1;
+                                                 &driver->budget, error, error_size)) return -1;
         return 2;
     }
-    test_page_scanning = true;
+    driver->scanning = true;
 scan:
     result = latcd_retirement_queue_step(executor, 32, 10000, &stats, error, error_size);
     if (result > 0) {
         fprintf(stderr, "latcd: test retirement executor scan yielded\n");
         return 2;
     }
-    test_page_scanning = false;
+    driver->scanning = false;
     if (result || stop_requested || !stats.complete ||
-        latcd_retirement_queue_restrict_to_waiting_page(executor, &page, &test_page_budget,
+        latcd_retirement_queue_restrict_to_waiting_page(executor, &page, &driver->budget,
                                                         deadline, error, error_size)) return -1;
 execute:
     LatcdRetirementDeletionReport report;
@@ -2221,8 +2225,8 @@ execute:
     uint64_t hash_budget = getenv("LATCD_TEST_SMALL_HASH_BUDGET") ? 3 : 65536;
     result = latcd_retirement_queue_execute_step(executor, hash_budget, 10000, &hashed,
                                                  &report, error, error_size);
-    test_page_executing = result == 2;
-    if (test_page_executing) {
+    driver->executing = result == 2;
+    if (driver->executing) {
         fprintf(stderr, "latcd: test retirement hash yielded\n");
         if (getenv("LATCD_TEST_STOP_ON_HASH_YIELD")) kill(getpid(), SIGTERM);
         return 2;
@@ -2243,7 +2247,7 @@ execute:
             if (getenv("LATCD_TEST_CRASH_BEFORE_BUSY_PAGE")) kill(getpid(), SIGKILL);
             if (clock_gettime(CLOCK_BOOTTIME, &ts)) return -1;
             now = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-            if (latcd_retirement_page_wait_busy(config->cache_dir, &test_page_budget, i,
+            if (latcd_retirement_page_wait_busy(config->cache_dir, &driver->budget, i,
                                                  &report, now, error, error_size)) return -1;
         } else if (results[i] != LATCD_RETIREMENT_RESULT_DEFERRED)
             return fail(error, error_size, "busy result conflicts with page");
@@ -2274,7 +2278,7 @@ static int test_retirement_page_has_deferred(const LatcdConfig *config,
     }
     return 0;
 }
-static int test_consume_retirement_page(const LatcdConfig *config,
+static int test_consume_retirement_page(LatcdPageDriver *driver, const LatcdConfig *config,
                                         char *error, size_t error_size)
 {
     LatcdRetirementPageState page;
@@ -2287,7 +2291,7 @@ static int test_consume_retirement_page(const LatcdConfig *config,
         if (clock_gettime(CLOCK_BOOTTIME, &ts)) return -1;
         uint64_t now = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
         do { result = latcd_retirement_consumption_recover_step(config->cache_dir, now,
-                                                &test_page_budget, error, error_size); }
+                                                &driver->budget, error, error_size); }
         while (result > 0 && !stop_requested);
         return stop_requested ? -1 : result;
     }
@@ -2310,7 +2314,7 @@ static int test_consume_retirement_page(const LatcdConfig *config,
             bool receipts[128], matches[128];
             unsigned receipt_count, match_count;
             queue = latcd_retirement_queue_new(config->cache_dir, LATCD_RETIREMENT_GRACE_US);
-            if (latcd_retirement_queue_page_receipt_begin(queue, &test_page_budget, i, error, error_size)) goto fail;
+            if (latcd_retirement_queue_page_receipt_begin(queue, &driver->budget, i, error, error_size)) goto fail;
             do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, error_size); }
             while (result > 0 && !stop_requested);
             if (stop_requested || result >= 0 ||
@@ -2318,7 +2322,7 @@ static int test_consume_retirement_page(const LatcdConfig *config,
                 latcd_retirement_queue_retry_matches(queue, matches, &match_count) || match_count != 1 ||
                 receipts[0] == matches[0]) goto fail;
             if (receipts[0]) {
-                if (latcd_retirement_queue_page_receipt_done(queue, &test_page_budget, error, error_size)) goto fail;
+                if (latcd_retirement_queue_page_receipt_done(queue, &driver->budget, error, error_size)) goto fail;
                 if (getenv("LATCD_TEST_CRASH_AFTER_PAGE_DONE")) kill(getpid(), SIGKILL);
             } else remaining++;
             latcd_retirement_queue_free(queue);
@@ -2344,9 +2348,9 @@ static int test_consume_retirement_page(const LatcdConfig *config,
     if (clock_gettime(CLOCK_BOOTTIME, &ts)) goto fail;
     uint64_t now = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
     if (latcd_retirement_page_budget_commit(config->cache_dir, now, &page,
-                                             &test_page_budget, error, error_size)) goto fail;
+                                             &driver->budget, error, error_size)) goto fail;
     do { result = latcd_retirement_consumption_recover_step(config->cache_dir, now,
-                                            &test_page_budget, error, error_size); }
+                                            &driver->budget, error, error_size); }
     while (result > 0 && !stop_requested);
     if (result || stop_requested) goto fail;
     return 0;
@@ -2355,35 +2359,35 @@ fail:
     if (queue) latcd_retirement_queue_free(queue);
     return result;
 }
-static int test_stage_retirement_page(const LatcdConfig *config,
+static int test_stage_retirement_page(LatcdPageDriver *driver, const LatcdConfig *config,
                                       char *error, size_t error_size)
 {
     LatcdRetirementPageState page;
     int result = 0;
-    if (!test_page_discovery) {
+    if (!driver->discovery) {
         if (latcd_retirement_page_round_begin(config->cache_dir,
                 LATCD_RETIREMENT_GRACE_US, &page, error, error_size)) return -1;
-        test_page_discovery = latcd_retirement_queue_new(
+        driver->discovery = latcd_retirement_queue_new(
             config->cache_dir, LATCD_RETIREMENT_GRACE_US);
-        result = latcd_retirement_queue_page_discovery_begin(test_page_discovery,
+        result = latcd_retirement_queue_page_discovery_begin(driver->discovery,
                                                                error, error_size);
     }
     LatcdRetirementQueueStats stats;
     if (!result) {
-        result = latcd_retirement_queue_step(test_page_discovery, 32, 10000, &stats,
+        result = latcd_retirement_queue_step(driver->discovery, 32, 10000, &stats,
                                               error, error_size);
         if (result > 0) {
             fprintf(stderr, "latcd: test page discovery yielded\n");
             return 1;
         }
         if (!stop_requested && result < 0 &&
-            !latcd_retirement_queue_aggregated_page(test_page_discovery, &page) && page.count)
-            result = latcd_retirement_queue_page_stage(test_page_discovery, &generation_capacity,
-                config->max_cache_bytes, &test_page_budget, error, error_size);
+            !latcd_retirement_queue_aggregated_page(driver->discovery, &page) && page.count)
+            result = latcd_retirement_queue_page_stage(driver->discovery, &generation_capacity,
+                config->max_cache_bytes, &driver->budget, error, error_size);
         else result = -1;
     }
-    latcd_retirement_queue_free(test_page_discovery);
-    test_page_discovery = NULL;
+    latcd_retirement_queue_free(driver->discovery);
+    driver->discovery = NULL;
     return result;
 }
 #endif
@@ -2412,15 +2416,15 @@ static void *compiler_input_recovery_worker(void *opaque)
         int64_t now = g_get_monotonic_time();
 #ifdef LATCD_GC_TIMER_TEST
         bool start_page_discovery = false;
-        if (retirement_safe && test_page_waiting && test_page_driver && now >= next_retirement) {
+        if (retirement_safe && test_page_driver_state.waiting && test_page_driver && now >= next_retirement) {
             uint64_t deadline = 0;
             char error[256] = {0};
-            int result = test_waiting_page_step(work->config, retirement, &deadline, error, sizeof(error));
+            int result = test_waiting_page_step(&test_page_driver_state, work->config, retirement, &deadline, error, sizeof(error));
             if (result < 0) {
                 retirement_safe = false;
                 fprintf(stderr, "latcd: test waiting page failed: %s\n", error);
             } else if (!result) {
-                test_page_waiting = false;
+                test_page_driver_state.waiting = false;
                 fprintf(stderr, "latcd: test waiting page consumed\n");
             } else if (result == 1) {
                 if (timer >= 0) {
@@ -2438,7 +2442,7 @@ static void *compiler_input_recovery_worker(void *opaque)
 #endif
         if (retirement_safe && atomic_load(&compiler_budget_recovery_state) == 1 &&
 #ifdef LATCD_GC_TIMER_TEST
-            !test_page_waiting && !test_page_discovery &&
+            !test_page_driver_state.waiting && !test_page_driver_state.discovery &&
 #endif
             now >= next_retirement) {
             LatcdRetirementQueueStats stats;
@@ -2459,7 +2463,7 @@ static void *compiler_input_recovery_worker(void *opaque)
             retirement_queue_stats = stats;
             pthread_mutex_unlock(&retirement_queue_lock);
 #ifdef LATCD_GC_TIMER_TEST
-            if (!result && stats.ready && !test_page_staged &&
+            if (!result && stats.ready && !test_page_driver_state.staged &&
                 getenv("LATCD_TEST_STAGE_PAGE")) start_page_discovery = true;
 #endif
             if (timer >= 0) {
@@ -2476,19 +2480,19 @@ static void *compiler_input_recovery_worker(void *opaque)
             }
             next_retirement = g_get_monotonic_time() + (result == 1 ? 100000 : 5000000);
 #ifdef LATCD_GC_TIMER_TEST
-            if (test_page_waiting && test_page_driver) next_retirement = 0;
+            if (test_page_driver_state.waiting && test_page_driver) next_retirement = 0;
 #endif
         }
 #ifdef LATCD_GC_TIMER_TEST
         if (retirement_safe && (start_page_discovery ||
-            (test_page_discovery && now >= next_retirement))) {
+            (test_page_driver_state.discovery && now >= next_retirement))) {
             char error[256] = {0};
-            int stage = test_stage_retirement_page(work->config, error, sizeof(error));
+            int stage = test_stage_retirement_page(&test_page_driver_state, work->config, error, sizeof(error));
             if (stage < 0) {
                 retirement_safe = false;
                 fprintf(stderr, "latcd: test page stage failed: %s\n", error);
             } else if (!stage) {
-                test_page_staged = true;
+                test_page_driver_state.staged = true;
                 fprintf(stderr, "latcd: test page staged\n");
                 if (getenv("LATCD_TEST_DEFER_PAGE")) {
                     LatcdRetirementPageState page;
@@ -2501,22 +2505,22 @@ static void *compiler_input_recovery_worker(void *opaque)
                     } else {
                         uint64_t now_us = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
                         if (latcd_retirement_page_budget_result(work->config->cache_dir, now_us,
-                            identity, &test_page_budget, &page.entries[0],
+                            identity, &test_page_driver_state.budget, &page.entries[0],
                             LATCD_RETIREMENT_RESULT_DEFERRED, error, sizeof(error)))
                             fprintf(stderr, "latcd: test defer failed: %s\n", error);
                         else fprintf(stderr, "latcd: test page deferred\n");
                     }
                 }
                 if (getenv("LATCD_TEST_CONSUME_PAGE") && test_page_driver) {
-                    test_page_waiting = true;
+                    test_page_driver_state.waiting = true;
                     next_retirement = 0;
                 } else if (getenv("LATCD_TEST_CONSUME_PAGE")) {
-                    if (test_consume_retirement_page(work->config, error, sizeof(error)))
+                    if (test_consume_retirement_page(&test_page_driver_state, work->config, error, sizeof(error)))
                         fprintf(stderr, "latcd: test page consume failed: %s\n", error);
                     else fprintf(stderr, "latcd: test page consumed\n");
                 }
             }
-            if (test_page_discovery) next_retirement = g_get_monotonic_time() + 100000;
+            if (test_page_driver_state.discovery) next_retirement = g_get_monotonic_time() + 100000;
         }
 #endif
         if (now >= next) {
@@ -2543,7 +2547,7 @@ static void *compiler_input_recovery_worker(void *opaque)
         }
         int64_t wake = retirement_safe && atomic_load(&compiler_budget_recovery_state) == 1 &&
 #ifdef LATCD_GC_TIMER_TEST
-            (!test_page_waiting || test_page_driver) &&
+            (!test_page_driver_state.waiting || test_page_driver) &&
 #endif
             true ?
             MIN(next, next_retirement) : next;
@@ -2562,7 +2566,7 @@ static void *compiler_input_recovery_worker(void *opaque)
             uint64_t count;
             if ((signals[i].revents & POLLIN) && read(signals[i].fd, &count, sizeof(count)) == sizeof(count)) {
 #ifdef LATCD_GC_TIMER_TEST
-                if (i && test_page_waiting && test_page_driver)
+                if (i && test_page_driver_state.waiting && test_page_driver)
                     fprintf(stderr, "latcd: test waiting timer woke\n");
 #endif
                 next_retirement = 0;
@@ -2579,15 +2583,15 @@ static void *compiler_input_recovery_worker(void *opaque)
      * main thread requests the final handoff only after joining publishers. */
     while (!atomic_load(&work->stopping)) poll(NULL, 0, 50);
 #ifdef LATCD_GC_TIMER_TEST
-    if (test_page_discovery) {
-        latcd_retirement_queue_free(test_page_discovery);
-        test_page_discovery = NULL;
+    if (test_page_driver_state.discovery) {
+        latcd_retirement_queue_free(test_page_driver_state.discovery);
+        test_page_driver_state.discovery = NULL;
     }
-    if (test_page_witness) {
-        latcd_retirement_queue_free(test_page_witness);
-        test_page_witness = NULL;
+    if (test_page_driver_state.witness) {
+        latcd_retirement_queue_free(test_page_driver_state.witness);
+        test_page_driver_state.witness = NULL;
     }
-    if (test_page_executing) {
+    if (test_page_driver_state.executing) {
         if (latcd_retirement_queue_cancel(retirement, retirement_error, sizeof(retirement_error)))
             fprintf(stderr, "latcd: test retirement cancellation failed: %s\n", retirement_error);
         else fprintf(stderr, "latcd: test retirement cancellation persisted\n");
@@ -2595,7 +2599,7 @@ static void *compiler_input_recovery_worker(void *opaque)
 #endif
     if (retirement_safe
 #ifdef LATCD_GC_TIMER_TEST
-        && !test_page_waiting
+        && !test_page_driver_state.waiting
 #endif
        ) {
         LatcdRetirementQueueStats stats;
@@ -7077,7 +7081,7 @@ int main(int argc, char **argv)
             LatcdRetirementPageState page;
             if (latcd_retirement_page_restore_budget(config.cache_dir, &generation_capacity,
                     config.max_cache_bytes, LATCD_RETIREMENT_GRACE_US,
-                    &test_page_budget, &page, error, sizeof(error))) budget_result = -1;
+                    &test_page_driver_state.budget, &page, error, sizeof(error))) budget_result = -1;
             else test_page_recovered = true;
         } else
 #endif
@@ -7095,13 +7099,13 @@ int main(int argc, char **argv)
         budget_result = fail(error, sizeof(error), "capacity index invalid after compiler budget recovery");
 #ifdef LATCD_GC_TIMER_TEST
     if (!budget_result && test_page_recovered) {
-        test_page_staged = true;
+        test_page_driver_state.staged = true;
         int deferred = test_retirement_page_has_deferred(&config, error, sizeof(error));
         if (deferred < 0) budget_result = -1;
         else if (deferred || getenv("LATCD_TEST_WAITING_DRIVER")) {
-            test_page_waiting = true;
+            test_page_driver_state.waiting = true;
             fprintf(stderr, "latcd: test recovered page waiting; automatic retry unavailable\n");
-        } else if (test_consume_retirement_page(&config, error, sizeof(error))) budget_result = -1;
+        } else if (test_consume_retirement_page(&test_page_driver_state, &config, error, sizeof(error))) budget_result = -1;
         else fprintf(stderr, "latcd: test recovered page consumed\n");
     }
 #endif
