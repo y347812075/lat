@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "broker-transport.h"
 #include <errno.h>
 #include <fcntl.h>
