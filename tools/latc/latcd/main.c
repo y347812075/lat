@@ -2120,6 +2120,9 @@ static LatcdPageBudget test_page_budget;
 static bool test_page_staged;
 static bool test_page_waiting;
 static bool test_page_executing;
+static LatcdRetirementQueue *test_page_witness;
+static unsigned test_page_member;
+static unsigned test_page_remaining;
 /* The caller owns the sole scheduler queue and the page budget. */
 static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueue *executor,
                                   uint64_t *deadline, char *error, size_t error_size)
@@ -2141,41 +2144,58 @@ static int test_waiting_page_step(const LatcdConfig *config, LatcdRetirementQueu
     }
     if (latcd_retirement_page_snapshot(config->cache_dir, now, &page, results,
                                         &inventory, error, error_size) < 0) return -1;
+    uint8_t page_identity[32];
+    if (latcd_retirement_page_budget_identity(&page, page_identity) ||
+        !test_page_budget.page_identity_bound ||
+        memcmp(page_identity, test_page_budget.page_identity, sizeof(page_identity)))
+        return fail(error, error_size, "waiting page identity changed");
     if (test_page_executing) goto execute;
-    unsigned remaining = 0;
-    for (unsigned i = 0; i < page.count; i++) {
+    for (unsigned i = test_page_member; i < page.count; i++) {
         if (results[i] == LATCD_RETIREMENT_RESULT_DONE) continue;
         if (results[i] == LATCD_RETIREMENT_RESULT_DEFERRED) {
             if (!inventory.members[i].present || inventory.undersized_member)
                 return fail(error, error_size, "invalid deferred page inventory");
             if (inventory.members[i].retry_at > now) {
-                remaining++;
+                test_page_remaining++;
+                test_page_member = i + 1;
                 continue;
             }
         } else if (results[i] != 0 && results[i] != 4)
             return fail(error, error_size, "invalid page member result");
-        LatcdRetirementQueue *witness = latcd_retirement_queue_new(config->cache_dir,
-                                                                   LATCD_RETIREMENT_GRACE_US);
         bool receipts[128], matches[128];
         unsigned receipt_count, match_count;
-        result = latcd_retirement_queue_page_receipt_begin(witness, &test_page_budget, i,
-                                                            error, error_size);
-        if (!result) {
-            do { result = latcd_retirement_queue_step(witness, 32, 10000, &stats,
-                                                       error, error_size); }
-            while (result > 0 && !stop_requested);
+        if (!test_page_witness) {
+            test_page_witness = latcd_retirement_queue_new(config->cache_dir,
+                                                            LATCD_RETIREMENT_GRACE_US);
+            result = latcd_retirement_queue_page_receipt_begin(test_page_witness,
+                &test_page_budget, i, error, error_size);
+            if (result) return -1;
+            test_page_member = i;
+        }
+        {
+            result = latcd_retirement_queue_step(test_page_witness, 32, 10000, &stats,
+                                                 error, error_size);
+            if (result > 0) {
+                fprintf(stderr, "latcd: test retirement witness yielded\n");
+                return 2;
+            }
             if (stop_requested || result >= 0 ||
-                latcd_retirement_queue_retry_receipts(witness, receipts, &receipt_count) || receipt_count != 1 ||
-                latcd_retirement_queue_retry_matches(witness, matches, &match_count) || match_count != 1 ||
+                latcd_retirement_queue_retry_receipts(test_page_witness, receipts, &receipt_count) || receipt_count != 1 ||
+                latcd_retirement_queue_retry_matches(test_page_witness, matches, &match_count) || match_count != 1 ||
                 receipts[0] == matches[0]) result = -1;
             else if (receipts[0])
-                result = latcd_retirement_queue_page_receipt_done(witness, &test_page_budget,
+                result = latcd_retirement_queue_page_receipt_done(test_page_witness, &test_page_budget,
                                                                   error, error_size);
-            else { remaining++; result = 0; }
+            else { test_page_remaining++; result = 0; }
         }
-        latcd_retirement_queue_free(witness);
+        latcd_retirement_queue_free(test_page_witness);
+        test_page_witness = NULL;
         if (result) return -1;
+        test_page_member = i + 1;
+        return 2;
     }
+    unsigned remaining = test_page_remaining;
+    test_page_member = test_page_remaining = 0;
     if (!remaining) {
         if (latcd_retirement_page_budget_commit(config->cache_dir, now, &page,
                                                  &test_page_budget, error, error_size)) return -1;
@@ -2533,6 +2553,10 @@ static void *compiler_input_recovery_worker(void *opaque)
      * main thread requests the final handoff only after joining publishers. */
     while (!atomic_load(&work->stopping)) poll(NULL, 0, 50);
 #ifdef LATCD_GC_TIMER_TEST
+    if (test_page_witness) {
+        latcd_retirement_queue_free(test_page_witness);
+        test_page_witness = NULL;
+    }
     if (test_page_executing) {
         if (latcd_retirement_queue_cancel(retirement, retirement_error, sizeof(retirement_error)))
             fprintf(stderr, "latcd: test retirement cancellation failed: %s\n", retirement_error);
