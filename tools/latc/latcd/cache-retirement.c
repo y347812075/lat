@@ -1882,6 +1882,7 @@ typedef struct RetrySnapshotEntry {
     LatcdRetirementPageDeadline hint;
     uint64_t sequence;
     uint8_t digest[32];
+    struct stat file;
 } RetrySnapshotEntry;
 
 static int retirement_schedule_access(const char *root, const char *boot,
@@ -1963,7 +1964,7 @@ static int retirement_schedule_access(const char *root, const char *boot,
         uint8_t shard_digest[32];
         bool valid = ++count <= RETIREMENT_SCHEDULE_LIMIT &&
             !read_file_snapshot(store, item->d_name, 1024, &raw, &size,
-                                inventory ? &record_snapshot : NULL, snapshot ? shard_digest : NULL) &&
+                                (inventory || snapshot) ? &record_snapshot : NULL, snapshot ? shard_digest : NULL) &&
             size <= RETIREMENT_SCHEDULE_BYTES - bytes && !memchr(raw, 0, size) &&
             g_key_file_load_from_data(record, raw, size, 0, NULL);
         char **groups = valid ? g_key_file_get_groups(record, &groups_count) : NULL;
@@ -2012,6 +2013,7 @@ static int retirement_schedule_access(const char *root, const char *boot,
             item.hint.retry_at = retry;
             item.hint.busy_count = busy;
             item.sequence = seq;
+            item.file = record_snapshot;
             memcpy(item.digest, shard_digest, sizeof(item.digest));
             g_array_append_val(snapshot, item);
             *loaded_sequence = MAX(*loaded_sequence, seq);
@@ -6160,6 +6162,7 @@ static int retry_install_lock(void *opaque)
 }
 
 static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatched, bool stage_receipt,
+                                LatcdPageBudget *consume_budget,
                                 LatcdRetirementRetryPage *page,
                                 LatcdCacheCapacity *capacity, uint64_t limit, LatcdPageBudget *budget,
                                 bool *receipts, unsigned *receipt_count,
@@ -6186,6 +6189,8 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
     uint64_t page_bytes = 0;
     struct stat cache, path, transactions, tombstone_stat;
     RetryInstallContext install = {.queue = queue, .roots = -1, .error = error, .error_size = error_size};
+    struct stat receipt_shard = {0};
+    bool receipt_shard_present = false;
     if (scheduler < 0) goto out;
     root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     gc = root < 0 ? -1 : open_directory(root, ".gc", false);
@@ -6228,7 +6233,9 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
             RetrySnapshotEntry *entry = &g_array_index(snapshot, RetrySnapshotEntry, i);
             if (!strcmp(entry->hint.name, queue->retry_order[0]) &&
                 entry->sequence == queue->receipt_shard_sequence &&
-                !memcmp(entry->digest, queue->receipt_shard_digest, 32)) found = true;
+                !memcmp(entry->digest, queue->receipt_shard_digest, 32)) {
+                found = true; receipt_shard = entry->file; receipt_shard_present = true;
+            }
         }
         bool missing = true;
         for (unsigned i = 0; i < snapshot->len; i++) {
@@ -6305,6 +6312,31 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
     if (!(page && budget)) {
         if (retry_install_lock(&install)) goto out;
     }
+    if (consume_budget) {
+        uint8_t identity[32];
+        LatcdRetirementRetryPage *stored = g_new0(LatcdRetirementRetryPage, 1);
+        int matching = latcd_cache_capacity_open_matching_root(consume_budget->capacity, queue->root, root);
+        bool valid = queue->receipt_resume && matching >= 0 && !consume_budget->invalid &&
+            consume_budget->page_identity_bound &&
+            !latcd_retirement_retry_page_load(queue->root, stored, error, error_size) &&
+            !latcd_retirement_retry_page_budget_identity(stored, identity) &&
+            !memcmp(identity, consume_budget->page_identity, 32);
+        g_free(stored);
+        if (matching >= 0) close(matching);
+        if (!valid) goto out;
+        int schedule = open_directory(gc, "retirement-schedule", false);
+        char *filename = g_strconcat(queue->retry_order[0], ".ini", NULL);
+        if (schedule < 0 || !directory_matches_at(gc, "retirement-schedule", schedule)) {
+            if (schedule >= 0) close(schedule);
+            g_free(filename); goto out;
+        }
+        close(install.roots); install.roots = -1;
+        int consumed = receipt_shard_present ?
+            latcd_cache_capacity_page_remove_checked(schedule, filename, &receipt_shard, consume_budget) :
+            latcd_cache_capacity_page_sync_absent(schedule, filename, consume_budget);
+        close(schedule); g_free(filename);
+        if (consumed) goto out;
+    }
     if (receipts) {
         for (unsigned i = 0; i < queue->retry_count; i++)
             receipts[i] = g_hash_table_contains(queue->removed_second, queue->retry_order[i]) &&
@@ -6368,21 +6400,21 @@ out:
 int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
                                              char *error, size_t error_size)
 {
-    return retry_witness_finish(queue, false, false, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
+    return retry_witness_finish(queue, false, false, NULL, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
 }
 
 int latcd_retirement_queue_retry_receipts_revalidate(LatcdRetirementQueue *queue,
     bool receipts[128], unsigned *count, char *error, size_t error_size)
 {
     if (!receipts || !count) return fail(error, error_size, "missing receipt observation output");
-    return retry_witness_finish(queue, false, false, NULL, NULL, 0, NULL, receipts, count, error, error_size);
+    return retry_witness_finish(queue, false, false, NULL, NULL, NULL, 0, NULL, receipts, count, error, error_size);
 }
 
 int latcd_retirement_queue_retry_page_snapshot(LatcdRetirementQueue *queue,
     LatcdRetirementRetryPage *page, char *error, size_t error_size)
 {
     if (!page) return fail(error, error_size, "missing retry page output");
-    return retry_witness_finish(queue, false, false, page, NULL, 0, NULL, NULL, NULL, error, error_size);
+    return retry_witness_finish(queue, false, false, NULL, page, NULL, 0, NULL, NULL, NULL, error, error_size);
 }
 
 int latcd_retirement_queue_retry_page_stage(LatcdRetirementQueue *queue,
@@ -6391,7 +6423,7 @@ int latcd_retirement_queue_retry_page_stage(LatcdRetirementQueue *queue,
 {
     if (!capacity || !budget) return fail(error, error_size, "missing retry page budget");
     LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
-    int result = retry_witness_finish(queue, false, false, page, capacity, limit, budget, NULL, NULL, error, error_size);
+    int result = retry_witness_finish(queue, false, false, NULL, page, capacity, limit, budget, NULL, NULL, error, error_size);
     g_free(page);
     return result;
 }
@@ -6402,7 +6434,7 @@ int latcd_retirement_queue_retry_page_stage_receipt(LatcdRetirementQueue *queue,
 {
     if (!capacity || !budget) return fail(error, error_size, "missing retry page budget");
     LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
-    int result = retry_witness_finish(queue, false, true, page, capacity, limit, budget, NULL, NULL, error, error_size);
+    int result = retry_witness_finish(queue, false, true, NULL, page, capacity, limit, budget, NULL, NULL, error, error_size);
     g_free(page);
     return result;
 }
@@ -6410,7 +6442,14 @@ int latcd_retirement_queue_retry_page_stage_receipt(LatcdRetirementQueue *queue,
 int latcd_retirement_queue_retry_advance_unmatched(LatcdRetirementQueue *queue,
                                                     char *error, size_t error_size)
 {
-    return retry_witness_finish(queue, true, false, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
+    return retry_witness_finish(queue, true, false, NULL, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
+}
+
+int latcd_retirement_queue_retry_receipt_consume(LatcdRetirementQueue *queue,
+    LatcdPageBudget *budget, char *error, size_t error_size)
+{
+    if (!budget || !budget->capacity) return fail(error, error_size, "missing retry receipt budget");
+    return retry_witness_finish(queue, false, false, budget, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
 }
 
 int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,

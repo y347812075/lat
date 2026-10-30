@@ -532,6 +532,10 @@ int latcd_retirement_queue_retry_begin(LatcdRetirementQueue *queue,
  * Observations remain diagnostic and do not authorize removal. */
 int latcd_retirement_queue_retry_receipt_resume(LatcdRetirementQueue *queue,
     struct LatcdPageBudget *budget, char *error, size_t error_size);
+/* Internal executor: caller holds owner lease and guarantees controlled access.
+ * Consumes only the schedule shard after receipt rediscovery; intent remains. */
+int latcd_retirement_queue_retry_receipt_consume(LatcdRetirementQueue *queue,
+    struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Preserve input retry order and report transaction rediscovery only. A false
  * match is not proof that a shard or its object can be removed. */
 int latcd_retirement_queue_retry_matches(const LatcdRetirementQueue *queue,
