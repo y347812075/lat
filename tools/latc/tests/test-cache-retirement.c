@@ -8194,7 +8194,7 @@ static void test_page_receipt_witness(unsigned mode)
     char *src = g_strdup_printf("%064x", 7);
     char *name = g_strconcat(src, ".so", NULL);
     char *path = g_build_filename(root, name, NULL);
-    if (mode != 1) {
+    if (mode != 1 && mode != 3) {
         const char *objects[] = {name};
         char *evidence = latcd_retirement_capture_objects(root, src, objects, 1);
         int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -8205,10 +8205,22 @@ static void test_page_receipt_witness(unsigned mode)
         g_free(evidence);
     }
     simulated_boottime_us = 101;
+    if (mode == 3) {
+        LatcdRetirementQueue *executor = latcd_retirement_queue_new(root, 1);
+        LatcdRetirementQueueStats execution_stats = sweep_queue(executor);
+        assert(execution_stats.complete && execution_stats.ready == 3);
+        for (unsigned i = 0; i < 3; i++) {
+            LatcdRetirementDeletionReport report;
+            assert(latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error)) == 1);
+            assert(report.object_unlinked && report.receipt_durable);
+        }
+        assert(access(path, F_OK) < 0 && errno == ENOENT);
+        latcd_retirement_queue_free(executor);
+    }
     LatcdRetirementPageState page;
     assert(!latcd_retirement_page_round_begin(root, 1, &page, error, sizeof(error)));
     char *schedule = g_build_filename(root, ".gc", "retirement-schedule", NULL);
-    assert(!mkdir(schedule, 0700));
+    assert(!mkdir(schedule, 0700) || errno == EEXIST);
     page.count = 1;
     g_strlcpy(page.entries[0].name, name, sizeof(page.entries[0].name));
     page.entries[0].enqueued = 100;
@@ -8229,11 +8241,11 @@ static void test_page_receipt_witness(unsigned mode)
     char *changed = g_build_filename(root, ".gc", "transactions", "witness-change", NULL);
     if (mode == 2) put(changed, "changed");
     int result = latcd_retirement_queue_page_receipt_done(queue, &budget, error, sizeof(error));
-    assert(mode ? result < 0 : !result);
+    assert(mode == 1 || mode == 2 ? result < 0 : !result);
     uint8_t results[128];
     assert(latcd_retirement_schedule_page_results(root, 101, &page, results, error, sizeof(error)) ==
-           (mode ? 1 : 0));
-    if (!mode) assert(results[0] == LATCD_RETIREMENT_RESULT_DONE);
+           (mode == 1 || mode == 2 ? 1 : 0));
+    if (mode == 0 || mode == 3) assert(results[0] == LATCD_RETIREMENT_RESULT_DONE);
     if (mode == 2) assert(!unlink(changed));
     g_free(changed);
     latcd_retirement_queue_free(queue);
@@ -9348,6 +9360,7 @@ int main(int argc, char **argv)
     test_page_receipt_witness(0);
     test_page_receipt_witness(1);
     test_page_receipt_witness(2);
+    test_page_receipt_witness(3);
     test_retry_multiple_receipts(0);
     test_retry_multiple_receipts(1);
     test_retry_multiple_receipts(2);
