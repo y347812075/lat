@@ -3013,6 +3013,26 @@ int latcd_retirement_consumption_finish(const char *root, uint64_t now_us,
     return page_finish(root, now_us, true, budget, error, error_size);
 }
 
+int latcd_retirement_consumption_recover_step(const char *root, uint64_t now_us,
+                                              LatcdPageBudget *budget, char *error, size_t error_size)
+{
+    LatcdRetirementPageState page;
+    if (!root || !budget || !budget->capacity || !budget->page_identity_bound ||
+        latcd_retirement_page_state_load(root, &page, error, error_size) ||
+        !page.budget_bound || !page.committed_pending || !page.count)
+        return fail(error, error_size, "invalid consumption recovery state");
+    if (!page.consumption_bound)
+        return latcd_retirement_consumption_begin(root, now_us, budget, error, error_size) ? -1 : 1;
+    if (page.consumption.intent_present)
+        return latcd_retirement_consumption_apply(root, now_us, budget, error, error_size) ? -1 : 1;
+    for (unsigned i = 0; i < page.count; i++) {
+        if (page.results[i] == LATCD_RETIREMENT_RESULT_DONE &&
+            !(page.consumption.completed[i / 8] & (1u << (i % 8))))
+            return latcd_retirement_consumption_prepare(root, now_us, i, budget, error, error_size) ? -1 : 1;
+    }
+    return latcd_retirement_consumption_finish(root, now_us, budget, error, error_size);
+}
+
 int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t now_us,
                                                     LatcdPageBudget *budget, char *error, size_t error_size)
 {

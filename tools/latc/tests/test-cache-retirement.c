@@ -4185,16 +4185,16 @@ static void test_budgeted_max_page(unsigned consumption)
         assert(!latcd_retirement_page_restore_budget(root, &recovered, UINT64_MAX, UINT64_MAX,
                                                      &budget, &loaded, error, sizeof(error)));
         assert(!latcd_cache_capacity_recovery_finish(&recovered));
-        assert(!latcd_retirement_consumption_apply(root, UINT64_MAX, &budget, error, sizeof(error)));
+        assert(latcd_retirement_consumption_recover_step(root, UINT64_MAX, &budget, error, sizeof(error)) == 1);
         assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
                !loaded.consumption.intent_present && (loaded.consumption.completed[0] & 2));
         assert(latcd_retirement_consumption_apply(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
         assert(latcd_retirement_consumption_finish(root, UINT64_MAX, &budget, error, sizeof(error)) < 0);
-        for (unsigned i = 3; i < page.count; i += 2) {
-            assert(!latcd_retirement_consumption_prepare(root, UINT64_MAX, i, &budget, error, sizeof(error)));
-            assert(!latcd_retirement_consumption_apply(root, UINT64_MAX, &budget, error, sizeof(error)));
-        }
-        assert(!latcd_retirement_consumption_finish(root, UINT64_MAX, &budget, error, sizeof(error)));
+        int recovery_step;
+        do {
+            recovery_step = latcd_retirement_consumption_recover_step(root, UINT64_MAX, &budget, error, sizeof(error));
+        } while (recovery_step == 1);
+        assert(!recovery_step);
         assert(!budget.capacity);
         assert(!latcd_retirement_page_state_load(root, &loaded, error, sizeof(error)) &&
                !loaded.count && !loaded.committed_pending && !strcmp(loaded.committed_cursor, page.cursor));

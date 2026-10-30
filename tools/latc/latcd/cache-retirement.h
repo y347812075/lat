@@ -315,6 +315,10 @@ int latcd_retirement_consumption_apply(const char *root, uint64_t now_us,
 /* Advance only after all done shards were consumed; deferred shards remain. */
 int latcd_retirement_consumption_finish(const char *root, uint64_t now_us,
                                     struct LatcdPageBudget *budget, char *error, size_t error_size);
+/* Owner lease and controlled namespace required. Resume a committed page one
+ * durable transition at a time; 1 means more work, 0 means finished. */
+int latcd_retirement_consumption_recover_step(const char *root, uint64_t now_us,
+                                    struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Caller holds the owner lease and serializes budget lifetime. These operations
  * require a persisted budget binding and never authorize object deletion.
  * DONE is rejected until a receipt witness protocol is implemented. */
