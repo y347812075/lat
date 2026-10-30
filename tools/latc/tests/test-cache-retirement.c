@@ -6077,6 +6077,38 @@ static void test_queue_consumer(unsigned mutation, bool bounded)
     }
     int pins[3] = {-1, -1, -1}, gate = -1;
     assert(stats.complete && stats.ready == 3);
+    if (mutation == 27) {
+        struct timespec now;
+        assert(!clock_gettime(CLOCK_BOOTTIME, &now));
+        simulated_boottime_us = (uint64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+        for (unsigned i = 0; i < 3; i++) {
+            pins[i] = open(paths[i], O_RDONLY | O_CLOEXEC);
+            assert(pins[i] >= 0 && !flock(pins[i], LOCK_SH | LOCK_NB));
+        }
+        for (unsigned i = 0; i < 3; i++) {
+            LatcdRetirementDeletionReport report;
+            assert(latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error)) < 0);
+            assert(!report.object_unlinked && !access(paths[i], F_OK));
+        }
+        for (unsigned i = 0; i < 3; i++) { close(pins[i]); pins[i] = -1; }
+        latcd_retirement_queue_free(queue);
+        queue = latcd_retirement_queue_new(root, 0);
+        assert(!latcd_retirement_queue_restore(queue, error, sizeof(error)));
+        stats = sweep_queue(queue);
+        assert(stats.complete && !stats.ready && stats.deferred == 3 &&
+               stats.next_attempt_us == simulated_boottime_us + 60000000);
+        simulated_boottime_us = stats.next_attempt_us;
+        stats = sweep_queue(queue);
+        assert(stats.complete && stats.ready == 3);
+        for (unsigned i = 0; i < 3; i++) {
+            LatcdRetirementDeletionReport report;
+            assert(latcd_retirement_queue_execute_one(queue, &report, error, sizeof(error)) == 1);
+            assert(report.object_unlinked && report.receipt_durable);
+        }
+        stats = sweep_queue(queue);
+        assert(stats.complete && !stats.candidates);
+        goto cleanup;
+    }
     if (mutation == 25) {
         char *other = root_new();
         lock_wrong_root = other;
@@ -9197,6 +9229,7 @@ int main(int argc, char **argv)
     test_queue_consumer(24, true);
     test_queue_consumer(25, true);
     test_queue_consumer(26, true);
+    test_queue_consumer(27, true);
     for (unsigned phase = 0; phase < 3; phase++)
         for (unsigned fault = 1; fault <= 8; fault++) test_clock_failure(phase, fault);
     for (int mutation = 0; mutation < 7; mutation++) test_object_identity(mutation);
