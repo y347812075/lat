@@ -57,3 +57,21 @@ start
 wait_stats 's["retirement_discovery_complete"] and s["retirement_due_candidates"] >= 3 and not s["automatic_deletion_enabled"]'
 test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
 stop
+rm -f "$stats"
+LATCD_TEST_STAGE_PAGE=1 start
+n=0
+while ! grep -q 'latcd: test page staged' "$work/server.err"; do
+    if ! kill -0 "$pid" 2>/dev/null; then cat "$work/server.err" >&2; exit 1; fi
+    n=$((n + 1)); if [ "$n" -ge 300 ]; then cat "$work/server.err" >&2; exit 1; fi
+    sleep 0.05
+done
+test -f "$cache/.gc/retirement-page.ini"
+test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
+stop
+if "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" \
+    --latc "$compiler" --runner "$daemon" --runtime-dir "$runtime" \
+    --stats "$stats" --workers 1 >"$work/restart.out" 2>"$work/restart.err"; then
+    echo 'daemon accepted unresolved first page' >&2; exit 1
+fi
+grep -q 'retirement page budget recovery unavailable or checkpoint unsafe' "$work/restart.err"
+test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"

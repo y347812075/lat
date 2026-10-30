@@ -150,6 +150,7 @@ $(BUILD)/tests/latcd-gc-timer: $(BUILD)/tests/latcd-gc-timer-main.o $(BUILD)/lat
 $(BUILD)/tests/gc-timer-runtime/liblat-aot-runtime.so.2: tests/gc-timer-runtime.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared -o $@ $<
+$(BUILD)/tests/gc-timer-runtime/liblat-aot-runtime.so.2 $(BUILD)/tests/test-cache-retirement: latcd/main.c
 test-latcd-gc-timer: all $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-cache-retirement $(BUILD)/tests/gc-timer-runtime/liblat-aot-runtime.so.2
 	@work=$$(mktemp -d "$(TMPDIR)/latcd-gc-timer.XXXXXX"); \
 	  trap 'if ! findmnt -rn -o TARGET | grep -F "$$work" >/dev/null && ! lsof +D "$$work" >/dev/null 2>&1; then rm -rf "$$work"; else echo "retained busy test directory: $$work" >&2; fi' EXIT; \
@@ -200,7 +201,7 @@ $(BUILD)/tests/test-cache-retirement: tests/test-cache-retirement.c \
 		$(BUILD)/aot-v2/runtime/cache-lifecycle.o \
 		$(BUILD)/aot-v2/runtime/internal-fd-registry.o
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DLATCD_RETIREMENT_TESTING -DLATCD_CAPACITY_TESTING -o $@ $^ $(LDLIBS) -pthread \
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DLATCD_RETIREMENT_TESTING -DLATCD_CAPACITY_TESTING -o $@ $(filter-out latcd/main.c,$^) $(LDLIBS) -pthread \
   -Wl,--wrap=clock_gettime -Wl,--wrap=g_file_get_contents -Wl,--wrap=g_get_monotonic_time \
   -Wl,--wrap=lat_aot_v2_cache_source_lock -Wl,--wrap=lat_aot_v2_cache_lock_fd -Wl,--wrap=readdir -Wl,--wrap=lstat -Wl,--wrap=fstatat \
   -Wl,--wrap=unlinkat -Wl,--wrap=fsync

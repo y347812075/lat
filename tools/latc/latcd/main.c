@@ -2115,6 +2115,34 @@ typedef struct LatcdTaskRecovery {
     bool idle_exit;
 } LatcdTaskRecovery;
 
+#ifdef LATCD_GC_TIMER_TEST
+static LatcdPageBudget test_page_budget;
+static bool test_page_staged;
+static int test_stage_retirement_page(const LatcdConfig *config,
+                                      char *error, size_t error_size)
+{
+    LatcdRetirementPageState page;
+    if (latcd_retirement_page_round_begin(config->cache_dir,
+            LATCD_RETIREMENT_GRACE_US, &page, error, error_size)) return -1;
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(
+        config->cache_dir, LATCD_RETIREMENT_GRACE_US);
+    int result = latcd_retirement_queue_page_discovery_begin(queue, error, error_size);
+    LatcdRetirementQueueStats stats;
+    if (!result) {
+        do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats,
+                                                  error, error_size); }
+        while (result > 0 && !stop_requested);
+        if (!stop_requested && result < 0 &&
+            !latcd_retirement_queue_aggregated_page(queue, &page) && page.count)
+            result = latcd_retirement_queue_page_stage(queue, &generation_capacity,
+                config->max_cache_bytes, &test_page_budget, error, error_size);
+        else result = -1;
+    }
+    latcd_retirement_queue_free(queue);
+    return result;
+}
+#endif
+
 static void *compiler_input_recovery_worker(void *opaque)
 {
     LatcdTaskRecovery *work = opaque;
@@ -2145,6 +2173,16 @@ static void *compiler_input_recovery_worker(void *opaque)
             pthread_mutex_lock(&retirement_queue_lock);
             retirement_queue_stats = stats;
             pthread_mutex_unlock(&retirement_queue_lock);
+#ifdef LATCD_GC_TIMER_TEST
+            if (!result && stats.ready && !test_page_staged &&
+                getenv("LATCD_TEST_STAGE_PAGE")) {
+                test_page_staged = true;
+                if (test_stage_retirement_page(work->config, error, sizeof(error)))
+                    fprintf(stderr, "latcd: test page stage failed: %s\n", error);
+                else
+                    fprintf(stderr, "latcd: test page staged\n");
+            }
+#endif
             if (timer >= 0) {
                 struct itimerspec deadline = {0};
                 if (retirement_safe && stats.complete && stats.next_attempt_us) {
