@@ -740,6 +740,32 @@ old = json.loads((cache.parent / "initial-files.json").read_text())
 assert all(hashlib.sha256((cache / name).read_bytes()).hexdigest() == digest
            for name, digest in old.items()), old
 PY
+wait_stats 's["retirement_discovery_complete"] and s["retirement_candidates"] >= 1 and not s["automatic_deletion_enabled"]'
+stop_service
+rm -f "$stats"
+"$latcd" --serve --socket "$socket" --cache-dir "$cache" \
+  --latc "$native_aware_compiler" --runner "$runner" --runtime-dir "$runtime_dir" \
+  --stats "$stats" --workers 1 --flush-only >"$phase/restart.stdout" 2>"$phase/restart.stderr" &
+server_pid=$!
+n=0
+while [ ! -S "$socket" ] && kill -0 "$server_pid" 2>/dev/null; do
+    n=$((n + 1)); [ "$n" -lt 500 ] || break; sleep 0.01
+done
+[ -S "$socket" ]
+wait_stats "s['cache_owner_pid'] == $server_pid and s['retirement_discovery_complete'] and s['retirement_candidates'] >= 1 and not s['automatic_deletion_enabled']"
+python3 - "$cache" "$guest" "$phase/initial-files.json" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+cache, source, snapshot = map(Path, sys.argv[1:])
+source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+manifest = json.loads((cache / f"{source_sha}.current").read_text())
+assert all((cache / manifest[role]).is_file() for role in ("module", "native", "tbset"))
+assert all(hashlib.sha256((cache / name).read_bytes()).hexdigest() == digest
+           for name, digest in json.loads(snapshot.read_text()).items())
+PY
 stop_service
 
 retained_marker=$work/retained-coverage.marker
