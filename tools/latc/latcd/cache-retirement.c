@@ -1492,8 +1492,9 @@ static bool page_state_shape(GKeyFile *record, LatcdRetirementPageState *state)
     return true;
 }
 
-static int page_state_store_fd(int root_fd, int gc, const LatcdRetirementPageState *state,
-                               LatcdPageBudget *budget, bool *not_installed)
+static int page_state_store_guarded(int root_fd, int gc, const LatcdRetirementPageState *state,
+                               LatcdPageBudget *budget, bool *not_installed,
+                               int (*before_install)(void *), void *install_context)
 {
     if (not_installed) *not_installed = true;
     int result = -1;
@@ -1568,10 +1569,19 @@ static int page_state_store_fd(int root_fd, int gc, const LatcdRetirementPageSta
         encode_hex(binding, sizeof(binding), hex);
         g_key_file_set_string(record, "consumption", "identity", hex);
     }
-    result = write_record_kind(gc, "retirement-page.ini", record, true, false, false, budget, not_installed);
+    gsize size = 0;
+    char *data = g_key_file_to_data(record, &size, NULL);
+    result = write_record_encoded(gc, "retirement-page.ini", data, size, true, false, false,
+                                  budget, not_installed, before_install, install_context);
 out:
     g_key_file_unref(record);
     return result;
+}
+
+static int page_state_store_fd(int root_fd, int gc, const LatcdRetirementPageState *state,
+                               LatcdPageBudget *budget, bool *not_installed)
+{
+    return page_state_store_guarded(root_fd, gc, state, budget, not_installed, NULL, NULL);
 }
 
 #ifdef LATCD_RETIREMENT_TESTING
@@ -3118,6 +3128,34 @@ static int retry_validate_snapshot(const LatcdRetirementRetryPage *page, GArray 
             sequences[i] != page->items[i].shard_sequence ||
             memcmp(digests[i], page->items[i].shard_digest, 32)) return -1;
     return 0;
+}
+
+/* Reconstruct removed scheduling hints only for inventory validation. Receipt
+ * authority must be established separately before committing the page. */
+static int retry_validate_completed(const LatcdRetirementRetryPage *page, GArray *snapshot,
+                                    uint64_t now, uint64_t sequence)
+{
+    LatcdRetirementRetryPage *copy = g_memdup2(page, sizeof(*page));
+    int result = -1;
+    if (copy->deletion_intent || copy->intent_present || copy->completed != copy->count) goto out;
+    for (unsigned index = 0; index < copy->count; index++) {
+        if (!copy->deleted[index]) continue;
+        for (unsigned i = 0; i < snapshot->len; i++)
+            if (!strcmp(g_array_index(snapshot, RetrySnapshotEntry, i).hint.name, copy->items[index].hint.name)) goto out;
+        RetrySnapshotEntry missing = {0};
+        missing.hint = copy->items[index].hint;
+        missing.sequence = copy->items[index].shard_sequence;
+        memcpy(missing.digest, copy->items[index].shard_digest, 32);
+        g_array_append_val(snapshot, missing);
+        sequence = MAX(sequence, missing.sequence);
+        copy->deleted[index] = false;
+        memset(copy->receipt_digest[index], 0, 32);
+        memcpy(copy->replacement_digest[index], copy->items[index].shard_digest, 32);
+    }
+    if (sequence == page->snapshot_sequence) result = retry_validate_snapshot(copy, snapshot, now, NULL);
+out:
+    g_free(copy);
+    return result;
 }
 
 int latcd_retirement_retry_page_restore_budget(const char *root,
@@ -6210,7 +6248,7 @@ static int retry_install_lock(void *opaque)
 }
 
 static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatched, bool stage_receipt,
-                                LatcdPageBudget *consume_budget,
+                                LatcdPageBudget *consume_budget, LatcdPageBudget *commit_budget,
                                 LatcdRetirementRetryPage *page,
                                 LatcdCacheCapacity *capacity, uint64_t limit, LatcdPageBudget *budget,
                                 bool *receipts, unsigned *receipt_count,
@@ -6314,9 +6352,28 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
             for (unsigned j = 0; valid && j < snapshot->len; j++)
                 if (!strcmp(g_array_index(snapshot, RetrySnapshotEntry, j).hint.name, name)) valid = false;
         }
+        if (valid && commit_budget) {
+            uint8_t binding[32];
+            int matching = latcd_cache_capacity_open_matching_root(commit_budget->capacity, queue->root, root);
+            valid = matching >= 0 && !commit_budget->invalid && commit_budget->page_identity_bound &&
+                !latcd_retirement_retry_page_budget_identity(stored, binding) &&
+                !memcmp(binding, commit_budget->page_identity, 32) &&
+                !retry_validate_completed(stored, snapshot, now, sequence);
+            if (matching >= 0) close(matching);
+        }
+        if (valid && commit_budget) {
+            current = (LatcdRetirementPageState){0};
+            current.cache_device = stored->cache_device; current.cache_inode = stored->cache_inode;
+            current.grace_us = stored->grace_us; current.round_cutoff = stored->round_cutoff;
+            current.sequence = stored->round_sequence;
+            g_strlcpy(current.boot, stored->boot, sizeof(current.boot));
+            g_strlcpy(current.committed_cursor, stored->committed_cursor, sizeof(current.committed_cursor));
+            g_strlcpy(current.retry_cursor, stored->end_cursor, sizeof(current.retry_cursor));
+        }
         g_free(stored);
         if (!valid) goto out;
     }
+    if (commit_budget && !queue->receipt_completed_scan) goto out;
     if ((advance_unmatched || page) && !queue->retry_snapshot_bound) goto out;
     if (stage_receipt && (!page || !budget || !queue->retry_count ||
         !g_hash_table_contains(queue->removed_second, queue->retry_order[0]) ||
@@ -6375,8 +6432,16 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
     }
     install.scheduler = scheduler; install.root = root; install.gc = gc;
     install.store = store; install.tombstones = tombstones; install.cache = cache;
-    if (!(page && budget)) {
+    if (!(page && budget) && !commit_budget) {
         if (retry_install_lock(&install)) goto out;
+    }
+    if (commit_budget) {
+        if (page_state_store_guarded(root, gc, &current, commit_budget, NULL,
+                                     retry_install_lock, &install)) {
+            latcd_cache_capacity_page_uncertain(commit_budget->capacity, commit_budget);
+            goto out;
+        }
+        if (latcd_cache_capacity_finish_page(commit_budget->capacity, commit_budget)) goto out;
     }
     if (consume_budget) {
         uint8_t identity[32];
@@ -6480,21 +6545,21 @@ out:
 int latcd_retirement_queue_retry_revalidate(LatcdRetirementQueue *queue,
                                              char *error, size_t error_size)
 {
-    return retry_witness_finish(queue, false, false, NULL, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
+    return retry_witness_finish(queue, false, false, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
 }
 
 int latcd_retirement_queue_retry_receipts_revalidate(LatcdRetirementQueue *queue,
     bool receipts[128], unsigned *count, char *error, size_t error_size)
 {
     if (!receipts || !count) return fail(error, error_size, "missing receipt observation output");
-    return retry_witness_finish(queue, false, false, NULL, NULL, NULL, 0, NULL, receipts, count, error, error_size);
+    return retry_witness_finish(queue, false, false, NULL, NULL, NULL, NULL, 0, NULL, receipts, count, error, error_size);
 }
 
 int latcd_retirement_queue_retry_page_snapshot(LatcdRetirementQueue *queue,
     LatcdRetirementRetryPage *page, char *error, size_t error_size)
 {
     if (!page) return fail(error, error_size, "missing retry page output");
-    return retry_witness_finish(queue, false, false, NULL, page, NULL, 0, NULL, NULL, NULL, error, error_size);
+    return retry_witness_finish(queue, false, false, NULL, NULL, page, NULL, 0, NULL, NULL, NULL, error, error_size);
 }
 
 int latcd_retirement_queue_retry_page_stage(LatcdRetirementQueue *queue,
@@ -6503,7 +6568,7 @@ int latcd_retirement_queue_retry_page_stage(LatcdRetirementQueue *queue,
 {
     if (!capacity || !budget) return fail(error, error_size, "missing retry page budget");
     LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
-    int result = retry_witness_finish(queue, false, false, NULL, page, capacity, limit, budget, NULL, NULL, error, error_size);
+    int result = retry_witness_finish(queue, false, false, NULL, NULL, page, capacity, limit, budget, NULL, NULL, error, error_size);
     g_free(page);
     return result;
 }
@@ -6514,7 +6579,7 @@ int latcd_retirement_queue_retry_page_stage_receipt(LatcdRetirementQueue *queue,
 {
     if (!capacity || !budget) return fail(error, error_size, "missing retry page budget");
     LatcdRetirementRetryPage *page = g_new0(LatcdRetirementRetryPage, 1);
-    int result = retry_witness_finish(queue, false, true, NULL, page, capacity, limit, budget, NULL, NULL, error, error_size);
+    int result = retry_witness_finish(queue, false, true, NULL, NULL, page, capacity, limit, budget, NULL, NULL, error, error_size);
     g_free(page);
     return result;
 }
@@ -6522,14 +6587,21 @@ int latcd_retirement_queue_retry_page_stage_receipt(LatcdRetirementQueue *queue,
 int latcd_retirement_queue_retry_advance_unmatched(LatcdRetirementQueue *queue,
                                                     char *error, size_t error_size)
 {
-    return retry_witness_finish(queue, true, false, NULL, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
+    return retry_witness_finish(queue, true, false, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
 }
 
 int latcd_retirement_queue_retry_receipt_consume(LatcdRetirementQueue *queue,
     LatcdPageBudget *budget, char *error, size_t error_size)
 {
     if (!budget || !budget->capacity) return fail(error, error_size, "missing retry receipt budget");
-    return retry_witness_finish(queue, false, false, budget, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
+    return retry_witness_finish(queue, false, false, budget, NULL, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
+}
+
+int latcd_retirement_queue_retry_completed_commit(LatcdRetirementQueue *queue,
+    LatcdPageBudget *budget, char *error, size_t error_size)
+{
+    if (!budget || !budget->capacity) return fail(error, error_size, "missing completed retry budget");
+    return retry_witness_finish(queue, false, false, NULL, budget, NULL, NULL, 0, NULL, NULL, NULL, error, error_size);
 }
 
 int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,

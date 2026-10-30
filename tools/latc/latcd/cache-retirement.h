@@ -535,6 +535,9 @@ int latcd_retirement_queue_retry_receipt_resume(LatcdRetirementQueue *queue,
 /* Rediscover every deleted member of a completed retry page. */
 int latcd_retirement_queue_retry_completed_resume(LatcdRetirementQueue *queue,
     struct LatcdPageBudget *budget, char *error, size_t error_size);
+/* Owner lease and controlled access required; commit under the retained scan witness. */
+int latcd_retirement_queue_retry_completed_commit(LatcdRetirementQueue *queue,
+    struct LatcdPageBudget *budget, char *error, size_t error_size);
 /* Internal executor: caller holds owner lease and guarantees controlled access.
  * Consumes only the schedule shard after receipt rediscovery; intent remains. */
 int latcd_retirement_queue_retry_receipt_consume(LatcdRetirementQueue *queue,
