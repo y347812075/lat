@@ -2118,6 +2118,56 @@ typedef struct LatcdTaskRecovery {
 #ifdef LATCD_GC_TIMER_TEST
 static LatcdPageBudget test_page_budget;
 static bool test_page_staged;
+static int test_consume_retirement_page(const LatcdConfig *config,
+                                        char *error, size_t error_size)
+{
+    LatcdRetirementPageState page;
+    LatcdRetirementQueueStats stats;
+    LatcdRetirementQueue *queue = NULL;
+    int result = -1;
+    if (latcd_retirement_page_state_load(config->cache_dir, &page, error, error_size)) return -1;
+    queue = latcd_retirement_queue_new(config->cache_dir, LATCD_RETIREMENT_GRACE_US);
+    if (latcd_retirement_queue_bind_capacity(queue, &generation_capacity)) goto out;
+    do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, error_size); }
+    while (result > 0 && !stop_requested);
+    if (result || stop_requested || !stats.complete ||
+        latcd_retirement_queue_restrict_to_page(queue, &page, error, error_size)) goto fail;
+    for (unsigned i = 0; i < page.count; i++) {
+        LatcdRetirementDeletionReport report;
+        uint64_t hashed;
+        do { result = latcd_retirement_queue_execute_step(queue, 65536, 10000,
+                                                          &hashed, &report, error, error_size); }
+        while (result == 2 && !stop_requested);
+        if (result != 1 || !report.receipt_durable || stop_requested) goto fail;
+    }
+    latcd_retirement_queue_free(queue);
+    queue = NULL;
+    for (unsigned i = 0; i < page.count; i++) {
+        queue = latcd_retirement_queue_new(config->cache_dir, LATCD_RETIREMENT_GRACE_US);
+        if (latcd_retirement_queue_page_receipt_begin(queue, &test_page_budget, i, error, error_size)) goto fail;
+        do { result = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, error_size); }
+        while (result > 0 && !stop_requested);
+        if (stop_requested || result >= 0 ||
+            latcd_retirement_queue_page_receipt_done(queue, &test_page_budget, error, error_size)) goto fail;
+        latcd_retirement_queue_free(queue);
+        queue = NULL;
+    }
+    struct timespec ts;
+    if (clock_gettime(CLOCK_BOOTTIME, &ts)) goto fail;
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+    if (latcd_retirement_page_budget_commit(config->cache_dir, now, &page,
+                                             &test_page_budget, error, error_size)) goto fail;
+    do { result = latcd_retirement_consumption_recover_step(config->cache_dir, now,
+                                            &test_page_budget, error, error_size); }
+    while (result > 0 && !stop_requested);
+    if (result || stop_requested) goto fail;
+    return 0;
+fail:
+    result = -1;
+out:
+    if (queue) latcd_retirement_queue_free(queue);
+    return result;
+}
 static int test_stage_retirement_page(const LatcdConfig *config,
                                       char *error, size_t error_size)
 {
@@ -2179,8 +2229,14 @@ static void *compiler_input_recovery_worker(void *opaque)
                 test_page_staged = true;
                 if (test_stage_retirement_page(work->config, error, sizeof(error)))
                     fprintf(stderr, "latcd: test page stage failed: %s\n", error);
-                else
+                else {
                     fprintf(stderr, "latcd: test page staged\n");
+                    if (getenv("LATCD_TEST_CONSUME_PAGE")) {
+                        if (test_consume_retirement_page(work->config, error, sizeof(error)))
+                            fprintf(stderr, "latcd: test page consume failed: %s\n", error);
+                        else fprintf(stderr, "latcd: test page consumed\n");
+                    }
+                }
             }
 #endif
             if (timer >= 0) {

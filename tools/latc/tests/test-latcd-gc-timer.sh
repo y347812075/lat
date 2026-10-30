@@ -75,3 +75,29 @@ if "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" \
 fi
 grep -q 'retirement page budget recovery unavailable or checkpoint unsafe' "$work/restart.err"
 test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
+cache=$work/consume-cache
+socket=$work/consume.sock
+stats=$work/consume-stats.json
+mkdir -m 700 "$cache"
+start
+stop
+"$fixture" --timer-fixture "$cache"
+LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 start
+n=0
+while ! grep -q 'latcd: test page consumed' "$work/server.err"; do
+    if grep -q 'latcd: test page .* failed' "$work/server.err" || ! kill -0 "$pid" 2>/dev/null; then
+        cat "$work/server.err" >&2; exit 1
+    fi
+    n=$((n + 1)); if [ "$n" -ge 300 ]; then cat "$work/server.err" >&2; exit 1; fi
+    sleep 0.05
+done
+old=$cache/$(printf '%064x' 7)
+test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
+python3 - "$cache" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+source = f'{7:064x}'
+manifest = json.loads((root / (source + '.current')).read_text())
+assert all((root / manifest[key]).is_file() for key in ('module', 'native', 'tbset'))
+PY
+stop

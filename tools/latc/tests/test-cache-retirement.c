@@ -9417,6 +9417,11 @@ int main(int argc, char **argv)
     }
     if (argc == 3 && !strcmp(argv[1], "--timer-fixture")) {
         publish_page_fixture(argv[2], 7);
+        char digest[65], error[256];
+        snprintf(digest, sizeof(digest), "%064x", 7);
+        int fd = lat_aot_v2_cache_source_lock(argv[2], digest, LOCK_SH | LOCK_NB,
+                                                false, error, sizeof(error));
+        assert(fd >= 0); close(fd);
         return 0;
     }
     if (argc == 3 && (!strcmp(argv[1], "--startup-retry-fixture") ||
