@@ -5560,6 +5560,7 @@ static int queue_object_removed(LatcdRetirementQueue *queue, const char *source,
     int store = queue->discovery_tombstones;
     int result = -1;
     char *raw = NULL, *stored_source = NULL, *hash = NULL;
+    char *current = NULL, *manifest = NULL;
     size_t size;
     GKeyFile *receipt = g_key_file_new();
     if (!queue_bind_root(queue, root) || store < 0) goto out;
@@ -5584,6 +5585,19 @@ static int queue_object_removed(LatcdRetirementQueue *queue, const char *source,
     }
     struct stat st;
     if (!fstatat(root, name, &st, AT_SYMLINK_NOFOLLOW) || errno != ENOENT) goto out;
+    current = g_strdup_printf("%s.current", source);
+    fd = openat(root, current, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    watched = fd >= 0 && !fstat(fd, &held) &&
+        !queue_watch_fd(queue->discovery_watch, fd, IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF) &&
+        !fstatat(root, current, &path, AT_SYMLINK_NOFOLLOW) && object_stat_equal(&held, &path);
+    if (fd >= 0) close(fd);
+    size_t manifest_size = 0;
+    GHashTable *references = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    bool unreferenced = watched && !read_file(root, current, MANIFEST_LIMIT, &manifest, &manifest_size) &&
+        manifest_references(source, manifest, manifest_size, references) &&
+        !g_hash_table_contains(references, name);
+    g_hash_table_unref(references);
+    if (!unreferenced) goto out;
     int count = g_key_file_get_integer(objects, "objects", "count", NULL);
     const char *fields[] = {"device", "inode", "size", "allocated"};
     for (int i = 0; i < count; i++) {
@@ -5599,6 +5613,7 @@ static int queue_object_removed(LatcdRetirementQueue *queue, const char *source,
         break;
     }
 out:
+    g_free(current); g_free(manifest);
     g_free(raw); g_free(stored_source); g_free(hash); g_key_file_unref(receipt);
     if (root >= 0) close(root);
     return result;
