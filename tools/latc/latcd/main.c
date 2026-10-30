@@ -3714,6 +3714,109 @@ static int G_GNUC_UNUSED broker_export_job(const LatcdConfig *config, int source
     return output;
 }
 
+typedef struct LatcdBrokerWorker {
+    const LatcdConfig *config;
+    pthread_mutex_t lock;
+    pthread_cond_t ready;
+    pthread_t thread;
+    _Atomic bool stopping;
+    bool occupied, pending, complete;
+    int source, output, event;
+    int64_t deadline;
+    LatcdBrokerExportRequest request;
+    LatcdBrokerExportResponse response;
+} LatcdBrokerWorker;
+
+static bool broker_worker_cancelled(void *opaque)
+{
+    LatcdBrokerWorker *worker = opaque;
+    return atomic_load(&worker->stopping);
+}
+
+static void *broker_worker_run(void *opaque)
+{
+    LatcdBrokerWorker *worker = opaque;
+    pthread_mutex_lock(&worker->lock);
+    for (;;) {
+        while (!worker->pending && !atomic_load(&worker->stopping))
+            pthread_cond_wait(&worker->ready, &worker->lock);
+        if (!worker->pending && atomic_load(&worker->stopping)) break;
+        int source = worker->source;
+        LatcdBrokerExportRequest request = worker->request;
+        int64_t deadline = worker->deadline;
+        worker->pending = false;
+        pthread_mutex_unlock(&worker->lock);
+        LatcdBrokerExportResponse response;
+        int output = broker_export_job(worker->config, source, &request, deadline,
+                                       broker_worker_cancelled, worker, &response);
+        close(source);
+        pthread_mutex_lock(&worker->lock);
+        worker->source = -1;
+        worker->output = output;
+        worker->response = response;
+        worker->complete = true;
+        uint64_t one = 1;
+        ssize_t ignored = write(worker->event, &one, sizeof(one));
+        (void)ignored;
+    }
+    pthread_mutex_unlock(&worker->lock);
+    return NULL;
+}
+
+static int G_GNUC_UNUSED broker_worker_start(LatcdBrokerWorker *worker, const LatcdConfig *config)
+{
+    *worker = (LatcdBrokerWorker) {.config = config, .source = -1, .output = -1, .event = -1};
+    if (pthread_mutex_init(&worker->lock, NULL)) return -1;
+    if (pthread_cond_init(&worker->ready, NULL)) { pthread_mutex_destroy(&worker->lock); return -1; }
+    worker->event = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (worker->event < 0 || pthread_create(&worker->thread, NULL, broker_worker_run, worker)) {
+        if (worker->event >= 0) close(worker->event);
+        pthread_cond_destroy(&worker->ready); pthread_mutex_destroy(&worker->lock); return -1;
+    }
+    return 0;
+}
+
+/* On success ownership of source transfers to the worker. */
+static int G_GNUC_UNUSED broker_worker_submit(LatcdBrokerWorker *worker, int source,
+    const LatcdBrokerExportRequest *request, int64_t deadline)
+{
+    pthread_mutex_lock(&worker->lock);
+    if (source < 0 || !request || worker->occupied || atomic_load(&worker->stopping)) {
+        pthread_mutex_unlock(&worker->lock); errno = EBUSY; return -1;
+    }
+    worker->occupied = worker->pending = true;
+    worker->source = source; worker->request = *request; worker->deadline = deadline;
+    pthread_cond_signal(&worker->ready);
+    pthread_mutex_unlock(&worker->lock);
+    return 0;
+}
+
+static int G_GNUC_UNUSED broker_worker_take(LatcdBrokerWorker *worker,
+                                             LatcdBrokerExportResponse *response, int *output)
+{
+    pthread_mutex_lock(&worker->lock);
+    if (!worker->complete) { pthread_mutex_unlock(&worker->lock); errno = EAGAIN; return -1; }
+    *response = worker->response; *output = worker->output;
+    worker->output = -1; worker->complete = worker->occupied = false;
+    uint64_t count;
+    ssize_t ignored = read(worker->event, &count, sizeof(count));
+    (void)ignored;
+    pthread_mutex_unlock(&worker->lock);
+    return 0;
+}
+
+static void G_GNUC_UNUSED broker_worker_stop(LatcdBrokerWorker *worker)
+{
+    atomic_store(&worker->stopping, true);
+    pthread_mutex_lock(&worker->lock);
+    pthread_cond_signal(&worker->ready);
+    pthread_mutex_unlock(&worker->lock);
+    pthread_join(worker->thread, NULL);
+    if (worker->output >= 0) close(worker->output);
+    close(worker->event);
+    pthread_cond_destroy(&worker->ready); pthread_mutex_destroy(&worker->lock);
+}
+
 static int G_GNUC_UNUSED broker_export_request(const LatcdConfig *config,
                                                 int socket_fd, uid_t client_uid)
 {
