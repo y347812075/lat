@@ -60,6 +60,8 @@ static const char *lock_wrong_root;
 static const char *schedule_scan_mutation;
 static bool retry_scan_hook_called, retry_scan_change, retry_scan_hold;
 static int retry_scan_held_fd = -1;
+static const char *retry_scan_receipt_path, *retry_scan_receipt_data;
+static void put(const char *path, const char *contents);
 static void retry_scan_hook(const char *root)
 {
     int fd = latcd_retirement_roots_lock(root, LOCK_SH | LOCK_NB, NULL, 0);
@@ -73,6 +75,7 @@ static void retry_scan_hook(const char *root)
         assert(!unlink(path));
         g_free(path);
     }
+    if (retry_scan_receipt_path) put(retry_scan_receipt_path, retry_scan_receipt_data);
     if (retry_scan_hold) retry_scan_held_fd = fd;
     else close(fd);
 }
@@ -7182,6 +7185,23 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
                                                                  error, sizeof(error)) < 0);
         latcd_retirement_test_retry_scanned = NULL;
         retry_scan_change = false;
+        assert(retry_scan_hook_called && !receipt_count && !receipts[0]);
+        latcd_retirement_queue_free(receipt_queue);
+        receipt_queue = latcd_retirement_queue_new(root, 1);
+        assert(!latcd_retirement_queue_diagnostic_retry(receipt_queue, retry_boot, retry_cutoff,
+                                                        receipt_hints, 2));
+        do {
+            queued = latcd_retirement_queue_step(receipt_queue, 32, 10000, &receipt_stats,
+                                                  error, sizeof(error));
+        } while (queued > 0);
+        assert(queued < 0 && !latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count));
+        retry_scan_hook_called = false;
+        retry_scan_receipt_path = marker; retry_scan_receipt_data = receipt;
+        latcd_retirement_test_retry_scanned = retry_scan_hook;
+        assert(latcd_retirement_queue_retry_receipts_revalidate(receipt_queue, receipts, &receipt_count,
+                                                                 error, sizeof(error)) < 0);
+        latcd_retirement_test_retry_scanned = NULL;
+        retry_scan_receipt_path = NULL; retry_scan_receipt_data = NULL;
         assert(retry_scan_hook_called && !receipt_count && !receipts[0]);
         latcd_retirement_queue_free(receipt_queue);
         for (unsigned change = 0; change < 2; change++) {
