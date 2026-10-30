@@ -8332,6 +8332,15 @@ static void test_page_execution_restriction(void)
            !strcmp(report.attempt_name, selected) && report.attempt_sequence &&
            report.retry_at_boottime_us > simulated_boottime_us && !access(selected_path, F_OK));
     uint64_t retry_at = report.retry_at_boottime_us;
+    LatcdRetirementPageDeadline deferred = page.entries[0];
+    deferred.last_attempt = page.sequence;
+    deferred.retry_at = retry_at;
+    deferred.busy_count = 1;
+    uint8_t binding[32];
+    assert(!latcd_retirement_page_budget_identity(&page, binding));
+    assert(!latcd_retirement_page_budget_result(root, simulated_boottime_us, binding, &budget,
+                                                 &deferred, LATCD_RETIREMENT_RESULT_DEFERRED,
+                                                 error, sizeof(error)));
     close(pin);
     assert(!latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error)));
     simulated_boottime_us = retry_at;

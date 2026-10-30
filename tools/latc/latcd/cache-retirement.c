@@ -6646,20 +6646,35 @@ int latcd_retirement_queue_page_receipt_begin(LatcdRetirementQueue *queue,
     int scheduler = scheduler_lock(queue->root, error, error_size);
     LatcdRetirementPageState page;
     uint8_t identity[32]; bool legacy = false;
+    uint8_t results[128];
+    LatcdRetirementPageInventory inventory;
+    char *boot = NULL;
+    uint64_t now;
     int result = -1;
     if (scheduler < 0) return -1;
     if (page_state_load(queue->root, &page, &legacy, error, error_size) || legacy ||
         !page.budget_bound || page.committed_pending || index >= page.count ||
         page.grace_us != queue->grace || latcd_retirement_page_budget_identity(&page, identity) ||
-        memcmp(identity, budget->page_identity, 32) ||
-        latcd_retirement_queue_diagnostic_retry(queue, page.boot, page.round_cutoff,
-                                                 &page.entries[index], 1)) goto out;
+        memcmp(identity, budget->page_identity, 32) || retirement_clock(&boot, &now) ||
+        strcmp(boot, page.boot) ||
+        schedule_page_results(queue->root, now, &page, results, &inventory, error, error_size) < 0 ||
+        (results[index] != 0 && results[index] != 4 &&
+         results[index] != LATCD_RETIREMENT_RESULT_DEFERRED) ||
+        (results[index] == LATCD_RETIREMENT_RESULT_DEFERRED && !inventory.members[index].present)) goto out;
+    if (results[index] == LATCD_RETIREMENT_RESULT_DEFERRED) {
+        page.entries[index].last_attempt = inventory.members[index].last_attempt;
+        page.entries[index].retry_at = inventory.members[index].retry_at;
+        page.entries[index].busy_count = inventory.members[index].busy_count;
+    }
+    if (latcd_retirement_queue_diagnostic_retry(queue, page.boot, page.round_cutoff,
+                                                &page.entries[index], 1)) goto out;
     queue->page_receipt_entry = page.entries[index];
     memcpy(queue->page_receipt_binding, identity, 32);
     queue->page_receipt_scan = true;
     result = 0;
 out:
     close(scheduler);
+    g_free(boot);
     return result ? fail(error, error_size, "cannot begin page receipt discovery") : 0;
 }
 
