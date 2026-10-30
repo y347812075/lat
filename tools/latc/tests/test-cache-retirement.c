@@ -7169,6 +7169,21 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
                !receipt_count);
         latcd_retirement_queue_free(receipt_queue);
         put(current, following);
+        for (unsigned variant = 0; variant < 2; variant++) {
+            if (variant) put(current, "invalid current\n");
+            else assert(!unlink(current));
+            receipt_queue = latcd_retirement_queue_new(root, 1);
+            assert(!latcd_retirement_queue_diagnostic_retry(receipt_queue, retry_boot, retry_cutoff,
+                                                            receipt_hints, 2));
+            do {
+                queued = latcd_retirement_queue_step(receipt_queue, 32, 10000, &receipt_stats,
+                                                      error, sizeof(error));
+            } while (queued > 0);
+            assert(queued < 0 && latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count) < 0 &&
+                   !receipt_count);
+            latcd_retirement_queue_free(receipt_queue);
+            put(current, following);
+        }
         receipt_queue = latcd_retirement_queue_new(root, 1);
         assert(!latcd_retirement_queue_diagnostic_retry(receipt_queue, retry_boot, retry_cutoff,
                                                         receipt_hints, 2));
