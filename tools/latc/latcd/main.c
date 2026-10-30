@@ -3236,23 +3236,33 @@ static int current_manifest_read(const LatcdConfig *config, const char *hex,
                                  LatcdCurrentManifest *manifest)
 {
     char *path = g_strdup_printf("%s/%s.current", config->cache_dir, hex);
-    gchar *contents = NULL;
-    gsize size = 0;
-    GError *read_error = NULL;
-    if (!g_file_get_contents(path, &contents, &size, &read_error)) {
-        int missing = read_error && read_error->domain == G_FILE_ERROR &&
-                      read_error->code == G_FILE_ERROR_NOENT;
-        g_clear_error(&read_error);
-        g_free(path);
-        errno = missing ? ENOENT : EIO;
-        return missing ? 1 : -1;
-    }
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     g_free(path);
-    if (!size || size >= 4096 || !strstr(contents, "\"version\":2")) {
-        g_free(contents);
+    if (fd < 0) return errno == ENOENT ? 1 : -1;
+    struct stat status;
+    char contents[4096];
+    size_t size = 0;
+    if (fstat(fd, &status)) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    if (!S_ISREG(status.st_mode)) { close(fd); errno = ENOEXEC; return -1; }
+    while (size < sizeof(contents)) {
+        ssize_t n = read(fd, contents + size, sizeof(contents) - size);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) { int saved = errno; close(fd); errno = saved; return -1; }
+        if (!n) break;
+        size += n;
+    }
+    close(fd);
+    if (!size || size >= sizeof(contents) || memchr(contents, '\0', size)) {
         errno = ENOEXEC;
         return -1;
     }
+    contents[size] = '\0';
+    if (!strstr(contents, "\"version\":2")) { errno = ENOEXEC; return -1; }
     manifest->module = manifest_string(contents, "module");
     manifest->native = manifest_string(contents, "native");
     manifest->tbset = manifest_string(contents, "tbset");
@@ -3274,7 +3284,6 @@ static int current_manifest_read(const LatcdConfig *config, const char *hex,
         strncmp(manifest->native, hex, 64) ||
         (*manifest->tbset && strncmp(manifest->tbset, hex, 64)) ||
         !sequence || end == sequence_value || (*end != ',' && *end != '}');
-    g_free(contents);
     if (result) {
         current_manifest_clear(manifest);
         errno = ENOEXEC;
@@ -3289,7 +3298,7 @@ static int G_GNUC_UNUSED broker_export_current(const LatcdConfig *config,
 {
     char hex[65];
     digest_hex(digest, hex);
-    int gate = lat_aot_v2_cache_source_lock(config->cache_dir, hex,
+    int gate = lat_aot_v2_cache_source_lock_existing(config->cache_dir, hex,
                          LOCK_SH | LOCK_NB, false, error, error_size);
     if (gate < 0) return -1;
     LatcdCurrentManifest manifest = {0};

@@ -102,6 +102,30 @@ static void test_owner_binding_after_acquire(bool root_swap)
     g_free(old); g_free(lock); g_free(root);
 }
 
+static void test_broker_read_bounds(void)
+{
+    char *root = g_dir_make_tmp("latcd-broker-bounds-XXXXXX", NULL);
+    uint8_t digest[32] = {0}; char hex[65], error[256];
+    digest_hex(digest, hex);
+    LatcdConfig config = {.cache_dir = root, .file_size_limit = 1 << 20};
+    g_assert_cmpint(broker_export_current(&config, digest, error, sizeof(error)), ==, -1);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    g_assert_false(g_file_test(gc, G_FILE_TEST_EXISTS));
+    char *name = g_strdup_printf("%s.current", hex);
+    char *path = g_build_filename(root, name, NULL);
+    char oversized[4096]; memset(oversized, 'x', sizeof(oversized));
+    g_assert_true(g_file_set_contents(path, oversized, sizeof(oversized), NULL));
+    LatcdCurrentManifest manifest = {0};
+    g_assert_cmpint(current_manifest_read(&config, hex, &manifest), ==, -1);
+    g_assert_cmpint(errno, ==, ENOEXEC);
+    g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(symlink("/dev/null", path), ==, 0);
+    g_assert_cmpint(current_manifest_read(&config, hex, &manifest), ==, -1);
+    g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(g_rmdir(root), ==, 0);
+    g_free(path); g_free(name); g_free(gc); g_free(root);
+}
+
 extern int lat_tb_key_set_read_file(const char *, const uint8_t [32],
                                     LatTbKeySet *, char *, size_t);
 static void (*tbset_read_hook)(void);
@@ -1290,6 +1314,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc == 1) {
+        test_broker_read_bounds();
         test_owner_binding_swap(false, false);
         test_owner_binding_swap(true, false);
         test_owner_binding_swap(false, true);
