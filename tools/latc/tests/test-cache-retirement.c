@@ -7178,6 +7178,39 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
                                                                  error, sizeof(error)) && !receipts[0]);
         latcd_retirement_queue_free(receipt_queue);
         assert(!unlink(pending_path));
+        receipt_queue = latcd_retirement_queue_new(root, 1);
+        assert(!latcd_retirement_queue_diagnostic_retry(receipt_queue, retry_boot, retry_cutoff,
+                                                        receipt_hints, 2));
+        do {
+            queued = latcd_retirement_queue_step(receipt_queue, 32, 10000, &receipt_stats,
+                                                  error, sizeof(error));
+        } while (queued > 0);
+        assert(queued < 0 && !latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count) && receipts[0]);
+        retry_scan_hook_called = false;
+        retry_scan_receipt_path = pending_path; retry_scan_receipt_data = pending_data;
+        latcd_retirement_test_retry_scanned = retry_scan_hook;
+        assert(latcd_retirement_queue_retry_receipts_revalidate(receipt_queue, receipts, &receipt_count,
+                                                                 error, sizeof(error)) < 0);
+        latcd_retirement_test_retry_scanned = NULL;
+        retry_scan_receipt_path = NULL; retry_scan_receipt_data = NULL;
+        assert(retry_scan_hook_called && !receipt_count && !receipts[0]);
+        latcd_retirement_queue_free(receipt_queue);
+        assert(!unlink(pending_path));
+        g_key_file_set_string(pending, "transaction", "previous", "invalid-base64");
+        char *invalid_pending = g_key_file_to_data(pending, NULL, NULL);
+        put(pending_path, invalid_pending);
+        receipt_queue = latcd_retirement_queue_new(root, 1);
+        assert(!latcd_retirement_queue_diagnostic_retry(receipt_queue, retry_boot, retry_cutoff,
+                                                        receipt_hints, 2));
+        do {
+            queued = latcd_retirement_queue_step(receipt_queue, 32, 10000, &receipt_stats,
+                                                  error, sizeof(error));
+        } while (queued > 0);
+        assert(queued < 0 && latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count) < 0 &&
+               !receipt_count);
+        latcd_retirement_queue_free(receipt_queue);
+        assert(!unlink(pending_path));
+        g_free(invalid_pending);
         g_free(pending_path); g_free(pending_name); g_free(pending_id); g_free(pending_data);
         g_key_file_unref(pending);
         put(current, previous);
