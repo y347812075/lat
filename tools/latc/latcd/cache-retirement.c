@@ -4577,7 +4577,7 @@ static int completed_removal(int root, const char *root_path, const char *source
     bool pending = !deletion && (!observation || !strcmp(observation, "MATCHED") ||
                                 !strcmp(observation, "MISSING"));
     valid = valid && (complete || (root_path && pending));
-    int latch = -1, result = 0;
+    int latch = -1, mount_store = -1, result = 0;
     if (valid && !complete) {
         latch = lat_aot_v2_cache_source_lock(root_path, source, LOCK_EX | LOCK_NB,
                                              false, NULL, 0);
@@ -4598,9 +4598,14 @@ static int completed_removal(int root, const char *root_path, const char *source
         identity.st_ino = (ino_t)values[1];
         identity.st_size = (off_t)values[2];
         identity.st_blocks = (blkcnt_t)(values[3] / 512);
+        mount_store = open_directory(gc, "mount-leases", true);
         if ((uint64_t)identity.st_dev != values[0] || (uint64_t)identity.st_ino != values[1] ||
             identity.st_size < 0 || (uint64_t)identity.st_size != values[2] || values[3] % 512 ||
             identity.st_blocks < 0 || (uint64_t)identity.st_blocks != values[3] / 512 ||
+            mount_store < 0 || flock(mount_store, LOCK_EX | LOCK_NB) ||
+            !directory_matches_at(root, ".gc", gc) ||
+            !directory_matches_at(gc, "mount-leases", mount_store) ||
+            mount_lease_status(root, gc, source, name, &identity) ||
             object_current_status(root, name) || object_hold_status(root, name, &identity) ||
             object_task_status(root, name, &identity) || object_transaction_status(root, name, &identity, NULL)) {
             result = -1;
@@ -4608,7 +4613,9 @@ static int completed_removal(int root, const char *root_path, const char *source
         }
         /* Observation only: make the already-absent name durable. Never unlink
          * here, and never infer physical block release from this receipt. */
-        if (fsync(root) || record_write_fault("missing-synced")) result = -1;
+        if (!directory_matches_at(root, ".gc", gc) ||
+            !directory_matches_at(gc, "mount-leases", mount_store) ||
+            fsync(root) || record_write_fault("missing-synced")) result = -1;
         else {
             g_key_file_set_string(record, "tombstone", "deletion_status", "UNLINKED");
             g_key_file_set_string(record, "tombstone", "recovery_status", "MISSING");
@@ -4616,6 +4623,7 @@ static int completed_removal(int root, const char *root_path, const char *source
         }
     } else if (valid) result = 1;
 out:
+    if (mount_store >= 0) close(mount_store);
     if (latch >= 0) close(latch);
     g_hash_table_unref(references);
     g_free(manifest); g_free(current); g_free(deletion); g_free(observation);

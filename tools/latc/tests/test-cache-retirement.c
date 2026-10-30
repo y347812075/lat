@@ -5308,6 +5308,20 @@ static void test_deleted_transaction_recovery(int mutation, const char *point, b
         assert_state(root, "RETIRED");
         g_free(pending_path); g_free(filename); g_free(id); g_free(pending_data);
         g_key_file_unref(pending); g_free(original); g_free(original_path);
+        char *lease_id = g_uuid_string_random();
+        int lease = latcd_retirement_mount_lease(root, lease_id, "CACHE", NULL, NULL,
+                                                 error, sizeof(error));
+        assert(lease >= 0);
+        close(lease);
+        assert(latcd_retirement_recover(root, &recovered, error, sizeof(error)) < 0);
+        assert_state(root, "RETIRED");
+        assert(!latcd_retirement_mount_release(root, lease_id, error, sizeof(error)));
+        char *mounts = g_build_filename(root, ".gc", "mount-leases", NULL);
+        int mount_lock = open(mounts, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        assert(mount_lock >= 0 && !flock(mount_lock, LOCK_EX | LOCK_NB));
+        assert(latcd_retirement_recover(root, &recovered, error, sizeof(error)) < 0);
+        assert_state(root, "RETIRED");
+        close(mount_lock); g_free(mounts); g_free(lease_id);
     }
     if (point) {
         pid_t child = fork();
