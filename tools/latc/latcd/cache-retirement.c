@@ -5214,6 +5214,7 @@ struct LatcdRetirementQueue {
     GHashTable *confirmed_keys;
     GHashTable *removed_first;
     GHashTable *removed_second;
+    GHashTable *retry_transaction_roots;
     GHashTable *retry_hints;
     char retry_order[128][138];
     unsigned retry_count;
@@ -5266,6 +5267,7 @@ LatcdRetirementQueue *latcd_retirement_queue_new(const char *root, uint64_t grac
     queue->confirmed_keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     queue->removed_first = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     queue->removed_second = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    queue->retry_transaction_roots = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     queue->retry_hints = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     return queue;
 }
@@ -5390,7 +5392,8 @@ int latcd_retirement_queue_retry_receipts(const LatcdRetirementQueue *queue,
     *count = queue->retry_count;
     for (unsigned i = 0; i < *count; i++)
         receipts[i] = g_hash_table_contains(queue->removed_second, queue->retry_order[i]) &&
-                      !g_hash_table_contains(queue->confirmed_keys, queue->retry_order[i]);
+                      !g_hash_table_contains(queue->confirmed_keys, queue->retry_order[i]) &&
+                      !g_hash_table_contains(queue->retry_transaction_roots, queue->retry_order[i]);
     return 0;
 }
 
@@ -5443,6 +5446,7 @@ void latcd_retirement_queue_free(LatcdRetirementQueue *queue)
     g_hash_table_unref(queue->confirmed_keys);
     g_hash_table_unref(queue->removed_first);
     g_hash_table_unref(queue->removed_second);
+    g_hash_table_unref(queue->retry_transaction_roots);
     g_hash_table_unref(queue->retry_hints);
     g_free(queue->root); g_free(queue);
 }
@@ -5630,7 +5634,26 @@ static bool queue_record(LatcdRetirementQueue *queue, const char *raw, size_t si
     valid = valid && source_valid(source) && state &&
         (!strcmp(state, "PREPARED") || !strcmp(state, "RETIRED") ||
          !strcmp(state, "ABORTED") || !strcmp(state, "UNKNOWN"));
-    if (!valid || strcmp(state, "RETIRED")) goto out;
+    if (!valid) goto out;
+    if (strcmp(state, "RETIRED")) {
+        if (queue->retry_count) {
+            char *previous64 = g_key_file_get_string(record, "transaction", "previous", NULL);
+            char *next64 = g_key_file_get_string(record, "transaction", "next", NULL);
+            gsize previous_size = 0, next_size = 0;
+            guchar *previous = previous64 ? decode_snapshot(previous64, &previous_size) : NULL;
+            guchar *next = next64 ? decode_snapshot(next64, &next_size) : NULL;
+            GHashTable *refs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+            valid = previous && next && next_size &&
+                (!previous_size || manifest_references(source, (char *)previous, previous_size, refs)) &&
+                manifest_references(source, (char *)next, next_size, refs);
+            for (unsigned i = 0; valid && i < queue->retry_count; i++)
+                if (g_hash_table_contains(refs, queue->retry_order[i]))
+                    g_hash_table_add(queue->retry_transaction_roots, g_strdup(queue->retry_order[i]));
+            g_hash_table_unref(refs);
+            g_free(previous); g_free(next); g_free(previous64); g_free(next64);
+        }
+        goto out;
+    }
     char *old64 = g_key_file_get_string(record, "transaction", "previous", NULL);
     char *next64 = g_key_file_get_string(record, "transaction", "next", NULL);
     char *objects64 = g_key_file_get_string(record, "transaction", "objects", NULL);
@@ -5732,6 +5755,7 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         g_hash_table_remove_all(queue->confirmed_keys);
         g_hash_table_remove_all(queue->removed_first);
         g_hash_table_remove_all(queue->removed_second);
+        g_hash_table_remove_all(queue->retry_transaction_roots);
         queue->epoch++;
         int root = open(queue->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (!queue_bind_root(queue, root)) { if (root >= 0) close(root); goto out; }
@@ -6070,7 +6094,8 @@ static int retry_witness_finish(LatcdRetirementQueue *queue, bool advance_unmatc
     if (receipts) {
         for (unsigned i = 0; i < queue->retry_count; i++)
             receipts[i] = g_hash_table_contains(queue->removed_second, queue->retry_order[i]) &&
-                          !g_hash_table_contains(queue->confirmed_keys, queue->retry_order[i]);
+                          !g_hash_table_contains(queue->confirmed_keys, queue->retry_order[i]) &&
+                          !g_hash_table_contains(queue->retry_transaction_roots, queue->retry_order[i]);
         *receipt_count = queue->retry_count;
     }
     if (page) {

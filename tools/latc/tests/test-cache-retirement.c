@@ -7157,6 +7157,29 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
         assert(latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count) < 0 &&
                !receipt_count);
         latcd_retirement_queue_free(receipt_queue);
+        GKeyFile *pending = g_key_file_new();
+        assert(g_key_file_load_from_data(pending, raw, -1, 0, NULL));
+        g_key_file_set_string(pending, "transaction", "state", "PREPARED");
+        char *pending_data = g_key_file_to_data(pending, NULL, NULL);
+        char *pending_id = g_uuid_string_random();
+        char *pending_name = g_strdup_printf("%s.ini", pending_id);
+        char *pending_path = g_build_filename(root, ".gc", "transactions", pending_name, NULL);
+        put(pending_path, pending_data);
+        receipt_queue = latcd_retirement_queue_new(root, 1);
+        assert(!latcd_retirement_queue_diagnostic_retry(receipt_queue, retry_boot, retry_cutoff,
+                                                        receipt_hints, 2));
+        do {
+            queued = latcd_retirement_queue_step(receipt_queue, 32, 10000, &receipt_stats,
+                                                  error, sizeof(error));
+        } while (queued > 0);
+        assert(queued < 0 && !latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count));
+        assert(receipt_count == 2 && !receipts[0]);
+        assert(!latcd_retirement_queue_retry_receipts_revalidate(receipt_queue, receipts, &receipt_count,
+                                                                 error, sizeof(error)) && !receipts[0]);
+        latcd_retirement_queue_free(receipt_queue);
+        assert(!unlink(pending_path));
+        g_free(pending_path); g_free(pending_name); g_free(pending_id); g_free(pending_data);
+        g_key_file_unref(pending);
         put(current, previous);
         receipt_queue = latcd_retirement_queue_new(root, 1);
         assert(!latcd_retirement_queue_diagnostic_retry(receipt_queue, retry_boot, retry_cutoff,
