@@ -3248,6 +3248,13 @@ static void test_page_stage(void)
     g_free(boot); remove_root(root); g_free(root);
 }
 
+static int test_result_guard(void *context)
+{
+    int *calls = context;
+    (*calls)++;
+    return -1;
+}
+
 static void test_budgeted_page_stage(void)
 {
     char *root = root_new(), error[256], *boot = NULL;
@@ -3327,6 +3334,13 @@ static void test_budgeted_page_stage(void)
     assert(latcd_retirement_page_commit(root, 150, &page, error, sizeof(error)) < 0);
     uint8_t binding[32];
     assert(!latcd_retirement_page_budget_identity(&page, binding));
+    int guard_calls = 0;
+    assert(latcd_retirement_test_guarded_budget_result(root, 150, binding, &budget,
+        &page.entries[0], test_result_guard, &guard_calls, error, sizeof(error)) < 0);
+    assert(guard_calls == 1 && capacity.ready && !budget.invalid);
+    char *guard_path = g_strconcat(store, "/", page.entries[0].name, ".ini", NULL);
+    assert(access(guard_path, F_OK) < 0 && errno == ENOENT);
+    g_free(guard_path);
     assert(latcd_retirement_page_budget_result(root, 150, binding, &budget, &page.entries[0],
                                                LATCD_RETIREMENT_RESULT_DONE, error, sizeof(error)) < 0);
     assert(strstr(error, "receipt witness"));

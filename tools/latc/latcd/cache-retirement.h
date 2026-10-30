@@ -332,6 +332,9 @@ int latcd_retirement_page_budget_commit(const char *root, uint64_t now_us,
 int latcd_retirement_page_finish_preserving_results(const char *root, uint64_t now_us,
                                     struct LatcdPageBudget *budget, char *error, size_t error_size);
 #if defined(LATCD_RETIREMENT_TESTING) && defined(LATCD_CAPACITY_TESTING)
+int latcd_retirement_test_guarded_budget_result(const char *root, uint64_t now_us,
+    const uint8_t identity[32], struct LatcdPageBudget *budget, const LatcdRetirementPageDeadline *entry,
+    int (*guard)(void *), void *context, char *error, size_t error_size);
 extern void (*latcd_retirement_test_before_settlement)(void);
 extern void (*latcd_retirement_test_before_target_revalidate)(void);
 extern void (*latcd_retirement_test_before_page_finish)(struct LatcdPageBudget *budget);
