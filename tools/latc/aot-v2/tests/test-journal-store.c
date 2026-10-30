@@ -653,6 +653,19 @@ int main(void)
     /* These fixtures invoke run_service directly, after simulated startup. */
     atomic_store(&compiler_budget_recovery_state, 1);
     alarm(60);
+    LatcdConfig managed = { .managed = true };
+    char isolation_error[128] = {0};
+    uint64_t reservation = 0;
+    uint8_t digest[32] = {0};
+    GPtrArray *tasks_for_compile = g_ptr_array_new_with_free_func(g_free);
+    g_assert_cmpint(run_compiler(&managed, 0, NULL, NULL, false, NULL, NULL,
+                                 NULL, NULL, digest, tasks_for_compile,
+                                 &reservation, isolation_error,
+                                 sizeof(isolation_error)), ==, -1);
+    g_assert_cmpstr(isolation_error, ==, "managed compiler isolation unavailable");
+    g_assert_cmpuint(tasks_for_compile->len, ==, 0);
+    g_assert_cmpuint(reservation, ==, 0);
+    g_ptr_array_free(tasks_for_compile, TRUE);
     char *directory = g_dir_make_tmp("journal-store-XXXXXX", NULL);
     g_assert_nonnull(directory);
     char *socket_path = g_build_filename(directory, "socket", NULL);

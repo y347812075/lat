@@ -2619,6 +2619,11 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         uint64_t *transient_reservation,
                         char *error, size_t error_size)
 {
+    /* A managed worker must not inherit access to the cache or task locks.
+     * Until its isolated task domain is available, never run it unsandboxed. */
+    if (config->managed) {
+        return fail(error, error_size, "managed compiler isolation unavailable");
+    }
     if (validate_toolchain(config, error, error_size)) {
         return -1;
     }
