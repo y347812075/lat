@@ -7592,6 +7592,41 @@ static void test_transaction_root_admission(unsigned mutation, bool executor)
             assert(!latcd_retirement_queue_defer(queue, &attempt, UINT64_MAX - 10000000, true));
         }
         latcd_retirement_queue_free(queue);
+        char *extra_shard_name = g_strconcat(receipt_hints[1].name, ".ini", NULL);
+        char *extra_shard = g_build_filename(root, ".gc", "retirement-schedule", extra_shard_name, NULL);
+        assert(!unlink(extra_shard));
+        g_free(extra_shard); g_free(extra_shard_name);
+        LatcdRetirementPageState receipt_round;
+        assert(!latcd_retirement_page_round_begin(root, 1, &receipt_round, error, sizeof(error)));
+        LatcdCacheCapacity receipt_capacity = LATCD_CACHE_CAPACITY_INIT;
+        LatcdPageBudget receipt_budget = {0};
+        assert(!latcd_cache_capacity_scan(&receipt_capacity, root, error, sizeof(error)));
+        latcd_cache_capacity_metadata_bind(&receipt_capacity, UINT64_MAX);
+        receipt_queue = latcd_retirement_queue_new(root, 1);
+        assert(latcd_retirement_queue_retry_begin(receipt_queue, error, sizeof(error)) == 1);
+        do {
+            queued = latcd_retirement_queue_step(receipt_queue, 32, 10000, &receipt_stats,
+                                                  error, sizeof(error));
+        } while (queued > 0);
+        assert(!latcd_retirement_queue_retry_receipts(receipt_queue, receipts, &receipt_count) &&
+               receipt_count == 1 && receipts[0]);
+        int stage_receipt = latcd_retirement_queue_retry_page_stage_receipt(
+            receipt_queue, &receipt_capacity, UINT64_MAX, &receipt_budget, error, sizeof(error));
+        assert(queued < 0 && !stage_receipt);
+        LatcdRetirementRetryPage *receipt_page = g_new0(LatcdRetirementRetryPage, 1);
+        assert(!latcd_retirement_retry_page_load(root, receipt_page, error, sizeof(error)) &&
+               receipt_page->deletion_intent && !receipt_page->completed &&
+               !strcmp(receipt_page->items[0].hint.name, names[0]) && !receipt_page->items[0].matched);
+        GChecksum *receipt_checksum = g_checksum_new(G_CHECKSUM_SHA256);
+        uint8_t receipt_hash[32]; gsize receipt_hash_size = sizeof(receipt_hash);
+        g_checksum_update(receipt_checksum, (const guchar *)receipt, strlen(receipt));
+        g_checksum_get_digest(receipt_checksum, receipt_hash, &receipt_hash_size);
+        g_checksum_free(receipt_checksum);
+        assert(receipt_hash_size == 32 && !memcmp(receipt_page->receipt_digest[0], receipt_hash, 32));
+        assert(latcd_retirement_retry_page_commit(root, &receipt_budget, error, sizeof(error)) < 0);
+        latcd_retirement_queue_free(receipt_queue);
+        latcd_cache_capacity_close(&receipt_capacity);
+        g_free(receipt_page);
         g_free(receipt); g_free(marker);
     }
     g_free(raw); g_key_file_unref(record); g_free(record_path); g_free(evidence);

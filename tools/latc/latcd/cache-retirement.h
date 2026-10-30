@@ -558,6 +558,11 @@ int latcd_retirement_queue_retry_page_snapshot(LatcdRetirementQueue *queue,
 int latcd_retirement_queue_retry_page_stage(LatcdRetirementQueue *queue,
     struct LatcdCacheCapacity *capacity, uint64_t limit, struct LatcdPageBudget *budget,
     char *error, size_t error_size);
+/* Stage the first member's witnessed receipt as a deletion intent. This does
+ * not authorize removal; receipt recovery and controlled access remain required. */
+int latcd_retirement_queue_retry_page_stage_receipt(LatcdRetirementQueue *queue,
+    struct LatcdCacheCapacity *capacity, uint64_t limit, struct LatcdPageBudget *budget,
+    char *error, size_t error_size);
 int latcd_retirement_retry_page_load(const char *root, LatcdRetirementRetryPage *page,
     char *error, size_t error_size);
 /* Startup with capacity recovery gated; accepts an untouched page or an intent
