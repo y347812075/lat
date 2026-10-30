@@ -8191,6 +8191,29 @@ static void publish_page_fixture(const char *root, unsigned id)
     g_free(evidence); g_free(current); g_free(previous); g_free(next_manifest); g_free(src);
 }
 
+static void test_page_discovery_witness(void)
+{
+    char *root = root_new(), error[256];
+    simulated_boottime_us = 100;
+    publish_page_fixture(root, 7);
+    LatcdRetirementPageState round, page;
+    simulated_boottime_us = 101;
+    assert(!latcd_retirement_page_round_begin(root, 1, &round, error, sizeof(error)));
+    simulated_boottime_us = 102;
+    LatcdRetirementQueue *queue = latcd_retirement_queue_new(root, 1);
+    assert(!latcd_retirement_queue_page_discovery_begin(queue, error, sizeof(error)));
+    LatcdRetirementQueueStats stats; int step;
+    do { step = latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)); }
+    while (step > 0);
+    assert(step < 0 && !latcd_retirement_queue_aggregated_page(queue, &page) && page.count == 3);
+    LatcdRetirementAttempt attempt;
+    assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));
+    assert(latcd_retirement_queue_step(queue, 32, 10000, &stats, error, sizeof(error)) < 0);
+    latcd_retirement_queue_free(queue);
+    simulated_boottime_us = 0;
+    remove_root(root); g_free(root);
+}
+
 static void test_page_receipt_witness(unsigned mode)
 {
     char *root = root_new(), error[256];
@@ -9362,6 +9385,7 @@ int main(int argc, char **argv)
     test_queue_overflow_fixture();
     test_retry_not_due(false);
     test_retry_not_due(true);
+    test_page_discovery_witness();
     test_page_receipt_witness(0);
     test_page_receipt_witness(1);
     test_page_receipt_witness(2);

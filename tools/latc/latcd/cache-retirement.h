@@ -651,6 +651,10 @@ int latcd_retirement_queue_retry_advance_unmatched(LatcdRetirementQueue *queue,
  * Owner lease required; missing or incompatible state is not a new round. */
 int latcd_retirement_queue_diagnostic_resume(LatcdRetirementQueue *queue,
                                               char *error, size_t error_size);
+/* Retain the monitored two-pass page snapshot from an idle round. It does not
+ * authorize staging or deletion; discard the queue after any failed scan. */
+int latcd_retirement_queue_page_discovery_begin(LatcdRetirementQueue *queue,
+                                                char *error, size_t error_size);
 /* Owner lease and controlled writers required. Consume an empty monitored
  * resumed scan to advance the persisted round; no deletion authorization. */
 int latcd_retirement_queue_round_advance(LatcdRetirementQueue *queue,
