@@ -7,6 +7,8 @@ runner=$4
 runtime=$5
 guest=$6
 work=$7
+mode=${8:-pin}
+case "$mode" in pin|unreferenced) ;; *) exit 2 ;; esac
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 mkdir -m 700 "$work" "$work/cache"
 cache=$work/cache
@@ -49,6 +51,7 @@ delta = (entry + 14 - base, 3)
 assert delta not in old
 write_key_set(guest, work / 'delta.tbset', [delta])
 PY
+if [ "$mode" = pin ]; then
 python3 - "$cache" "$work/old.json" "$work/pins-ready" <<'PY' &
 import fcntl, json, pathlib, signal, sys
 cache = pathlib.Path(sys.argv[1]); m = json.loads(pathlib.Path(sys.argv[2]).read_text())
@@ -60,6 +63,7 @@ PY
 pin_pid=$!
 n=0
 while [ ! -f "$work/pins-ready" ]; do kill -0 "$pin_pid"; n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05; done
+fi
 "$latcd" --submit --socket "$socket" --tbset "$work/delta.tbset" "$guest" >"$work/delta-submit"
 "$latcd" --flush-source --socket "$socket" "$guest" >"$work/delta-flush"
 grep -q '^status=0$' "$work/delta-flush"
@@ -79,6 +83,27 @@ assert retired
 (work / 'new.json').write_text(json.dumps(new))
 (work / 'retired.json').write_text(json.dumps(sorted(retired)))
 PY
+if [ "$mode" = unreferenced ]; then
+python3 - "$cache" "$work/old.json" "$work/retired.json" <<'PY'
+import base64, configparser, json, pathlib, sys, time
+cache = pathlib.Path(sys.argv[1]); old = json.loads(pathlib.Path(sys.argv[2]).read_text())
+retired = json.loads(pathlib.Path(sys.argv[3]).read_text())
+matches = []
+for path in (cache / '.gc/transactions').glob('*.ini'):
+    c = configparser.ConfigParser(); c.read(path)
+    t = c['transaction']
+    if t.get('previous') and json.loads(base64.b64decode(t['previous'])) == old:
+        matches.append(int(t['retired_boottime_us']) / 1_000_000)
+assert len(matches) == 1
+deadline = matches[0] + 3
+remaining = deadline - time.clock_gettime(time.CLOCK_BOOTTIME)
+assert remaining > 0.5
+time.sleep(remaining - 0.25)
+assert time.clock_gettime(time.CLOCK_BOOTTIME) < deadline
+assert all((cache / name).is_file() for name in retired)
+PY
+fi
+if [ "$mode" = pin ]; then
 n=0
 while ! grep -q 'test page busy retry=' "$work/server.err"; do
     if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then cat "$work/server.err" >&2; exit 1; fi
@@ -90,12 +115,20 @@ root = pathlib.Path(sys.argv[1]); names = json.loads(pathlib.Path(sys.argv[2]).r
 assert all((root / name).is_file() for name in names)
 PY
 kill "$pin_pid"; wait "$pin_pid" 2>/dev/null || :; pin_pid=
+fi
 n=0
 while ! grep -q 'test waiting page consumed' "$work/server.err"; do
     if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then cat "$work/server.err" >&2; exit 1; fi
     n=$((n + 1)); [ "$n" -lt 1000 ]; sleep 0.1
 done
-grep -q 'test waiting timer woke' "$work/server.err"
+if [ "$mode" = pin ]; then
+    grep -q 'test waiting timer woke' "$work/server.err"
+else
+    python3 - "$work/stats.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))['retirement_timer_wakeups'] > 0
+PY
+fi
 python3 - "$cache" "$guest" "$work" <<'PY'
 import hashlib, json, pathlib, sys
 cache, guest, work = map(pathlib.Path, sys.argv[1:])
@@ -105,6 +138,33 @@ source = hashlib.sha256(guest.read_bytes()).hexdigest()
 new = json.loads((work / 'new.json').read_text())
 assert json.loads((cache / (source + '.current')).read_text()) == new
 assert all((cache / new[k]).is_file() for k in ('module', 'native', 'tbset'))
+PY
+module=$(python3 - "$cache" "$guest" <<'PY'
+import hashlib, json, pathlib, sys
+root, guest = map(pathlib.Path, sys.argv[1:])
+print(json.loads((root / (hashlib.sha256(guest.read_bytes()).hexdigest() + '.current')).read_text())['module'])
+PY
+)
+"$latc" emit-module-tbset "$cache/$module" -o "$work/actual.tbset"
+python3 - "$work" "$script_dir" <<'PY'
+import pathlib, sys
+work = pathlib.Path(sys.argv[1]); sys.path.insert(0, sys.argv[2])
+from tb_key_set import read_key_set
+_, _, a = read_key_set(work / 'initial.tbset'); _, _, b = read_key_set(work / 'delta.tbset')
+_, _, actual = read_key_set(work / 'actual.tbset')
+assert set(a) | set(b) <= set(actual)
+PY
+set +e
+LD_LIBRARY_PATH="$runtime" LATX_AOT_V2_CACHE_DIR="$cache" LATX_AOT_V2_LATCD_SOCKET="$socket" \
+    LATX_AOT_V2_STRICT=1 LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 LATC_STRICT_AOT=1 \
+    LATC_STATS_OUT="$work/strict-stats.json" "$runner" "$guest" >"$work/strict.out" 2>"$work/strict.err"
+strict_status=$?
+set -e
+test "$strict_status" -eq 42
+python3 - "$work/strict-stats.json" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+assert s['runtime_file_tb_gen_calls'] == 0 and s['runtime_file_tb_gen_attempts'] == 0
 PY
 python3 - "$guest" "$work/third.tbset" "$script_dir" <<'PY'
 import pathlib, struct, sys

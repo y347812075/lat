@@ -167,7 +167,7 @@ test-latcd-gc-publication: $(BUILD)/tests/latcd-gc-timer
 	sh tests/test-latcd-gc-publication.sh "$(abspath $(BUILD)/tests/latcd-gc-timer)" \
 	  "$(GC_INSTALL_PREFIX)/bin/latcd" "$(GC_INSTALL_PREFIX)/bin/latc" \
 	  "$(GC_INSTALL_PREFIX)/bin/latx-x86_64" "$(GC_INSTALL_PREFIX)/lib" \
-	  "$(GC_X86_GUEST)" "$(GC_TEST_WORK)"
+	  "$(GC_X86_GUEST)" "$(GC_TEST_WORK)" "$(if $(GC_TEST_MODE),$(GC_TEST_MODE),pin)"
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
