@@ -1,9 +1,12 @@
 #define _GNU_SOURCE
 #include "broker-transport.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 int latcd_broker_listener_socket(void)
@@ -18,6 +21,65 @@ int latcd_broker_listener_socket(void)
         return -1;
     }
     return fd;
+}
+
+int latcd_broker_listener_open(LatcdBrokerListener *listener, int directory,
+                               const char *name)
+{
+    struct stat parent, path;
+    if (!listener || !name || !*name || strlen(name) >= sizeof(listener->name) ||
+        strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, "..") ||
+        fstat(directory, &parent) || !S_ISDIR(parent.st_mode) ||
+        parent.st_uid != geteuid() || (parent.st_mode & 0022)) {
+        errno = EINVAL; return -1;
+    }
+    *listener = (LatcdBrokerListener) {.fd = -1, .directory = -1};
+    if (!fstatat(directory, name, &path, AT_SYMLINK_NOFOLLOW) || errno != ENOENT) {
+        errno = EEXIST; return -1;
+    }
+    int held = fcntl(directory, F_DUPFD_CLOEXEC, 3);
+    if (held < 0) return -1;
+    int fd = latcd_broker_listener_socket();
+    if (fd < 0) { close(held); return -1; }
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    int length = snprintf(address.sun_path, sizeof(address.sun_path),
+                          "/proc/self/fd/%d/%s", held, name);
+    if (length < 0 || (size_t)length >= sizeof(address.sun_path)) {
+        close(fd); close(held); errno = ENAMETOOLONG; return -1;
+    }
+    if (bind(fd, (struct sockaddr *)&address, sizeof(address))) {
+        int saved = errno; close(fd); close(held); errno = saved; return -1;
+    }
+    if (fstatat(held, name, &path, AT_SYMLINK_NOFOLLOW) || !S_ISSOCK(path.st_mode) ||
+        path.st_uid != geteuid()) {
+        close(fd); close(held); errno = ESTALE; return -1;
+    }
+    listener->fd = fd; listener->directory = held;
+    listener->device = path.st_dev; listener->inode = path.st_ino;
+    strcpy(listener->name, name);
+    if (fchmodat(held, name, 0666, 0) || listen(fd, 16)) {
+        int saved = errno; latcd_broker_listener_close(listener); errno = saved; return -1;
+    }
+    return 0;
+}
+
+int latcd_broker_listener_close(LatcdBrokerListener *listener)
+{
+    if (!listener || listener->fd < 0 || listener->directory < 0) {
+        errno = EINVAL; return -1;
+    }
+    close(listener->fd);
+    struct stat path;
+    int result = -1;
+    if (!fstatat(listener->directory, listener->name, &path, AT_SYMLINK_NOFOLLOW) &&
+        S_ISSOCK(path.st_mode) && path.st_dev == listener->device && path.st_ino == listener->inode)
+        result = unlinkat(listener->directory, listener->name, 0);
+    else errno = ESTALE;
+    int saved = errno;
+    close(listener->directory);
+    listener->fd = listener->directory = -1;
+    errno = saved;
+    return result;
 }
 
 int latcd_broker_peer(int fd, uid_t expected_uid, uid_t *uid, gid_t *gid)

@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -61,9 +62,44 @@ static void test_early_packet(void)
     close(accepted); close(client); close(listener);
 }
 
+static void test_path_listener(void)
+{
+    const char *tmp = getenv("TMPDIR");
+    assert(tmp && *tmp);
+    char path[512];
+    assert(snprintf(path, sizeof(path), "%s/broker-path-XXXXXX", tmp) < (int)sizeof(path));
+    assert(mkdtemp(path));
+    int directory = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(directory >= 0);
+    LatcdBrokerListener listener, other;
+    assert(!latcd_broker_listener_open(&listener, directory, "broker.sock"));
+    assert(latcd_broker_listener_open(&other, directory, "broker.sock") < 0);
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    assert(snprintf(address.sun_path, sizeof(address.sun_path), "/proc/self/fd/%d/broker.sock",
+                    directory) < (int)sizeof(address.sun_path));
+    int client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    assert(client >= 0 && !connect(client, (struct sockaddr *)&address, sizeof(address)));
+    int accepted = accept4(listener.fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    assert(accepted >= 0);
+    close(accepted); close(client);
+    assert(!latcd_broker_listener_close(&listener));
+    assert(faccessat(directory, "broker.sock", F_OK, 0) < 0);
+    assert(!latcd_broker_listener_open(&listener, directory, "broker.sock"));
+    assert(!unlinkat(directory, "broker.sock", 0));
+    int replacement = openat(directory, "broker.sock", O_CREAT | O_EXCL | O_WRONLY, 0600);
+    assert(replacement >= 0); close(replacement);
+    assert(latcd_broker_listener_close(&listener) < 0);
+    assert(!faccessat(directory, "broker.sock", F_OK, 0));
+    assert(!unlinkat(directory, "broker.sock", 0));
+    assert(!fchmod(directory, 0777));
+    assert(latcd_broker_listener_open(&listener, directory, "broker.sock") < 0);
+    close(directory); assert(!rmdir(path));
+}
+
 int main(void)
 {
     test_early_packet();
+    test_path_listener();
     int s[2]; uid_t uid; gid_t gid;
     assert(!socketpair(AF_UNIX, SOCK_SEQPACKET, 0, s));
     assert(!latcd_broker_peer(s[0], getuid(), &uid, &gid));

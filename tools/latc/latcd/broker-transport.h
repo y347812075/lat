@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 
 #define LATCD_BROKER_EXPORT_VERSION 2u
 #define LATCD_BROKER_PURPOSE_OFFLINE_SNAPSHOT 1u
@@ -25,6 +26,18 @@ typedef struct LatcdBrokerExportResponse {
 
 /* Call before bind/listen so credentials are attached to early packets. */
 int latcd_broker_listener_socket(void);
+typedef struct LatcdBrokerListener {
+    int fd;
+    int directory;
+    char name[80];
+    dev_t device;
+    ino_t inode;
+} LatcdBrokerListener;
+/* Directory must be held by the service and not writable by other users. */
+int latcd_broker_listener_open(LatcdBrokerListener *listener, int directory,
+                               const char *name);
+/* Returns -1 if the pathname no longer names this listener. */
+int latcd_broker_listener_close(LatcdBrokerListener *listener);
 
 /* Set SO_PASSCRED before receiving. expected_uid comes from trusted policy. */
 int latcd_broker_peer(int socket_fd, uid_t expected_uid, uid_t *uid, gid_t *gid);
