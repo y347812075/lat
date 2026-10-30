@@ -8349,9 +8349,20 @@ static void test_page_execution_restriction(void)
     assert(!latcd_retirement_queue_restrict_to_waiting_page(executor, &page, &budget,
                                                              &next_attempt, error, sizeof(error)));
     assert(next_attempt == retry_at);
-    close(pin);
     assert(!latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error)));
     simulated_boottime_us = retry_at;
+    assert(!latcd_retirement_queue_restrict_to_waiting_page(executor, &page, &budget,
+                                                             &next_attempt, error, sizeof(error)));
+    assert(latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error)) < 0);
+    assert(report.busy_observation_durable && report.scheduler_deferral_durable &&
+           report.retry_at_boottime_us > retry_at);
+    uint64_t later_retry = report.retry_at_boottime_us;
+    assert(!latcd_retirement_queue_restrict_to_waiting_page(executor, &page, &budget,
+                                                             &next_attempt, error, sizeof(error)));
+    assert(next_attempt == later_retry);
+    close(pin);
+    assert(!latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error)));
+    simulated_boottime_us = later_retry;
     assert(!latcd_retirement_queue_restrict_to_waiting_page(executor, &page, &budget,
                                                              &next_attempt, error, sizeof(error)));
     int execute_result = latcd_retirement_queue_execute_one(executor, &report, error, sizeof(error));

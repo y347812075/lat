@@ -5641,7 +5641,7 @@ static int queue_restrict_page(LatcdRetirementQueue *queue,
         if (results[i] == LATCD_RETIREMENT_RESULT_DEFERRED)
             eligible = MAX(eligible, inventory.members[i].retry_at);
         if (next_attempt && (!*next_attempt || eligible < *next_attempt)) *next_attempt = eligible;
-        if (eligible > now) continue;
+        if (budget && eligible > now) continue;
         g_hash_table_add(queue->page_members, g_strdup(current.entries[i].name));
     }
     queue->page_restricted = true;
