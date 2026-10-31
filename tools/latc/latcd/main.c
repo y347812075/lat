@@ -3141,11 +3141,23 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (test_bootstrap && (handoff_child < 0 || filter_child < 0)) pin_result = -1;
     const char *bwrap = test_bootstrap ? getenv("LATCD_TEST_BWRAP") : NULL;
     if (test_bootstrap && (!bwrap || bwrap[0] != '/')) pin_result = -1;
+    int launcher_fds[2] = {-1, -1}, launcher_child[2] = {-1, -1};
+    if (test_bootstrap && !pin_result) {
+        const char *paths[] = {bwrap, bootstrap};
+        for (unsigned i = 0; i < 2; i++) {
+            struct stat st;
+            launcher_fds[i] = open(paths[i], O_PATH | O_CLOEXEC | O_NOFOLLOW);
+            if (launcher_fds[i] < 0 || fstat(launcher_fds[i], &st) ||
+                !S_ISREG(st.st_mode) || !(st.st_mode & 0111) ||
+                (launcher_child[i] = fcntl(launcher_fds[i], F_DUPFD_CLOEXEC, 16)) < 0)
+                pin_result = -1;
+        }
+    }
     const char *sandbox_args[] = {bwrap, "--unshare-all", "--die-with-parent",
         "--ro-bind", toolroot, "/usr", "--symlink", "usr/bin", "/bin",
         "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
         "--proc", "/proc", "--dev", "/dev", "--size", "67108864", "--tmpfs", "/work",
-        "--ro-bind", bootstrap, "/bootstrap", "--seccomp", "9", "--chdir", "/work",
+        "--ro-bind-fd", "14", "/bootstrap", "--seccomp", "9", "--chdir", "/work",
         "--clearenv", "--setenv", "PATH", "/usr/bin:/bin", "--", "/bootstrap",
         "/usr/bin/true", NULL};
     const char *sandbox_env[] = {"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", NULL};
@@ -3178,7 +3190,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         for (unsigned i = 0; i < 4; i++) if (input_copies[i] >= 0) {
             TEST_ARG("--ro-bind-data"); TEST_ARG(fds[i]); TEST_ARG(paths[i]);
         }
-        const char *setup[] = {"--ro-bind", bootstrap, "/bootstrap", "--seccomp", "9", "--chdir", "/work",
+        const char *setup[] = {"--ro-bind-fd", "14", "/bootstrap", "--seccomp", "9", "--chdir", "/work",
             "--clearenv", "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "CC", "/usr/bin/gcc",
             "--setenv", "TMPDIR", "/work", "--setenv", "LD_LIBRARY_PATH", "/usr/lib",
             "--setenv", "LATC_NATIVE_OUTPUT", "/work/output.native"};
@@ -3241,6 +3253,11 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             if (test_bootstrap && (dup2(handoff_child, 8) < 0 || dup2(filter_child, 9) < 0)) _exit(126);
             if (test_real_compile) for (unsigned i = 0; i < 3; i++)
                 if (dup2(tool_child[i], 10 + i) < 0) _exit(126);
+            if (test_bootstrap && !test_real_compile)
+                for (unsigned i = 10; i < 13; i++) close(i);
+            if (test_bootstrap && (dup2(launcher_child[0], 13) < 0 ||
+                                   dup2(launcher_child[1], 14) < 0 ||
+                                   fcntl(13, F_SETFD, FD_CLOEXEC))) _exit(126);
 #endif
             close(0); close(1);
 #ifdef LATCD_GC_TIMER_TEST
@@ -3250,7 +3267,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
 #endif
             if (syscall(SYS_close_range,
 #ifdef LATCD_GC_TIMER_TEST
-                        test_real_compile ? 13u : test_bootstrap ? 10u : 8u,
+                        test_bootstrap ? 15u : 8u,
 #else
                         8u,
 #endif
@@ -3277,8 +3294,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             if (test_bootstrap) {
                 if (n != 1 || permit != '1' || dup2(8, 3) < 0) _exit(126);
                 close(8);
-                execve(bwrap, (char *const *)(test_real_compile ? compile_args : sandbox_args),
-                       (char *const *)sandbox_env);
+                syscall(SYS_execveat, 13, "", (char *const *)(test_real_compile ? compile_args : sandbox_args),
+                        (char *const *)sandbox_env, AT_EMPTY_PATH);
                 _exit(127);
             }
             if (n == 1 && permit == '1' && test_descendant) {
@@ -3358,6 +3375,10 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     for (unsigned i = 0; i < 3; i++) {
         if (tool_child[i] >= 0) close(tool_child[i]);
         if (tool_fds[i] >= 0) close(tool_fds[i]);
+    }
+    for (unsigned i = 0; i < 2; i++) {
+        if (launcher_child[i] >= 0) close(launcher_child[i]);
+        if (launcher_fds[i] >= 0) close(launcher_fds[i]);
     }
     if (test_bootstrap && child > 0) {
         struct pollfd ready = {.fd = handoff[0], .events = POLLIN};
