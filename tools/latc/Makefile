@@ -164,7 +164,7 @@ $(BUILD)/latc: $(BUILD)/compiler/latc.o $(BUILD)/compiler/tbset.o $(BUILD)/compi
 		$(BUILD)/aot-v2/compiler/module-inspect.o \
 		$(BUILD)/aot-v2/runtime/elf-validate.o \
 		$(BUILD)/aot-v2/common/translation-config.o \
-		$(FORMAT_OBJ) $(BUILD)/native/format/native-image.o \
+		$(FORMAT_OBJ) $(BUILD)/native/format/native-image.o $(BUILD)/native/format/replay-validate.o \
 		$(BUILD)/native/format/native-tu-plan.o \
 		$(BUILD)/native/format/native-tu-audit.o $(BUILD)/liblatc_cfg.a
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)

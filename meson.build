@@ -613,6 +613,7 @@ if 'CONFIG_LATX' in config_host
       'tools/latc/aot-v2/runtime/elf-validate.c',
       'tools/latc/format/bundle.c',
       'tools/latc/native/format/native-image.c',
+      'tools/latc/native/format/replay-validate.c',
       'tools/latc/native/format/native-tu-plan.c',
       'tools/latc/native/format/native-tu-audit.c',
       'tools/latc/aot-v2/common/translation-config.c',
