@@ -121,6 +121,7 @@ typedef struct LatcdCurrentManifest {
 } LatcdCurrentManifest;
 
 static void current_manifest_clear(LatcdCurrentManifest *manifest);
+static int metadata_equal(const struct stat *before, const struct stat *after);
 static bool current_manifest_equal(const LatcdCurrentManifest *first,
                                     const LatcdCurrentManifest *second);
 static int current_manifest_read(const LatcdConfig *config, const char *hex,
@@ -573,31 +574,52 @@ static int validate_toolchain(const LatcdConfig *config, char *error, size_t err
     return validate_toolchain_paths(config, NULL, error, error_size);
 }
 
-static int validate_managed_toolchain(const LatcdConfig *config, char *error,
-                                      size_t error_size)
+static int open_validated_toolchain(const LatcdConfig *config, bool managed,
+                                    int fds[3], char *error, size_t error_size)
 {
     char *runtime = g_build_filename(config->runtime_dir, LAT_AOT_V2_RUNTIME_SONAME, NULL);
-    int fds[3] = {-1, -1, -1};
     const char *paths[] = {config->compiler, config->runner, runtime};
+    struct stat before[3], after;
     int result = -1;
-    for (unsigned i = 0; i < G_N_ELEMENTS(fds); i++) {
-        fds[i] = latcd_managed_file(paths[i], i < 2);
+    for (unsigned i = 0; i < 3; i++) fds[i] = -1;
+    for (unsigned i = 0; i < 3; i++) {
+        fds[i] = managed ? latcd_managed_file(paths[i], i < 2) :
+            open(paths[i], O_PATH | O_CLOEXEC | O_NOFOLLOW);
         if (fds[i] < 0) {
-            fail(error, error_size, "cannot pin managed tool %s: %s", paths[i], strerror(errno));
+            fail(error, error_size, "cannot pin tool %s: %s", paths[i], strerror(errno));
+            goto out;
+        }
+        if (fstat(fds[i], &before[i]) || !S_ISREG(before[i].st_mode)) {
+            fail(error, error_size, "invalid tool %s", paths[i]);
             goto out;
         }
     }
     char pinned[3][64];
-    for (unsigned i = 0; i < G_N_ELEMENTS(fds); i++)
+    for (unsigned i = 0; i < 3; i++)
         snprintf(pinned[i], sizeof(pinned[i]), "/proc/self/fd/%d", fds[i]);
     LatcdConfig snapshot = *config;
     snapshot.compiler = pinned[0];
     snapshot.runner = pinned[1];
     result = validate_toolchain_paths(&snapshot, pinned[2], error, error_size);
+    for (unsigned i = 0; !result && i < 3; i++) {
+        if (fstat(fds[i], &after) || !metadata_equal(&before[i], &after))
+            result = fail(error, error_size, "tool changed during identity validation: %s", paths[i]);
+    }
 out:
-    for (unsigned i = 0; i < G_N_ELEMENTS(fds); i++)
+    if (result) for (unsigned i = 0; i < 3; i++) {
         if (fds[i] >= 0) close(fds[i]);
+        fds[i] = -1;
+    }
     g_free(runtime);
+    return result;
+}
+
+static int validate_managed_toolchain(const LatcdConfig *config, char *error,
+                                      size_t error_size)
+{
+    int fds[3];
+    int result = open_validated_toolchain(config, true, fds, error, error_size);
+    if (!result) for (unsigned i = 0; i < 3; i++) close(fds[i]);
     return result;
 }
 
@@ -3105,32 +3127,14 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         "/usr/bin/true", NULL};
     const char *sandbox_env[] = {"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", NULL};
     const char *compile_args[128];
-    char *sandbox_runtime = g_build_filename(config->runtime_dir, "liblat-aot-runtime.so.2", NULL);
     int tool_fds[3] = {-1, -1, -1};
     int tool_child[3] = {-1, -1, -1};
     if (test_real_compile) {
-        const char *tools[] = {config->compiler, config->runner, sandbox_runtime};
-        struct stat before[3], after;
-        for (unsigned i = 0; i < 3; i++) {
-            tool_fds[i] = open(tools[i], O_PATH | O_CLOEXEC | O_NOFOLLOW);
-            if (tool_fds[i] < 0 || fstat(tool_fds[i], &before[i]) || !S_ISREG(before[i].st_mode) ||
-                (tool_child[i] = fcntl(tool_fds[i], F_DUPFD_CLOEXEC, 16)) < 0)
-                pin_result = -1;
-        }
+        if (open_validated_toolchain(config, false, tool_fds, error, error_size)) pin_result = -1;
         if (!pin_result) {
-            char paths[3][64];
-            for (unsigned i = 0; i < 3; i++)
-                snprintf(paths[i], sizeof(paths[i]), "/proc/self/fd/%d", tool_fds[i]);
-            LatcdConfig pinned = *config;
-            pinned.compiler = paths[0]; pinned.runner = paths[1];
-            if (validate_toolchain_paths(&pinned, paths[2], error, error_size)) pin_result = -1;
-            for (unsigned i = 0; !pin_result && i < 3; i++) {
-                if (fstat(tool_fds[i], &after) || before[i].st_dev != after.st_dev ||
-                    before[i].st_ino != after.st_ino || before[i].st_size != after.st_size ||
-                    before[i].st_mtim.tv_sec != after.st_mtim.tv_sec ||
-                    before[i].st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
-                    before[i].st_ctim.tv_sec != after.st_ctim.tv_sec ||
-                    before[i].st_ctim.tv_nsec != after.st_ctim.tv_nsec) pin_result = -1;
+            for (unsigned i = 0; i < 3; i++) {
+                if ((tool_child[i] = fcntl(tool_fds[i], F_DUPFD_CLOEXEC, 16)) < 0)
+                    pin_result = -1;
             }
         }
     }
@@ -3510,7 +3514,6 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         g_free(parent);
     }
     if (workspace >= 0) close(workspace);
-    g_free(sandbox_runtime);
 #endif
     /*
      * Compiler shell scripts can exit after SIGTERM while a grandchild keeps
