@@ -3265,10 +3265,15 @@ static int inspect_source(const char *path, LatAotExpectedV2 *expected,
     return 0;
 }
 
-static int prepare_key_journal_config(CPUArchState *env, char *error, size_t size)
+static int prepare_key_journal_config(CPUArchState *env, bool native_replay_domain,
+                                      char *error, size_t size)
 {
     LatTranslationConfig config;
     latx_translation_config_capture(env, env_cpu(env)->tcg_cflags, &config);
+    config.native_replay_domain = native_replay_domain &&
+        config.guest_abi == LAT_CONFIG_ABI_X86_64 &&
+        config.values[LAT_CONFIG_LEGACY_AOT] == 0 &&
+        config.values[LAT_CONFIG_PARALLEL] == 1;
     GBytes *bytes;
     if (lat_translation_config_encode(&config, &bytes, error, size)) return -1;
     if (lat_translation_config_digest(&config, key_journal_config_digest, error, size)) {
@@ -3428,11 +3433,12 @@ bool latc_aot_v2_key_retry_service(CPUState *cpu)
     return true;
 }
 
-int latc_aot_v2_prepare(CPUArchState *env)
+int latc_aot_v2_prepare(CPUArchState *env, bool native_replay_domain)
 {
     if (key_journal_enabled && key_journal_config_fd < 0) {
         char error[256] = "missing daemon socket";
-        if (!lat_aot_socket_path() || prepare_key_journal_config(env, error, sizeof(error))) {
+        if (!lat_aot_socket_path() || prepare_key_journal_config(
+                env, native_replay_domain, error, sizeof(error))) {
             fprintf(stderr, "latx: cannot prepare key journal: %s\n", error);
             _exit(125);
         }

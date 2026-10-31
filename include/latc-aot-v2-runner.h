@@ -103,7 +103,7 @@ bool latc_aot_v2_key_resume_jrra(target_ulong pc, uint32_t cflags);
 void latc_aot_v2_collect_existing_jit_tbs(target_ulong guest_begin,
                                           target_ulong guest_end);
 bool latc_aot_v2_is_file_pc(target_ulong guest_pc);
-int latc_aot_v2_prepare(CPUArchState *env);
+int latc_aot_v2_prepare(CPUArchState *env, bool native_replay_domain);
 bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
                              uint32_t cflags, LatcAotV2Target *target);
 void latc_aot_v2_note_cached_miss(const LatcAotV2Target *target);

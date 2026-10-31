@@ -243,9 +243,10 @@ bool latc_aot_v2_is_file_pc(target_ulong guest_pc)
     return false;
 }
 
-int latc_aot_v2_prepare(CPUArchState *env)
+int latc_aot_v2_prepare(CPUArchState *env, bool native_replay_domain)
 {
     (void)env;
+    (void)native_replay_domain;
     return 0;
 }
 

@@ -26,7 +26,7 @@ import time
 from tb_key_set import read_key_set
 
 
-MODES = ('control', 'truncate', 'setfl', 'overwrite', 'dup', 'collision',
+MODES = ('control', 'replay-domain', 'truncate', 'setfl', 'overwrite', 'dup', 'collision',
          'path-control', 'path', 'hardlink', 'symlink', 'scm-control', 'scm',
          'background', 'restart', 'background-active', 'background-retry')
 
@@ -268,7 +268,9 @@ def run_case(prefix, guests, root, mode):
     cache.mkdir()
     endpoint = str(work / 'socket')
     require(len(os.fsencode(endpoint)) < 108, 'use a shorter work path for AF_UNIX')
-    if mode == 'hardlink':
+    if mode == 'replay-domain':
+        guest = guests / 'guest-control'
+    elif mode == 'hardlink':
         guest = guests / 'guest-hardlink'
     elif mode in ('scm-control', 'scm'):
         guest = guests / 'guest-scm'
@@ -279,6 +281,8 @@ def run_case(prefix, guests, root, mode):
                           ('path-control', 'path', 'symlink')
                           else 'guest-' + mode)
     env = guest_environment(prefix, work, root, endpoint)
+    if mode == 'replay-domain':
+        env.pop('LATC_DISABLE_PRETRANSLATE')
     evidence = {'mode': mode, 'environment': env, 'commands': [],
                 'scope': 'real guest with controlled numeric fd; broker owns journal file',
                 'guest_sha256': digest(guest),
@@ -350,6 +354,12 @@ def run_case(prefix, guests, root, mode):
             journals = list((cache / '.journals').glob('*/keys'))
             require(len(journals) == 1, 'expected one registered journal')
             journal = journals[0]
+            config_bytes = (journal.parent / 'config').read_bytes()
+            require(len(config_bytes) >= 64, 'truncated journal configuration')
+            config_flags = struct.unpack_from('<I', config_bytes, 16)[0]
+            require(bool(config_flags & 2) == (mode == 'replay-domain'),
+                    'journal native replay domain does not match runtime mode')
+            evidence['config_flags'] = config_flags
             stat = journal.stat()
             main_table = Path(f'/proc/{runner.pid}/fd')
             main_descriptors = descriptors_for_inode(main_table, stat)

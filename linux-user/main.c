@@ -2307,7 +2307,9 @@ int main(int argc, char **argv, char **envp)
     target_cpu_copy_regs(env, regs);
 
 #ifdef CONFIG_LATX
-    if (latc_aot_v2_prepare(env) && latc_aot_v2_strict_enabled()) {
+    if (latc_aot_v2_prepare(env, native_translation_config_domain() &&
+                            !getenv("LATC_DISABLE_PRETRANSLATE")) &&
+        latc_aot_v2_strict_enabled()) {
         exit(EXIT_FAILURE);
     }
 #endif
