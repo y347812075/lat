@@ -3144,7 +3144,14 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (test_bootstrap && (!bwrap || bwrap[0] != '/')) pin_result = -1;
     int launcher_fds[2] = {-1, -1}, launcher_child[2] = {-1, -1};
     if (test_bootstrap && !pin_result) {
-        if (latcd_managed_launcher_open(bwrap, bootstrap, 0, launcher_fds)) pin_result = -1;
+        if (managed_launcher_fds[0] >= 0 && managed_launcher_fds[1] >= 0) {
+            for (unsigned i = 0; i < 2; i++) {
+                launcher_fds[i] = fcntl(managed_launcher_fds[i], F_DUPFD_CLOEXEC, 16);
+                if (launcher_fds[i] < 0) pin_result = -1;
+            }
+        } else if (latcd_managed_launcher_open(bwrap, bootstrap, 0, launcher_fds)) {
+            pin_result = -1;
+        }
         for (unsigned i = 0; !pin_result && i < 2; i++) {
             if ((launcher_child[i] = fcntl(launcher_fds[i], F_DUPFD_CLOEXEC, 16)) < 0)
                 pin_result = -1;
@@ -8412,7 +8419,9 @@ int main(int argc, char **argv)
 #ifdef LATCD_GC_TIMER_TEST
     const char *test_delegation = getenv("LATCD_TEST_SERVICE_DELEGATION");
     if (test_delegation && *test_delegation && serve && !managed_entry) {
-        if (!getenv("LATCD_TEST_BOOTSTRAP") || !getenv("LATCD_TEST_REAL_COMPILE")) {
+        if (!getenv("LATCD_TEST_BOOTSTRAP") || !getenv("LATCD_TEST_REAL_COMPILE") ||
+            latcd_managed_launcher_open(getenv("LATCD_TEST_BWRAP"), getenv("LATCD_TEST_BOOTSTRAP"),
+                                        0, managed_launcher_fds)) {
             fprintf(stderr, "latcd: incomplete test managed worker configuration\n");
             return 1;
         }
