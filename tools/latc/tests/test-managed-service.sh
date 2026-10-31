@@ -100,6 +100,51 @@ wait "$pid"
 pid=
 test ! -e "$work/admin/admin.sock"
 test ! -e "$work/broker/broker.sock"
+if [ "${LATCD_TEST_REAL_DELEGATION:-0}" = 1 ]; then
+    scope=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
+    mkdir "$scope/supervisor"
+    printf '%s\n' "$$" > "$scope/supervisor/cgroup.procs"
+    printf '%s\n' '+memory +pids' > "$scope/cgroup.subtree_control"
+    mkdir "$scope/worker"
+    chown 1234:1234 "$scope/worker" "$scope/worker/cgroup.procs" \
+        "$scope/worker/cgroup.subtree_control"
+    sed "s|}$|,\"worker_cgroup\":\"$scope/worker\"}|" "$work/config" > "$work/delegated-config"
+    # The trusted supervisor places the process before it drops privileges.
+    sh -c 'printf "%s\n" "$$" > "$1/cgroup.procs"; shift; exec "$@"' sh "$scope/worker" \
+        setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
+        env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/delegated-config" \
+        >"$work/delegated.out" 2>"$work/delegated.err" &
+    pid=$!
+    n=0
+    while [ ! -S "$work/broker/broker.sock" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then cat "$work/delegated.err" >&2; exit 1; fi
+        n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+    done
+    grep -q 'worker delegation initialized; compiler disabled' "$work/delegated.err"
+    grep -qx "$pid" "$scope/worker/manager/cgroup.procs"
+    mkdir "$scope/worker/preserved-task"
+    kill -TERM "$pid"
+    wait "$pid"
+    pid=
+    sh -c 'printf "%s\n" "$$" > "$1/cgroup.procs"; shift; exec "$@"' sh "$scope/worker/manager" \
+        setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
+        env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/delegated-config" \
+        >"$work/restarted.out" 2>"$work/restarted.err" &
+    pid=$!
+    n=0
+    while [ ! -S "$work/broker/broker.sock" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then cat "$work/restarted.err" >&2; exit 1; fi
+        n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+    done
+    grep -q 'worker delegation initialized; compiler disabled' "$work/restarted.err"
+    grep -qx "$pid" "$scope/worker/manager/cgroup.procs"
+    test -d "$scope/worker/preserved-task"
+    kill -TERM "$pid"
+    wait "$pid"
+    pid=
+    rmdir "$scope/worker/preserved-task"
+    rmdir "$scope/worker/manager" "$scope/worker"
+fi
 touch "$work/broker/broker.sock"
 chown 1234:1234 "$work/broker/broker.sock"
 if run_service >"$work/failure.out" 2>"$work/failure.err"; then exit 1; fi
