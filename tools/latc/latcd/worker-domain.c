@@ -90,9 +90,15 @@ int latcd_worker_delegation_init(int parent, int *manager)
     if (cgroup_dir(parent)) return -1;
     char expected[32];
     snprintf(expected, sizeof(expected), "%ld\n", (long)getpid());
-    bool created = !mkdirat(parent, "manager", 0700);
-    if (!created && errno != EEXIST) return -1;
     int child = openat(parent, "manager", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool created = false;
+    if (child < 0 && errno == ENOENT) {
+        /* Do not modify a delegation until this process is known to belong
+         * directly to it. A competing creator fails closed. */
+        if (only_process(parent, expected) || mkdirat(parent, "manager", 0700)) return -1;
+        created = true;
+        child = openat(parent, "manager", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    }
     if (child < 0) return -1;
     if (cgroup_dir(child) || (created ?
         (only_process(parent, expected) || only_process(child, "") ||

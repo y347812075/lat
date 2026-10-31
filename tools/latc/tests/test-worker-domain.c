@@ -41,6 +41,14 @@ int main(int argc, char **argv)
     if (argc != 2) return 0;
     int parent = latcd_worker_delegation_open(argv[1]);
     assert(parent >= 0);
+    assert(!mkdirat(parent, "wrong-target", 0700));
+    int wrong_target = openat(parent, "wrong-target", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(wrong_target >= 0);
+    assert(latcd_worker_delegation_init(wrong_target, &manager) < 0 && errno == EBUSY);
+    struct stat missing;
+    assert(fstatat(wrong_target, "manager", &missing, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT);
+    close(wrong_target);
+    assert(!unlinkat(parent, "wrong-target", AT_REMOVEDIR));
     assert(!latcd_worker_delegation_init(parent, &manager) && manager >= 0);
     int domain = latcd_worker_domain_create(parent, "latcd-domain-test", &identity);
     assert(domain >= 0);
