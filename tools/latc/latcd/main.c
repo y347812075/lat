@@ -3157,7 +3157,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         "--clearenv", "--setenv", "PATH", "/usr/bin:/bin", "--", "/bootstrap",
         "/usr/bin/true", NULL};
     const char *sandbox_env[] = {"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", NULL};
-    const char *compile_args[128];
+    GPtrArray *compile_options = g_ptr_array_new();
+    GPtrArray *compile_exec = g_ptr_array_new();
     int tool_fds[3] = {-1, -1, -1};
     int tool_child[3] = {-1, -1, -1};
     if (test_real_compile) {
@@ -3176,10 +3177,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             }
         }
     }
-    size_t arg = 0;
-#define TEST_ARG(value) (compile_args[arg++] = (value))
+#define TEST_ARG(value) g_ptr_array_add(compile_options, (gpointer)(value))
     if (test_real_compile) {
-        const char *initial[] = {bwrap, "--unshare-all", "--die-with-parent",
+        const char *initial[] = {"--unshare-all", "--die-with-parent",
             "--ro-bind", toolroot, "/usr", "--symlink", "usr/bin", "/bin",
             "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
             "--proc", "/proc", "--dev", "/dev", "--size", "268435456", "--tmpfs", "/work",
@@ -3209,33 +3209,26 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         if (allow_zero_eflags_stub) { TEST_ARG("--setenv"); TEST_ARG("LATC_AOT_ALLOW_ZERO_EFLAGS_STUB"); TEST_ARG("1"); }
         if (base_native) { TEST_ARG("--setenv"); TEST_ARG("LATC_NATIVE_BASE"); TEST_ARG(paths[2]); }
         if (base_module) { TEST_ARG("--setenv"); TEST_ARG("LATC_NATIVE_BASE_MODULE"); TEST_ARG(paths[3]); }
-        const char *command[] = {"--", "/bootstrap", "/usr/bin/latc", "compile-module", paths[0],
+        const char *command[] = {bwrap, "--args", "15", "--", "/bootstrap", "/usr/bin/latc", "compile-module", paths[0],
             "-o", "/work/output.so", "--runner", "/usr/bin/latx-x86_64", "--runtime-dir", "/usr/lib"};
-        for (size_t i = 0; i < G_N_ELEMENTS(command); i++) TEST_ARG(command[i]);
-        if (tbset) { TEST_ARG("--tbset"); TEST_ARG(paths[1]); }
-        if (static_tbset) TEST_ARG("--static-tbset");
+        for (size_t i = 0; i < G_N_ELEMENTS(command); i++)
+            g_ptr_array_add(compile_exec, (gpointer)command[i]);
+        if (tbset) { g_ptr_array_add(compile_exec, "--tbset"); g_ptr_array_add(compile_exec, (gpointer)paths[1]); }
+        if (static_tbset) g_ptr_array_add(compile_exec, "--static-tbset");
     }
-    TEST_ARG(NULL);
+    g_ptr_array_add(compile_exec, NULL);
 #undef TEST_ARG
     int args_fd = -1, args_child = -1;
-    const char *compile_exec_args[20] = {bwrap, "--args", "15", "--"};
     if (test_real_compile && !pin_result) {
         args_fd = syscall(SYS_memfd_create, "latcd-bwrap-args",
                           MFD_CLOEXEC | MFD_ALLOW_SEALING);
         if (args_fd < 0) pin_result = -1;
-        size_t i = 1;
-        for (; !pin_result && compile_args[i] && strcmp(compile_args[i], "--"); i++) {
-            size_t length = strlen(compile_args[i]) + 1;
-            if (write(args_fd, compile_args[i], length) != (ssize_t)length)
+        for (size_t i = 0; !pin_result && i < compile_options->len; i++) {
+            const char *option = g_ptr_array_index(compile_options, i);
+            size_t length = strlen(option) + 1;
+            if (write(args_fd, option, length) != (ssize_t)length)
                 pin_result = -1;
         }
-        if (!pin_result && compile_args[i]) {
-            size_t out = 4;
-            for (i++; compile_args[i] && out + 1 < G_N_ELEMENTS(compile_exec_args); i++)
-                compile_exec_args[out++] = compile_args[i];
-            if (compile_args[i]) pin_result = -1;
-            compile_exec_args[out] = NULL;
-        } else pin_result = -1;
         if (!pin_result && (fcntl(args_fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW |
                                   F_SEAL_SHRINK | F_SEAL_SEAL) ||
                             lseek(args_fd, 0, SEEK_SET) < 0 ||
@@ -3323,7 +3316,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             if (test_bootstrap) {
                 if (n != 1 || permit != '1' || dup2(8, 3) < 0) _exit(126);
                 close(8);
-                syscall(SYS_execveat, 13, "", (char *const *)(test_real_compile ? compile_exec_args : sandbox_args),
+                syscall(SYS_execveat, 13, "", (char *const *)(test_real_compile ? compile_exec->pdata : (gpointer)sandbox_args),
                         (char *const *)sandbox_env, AT_EMPTY_PATH);
                 _exit(127);
             }
@@ -3403,6 +3396,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (filter >= 0) close(filter);
     if (args_child >= 0) close(args_child);
     if (args_fd >= 0) close(args_fd);
+    g_ptr_array_free(compile_options, TRUE);
+    g_ptr_array_free(compile_exec, TRUE);
     for (unsigned i = 0; i < 3; i++) {
         if (tool_child[i] >= 0) close(tool_child[i]);
         if (tool_fds[i] >= 0) close(tool_fds[i]);
