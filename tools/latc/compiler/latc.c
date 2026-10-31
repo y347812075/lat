@@ -429,14 +429,17 @@ static int compile_replay_native(const char *input, const char *output,
     gchar *script = g_build_filename(tool_dir, "scripts",
                                      "compile-native-image.sh", NULL);
 #endif
+    gchar **environment = g_get_environ();
+    environment = g_environ_setenv(environment, "LATC_TRANSLATION_CONFIG_FROM",
+                                   config, TRUE);
+    const char *arguments[] = {script, "--config-replay", executable,
+                               runner, input, output, tbset, NULL};
     pid_t child = fork();
     if (child == 0) {
-        if (setenv("LATC_TRANSLATION_CONFIG_FROM", config, 1)) _exit(126);
-        execl(script, script, "--config-replay", executable, runner, input,
-              output, tbset, (char *)NULL);
-        fprintf(stderr, "latc: cannot execute %s: %s\n", script, strerror(errno));
+        execve(script, (char *const *)arguments, environment);
         _exit(127);
     }
+    g_strfreev(environment);
     g_free(script);
 #ifndef LATC_INSTALLED_SCRIPT_DIR
     g_free(tool_dir);
