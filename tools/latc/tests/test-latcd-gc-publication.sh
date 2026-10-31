@@ -166,8 +166,15 @@ if [ "$mode" != unreferenced ]; then
     grep -q 'test waiting timer woke' "$log"
 else
     python3 - "$work/stats.json" <<'PY'
-import json, sys
-assert json.load(open(sys.argv[1]))['retirement_timer_wakeups'] > 0
+import json, pathlib, sys, time
+path = pathlib.Path(sys.argv[1])
+deadline = time.monotonic() + 5
+while True:
+    if json.loads(path.read_text())['retirement_timer_wakeups'] > 0:
+        break
+    if time.monotonic() >= deadline:
+        raise AssertionError('retirement timer wakeup not reflected in statistics')
+    time.sleep(0.05)
 PY
 fi
 if [ "$mode" = pin ]; then
