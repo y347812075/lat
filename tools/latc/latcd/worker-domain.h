@@ -4,6 +4,11 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+/* Initialize a fresh, caller-owned delegated cgroup before starting threads.
+ * The caller is moved into manager; parent remains open for task cgroups.
+ * Failure may leave manager in place and must not be retried in the same scope. */
+int latcd_worker_delegation_init(int parent, int *manager);
+
 /* All operations use a held cgroup v2 directory, never a worker path. */
 int latcd_worker_domain_create(int parent, const char *name, struct stat *identity);
 int latcd_worker_domain_populated(int parent, const char *name,

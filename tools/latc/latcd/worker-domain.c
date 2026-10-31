@@ -33,6 +33,54 @@ static int cgroup_dir(int fd)
     return 0;
 }
 
+static int write_text(int dir, const char *name, const char *text)
+{
+    int fd = openat(dir, name, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    size_t length = strlen(text);
+    ssize_t n;
+    do { n = write(fd, text, length); } while (n < 0 && errno == EINTR);
+    int saved = errno;
+    close(fd);
+    if (n != (ssize_t)length) { errno = n < 0 ? saved : EIO; return -1; }
+    return 0;
+}
+
+int latcd_worker_delegation_init(int parent, int *manager)
+{
+    if (!manager) { errno = EINVAL; return -1; }
+    *manager = -1;
+    if (cgroup_dir(parent)) return -1;
+    int procs = openat(parent, "cgroup.procs", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (procs < 0) return -1;
+    char data[4096];
+    ssize_t n;
+    do { n = read(procs, data, sizeof(data) - 1); } while (n < 0 && errno == EINTR);
+    int saved = errno;
+    close(procs);
+    if (n <= 0 || n == (ssize_t)sizeof(data) - 1) {
+        errno = n < 0 ? saved : EINVAL;
+        return -1;
+    }
+    data[n] = 0;
+    char expected[32];
+    snprintf(expected, sizeof(expected), "%ld\n", (long)getpid());
+    /* A fresh scope must contain only this single-threaded manager. */
+    if (strcmp(data, expected)) { errno = EBUSY; return -1; }
+    if (mkdirat(parent, "manager", 0700)) return -1;
+    int child = openat(parent, "manager", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (child < 0) return -1;
+    if (cgroup_dir(child) || write_text(child, "cgroup.procs", expected) ||
+        write_text(parent, "cgroup.subtree_control", "+memory +pids")) {
+        saved = errno;
+        close(child);
+        errno = saved;
+        return -1;
+    }
+    *manager = child;
+    return 0;
+}
+
 static int write_limit(int dir, const char *name, uint64_t value)
 {
     char data[32];

@@ -33,10 +33,13 @@ int main(int argc, char **argv)
     assert(latcd_worker_domain_create(ordinary, "test", &identity) < 0 && errno == EINVAL);
     assert(latcd_worker_domain_set_limits(ordinary, 1, 1) < 0 && errno == EINVAL);
     assert(latcd_worker_domain_clone(ordinary) < 0 && errno == EINVAL);
+    int manager = -1;
+    assert(latcd_worker_delegation_init(ordinary, &manager) < 0 && errno == EINVAL);
     close(ordinary);
     if (argc != 2) return 0;
     int parent = open(argv[1], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     assert(parent >= 0);
+    assert(!latcd_worker_delegation_init(parent, &manager) && manager >= 0);
     int domain = latcd_worker_domain_create(parent, "latcd-domain-test", &identity);
     assert(domain >= 0);
     assert(latcd_worker_domain_set_limits(domain, 0, 1) < 0 && errno == EINVAL);
@@ -103,6 +106,7 @@ int main(int argc, char **argv)
     assert(!unlinkat(parent, "latcd-domain-test", AT_REMOVEDIR));
     assert(latcd_worker_domain_populated(parent, "latcd-domain-test", &identity, &value) < 0 && errno == ENOENT);
     assert(latcd_worker_domain_kill(parent, "latcd-domain-test", &identity) < 0 && errno == ENOENT);
+    close(manager);
     close(parent);
     return 0;
 }
