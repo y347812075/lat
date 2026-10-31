@@ -61,6 +61,12 @@ while [ ! -S "$work/broker/broker.sock" ]; do
     n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
 done
 test -S "$work/admin/admin.sock"
+# Managed services must remain available to process retirement deadlines even
+# when no clients send requests; their lifetime is controlled externally.
+sleep 2
+kill -0 "$pid"
+test -S "$work/admin/admin.sock"
+test -S "$work/broker/broker.sock"
 setpriv --reuid=1236 --regid=1236 --clear-groups python3 - "$work/broker/broker.sock" <<'PY'
 import socket, sys
 with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as s:
