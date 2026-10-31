@@ -112,6 +112,10 @@ test-worker-domain: $(BUILD)/tests/test-worker-domain
 	$(BUILD)/tests/test-worker-domain
 test: test-worker-domain
 
+$(BUILD)/latcd/worker-bootstrap: latcd/worker-bootstrap.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $<
+
 test-native-config-replay:
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)" || \
 	  { echo "usage: make test-native-config-replay INSTALL_PREFIX=... X86_GUEST=... TBSET=... WORK=..."; exit 2; }
@@ -221,7 +225,7 @@ $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer \
 $(BUILD)/tests/test-journal-store $(BUILD)/tests/test-latcd-channel \
 $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/managed-config.o $(BUILD)/latcd/managed-path.o
 
-$(BUILD)/latcd/latcd: $(BUILD)/latcd/worker-seccomp.o
+$(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer: $(BUILD)/latcd/worker-seccomp.o
 $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-journal-store \
 $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/worker-domain.o
 

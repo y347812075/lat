@@ -18,6 +18,7 @@
 #include "broker-transport.h"
 #include "managed-config.h"
 #include "worker-domain.h"
+#include "worker-seccomp.h"
 #include "managed-path.h"
 
 #include <dlfcn.h>
@@ -29,6 +30,7 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <linux/memfd.h>
+#include <linux/magic.h>
 #include <pthread.h>
 #include <poll.h>
 #include <signal.h>
@@ -44,6 +46,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
 #include <time.h>
@@ -1564,6 +1567,8 @@ static void task_root_test_barrier(bool copying, char stage)
 static int record_compiler_budget(const LatcdConfig *config, const char *id,
                                    const struct stat *task, uint64_t bytes);
 
+static _Thread_local bool task_roots_busy;
+
 /* The immutable record is also the lease inode. No completion or deletion claim. */
 static int record_task(const LatcdConfig *config, bool copying,
                                 const char *const paths[6], const int pins[4],
@@ -1585,7 +1590,10 @@ static int record_task(const LatcdConfig *config, bool copying,
      * executor's roots-to-object order. Keep SH through durable registration. */
     int roots = latcd_retirement_roots_lock(config->cache_dir, LOCK_SH | LOCK_NB,
                                             error, error_size);
-    if (roots < 0) goto out;
+    if (roots < 0) {
+        if (!copying && (errno == EWOULDBLOCK || errno == EAGAIN)) task_roots_busy = true;
+        goto out;
+    }
     task_root_test_barrier(copying, 'l');
     root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (root < 0 || (gc = open_task_directory(root, ".gc")) < 0 ||
@@ -2024,7 +2032,15 @@ out:
 typedef struct LatcdCompilerTask {
     char id[37];
     struct stat identity;
+    int publication_lease;
 } LatcdCompilerTask;
+
+static void compiler_task_free(gpointer data)
+{
+    LatcdCompilerTask *task = data;
+    if (task->publication_lease >= 0) close(task->publication_lease);
+    g_free(task);
+}
 
 static pthread_mutex_t compiler_task_lock = PTHREAD_MUTEX_INITIALIZER;
 static GHashTable *local_compiler_tasks;
@@ -2096,8 +2112,7 @@ static bool compiler_release_matches(int releases, const char *name,
 static int release_copy_task(const LatcdConfig *config, int task_pin,
                               char *error, size_t error_size);
 
-/* Caller owns the daemon lease. Surviving tasks retain SH on the task inode;
- * only absent outputs may reach a recovered terminal state. */
+/* Caller owns the daemon lease and the exclusive task lease. */
 static int recover_managed_domain(const LatcdConfig *config, const char *id, int task)
 {
     LatcdManagedDomain domain = {0};
@@ -2108,11 +2123,22 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
     if (worker_delegation_fd < 0 ||
         latcd_managed_task_domain(config->cache_dir, id, task, &domain,
                                   LATCD_MANAGED_PREPARED, error, sizeof(error))) goto out;
-    if (domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY) {
+    if (domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY ||
+        domain.state == LATCD_MANAGED_OUTPUTS_REMOVED) {
         result = 0;
         goto out;
     }
-    if ((domain.state != LATCD_MANAGED_BOUND && domain.state != LATCD_MANAGED_AUTHORIZED) ||
+    if (domain.state == LATCD_MANAGED_OUTPUT_ADOPTED) {
+        if (latcd_managed_outputs_discard(config->cache_dir, id, task, error, sizeof(error))) goto out;
+        /* The publisher may have removed both temporary links before the
+         * manifest commit. This records only their absence, not publication. */
+        if (!latcd_managed_task_domain(config->cache_dir, id, task, &domain,
+                                       LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error)))
+            result = 0;
+        goto out;
+    }
+    if ((domain.state != LATCD_MANAGED_BOUND && domain.state != LATCD_MANAGED_AUTHORIZED &&
+         domain.state != LATCD_MANAGED_WORKSPACE_READY) ||
         fstat(worker_delegation_fd, &delegation) ||
         delegation.st_dev != domain.delegation.st_dev || delegation.st_ino != domain.delegation.st_ino ||
         !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, &length, NULL)) goto out;
@@ -2199,8 +2225,17 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
         bool valid = task >= 0 && !fstat(task, &before) &&
             S_ISREG(before.st_mode) && before.st_uid == geteuid() &&
             before.st_nlink == 1 && !(before.st_mode & 0222) &&
-            before.st_size > 0 && (uint64_t)before.st_size <= sizeof(data) &&
-            !flock(task, LOCK_EX | LOCK_NB) &&
+            before.st_size > 0 && (uint64_t)before.st_size <= sizeof(data);
+        if (valid && flock(task, LOCK_EX | LOCK_NB)) {
+            if (errno == EWOULDBLOCK || errno == EAGAIN) {
+                g_key_file_free(record);
+                close(task);
+                retained++;
+                continue;
+            }
+            valid = false;
+        }
+        valid = valid &&
             pread(task, data, before.st_size, 0) == before.st_size &&
             !fstat(task, &after) && metadata_equal(&before, &after) &&
             g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
@@ -2216,6 +2251,12 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
         }
         if (managed) {
             bool unsafe = !valid || recover_managed_domain(config, id, task);
+            LatcdManagedDomain terminal = {0};
+            char state_error[256];
+            if (!unsafe && !latcd_managed_task_domain(config->cache_dir, id, task, &terminal,
+                    LATCD_MANAGED_PREPARED, state_error, sizeof(state_error)) &&
+                terminal.state == LATCD_MANAGED_OUTPUTS_REMOVED)
+                latcd_cache_capacity_release_task(&generation_capacity, id);
             g_key_file_free(record);
             if (task >= 0) close(task);
             retained++;
@@ -2943,8 +2984,10 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (task_lease < 0) pin_result = -1;
     if (task_lease >= 0) {
         LatcdCompilerTask *task = g_new0(LatcdCompilerTask, 1);
+        task->publication_lease = -1;
         g_strlcpy(task->id, task_id, sizeof(task->id));
-        if (fstat(task_lease, &task->identity)) {
+        if (fstat(task_lease, &task->identity) ||
+            (config->managed && (task->publication_lease = fcntl(task_lease, F_DUPFD_CLOEXEC, 3)) < 0)) {
             g_free(task);
             pin_result = -1;
         } else {
@@ -2960,6 +3003,60 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         snapshot_managed_inputs(input_pins, input_copies, digest, error, error_size))
         pin_result = -1;
     int gate[2] = {-1, -1}, domain_fd = -1;
+#ifdef LATCD_GC_TIMER_TEST
+    int handoff[2] = {-1, -1}, filter = -1, workspace = -1;
+    bool test_bootstrap = config->managed && getenv("LATCD_TEST_BOOTSTRAP");
+    bool test_real_compile = test_bootstrap && getenv("LATCD_TEST_REAL_COMPILE");
+    bool handoff_failed = false;
+    const char *bootstrap = test_bootstrap ? getenv("LATCD_TEST_BOOTSTRAP") : NULL;
+    const char *toolroot = test_bootstrap ? getenv("LATCD_TEST_TOOLROOT") : NULL;
+    if (test_bootstrap && (!toolroot || bootstrap[0] != '/' || toolroot[0] != '/' ||
+        socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, handoff) ||
+        (filter = latcd_worker_seccomp_fd()) < 0)) pin_result = -1;
+    int handoff_child = handoff[1] < 0 ? -1 : fcntl(handoff[1], F_DUPFD_CLOEXEC, 16);
+    int filter_child = filter < 0 ? -1 : fcntl(filter, F_DUPFD_CLOEXEC, 16);
+    if (test_bootstrap && (handoff_child < 0 || filter_child < 0)) pin_result = -1;
+    const char *bwrap = test_bootstrap ? getenv("LATCD_TEST_BWRAP") : NULL;
+    if (test_bootstrap && (!bwrap || bwrap[0] != '/')) pin_result = -1;
+    const char *sandbox_args[] = {bwrap, "--unshare-all", "--die-with-parent",
+        "--ro-bind", toolroot, "/usr", "--symlink", "usr/bin", "/bin",
+        "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
+        "--proc", "/proc", "--dev", "/dev", "--size", "67108864", "--tmpfs", "/work",
+        "--ro-bind", bootstrap, "/bootstrap", "--seccomp", "9", "--chdir", "/work",
+        "--clearenv", "--setenv", "PATH", "/usr/bin:/bin", "--", "/bootstrap",
+        "/usr/bin/true", NULL};
+    const char *sandbox_env[] = {"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", NULL};
+    const char *compile_args[96];
+    size_t arg = 0;
+#define TEST_ARG(value) (compile_args[arg++] = (value))
+    if (test_real_compile) {
+        const char *initial[] = {bwrap, "--unshare-all", "--die-with-parent",
+            "--ro-bind", toolroot, "/usr", "--symlink", "usr/bin", "/bin",
+            "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
+            "--proc", "/proc", "--dev", "/dev", "--size", "268435456", "--tmpfs", "/work",
+            "--dir", "/input"};
+        for (size_t i = 0; i < G_N_ELEMENTS(initial); i++) TEST_ARG(initial[i]);
+        const char *fds[] = {"4", "5", "6", "7"};
+        const char *paths[] = {"/input/source", "/input/tbset", "/input/base.native", "/input/base.so"};
+        for (unsigned i = 0; i < 4; i++) if (input_copies[i] >= 0) {
+            TEST_ARG("--ro-bind-data"); TEST_ARG(fds[i]); TEST_ARG(paths[i]);
+        }
+        const char *setup[] = {"--ro-bind", bootstrap, "/bootstrap", "--seccomp", "9", "--chdir", "/work",
+            "--clearenv", "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "CC", "/usr/bin/gcc",
+            "--setenv", "TMPDIR", "/work", "--setenv", "LD_LIBRARY_PATH", "/usr/lib",
+            "--setenv", "LATC_NATIVE_OUTPUT", "/work/output.native"};
+        for (size_t i = 0; i < G_N_ELEMENTS(setup); i++) TEST_ARG(setup[i]);
+        if (base_native) { TEST_ARG("--setenv"); TEST_ARG("LATC_NATIVE_BASE"); TEST_ARG(paths[2]); }
+        if (base_module) { TEST_ARG("--setenv"); TEST_ARG("LATC_NATIVE_BASE_MODULE"); TEST_ARG(paths[3]); }
+        const char *command[] = {"--", "/bootstrap", "/usr/bin/latc", "compile-module", paths[0],
+            "-o", "/work/output.so", "--runner", "/usr/bin/latx-x86_64", "--runtime-dir", "/usr/lib"};
+        for (size_t i = 0; i < G_N_ELEMENTS(command); i++) TEST_ARG(command[i]);
+        if (tbset) { TEST_ARG("--tbset"); TEST_ARG(paths[1]); }
+        if (static_tbset) TEST_ARG("--static-tbset");
+    }
+    TEST_ARG(NULL);
+#undef TEST_ARG
+#endif
     LatcdManagedDomain domain = {0};
     pid_t child = -1;
 #ifdef LATCD_GC_TIMER_TEST
@@ -2994,12 +3091,26 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                     close(4 + i);
                 }
             }
-            close(0); close(1); close(2);
-            if (syscall(SYS_close_range, 8u, ~0u, 0u)) _exit(126);
+#ifdef LATCD_GC_TIMER_TEST
+            if (test_bootstrap && (dup2(handoff_child, 8) < 0 || dup2(filter_child, 9) < 0)) _exit(126);
+#endif
+            close(0); close(1);
+#ifdef LATCD_GC_TIMER_TEST
+            if (!test_bootstrap) close(2);
+#else
+            close(2);
+#endif
+            if (syscall(SYS_close_range,
+#ifdef LATCD_GC_TIMER_TEST
+                        test_bootstrap ? 10u : 8u,
+#else
+                        8u,
+#endif
+                        ~0u, 0u)) _exit(126);
 #ifdef LATCD_GC_TIMER_TEST
             if (fcntl(0, F_GETFD) != -1 || errno != EBADF ||
                 fcntl(1, F_GETFD) != -1 || errno != EBADF ||
-                fcntl(2, F_GETFD) != -1 || errno != EBADF) _exit(126);
+                (!test_bootstrap && (fcntl(2, F_GETFD) != -1 || errno != EBADF))) _exit(126);
             for (unsigned i = 0; i < 4; i++) {
                 if (input_copies[i] >= 0) {
                     int seals = fcntl(4 + i, F_GET_SEALS);
@@ -3015,6 +3126,13 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             ssize_t n;
             do { n = read(3, &permit, 1); } while (n < 0 && errno == EINTR);
 #ifdef LATCD_GC_TIMER_TEST
+            if (test_bootstrap) {
+                if (n != 1 || permit != '1' || dup2(8, 3) < 0) _exit(126);
+                close(8);
+                execve(bwrap, (char *const *)(test_real_compile ? compile_args : sandbox_args),
+                       (char *const *)sandbox_env);
+                _exit(127);
+            }
             if (n == 1 && permit == '1' && test_descendant) {
                 int ready[2];
                 if (pipe(ready)) _exit(126);
@@ -3084,6 +3202,51 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (gate[0] >= 0) close(gate[0]);
     if (gate[1] >= 0) close(gate[1]);
     if (domain_fd >= 0) close(domain_fd);
+#ifdef LATCD_GC_TIMER_TEST
+    if (handoff[1] >= 0) close(handoff[1]);
+    if (handoff_child >= 0) close(handoff_child);
+    if (filter_child >= 0) close(filter_child);
+    if (filter >= 0) close(filter);
+    if (test_bootstrap && child > 0) {
+        struct pollfd ready = {.fd = handoff[0], .events = POLLIN};
+        char payload[32];
+        struct iovec iov = {.iov_base = payload, .iov_len = sizeof(payload)};
+        union { struct cmsghdr align; char data[CMSG_SPACE(sizeof(int))]; } control = {0};
+        struct msghdr msg = {.msg_iov = &iov, .msg_iovlen = 1,
+                             .msg_control = control.data, .msg_controllen = sizeof(control.data)};
+        int polled;
+        do { polled = poll(&ready, 1, 30000); } while (polled < 0 && errno == EINTR);
+        ssize_t n = polled > 0 ? recvmsg(handoff[0], &msg, MSG_CMSG_CLOEXEC) : -1;
+        struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+        const char expected[] = "LATCD-WORKSPACE-1";
+        bool valid_message = n == sizeof(expected) && !memcmp(payload, expected, sizeof(expected)) &&
+            !(msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) && c &&
+            c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS &&
+            c->cmsg_len == CMSG_LEN(sizeof(int)) && !CMSG_NXTHDR(&msg, c);
+        for (c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
+            if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS ||
+                c->cmsg_len < CMSG_LEN(0)) continue;
+            size_t count = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+            for (size_t i = 0; i < count; i++) {
+                int received;
+                memcpy(&received, CMSG_DATA(c) + i * sizeof(received), sizeof(received));
+                if (valid_message && workspace < 0) workspace = received;
+                else close(received);
+            }
+        }
+        struct statfs fs;
+        struct stat st;
+        bool valid = workspace >= 0 && !fstat(workspace, &st) && S_ISDIR(st.st_mode) &&
+            !fstatfs(workspace, &fs) && (unsigned long)fs.f_type == TMPFS_MAGIC;
+        if (!valid || latcd_managed_task_domain(config->cache_dir, task_id, task_lease,
+                &domain, LATCD_MANAGED_WORKSPACE_READY, error, error_size) ||
+            send(handoff[0], "1", 1, MSG_NOSIGNAL) != 1) {
+            handoff_failed = true;
+            (void)latcd_worker_domain_kill(worker_delegation_fd, task_id, &domain.domain);
+        }
+    }
+    if (handoff[0] >= 0) close(handoff[0]);
+#endif
     if (child < 0) {
         if (task_lease >= 0) close(task_lease);
         g_free(task_id);
@@ -3117,9 +3280,22 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (config->managed) {
         int populated = 1;
         bool empty = false;
-        bool cancelled = waited != child || !WIFEXITED(status) || WEXITSTATUS(status);
+        bool cancelled = waited != child || !WIFEXITED(status) || WEXITSTATUS(status)
+#ifdef LATCD_GC_TIMER_TEST
+                         || handoff_failed
+#endif
+                         ;
         if (!latcd_worker_domain_populated(worker_delegation_fd, task_id,
                                             &domain.domain, &populated)) {
+#ifdef LATCD_GC_TIMER_TEST
+            if (test_bootstrap && !cancelled) {
+                for (unsigned i = 0; populated && i < 100; i++) {
+                    usleep(10000);
+                    if (latcd_worker_domain_populated(worker_delegation_fd, task_id,
+                                                       &domain.domain, &populated)) break;
+                }
+            }
+#endif
             if (populated) {
                 cancelled = true;
                 (void)latcd_worker_domain_kill(worker_delegation_fd, task_id, &domain.domain);
@@ -3142,6 +3318,56 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             errno = ECANCELED;
         }
     }
+#ifdef LATCD_GC_TIMER_TEST
+    if (test_real_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&
+        !WEXITSTATUS(status) && domain.state == LATCD_MANAGED_DOMAIN_EMPTY) {
+        const char *names[] = {"output.native", "output.so"};
+        const char *destinations[] = {output_native, output};
+        if (latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
+                                     LATCD_MANAGED_ADOPTING, error, error_size)) waited = -1;
+        for (unsigned i = 0; waited == child && i < 2; i++) {
+            int fd = openat(workspace, names[i], O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+            struct stat st;
+            if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+                st.st_size <= 0 || st.st_size > 64 * 1024 * 1024) {
+                if (fd >= 0) close(fd);
+                waited = -1; errno = EINVAL; break;
+            }
+            int out = open(destinations[i], O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+            char bytes[65536];
+            off_t offset = 0;
+            bool copied = out >= 0;
+            while (copied && offset < st.st_size) {
+                size_t wanted = MIN((uint64_t)sizeof(bytes), (uint64_t)(st.st_size - offset));
+                ssize_t n = pread(fd, bytes, wanted, offset);
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) { copied = false; break; }
+                ssize_t done = 0;
+                while (done < n) {
+                    ssize_t w = write(out, bytes + done, n - done);
+                    if (w < 0 && errno == EINTR) continue;
+                    if (w <= 0) { copied = false; break; }
+                    done += w;
+                }
+                offset += n;
+            }
+            if (copied && fsync(out)) copied = false;
+            if (out >= 0) close(out);
+            close(fd);
+            if (!copied) { waited = -1; errno = EIO; break; }
+        }
+        char *parent = g_path_get_dirname(output);
+        if (waited == child && (sync_directory(parent, error, error_size) ||
+            latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
+                                      LATCD_MANAGED_OUTPUT_ADOPTED, error, error_size) ||
+            latcd_managed_outputs_verify(config->cache_dir, task_id, task_lease,
+                                         error, error_size))) waited = -1;
+        if (waited == child && getenv("LATCD_TEST_CRASH_AFTER_OUTPUT_ADOPTED"))
+            kill(getpid(), SIGKILL);
+        g_free(parent);
+    }
+    if (workspace >= 0) close(workspace);
+#endif
     /*
      * Compiler shell scripts can exit after SIGTERM while a grandchild keeps
      * translating in the compiler's process group.  Do not lose the PGID
@@ -4615,6 +4841,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
                             uint64_t published_sequence,
                             LatcdResponseV2 *response)
 {
+    task_roots_busy = false;
     char error[sizeof(response->message)] = {0};
     char *temporary_dir = g_build_filename(config->cache_dir, ".tmp", NULL);
     char *module = NULL;
@@ -4626,7 +4853,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     char *base_native = NULL;
     char *base_module = NULL;
     int baseline_pins[4] = {-1, -1, -1, -1};
-    GPtrArray *compiler_tasks = g_ptr_array_new_with_free_func(g_free);
+    GPtrArray *compiler_tasks = g_ptr_array_new_with_free_func(compiler_task_free);
     uint64_t transient_reservation = 0;
     char *retained_tbset = NULL;
     char *module_name = NULL;
@@ -4791,6 +5018,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
                                        base_native, base_module, native,
                                        module, digest, compiler_tasks, &transient_reservation, error, sizeof(error));
     if (compiler_result) {
+        if (task_roots_busy) goto out;
         if (!base_native) {
             status = LATCD_STATUS_COMPILE_FAILED;
             goto out;
@@ -4989,6 +5217,10 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     if (tbset_copy) {
         tbset_copy[0] = '\0';
     }
+#ifdef LATCD_GC_TIMER_TEST
+    if (config->managed && getenv("LATCD_TEST_CRASH_AFTER_OUTPUT_UNLINK"))
+        kill(getpid(), SIGKILL);
+#endif
     if (sync_directory(config->cache_dir, error, sizeof(error))) {
         pthread_mutex_unlock(&cache_lock);
         goto out;
@@ -5032,7 +5264,34 @@ out:
     if (native && *native && unlink(native) && errno != ENOENT) transient_retained = true;
     for (guint i = 0; i < compiler_tasks->len; i++) {
         LatcdCompilerTask *task = g_ptr_array_index(compiler_tasks, i);
-        if (record_compiler_release(config, task->id, &task->identity, true)) {
+        int released = -1;
+        if (config->managed) {
+            if (task->publication_lease >= 0) {
+                close(task->publication_lease);
+                task->publication_lease = -1;
+            }
+            char *name = g_strdup_printf("%s.ini", task->id);
+            char *path = g_build_filename(config->cache_dir, ".gc", "tasks", name, NULL);
+            int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+            struct stat observed;
+            LatcdManagedDomain domain = {0};
+            char state_error[256];
+            if (fd >= 0 && !fstat(fd, &observed) &&
+                observed.st_dev == task->identity.st_dev && observed.st_ino == task->identity.st_ino &&
+                !flock(fd, LOCK_EX | LOCK_NB) &&
+                !latcd_managed_task_domain(config->cache_dir, task->id, fd, &domain,
+                                            LATCD_MANAGED_PREPARED, state_error, sizeof(state_error)) &&
+                domain.state == LATCD_MANAGED_OUTPUT_ADOPTED &&
+                !latcd_managed_task_domain(config->cache_dir, task->id, fd, &domain,
+                                            LATCD_MANAGED_OUTPUTS_REMOVED, state_error, sizeof(state_error)))
+                released = 0;
+            if (fd >= 0) close(fd);
+            g_free(path); g_free(name);
+        } else {
+            released = record_compiler_release(config, task->id, &task->identity, true);
+        }
+        if (config->managed) transient_retained = true;
+        if (released) {
             transient_retained = true;
             fprintf(stderr, "latcd: compiler output release not durable; retaining task root\n");
         }
@@ -5080,7 +5339,7 @@ out:
     g_free(native);
     g_free(module);
     g_free(temporary_dir);
-    return status ? -1 : 0;
+    return task_roots_busy ? -2 : status ? -1 : 0;
 }
 
 static int process_request(const LatcdConfig *config, int source_fd,
@@ -5535,23 +5794,28 @@ static void *compiler_worker(void *opaque)
                 }
         }
         if (!result && !delta_empty) {
-            result = publish_snapshot(service->config, worker->index,
-                                      job->snapshot,
-                                      compile_delta ? compile_delta :
-                                      compile_tbset,
-                                      compile_tbset, job->static_tbset,
-                                      job->digest,
-                                      job->compile_sequence, &response);
+            for (unsigned attempt = 0; ; attempt++) {
+                result = publish_snapshot(service->config, worker->index,
+                                          job->snapshot,
+                                          compile_delta ? compile_delta : compile_tbset,
+                                          compile_tbset, job->static_tbset,
+                                          job->digest, job->compile_sequence, &response);
+                if (result != -2 || attempt == 99 || stop_requested) break;
+                usleep(10000);
+            }
         } else if (!result) {
             int publish_result = publish_covered_tbset(
                 service->config, compile_tbset, job->digest,
                 job->compile_sequence, &response);
             if (publish_result > 0) {
-                result = publish_snapshot(
-                    service->config, worker->index, job->snapshot,
-                    compile_tbset, compile_tbset, job->static_tbset,
-                    job->digest,
-                    job->compile_sequence, &response);
+                for (unsigned attempt = 0; ; attempt++) {
+                    result = publish_snapshot(
+                        service->config, worker->index, job->snapshot,
+                        compile_tbset, compile_tbset, job->static_tbset,
+                        job->digest, job->compile_sequence, &response);
+                    if (result != -2 || attempt == 99 || stop_requested) break;
+                    usleep(10000);
+                }
             } else {
                 result = publish_result;
             }
@@ -7685,6 +7949,15 @@ out:
     return result;
 }
 
+static int test_managed_scan_busy(const char *root)
+{
+    LatcdConfig config = { .cache_dir = root, .managed = true };
+    char error[256] = {0};
+    int result = recover_compiler_inputs(&config, error, sizeof(error));
+    if (result) fprintf(stderr, "managed busy scan: %s\n", error);
+    return result ? 1 : 0;
+}
+
 static int test_managed_compiler_run(const char *root, const char *delegation)
 {
     LatcdConfig config = { .cache_dir = root, .managed = true, .compiler = "/bin/false",
@@ -7694,10 +7967,17 @@ static int test_managed_compiler_run(const char *root, const char *delegation)
     char *source = g_build_filename(root, ".tmp", "input", NULL);
     char *native = g_build_filename(root, ".tmp", "output-native", NULL);
     char *module = g_build_filename(root, ".tmp", "output-module", NULL);
-    GPtrArray *tasks = g_ptr_array_new_with_free_func(g_free);
+    GPtrArray *tasks = g_ptr_array_new_with_free_func(compiler_task_free);
+    const char *test_tbset = getenv("LATCD_TEST_INPUT_TBSET");
+    const char *test_base_native = getenv("LATCD_TEST_INPUT_BASE_NATIVE");
+    const char *test_base_module = getenv("LATCD_TEST_INPUT_BASE_MODULE");
     uint8_t digest[32];
     GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
-    g_checksum_update(checksum, (const guchar *)"input", 5);
+    gchar *source_bytes = NULL;
+    gsize source_length = 0;
+    if (!g_file_get_contents(source, &source_bytes, &source_length, NULL)) return 1;
+    g_checksum_update(checksum, (const guchar *)source_bytes, source_length);
+    g_free(source_bytes);
     gsize digest_length = sizeof(digest);
     g_checksum_get_digest(checksum, digest, &digest_length);
     g_checksum_free(checksum);
@@ -7709,7 +7989,8 @@ static int test_managed_compiler_run(const char *root, const char *delegation)
     worker_delegation_fd = latcd_worker_delegation_open(delegation);
     if (worker_delegation_fd < 0 || latcd_worker_delegation_init(worker_delegation_fd, &manager)) goto out;
     test_managed_compiler = true;
-    if (run_compiler(&config, 0, source, NULL, false, NULL, NULL, native, module,
+    if (run_compiler(&config, 0, source, test_tbset, false, test_base_native,
+                     test_base_module, native, module,
                      digest, tasks, &reservation, error, sizeof(error))) goto out;
     if (tasks->len != 1) goto out;
     printf("%s\n", ((LatcdCompilerTask *)g_ptr_array_index(tasks, 0))->id);
@@ -7736,6 +8017,8 @@ int main(int argc, char **argv)
         return test_managed_task_recovery(argv[2], argv[3]);
     if (argc == 3 && !strcmp(argv[1], "--test-managed-scan-identity"))
         return test_managed_scan_identity(argv[2]);
+    if (argc == 3 && !strcmp(argv[1], "--test-managed-scan-busy"))
+        return test_managed_scan_busy(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "--test-managed-compiler"))
         return test_managed_compiler_run(argv[2], argv[3]);
 #endif
@@ -7915,6 +8198,17 @@ int main(int argc, char **argv)
         fprintf(stderr, "latcd: %s\n", error);
         return 1;
     }
+#ifdef LATCD_GC_TIMER_TEST
+    const char *test_delegation = getenv("LATCD_TEST_SERVICE_DELEGATION");
+    if (test_delegation && *test_delegation && serve && !managed_entry) {
+        if (!getenv("LATCD_TEST_BOOTSTRAP") || !getenv("LATCD_TEST_REAL_COMPILE")) {
+            fprintf(stderr, "latcd: incomplete test managed worker configuration\n");
+            return 1;
+        }
+        config.managed = true;
+        test_managed_compiler = true;
+    }
+#endif
     struct rlimit inherited_cpu;
     if (getrlimit(RLIMIT_CPU, &inherited_cpu) == 0 &&
         inherited_cpu.rlim_max != RLIM_INFINITY &&
@@ -7959,6 +8253,29 @@ int main(int argc, char **argv)
         }
         fprintf(stderr, "latcd: worker delegation initialized; compiler disabled\n");
     }
+#ifdef LATCD_GC_TIMER_TEST
+    if (test_delegation && *test_delegation && config.managed && !managed_entry) {
+        worker_delegation_fd = latcd_worker_delegation_open(test_delegation);
+        int manager = worker_delegation_fd < 0 ? -1 :
+            openat(worker_delegation_fd, "manager", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int destination = manager >= 0 ? manager : worker_delegation_fd;
+        int procs = destination < 0 ? -1 :
+            openat(destination, "cgroup.procs", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+        char pid[32];
+        int length = snprintf(pid, sizeof(pid), "%ld\n", (long)getpid());
+        bool moved = procs >= 0 && length > 0 && (size_t)length < sizeof(pid) &&
+            write(procs, pid, length) == length;
+        if (procs >= 0) close(procs);
+        if (manager >= 0) close(manager);
+        if (!moved ||
+            latcd_worker_delegation_init(worker_delegation_fd, &worker_manager_fd)) {
+            fprintf(stderr, "latcd: test worker delegation rejected: %s\n", strerror(errno));
+            if (worker_delegation_fd >= 0) close(worker_delegation_fd);
+            close(cache_owner);
+            return 1;
+        }
+    }
+#endif
     int domain = latcd_cache_domain_validate(config.cache_dir, cache_domain_id,
                                               error, sizeof(error));
     if (domain < 0) {

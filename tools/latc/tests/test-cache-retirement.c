@@ -8038,18 +8038,22 @@ static void test_unknown_task_release(bool executor, bool managed)
     char *id = g_uuid_string_random(), *filename = g_strdup_printf("%s.ini", id);
     char *task_path = g_build_filename(tasks, filename, NULL);
     char *release_path = g_build_filename(releases, filename, NULL);
-    struct stat cache, object;
+    char *temporary = g_build_filename(root, ".tmp", NULL);
+    assert(!g_mkdir_with_parents(temporary, 0700));
+    struct stat cache, object, tmp_identity;
     assert(!stat(root, &cache) && !stat(path, &object));
+    assert(!stat(temporary, &tmp_identity));
     char *task = g_strdup_printf("[task]\nversion=3\nid=%s\nstate=%s\nsource=%s\n"
         "build_id=%s\nenvironment_sha256=%s\n%s"
         "[cache]\ndevice=%llu\ninode=%llu\nsize=0\nmode=16832\nuid=0\nmtime_sec=0\nmtime_nsec=0\n"
-        "[temporary]\ndevice=0\ninode=0\nsize=0\nmode=16832\nuid=0\nmtime_sec=0\nmtime_nsec=0\n"
+        "[temporary]\ndevice=%llu\ninode=%llu\nsize=0\nmode=16832\nuid=0\nmtime_sec=0\nmtime_nsec=0\n"
         "[source]\nname=%s\ndirectory=cache\ndevice=%llu\ninode=%llu\nsize=%llu\n"
         "mode=%u\nuid=%u\nmtime_sec=0\nmtime_nsec=0\n"
         "[output_native]\nname=task-output\n[output_module]\nname=task-module\n",
         id, managed ? "PREPARED" : "BOUND", source, source, source,
         managed ? "kind=MANAGED_COMPILER\n" : "", (unsigned long long)cache.st_dev,
-        (unsigned long long)cache.st_ino, name, (unsigned long long)object.st_dev,
+        (unsigned long long)cache.st_ino, (unsigned long long)tmp_identity.st_dev,
+        (unsigned long long)tmp_identity.st_ino, name, (unsigned long long)object.st_dev,
         (unsigned long long)object.st_ino, (unsigned long long)object.st_size,
         object.st_mode, object.st_uid);
     put(task_path, task);
@@ -8132,6 +8136,8 @@ static void test_unknown_task_release(bool executor, bool managed)
                                           LATCD_MANAGED_BOUND, error, sizeof(error)));
         assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
                                           LATCD_MANAGED_AUTHORIZED, error, sizeof(error)));
+        assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
+                                          LATCD_MANAGED_WORKSPACE_READY, error, sizeof(error)));
         unsigned terminal = executor ? LATCD_MANAGED_CANCELLED : LATCD_MANAGED_DOMAIN_EMPTY;
         assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
                                           terminal, error, sizeof(error)));
@@ -8140,13 +8146,64 @@ static void test_unknown_task_release(bool executor, bool managed)
         assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
                                           LATCD_MANAGED_PREPARED, error, sizeof(error)));
         assert(domain.state == terminal && domain.domain.st_ino == 4);
+        if (!executor) {
+            assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
+                                              LATCD_MANAGED_ADOPTING, error, sizeof(error)));
+            assert(latcd_managed_task_domain(root, id, task_fd, &domain,
+                                             LATCD_MANAGED_AUTHORIZED, error, sizeof(error)));
+            assert(latcd_managed_task_domain(root, id, task_fd, &domain,
+                                             LATCD_MANAGED_OUTPUT_ADOPTED, error, sizeof(error)));
+            char *native = g_build_filename(temporary, "task-output", NULL);
+            char *module = g_build_filename(temporary, "task-module", NULL);
+            put(native, "native output\n");
+            put(module, "module output\n");
+            assert(!chmod(native, 0600) && !chmod(module, 0600));
+            assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
+                                              LATCD_MANAGED_OUTPUT_ADOPTED, error, sizeof(error)));
+            GKeyFile *adopted = g_key_file_new();
+            assert(g_key_file_load_from_file(adopted, state_path, 0, NULL));
+            char *hash = g_key_file_get_string(adopted, "managed", "native_sha256", NULL);
+            char *expected = g_compute_checksum_for_string(G_CHECKSUM_SHA256, "native output\n", -1);
+            assert(hash && !strcmp(hash, expected));
+            g_free(hash); g_free(expected); g_key_file_unref(adopted);
+            assert(!latcd_managed_outputs_verify(root, id, task_fd, error, sizeof(error)));
+            assert(latcd_managed_task_domain(root, id, task_fd, &domain,
+                                             LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error)));
+            int original = open(native, O_RDONLY | O_CLOEXEC);
+            assert(original >= 0);
+            put(native, "changed output\n");
+            assert(latcd_managed_outputs_verify(root, id, task_fd, error, sizeof(error)));
+            assert(latcd_managed_outputs_discard(root, id, task_fd, error, sizeof(error)));
+            assert(!access(native, F_OK) && !access(module, F_OK));
+            assert(!unlink(native));
+            put(native, "native output\n");
+            assert(!chmod(native, 0600));
+            assert(latcd_managed_outputs_verify(root, id, task_fd, error, sizeof(error)));
+            close(original);
+            assert(!unlink(native));
+            assert(!latcd_managed_outputs_discard(root, id, task_fd, error, sizeof(error)));
+            assert(access(module, F_OK) && errno == ENOENT);
+            assert(!latcd_managed_outputs_discard(root, id, task_fd, error, sizeof(error)));
+            assert(latcd_managed_outputs_verify(root, id, task_fd, error, sizeof(error)));
+            assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
+                                              LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error)));
+            g_free(native); g_free(module);
+            assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
+                                              LATCD_MANAGED_PREPARED, error, sizeof(error)));
+            assert(domain.state == LATCD_MANAGED_OUTPUTS_REMOVED);
+            assert(!flock(task_fd, LOCK_SH | LOCK_NB));
+            int pinned = open(path, O_RDONLY | O_CLOEXEC);
+            assert(pinned >= 0 && latcd_retirement_tombstone(root, source, name, pinned,
+                                                              evidence, error, sizeof(error)));
+            close(pinned);
+        }
         close(task_fd);
     }
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     assert(fd >= 0);
     int result = executor ? latcd_tombstone_delete(root, name, error, sizeof(error)) :
         latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error));
-    assert(result && !access(path, F_OK));
+    assert((managed && !executor ? !result : result) && !access(path, F_OK));
     close(fd);
     if (managed) {
         assert(!unlink(state_path));
@@ -8160,7 +8217,7 @@ static void test_unknown_task_release(bool executor, bool managed)
     g_free(state); g_free(state_path); g_free(state_dir);
     g_free(release); g_free(task); g_free(release_path); g_free(task_path);
     g_free(filename); g_free(id); g_free(releases); g_free(tasks);
-    g_free(evidence); g_free(path); g_free(name); remove_root(root); g_free(root);
+    g_free(evidence); g_free(path); g_free(name); g_free(temporary); remove_root(root); g_free(root);
 }
 
 static void test_hold_crash(bool release, const char *point)

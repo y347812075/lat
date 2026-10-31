@@ -18,12 +18,18 @@ typedef struct LatcdManagedDomain {
 } LatcdManagedDomain;
 enum { LATCD_MANAGED_PREPARED, LATCD_MANAGED_BOUND,
        LATCD_MANAGED_AUTHORIZED, LATCD_MANAGED_CANCELLED,
-       LATCD_MANAGED_DOMAIN_EMPTY };
+       LATCD_MANAGED_DOMAIN_EMPTY, LATCD_MANAGED_WORKSPACE_READY,
+       LATCD_MANAGED_ADOPTING, LATCD_MANAGED_OUTPUT_ADOPTED,
+       LATCD_MANAGED_OUTPUTS_REMOVED };
 /* The caller owns the task lease (or an exclusive recovery lease). A bound
  * domain always has the task UUID as its cgroup name. */
 int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
                               LatcdManagedDomain *domain, unsigned next,
                               char *error, size_t error_size);
+int latcd_managed_outputs_verify(const char *root, const char *id, int task_fd,
+                                 char *error, size_t error_size);
+int latcd_managed_outputs_discard(const char *root, const char *id, int task_fd,
+                                 char *error, size_t error_size);
 /* Owner lease required. Acquire after source latch, never wait under cache_lock.
  * Publishers hold SH through transaction finish; retirement/deletion holds EX.
  * Returned CLOEXEC fd is released by close only. Not domain admission. */

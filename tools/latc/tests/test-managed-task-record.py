@@ -60,6 +60,9 @@ def run(binary):
                     pass
                 else:
                     raise AssertionError('task lease not held')
+            subprocess.run([binary, '--test-managed-scan-busy', str(root)],
+                           check=True, timeout=20)
+            assert state_path.is_file() and budget_path.is_file()
             process.stdin.write('x')
             process.stdin.flush()
             assert process.wait(timeout=10) == 0, process.stderr.read()

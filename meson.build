@@ -667,6 +667,8 @@ if 'CONFIG_LATX' in config_host
     'tools/latc/aot-v2/runtime',
     'tools/latc/aot-v2/common',
   )
+  executable('latcd-worker-bootstrap', 'tools/latc/latcd/worker-bootstrap.c',
+    install: true, install_dir: latc_helper_dir)
   latcd = executable(
     'latcd',
     files(
