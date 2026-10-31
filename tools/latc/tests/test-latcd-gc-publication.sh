@@ -15,9 +15,21 @@ cache=$work/cache
 socket=$work/latcd.sock
 pid=
 pin_pid=
+closure_replaced=0
 cleanup() {
     if [ -n "$pin_pid" ]; then kill "$pin_pid" 2>/dev/null || :; wait "$pin_pid" 2>/dev/null || :; fi
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || :; wait "$pid" 2>/dev/null || :; fi
+    if [ "$closure_replaced" = 1 ]; then
+        python3 - "$LATCD_TEST_WORKER_CLOSURE" <<'PY'
+import json, os, sys
+targets = {'/usr/libexec/latc/scripts/compile-aot-v2-module.sh', '/usr/bin/gcc',
+           '/usr/lib64/ld-linux-loongarch-lp64d.so.1'}
+for item in json.load(open(sys.argv[1]))['files']:
+    if item['destination'] not in targets: continue
+    saved = item['source'] + '.latcd-test-saved'
+    if os.path.exists(saved): os.replace(saved, item['source'])
+PY
+    fi
 }
 trap cleanup EXIT
 unset LATCD_TEST_BROKER_DIRECTORY
@@ -31,6 +43,22 @@ n=0
 while [ ! -S "$socket" ]; do
     kill -0 "$pid"; n=$((n + 1)); [ "$n" -lt 500 ]; sleep 0.05
 done
+if [ "${LATCD_TEST_REPLACE_CLOSURE:-0}" = 1 ]; then
+    : "${LATCD_TEST_WORKER_CLOSURE:?closure manifest required}"
+    closure_replaced=1
+    python3 - "$LATCD_TEST_WORKER_CLOSURE" <<'PY'
+import json, os, sys
+targets = {'/usr/libexec/latc/scripts/compile-aot-v2-module.sh', '/usr/bin/gcc',
+           '/usr/lib64/ld-linux-loongarch-lp64d.so.1'}
+items = [i for i in json.load(open(sys.argv[1]))['files'] if i['destination'] in targets]
+assert {i['destination'] for i in items} == targets
+for item in items:
+    path = item['source']; saved = path + '.latcd-test-saved'
+    assert not os.path.lexists(saved)
+    os.rename(path, saved)
+    with open(path, 'xb') as replacement: replacement.write(b'invalid replacement\n')
+PY
+fi
 if [ "${LATCD_TEST_REPLACE_LAUNCHER:-0}" = 1 ]; then
     mv "$LATCD_TEST_BWRAP" "$LATCD_TEST_BWRAP.saved"
     mv "$LATCD_TEST_BOOTSTRAP" "$LATCD_TEST_BOOTSTRAP.saved"
@@ -123,6 +151,18 @@ fi
 grep -q '^status=0$' "$work/delta-flush"
 if [ "${LATCD_TEST_REQUIRE_INCREMENTAL:-0}" = 1 ]; then
     grep -q '^latcd: test incremental module validated$' "$work/server.err"
+fi
+if [ "$closure_replaced" = 1 ]; then
+    python3 - "$LATCD_TEST_WORKER_CLOSURE" <<'PY'
+import json, os, sys
+targets = {'/usr/libexec/latc/scripts/compile-aot-v2-module.sh', '/usr/bin/gcc',
+           '/usr/lib64/ld-linux-loongarch-lp64d.so.1'}
+for item in json.load(open(sys.argv[1]))['files']:
+    if item['destination'] not in targets: continue
+    saved = item['source'] + '.latcd-test-saved'
+    if os.path.exists(saved): os.replace(saved, item['source'])
+PY
+    closure_replaced=0
 fi
 if [ "${LATCD_TEST_IDLE_SECONDS:-0}" != 0 ]; then
     sleep 2
