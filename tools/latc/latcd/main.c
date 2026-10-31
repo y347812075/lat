@@ -2865,7 +2865,13 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         if (config->managed) {
             close(gate[1]);
             if (gate[0] != 3 && dup2(gate[0], 3) < 0) _exit(126);
+            close(0); close(1); close(2);
             if (syscall(SYS_close_range, 4u, ~0u, 0u)) _exit(126);
+#ifdef LATCD_GC_TIMER_TEST
+            if (fcntl(0, F_GETFD) != -1 || errno != EBADF ||
+                fcntl(1, F_GETFD) != -1 || errno != EBADF ||
+                fcntl(2, F_GETFD) != -1 || errno != EBADF) _exit(126);
+#endif
             char permit;
             ssize_t n;
             do { n = read(3, &permit, 1); } while (n < 0 && errno == EINTR);
