@@ -96,6 +96,14 @@ test-managed-environment: $(BUILD)/tests/test-managed-environment
 	$(BUILD)/tests/test-managed-environment
 test: test-managed-environment
 
+$(BUILD)/tests/test-worker-seccomp: tests/test-worker-seccomp.c latcd/worker-seccomp.c latcd/worker-seccomp.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test-worker-seccomp.c latcd/worker-seccomp.c -pthread
+.PHONY: test-worker-seccomp
+test-worker-seccomp: $(BUILD)/tests/test-worker-seccomp
+	$(BUILD)/tests/test-worker-seccomp
+test: test-worker-seccomp
+
 test-native-config-replay:
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)" || \
 	  { echo "usage: make test-native-config-replay INSTALL_PREFIX=... X86_GUEST=... TBSET=... WORK=..."; exit 2; }
@@ -200,6 +208,8 @@ $(BUILD)/latcd/latcd $(BUILD)/tests/test-journal-store $(BUILD)/tests/test-latcd
 $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer \
 $(BUILD)/tests/test-journal-store $(BUILD)/tests/test-latcd-channel \
 $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/managed-config.o $(BUILD)/latcd/managed-path.o
+
+$(BUILD)/latcd/latcd: $(BUILD)/latcd/worker-seccomp.o
 
 $(BUILD)/tests/cache-capacity-testing.o: latcd/cache-capacity.c latcd/cache-capacity.h
 	@mkdir -p $(dir $@)
