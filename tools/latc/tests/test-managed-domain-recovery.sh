@@ -27,6 +27,17 @@ grep -qx 'state=EXEC_AUTHORIZED' "$state"
 test "$(awk '$1 == "populated" {print $2}' "$scope/worker/$id/cgroup.events")" = 1
 kill -KILL "$pid"
 wait "$pid" 2>/dev/null || :
+cp "$state" /work/original-state
+sed -i 's/^boot=.*/boot=00000000-0000-0000-0000-000000000000/' "$state"
+if LATCD_TEST_RECOVERY_ONCE=1 sh -c '
+    printf "%s\n" "$$" > "$1/cgroup.procs"; shift
+    exec "$@"
+' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/cache "$scope/worker"; then
+    echo 'mismatched boot accepted during recovery' >&2; exit 1
+fi
+grep -qx 'state=EXEC_AUTHORIZED' "$state"
+test "$(awk '$1 == "populated" {print $2}' "$scope/worker/$id/cgroup.events")" = 1
+cp /work/original-state "$state"
 LATCD_TEST_RECOVERY_ONCE=1 sh -c '
     printf "%s\n" "$$" > "$1/cgroup.procs"; shift
     exec "$@"

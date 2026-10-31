@@ -2026,16 +2026,21 @@ static int release_copy_task(const LatcdConfig *config, int task_pin,
 
 /* Caller owns the daemon lease. Surviving tasks retain SH on the task inode;
  * only absent outputs may reach a recovered terminal state. */
-static void recover_managed_domain(const LatcdConfig *config, const char *id, int task)
+static int recover_managed_domain(const LatcdConfig *config, const char *id, int task)
 {
     LatcdManagedDomain domain = {0};
     char error[256], *boot = NULL;
     gsize length = 0;
     struct stat delegation;
+    int result = -1;
     if (worker_delegation_fd < 0 ||
         latcd_managed_task_domain(config->cache_dir, id, task, &domain,
-                                  LATCD_MANAGED_PREPARED, error, sizeof(error)) ||
-        (domain.state != LATCD_MANAGED_BOUND && domain.state != LATCD_MANAGED_AUTHORIZED) ||
+                                  LATCD_MANAGED_PREPARED, error, sizeof(error))) goto out;
+    if (domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY) {
+        result = 0;
+        goto out;
+    }
+    if ((domain.state != LATCD_MANAGED_BOUND && domain.state != LATCD_MANAGED_AUTHORIZED) ||
         fstat(worker_delegation_fd, &delegation) ||
         delegation.st_dev != domain.delegation.st_dev || delegation.st_ino != domain.delegation.st_ino ||
         !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, &length, NULL)) goto out;
@@ -2053,10 +2058,11 @@ static void recover_managed_domain(const LatcdConfig *config, const char *id, in
         }
         if (populated) goto out;
     }
-    (void)latcd_managed_task_domain(config->cache_dir, id, task, &domain,
-                                    LATCD_MANAGED_CANCELLED, error, sizeof(error));
+    result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
+                                       LATCD_MANAGED_CANCELLED, error, sizeof(error));
 out:
     g_free(boot);
+    return result;
 }
 
 static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
@@ -2114,10 +2120,11 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
         bool managed = version && !strcmp(version, "3");
         g_free(version);
         if (managed) {
-            if (valid) recover_managed_domain(config, id, task);
+            bool unsafe = !valid || recover_managed_domain(config, id, task);
             g_key_file_free(record);
             if (task >= 0) close(task);
             retained++;
+            if (config->managed && unsafe) { errno = ESTALE; result = -1; break; }
             continue;
         }
         if (valid && copying) {
