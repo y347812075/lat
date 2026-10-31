@@ -46,6 +46,23 @@ def run(test_daemon, prefix, guest, work):
                     '-o', str(full)], check=True)
     digest = hashlib.sha256(guest.read_bytes()).hexdigest()
     env = dict(os.environ, LD_LIBRARY_PATH=str(prefix / 'lib'))
+    invalid = work / 'invalid-selection'
+    invalid.mkdir(mode=0o700)
+    invalid_cache, invalid_socket = invalid / 'cache', invalid / 'd.sock'
+    invalid_args = [test_daemon, '--serve', '--socket', str(invalid_socket),
+                    '--cache-dir', str(invalid_cache), '--latc', str(prefix / 'bin/latc'),
+                    '--runner', str(prefix / 'bin/latx-x86_64'), '--runtime-dir', str(prefix / 'lib'),
+                    '--workers', '1', '--flush-only', '--idle-seconds', '0']
+    with (invalid / 'daemon.log').open('wb') as log:
+        daemon = start(invalid_args, dict(env, LATC_TBSET_SELECTION='invalid-selection'), log, invalid_socket)
+        try:
+            submit(client, invalid_socket, tbset, guest, env)
+            subprocess.run([str(client), '--flush-source', '--socket', str(invalid_socket), str(guest)],
+                           env=env, capture_output=True, timeout=120)
+            assert 'invalid LATC_TBSET_SELECTION' in (invalid / 'daemon.log').read_text()
+            assert not (invalid_cache / (digest + '.current')).exists()
+        finally:
+            daemon.terminate(); daemon.wait(timeout=30)
     for phase, replacement in ((p, r) for r in (False, True)
                                for p in ('ADOPTING', 'OUTPUT_PREPARED', 'PARTIAL_ADOPTION', 'OUTPUT_ADOPTED', 'OUTPUT_UNLINK', 'CURRENT_SYNCED')):
         directory = work / (phase + ('-replacement' if replacement else '-first'))

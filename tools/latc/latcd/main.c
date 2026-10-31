@@ -3031,7 +3031,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         "--clearenv", "--setenv", "PATH", "/usr/bin:/bin", "--", "/bootstrap",
         "/usr/bin/true", NULL};
     const char *sandbox_env[] = {"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", NULL};
-    const char *compile_args[96];
+    const char *compile_args[128];
     size_t arg = 0;
 #define TEST_ARG(value) (compile_args[arg++] = (value))
     if (test_real_compile) {
@@ -3051,6 +3051,15 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             "--setenv", "TMPDIR", "/work", "--setenv", "LD_LIBRARY_PATH", "/usr/lib",
             "--setenv", "LATC_NATIVE_OUTPUT", "/work/output.native"};
         for (size_t i = 0; i < G_N_ELEMENTS(setup); i++) TEST_ARG(setup[i]);
+        TEST_ARG("--setenv"); TEST_ARG("LATC_AOT_THREADS"); TEST_ARG(strchr(aot_threads, '=') + 1);
+        TEST_ARG("--setenv"); TEST_ARG("LATC_TRUSTED_SOURCE_SHA256"); TEST_ARG(digest_text);
+        TEST_ARG("--setenv"); TEST_ARG("LATC_TBSET_CLOSURE_LIMIT"); TEST_ARG(closure_limit);
+        TEST_ARG("--setenv"); TEST_ARG("LATC_TBSET_SELECTION");
+        TEST_ARG(selection && *selection ? selection : "bounded");
+        TEST_ARG("--setenv"); TEST_ARG("LATC_SKIP_FINAL_INSPECT"); TEST_ARG("1");
+        if (compile_timing) { TEST_ARG("--setenv"); TEST_ARG("LATC_COMPILE_TIMING"); TEST_ARG("1"); }
+        if (expand_functions) { TEST_ARG("--setenv"); TEST_ARG("LATC_TBSET_EXPAND_FUNCTIONS"); TEST_ARG("1"); }
+        if (allow_zero_eflags_stub) { TEST_ARG("--setenv"); TEST_ARG("LATC_AOT_ALLOW_ZERO_EFLAGS_STUB"); TEST_ARG("1"); }
         if (base_native) { TEST_ARG("--setenv"); TEST_ARG("LATC_NATIVE_BASE"); TEST_ARG(paths[2]); }
         if (base_module) { TEST_ARG("--setenv"); TEST_ARG("LATC_NATIVE_BASE_MODULE"); TEST_ARG(paths[3]); }
         const char *command[] = {"--", "/bootstrap", "/usr/bin/latc", "compile-module", paths[0],
