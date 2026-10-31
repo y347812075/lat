@@ -8149,12 +8149,17 @@ static void test_unknown_task_release(bool executor, bool managed)
         if (!executor) {
             assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
                                               LATCD_MANAGED_ADOPTING, error, sizeof(error)));
+            char *native = g_build_filename(temporary, "task-output", NULL);
+            char *module = g_build_filename(temporary, "task-module", NULL);
+            put(native, "unidentified partial output\n");
+            assert(latcd_managed_task_domain(root, id, task_fd, &domain,
+                                             LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error)));
+            assert(!access(native, F_OK));
+            assert(!unlink(native));
             assert(latcd_managed_task_domain(root, id, task_fd, &domain,
                                              LATCD_MANAGED_AUTHORIZED, error, sizeof(error)));
             assert(latcd_managed_task_domain(root, id, task_fd, &domain,
                                              LATCD_MANAGED_OUTPUT_ADOPTED, error, sizeof(error)));
-            char *native = g_build_filename(temporary, "task-output", NULL);
-            char *module = g_build_filename(temporary, "task-module", NULL);
             put(native, "native output\n");
             put(module, "module output\n");
             assert(!chmod(native, 0600) && !chmod(module, 0600));

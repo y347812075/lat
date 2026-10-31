@@ -2128,6 +2128,11 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
         result = 0;
         goto out;
     }
+    if (domain.state == LATCD_MANAGED_ADOPTING) {
+        result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
+                                            LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error));
+        goto out;
+    }
     if (domain.state == LATCD_MANAGED_OUTPUT_ADOPTED) {
         if (latcd_managed_outputs_discard(config->cache_dir, id, task, error, sizeof(error))) goto out;
         /* The publisher may have removed both temporary links before the
@@ -3325,6 +3330,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         const char *destinations[] = {output_native, output};
         if (latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
                                      LATCD_MANAGED_ADOPTING, error, error_size)) waited = -1;
+        if (waited == child && getenv("LATCD_TEST_CRASH_AFTER_ADOPTING"))
+            kill(getpid(), SIGKILL);
         for (unsigned i = 0; waited == child && i < 2; i++) {
             int fd = openat(workspace, names[i], O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
             struct stat st;

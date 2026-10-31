@@ -4640,7 +4640,8 @@ int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
                 (next == LATCD_MANAGED_CANCELLED || next == LATCD_MANAGED_DOMAIN_EMPTY)) ||
                (old.state == LATCD_MANAGED_DOMAIN_EMPTY && next == LATCD_MANAGED_ADOPTING) ||
                (old.state == LATCD_MANAGED_ADOPTING && next == LATCD_MANAGED_OUTPUT_ADOPTED) ||
-               (old.state == LATCD_MANAGED_OUTPUT_ADOPTED && next == LATCD_MANAGED_OUTPUTS_REMOVED &&
+               ((old.state == LATCD_MANAGED_ADOPTING || old.state == LATCD_MANAGED_OUTPUT_ADOPTED) &&
+                next == LATCD_MANAGED_OUTPUTS_REMOVED &&
                 managed_outputs_removed(directory, raw, size)))) {
         LatcdManagedDomain value = old.state == LATCD_MANAGED_PREPARED ? *domain : old;
         if (g_uuid_string_is_valid(value.boot) && value.delegation.st_ino && value.domain.st_ino) {

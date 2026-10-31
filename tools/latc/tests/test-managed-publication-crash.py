@@ -47,7 +47,7 @@ def run(test_daemon, prefix, guest, work):
     digest = hashlib.sha256(guest.read_bytes()).hexdigest()
     env = dict(os.environ, LD_LIBRARY_PATH=str(prefix / 'lib'))
     for phase, replacement in ((p, r) for r in (False, True)
-                               for p in ('OUTPUT_ADOPTED', 'OUTPUT_UNLINK', 'CURRENT_SYNCED')):
+                               for p in ('ADOPTING', 'OUTPUT_ADOPTED', 'OUTPUT_UNLINK', 'CURRENT_SYNCED')):
         directory = work / (phase + ('-replacement' if replacement else '-first'))
         directory.mkdir(mode=0o700)
         cache, socket = directory / 'cache', directory / 'd.sock'
@@ -95,11 +95,11 @@ def run(test_daemon, prefix, guest, work):
         adopted = []
         for path in states:
             record = configparser.ConfigParser(); record.read(path)
-            if record['managed']['state'] == 'OUTPUT_ADOPTED':
+            if record['managed']['state'] == ('ADOPTING' if phase == 'ADOPTING' else 'OUTPUT_ADOPTED'):
                 adopted.append(path)
         assert len(adopted) == 1
         state = configparser.ConfigParser(); state.read(adopted[0])
-        assert state['managed']['state'] == 'OUTPUT_ADOPTED'
+        assert state['managed']['state'] == ('ADOPTING' if phase == 'ADOPTING' else 'OUTPUT_ADOPTED')
         socket.unlink(missing_ok=True)
         with (directory / 'restart.log').open('wb') as log:
             daemon = start(args, env, log, socket)
