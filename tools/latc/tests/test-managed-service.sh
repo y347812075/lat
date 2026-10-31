@@ -18,10 +18,13 @@ mkdir -m 755 "$work/broker"
 chown 1234:1234 "$work/cache" "$work/admin" "$work/broker"
 cp "$fixture" "$work/tools/latc"
 cp "$fixture" "$work/tools/runner"
+cp "$fixture" "$work/tools/bwrap"
+cp "$fixture" "$work/tools/bootstrap"
 cp "$runtime" "$work/runtime/liblat-aot-runtime.so.2"
 chmod 755 "$work/tools/latc" "$work/tools/runner"
+chmod 755 "$work/tools/bwrap" "$work/tools/bootstrap"
 chmod 755 "$work/runtime/liblat-aot-runtime.so.2"
-printf '%s\n' '{"service_uid":"1234","client_uid":"1235","cache":"/opt/latcd-managed-test/cache","admin":"/opt/latcd-managed-test/admin","broker":"/opt/latcd-managed-test/broker","compiler":"/opt/latcd-managed-test/tools/latc","runner":"/opt/latcd-managed-test/tools/runner","runtime":"/opt/latcd-managed-test/runtime"}' > "$work/config"
+printf '%s\n' '{"service_uid":"1234","client_uid":"1235","cache":"/opt/latcd-managed-test/cache","admin":"/opt/latcd-managed-test/admin","broker":"/opt/latcd-managed-test/broker","compiler":"/opt/latcd-managed-test/tools/latc","runner":"/opt/latcd-managed-test/tools/runner","runtime":"/opt/latcd-managed-test/runtime","worker_bwrap":"/opt/latcd-managed-test/tools/bwrap","worker_bootstrap":"/opt/latcd-managed-test/tools/bootstrap"}' > "$work/config"
 pid=
 task_pid=
 cleanup() {
@@ -44,6 +47,16 @@ expect_rejected() {
 chmod 777 "$work/tools/latc"
 expect_rejected
 chmod 755 "$work/tools/latc"
+chmod 777 "$work/tools/bootstrap"
+expect_rejected
+chmod 755 "$work/tools/bootstrap"
+sed 's|,"worker_bootstrap":"/opt/latcd-managed-test/tools/bootstrap"||' "$work/config" > "$work/incomplete-config"
+if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
+    env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/incomplete-config" \
+    >"$work/incomplete.out" 2>"$work/incomplete.err"; then
+    echo 'incomplete launcher accepted' >&2; exit 1
+fi
+grep -q 'managed configuration rejected' "$work/incomplete.err"
 chmod 777 "$work/broker"
 expect_rejected
 chmod 755 "$work/broker"

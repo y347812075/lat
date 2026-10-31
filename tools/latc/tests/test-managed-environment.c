@@ -1,8 +1,14 @@
+#define _GNU_SOURCE
 #include "../latcd/managed-config.h"
 #include "../latcd/managed-path.h"
 #include <assert.h>
 #include <errno.h>
 #include <stddef.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 int main(void)
 {
@@ -28,5 +34,24 @@ int main(void)
     assert(latcd_managed_config_read("relative", valid[0], 1, NULL) < 0 && errno == EINVAL);
     LatcdManagedConfig invalid = {0};
     assert(latcd_managed_config_validate(&invalid) < 0 && errno == EACCES);
+    char path[4096], moved[4096];
+    const char *home = getenv("HOME");
+    assert(home && snprintf(path, sizeof(path), "%s/tmp/latcd-launcher-XXXXXX", home) < (int)sizeof(path));
+    assert(mkdtemp(path));
+    assert(snprintf(moved, sizeof(moved), "%s/old", path) < (int)sizeof(moved));
+    char file[4096];
+    assert(snprintf(file, sizeof(file), "%s/tool", path) < (int)sizeof(file));
+    int fd = open(file, O_CREAT | O_EXCL | O_WRONLY, 0700);
+    assert(fd >= 0 && write(fd, "old", 3) == 3 && !close(fd));
+    int held[2];
+    assert(!latcd_managed_launcher_open(file, file, 0, held));
+    struct stat original, pinned, replacement;
+    assert(!fstat(held[0], &original) && !rename(file, moved));
+    fd = open(file, O_CREAT | O_EXCL | O_WRONLY, 0700);
+    assert(fd >= 0 && !fstat(fd, &replacement) && !close(fd));
+    assert(!fstat(held[0], &pinned) && pinned.st_ino == original.st_ino &&
+           pinned.st_dev == original.st_dev && pinned.st_ino != replacement.st_ino);
+    close(held[0]); close(held[1]);
+    assert(!unlink(file) && !unlink(moved) && !rmdir(path));
     return 0;
 }

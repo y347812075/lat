@@ -5,6 +5,7 @@
 #include "managed-path.h"
 #include "parson/parson.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/capability.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -21,7 +22,34 @@ void latcd_managed_config_clear(LatcdManagedConfig *c)
     free(c->cache); free(c->admin); free(c->broker);
     free(c->compiler); free(c->runner); free(c->runtime);
     free(c->worker_cgroup);
+    free(c->worker_bwrap); free(c->worker_bootstrap);
     memset(c, 0, sizeof(*c));
+}
+
+int latcd_managed_launcher_open(const char *bwrap, const char *bootstrap,
+                                int managed, int fds[2])
+{
+    const char *paths[] = {bwrap, bootstrap};
+    fds[0] = fds[1] = -1;
+    for (unsigned i = 0; i < 2; i++) {
+        struct stat st;
+        if (!paths[i] || paths[i][0] != '/') { errno = EINVAL; goto fail; }
+        fds[i] = managed ? latcd_managed_file(paths[i], 1) :
+            open(paths[i], O_PATH | O_CLOEXEC | O_NOFOLLOW);
+        if (fds[i] < 0 || fstat(fds[i], &st) || !S_ISREG(st.st_mode) ||
+            !(st.st_mode & 0111)) { errno = EACCES; goto fail; }
+    }
+    return 0;
+fail:
+    {
+        int saved = errno;
+        for (unsigned i = 0; i < 2; i++) {
+            if (fds[i] >= 0) close(fds[i]);
+            fds[i] = -1;
+        }
+        errno = saved;
+        return -1;
+    }
 }
 
 static int uid_value(const char *s, uid_t *out)
@@ -67,8 +95,8 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
     char **paths[] = {&c->cache, &c->admin, &c->broker, &c->compiler, &c->runner, &c->runtime};
     int result = -1;
     size_t count = object ? json_object_get_count(object) : 0;
-    if (!object || (count != sizeof(keys) / sizeof(keys[0]) &&
-                    count != sizeof(keys) / sizeof(keys[0]) + 1) ||
+    if (!object || count < sizeof(keys) / sizeof(keys[0]) ||
+        count > sizeof(keys) / sizeof(keys[0]) + 3 ||
         !json_object_get_string(object, keys[0]) || !json_object_get_string(object, keys[1]) ||
         strlen(json_object_get_string(object, keys[0])) != json_object_get_string_len(object, keys[0]) ||
         strlen(json_object_get_string(object, keys[1])) != json_object_get_string_len(object, keys[1]) ||
@@ -81,13 +109,25 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
         *paths[i] = strdup(s);
         if (!*paths[i]) goto out;
     }
-    if (count > sizeof(keys) / sizeof(keys[0])) {
+    if (json_object_has_value(object, "worker_cgroup")) {
         const char *s = json_object_get_string(object, "worker_cgroup");
         if (!s || s[0] != '/' || !s[1] ||
             strlen(s) != json_object_get_string_len(object, "worker_cgroup")) goto out;
         c->worker_cgroup = strdup(s);
         if (!c->worker_cgroup) goto out;
     }
+    const char *optional[] = {"worker_bwrap", "worker_bootstrap"};
+    char **targets[] = {&c->worker_bwrap, &c->worker_bootstrap};
+    for (unsigned i = 0; i < 2; i++) if (json_object_has_value(object, optional[i])) {
+        const char *s = json_object_get_string(object, optional[i]);
+        if (!s || s[0] != '/' || !s[1] ||
+            strlen(s) != json_object_get_string_len(object, optional[i])) goto out;
+        *targets[i] = strdup(s);
+        if (!*targets[i]) goto out;
+    }
+    if (!!c->worker_bwrap != !!c->worker_bootstrap ||
+        count != sizeof(keys) / sizeof(keys[0]) + !!c->worker_cgroup +
+                 !!c->worker_bwrap + !!c->worker_bootstrap) goto out;
     result = 0;
 out:
     if (value) json_value_free(value);
@@ -145,6 +185,11 @@ int latcd_managed_config_validate(const LatcdManagedConfig *c)
     free(runtime);
     if (library < 0) goto out;
     close(library);
+    if (c->worker_bwrap) {
+        int launcher[2];
+        if (latcd_managed_launcher_open(c->worker_bwrap, c->worker_bootstrap, 1, launcher)) goto out;
+        close(launcher[0]); close(launcher[1]);
+    }
     result = 0;
 out:
     {

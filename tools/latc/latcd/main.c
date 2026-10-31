@@ -135,6 +135,7 @@ static _Atomic unsigned int active_precompiles;
 static char cache_domain_id[37];
 static bool cache_domain_managed;
 static int worker_delegation_fd = -1;
+static int managed_launcher_fds[2] = {-1, -1};
 static int worker_manager_fd = -1;
 
 static uint32_t default_worker_count(void)
@@ -3143,13 +3144,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (test_bootstrap && (!bwrap || bwrap[0] != '/')) pin_result = -1;
     int launcher_fds[2] = {-1, -1}, launcher_child[2] = {-1, -1};
     if (test_bootstrap && !pin_result) {
-        const char *paths[] = {bwrap, bootstrap};
-        for (unsigned i = 0; i < 2; i++) {
-            struct stat st;
-            launcher_fds[i] = open(paths[i], O_PATH | O_CLOEXEC | O_NOFOLLOW);
-            if (launcher_fds[i] < 0 || fstat(launcher_fds[i], &st) ||
-                !S_ISREG(st.st_mode) || !(st.st_mode & 0111) ||
-                (launcher_child[i] = fcntl(launcher_fds[i], F_DUPFD_CLOEXEC, 16)) < 0)
+        if (latcd_managed_launcher_open(bwrap, bootstrap, 0, launcher_fds)) pin_result = -1;
+        for (unsigned i = 0; !pin_result && i < 2; i++) {
+            if ((launcher_child[i] = fcntl(launcher_fds[i], F_DUPFD_CLOEXEC, 16)) < 0)
                 pin_result = -1;
         }
     }
@@ -8405,6 +8402,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "latcd: %s\n", error);
         return 1;
     }
+    if (managed_entry && managed_config.worker_bwrap &&
+        latcd_managed_launcher_open(managed_config.worker_bwrap,
+                                    managed_config.worker_bootstrap, 1,
+                                    managed_launcher_fds)) {
+        fprintf(stderr, "latcd: managed launcher rejected: %s\n", strerror(errno));
+        return 1;
+    }
 #ifdef LATCD_GC_TIMER_TEST
     const char *test_delegation = getenv("LATCD_TEST_SERVICE_DELEGATION");
     if (test_delegation && *test_delegation && serve && !managed_entry) {
@@ -8619,6 +8623,7 @@ int main(int argc, char **argv)
     latcd_cache_capacity_close(&generation_capacity);
     if (worker_manager_fd >= 0) close(worker_manager_fd);
     if (worker_delegation_fd >= 0) close(worker_delegation_fd);
+    for (unsigned i = 0; i < 2; i++) if (managed_launcher_fds[i] >= 0) close(managed_launcher_fds[i]);
     close(cache_owner);
     return result;
 }
