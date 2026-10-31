@@ -8075,8 +8075,25 @@ static void test_unknown_task_release(bool executor, bool managed)
         assert(wrong_fd >= 0 && latcd_managed_task_prepare(root, id, wrong_fd, error, sizeof(error)));
         close(wrong_fd);
         assert(access(state_path, F_OK));
+        assert(latcd_managed_task_prepare(root, id, task_fd, error, sizeof(error)));
+        char *budget_dir = g_build_filename(root, ".gc", "compiler-budgets", NULL);
+        assert(!mkdir(budget_dir, 0700));
+        char *budget_path = g_build_filename(budget_dir, filename, NULL);
+        char *budget = g_strdup_printf("[budget]\nversion=1\ntask_id=%s\n"
+            "task_device=%llu\ntask_inode=%llu\ncache_device=%llu\ncache_inode=%llu\nbytes=4096\n",
+            id, (unsigned long long)identity.st_dev, (unsigned long long)identity.st_ino + 1,
+            (unsigned long long)cache.st_dev, (unsigned long long)cache.st_ino);
+        put(budget_path, budget);
+        assert(latcd_managed_task_prepare(root, id, task_fd, error, sizeof(error)));
+        g_free(budget);
+        budget = g_strdup_printf("[budget]\nversion=1\ntask_id=%s\n"
+            "task_device=%llu\ntask_inode=%llu\ncache_device=%llu\ncache_inode=%llu\nbytes=4096\n",
+            id, (unsigned long long)identity.st_dev, (unsigned long long)identity.st_ino,
+            (unsigned long long)cache.st_dev, (unsigned long long)cache.st_ino);
+        put(budget_path, budget);
         assert(!latcd_managed_task_prepare(root, id, task_fd, error, sizeof(error)));
         assert(latcd_managed_task_prepare(root, id, task_fd, error, sizeof(error)));
+        g_free(budget); g_free(budget_path); g_free(budget_dir);
         close(task_fd);
         if (!executor) {
             char *other = g_strdup_printf("%s.so", source);

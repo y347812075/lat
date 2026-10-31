@@ -4294,14 +4294,33 @@ int latcd_managed_task_prepare(const char *root, const char *id, int task_fd,
     int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
     int tasks = gc < 0 ? -1 : open_directory(gc, "tasks", false);
+    int budgets = gc < 0 ? -1 : open_directory(gc, "compiler-budgets", false);
     int states = gc < 0 ? -1 : open_directory(gc, "managed-task-state", true);
-    char *name = g_strdup_printf("%s.ini", id), *raw = NULL;
-    size_t size = 0;
-    struct stat held, snapshot, existing;
-    GKeyFile *task = g_key_file_new(), *state = g_key_file_new();
-    bool valid = states >= 0 && tasks >= 0 && !fstat(task_fd, &held) &&
+    char *name = g_strdup_printf("%s.ini", id), *raw = NULL, *budget_raw = NULL;
+    size_t size = 0, budget_size = 0;
+    struct stat held, snapshot, existing, cache;
+    GKeyFile *task = g_key_file_new(), *state = g_key_file_new(), *budget = g_key_file_new();
+    const char *budget_keys[] = {"version", "task_id", "task_device", "task_inode",
+                                 "cache_device", "cache_inode", "bytes"};
+    uint64_t task_device, task_inode, cache_device, cache_inode, bytes;
+    gsize budget_groups = 0;
+    bool valid = states >= 0 && tasks >= 0 && budgets >= 0 && !fstat(directory, &cache) &&
+        !fstat(task_fd, &held) &&
         !read_file_snapshot(tasks, name, RECORD_LIMIT, &raw, &size, &snapshot, NULL) &&
         object_stat_equal(&held, &snapshot) && !memchr(raw, 0, size) &&
+        !read_file(budgets, name, RECORD_LIMIT, &budget_raw, &budget_size) &&
+        !memchr(budget_raw, 0, budget_size) &&
+        g_key_file_load_from_data(budget, budget_raw, budget_size, 0, NULL);
+    char **budget_names = g_key_file_get_groups(budget, &budget_groups);
+    valid = valid && budget_groups == 1 &&
+        exact_keys(budget, "budget", budget_keys, G_N_ELEMENTS(budget_keys)) &&
+        record_string_is(budget, "budget", "version", "1") &&
+        record_string_is(budget, "budget", "task_id", id) &&
+        record_uint64(budget, "budget", "task_device", &task_device) && task_device == (uint64_t)held.st_dev &&
+        record_uint64(budget, "budget", "task_inode", &task_inode) && task_inode == (uint64_t)held.st_ino &&
+        record_uint64(budget, "budget", "cache_device", &cache_device) && cache_device == (uint64_t)cache.st_dev &&
+        record_uint64(budget, "budget", "cache_inode", &cache_inode) && cache_inode == (uint64_t)cache.st_ino &&
+        record_uint64(budget, "budget", "bytes", &bytes) && bytes > 0 &&
         g_key_file_load_from_data(task, raw, size, 0, NULL) &&
         record_string_is(task, "task", "version", "3") &&
         record_string_is(task, "task", "id", id) &&
@@ -4320,8 +4339,10 @@ int latcd_managed_task_prepare(const char *root, const char *id, int task_fd,
         g_free(digest);
         result = write_record(states, name, state);
     }
-    g_key_file_unref(state); g_key_file_unref(task); g_free(raw); g_free(name);
+    g_strfreev(budget_names); g_key_file_unref(budget);
+    g_key_file_unref(state); g_key_file_unref(task); g_free(budget_raw); g_free(raw); g_free(name);
     if (states >= 0) close(states);
+    if (budgets >= 0) close(budgets);
     if (tasks >= 0) close(tasks);
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
