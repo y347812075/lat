@@ -4277,11 +4277,12 @@ static bool managed_task_state_read(int gc, const char *name, const char *id,
     bool bound = record_string_is(record, "managed", "state", "DOMAIN_BOUND");
     bool authorized = record_string_is(record, "managed", "state", "EXEC_AUTHORIZED");
     bool cancelled = record_string_is(record, "managed", "state", "CANCELLED_DOMAIN_EMPTY");
+    bool empty = record_string_is(record, "managed", "state", "DOMAIN_EMPTY");
     valid = valid && groups == 1 && (prepared ? exact_keys(record, "managed", keys, G_N_ELEMENTS(keys)) :
         exact_keys(record, "managed", bound_keys, G_N_ELEMENTS(bound_keys))) &&
         record_string_is(record, "managed", "version", "1") &&
         record_string_is(record, "managed", "task_id", id) &&
-        (prepared || bound || authorized || cancelled);
+        (prepared || bound || authorized || cancelled || empty);
     uint64_t device, inode;
     valid = valid && record_uint64(record, "managed", "task_device", &device) &&
         record_uint64(record, "managed", "task_inode", &inode) &&
@@ -4289,7 +4290,8 @@ static bool managed_task_state_read(int gc, const char *name, const char *id,
     char *digest = g_compute_checksum_for_data(G_CHECKSUM_SHA256, (const guchar *)raw, size);
     valid = valid && record_string_is(record, "managed", "task_sha256", digest);
     LatcdManagedDomain parsed = { .state = prepared ? LATCD_MANAGED_PREPARED :
-        bound ? LATCD_MANAGED_BOUND : authorized ? LATCD_MANAGED_AUTHORIZED : LATCD_MANAGED_CANCELLED };
+        bound ? LATCD_MANAGED_BOUND : authorized ? LATCD_MANAGED_AUTHORIZED :
+        cancelled ? LATCD_MANAGED_CANCELLED : LATCD_MANAGED_DOMAIN_EMPTY };
     if (valid && !prepared) {
         struct stat cache;
         int root = openat(gc, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -4392,7 +4394,7 @@ int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
                               char *error, size_t error_size)
 {
     if (!root || !id || !g_uuid_string_is_valid(id) || task_fd < 0 || !domain ||
-        next > LATCD_MANAGED_CANCELLED)
+        next > LATCD_MANAGED_DOMAIN_EMPTY)
         return fail(error, error_size, "invalid managed domain request");
     int roots = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, error_size);
     if (roots < 0) return -1;
@@ -4414,10 +4416,12 @@ int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
         result = 0;
     } else if (valid && ((old.state == LATCD_MANAGED_PREPARED && next == LATCD_MANAGED_BOUND) ||
                (old.state == LATCD_MANAGED_BOUND && (next == LATCD_MANAGED_AUTHORIZED || next == LATCD_MANAGED_CANCELLED)) ||
-               (old.state == LATCD_MANAGED_AUTHORIZED && next == LATCD_MANAGED_CANCELLED))) {
+               (old.state == LATCD_MANAGED_AUTHORIZED &&
+                (next == LATCD_MANAGED_CANCELLED || next == LATCD_MANAGED_DOMAIN_EMPTY)))) {
         LatcdManagedDomain value = old.state == LATCD_MANAGED_PREPARED ? *domain : old;
         if (g_uuid_string_is_valid(value.boot) && value.delegation.st_ino && value.domain.st_ino) {
-            const char *names[] = {"PREPARED", "DOMAIN_BOUND", "EXEC_AUTHORIZED", "CANCELLED_DOMAIN_EMPTY"};
+            const char *names[] = {"PREPARED", "DOMAIN_BOUND", "EXEC_AUTHORIZED",
+                                   "CANCELLED_DOMAIN_EMPTY", "DOMAIN_EMPTY"};
             GKeyFile *record = g_key_file_new();
             char *digest = g_compute_checksum_for_data(G_CHECKSUM_SHA256, (const guchar *)raw, size);
             g_key_file_set_string(record, "managed", "version", "1");

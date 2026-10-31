@@ -2991,8 +2991,10 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                 usleep(10000);
             }
         }
+        unsigned terminal = waited == child && WIFEXITED(status) && !WEXITSTATUS(status) ?
+            LATCD_MANAGED_DOMAIN_EMPTY : LATCD_MANAGED_CANCELLED;
         if (!empty || latcd_managed_task_domain(config->cache_dir, task_id, task_lease,
-                                                 &domain, LATCD_MANAGED_CANCELLED,
+                                                 &domain, terminal,
                                                  error, error_size)) {
             waited = -1;
             errno = EBUSY;

@@ -8132,13 +8132,14 @@ static void test_unknown_task_release(bool executor, bool managed)
                                           LATCD_MANAGED_BOUND, error, sizeof(error)));
         assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
                                           LATCD_MANAGED_AUTHORIZED, error, sizeof(error)));
+        unsigned terminal = executor ? LATCD_MANAGED_CANCELLED : LATCD_MANAGED_DOMAIN_EMPTY;
         assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
-                                          LATCD_MANAGED_CANCELLED, error, sizeof(error)));
+                                          terminal, error, sizeof(error)));
         assert(latcd_managed_task_domain(root, id, task_fd, &domain,
                                          LATCD_MANAGED_AUTHORIZED, error, sizeof(error)));
         assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
                                           LATCD_MANAGED_PREPARED, error, sizeof(error)));
-        assert(domain.state == LATCD_MANAGED_CANCELLED && domain.domain.st_ino == 4);
+        assert(domain.state == terminal && domain.domain.st_ino == 4);
         close(task_fd);
     }
     int fd = open(path, O_RDONLY | O_CLOEXEC);

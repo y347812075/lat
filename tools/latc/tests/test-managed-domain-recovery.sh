@@ -45,7 +45,7 @@ LATCD_TEST_DOMAIN_DESCENDANT=1 sh -c '
     exec "$@"
 ' sh "$scope/worker" "$binary" --test-managed-compiler /work/compile-cache "$scope/worker" >/work/compile-id
 id=$(cat /work/compile-id)
-grep -qx 'state=CANCELLED_DOMAIN_EMPTY' "/work/compile-cache/.gc/managed-task-state/$id.ini"
+grep -qx 'state=DOMAIN_EMPTY' "/work/compile-cache/.gc/managed-task-state/$id.ini"
 test "$(awk '$1 == "populated" {print $2}' "$scope/worker/$id/cgroup.events")" = 0
 test -f "/work/compile-cache/.gc/compiler-budgets/$id.ini"
 test ! -e "/work/compile-cache/.gc/compiler-releases/$id.ini"
