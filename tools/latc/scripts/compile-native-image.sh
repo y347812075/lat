@@ -2,16 +2,18 @@
 set -eu
 
 module=0
+config_replay=0
 static_tbset=0
 while :; do
     case "${1:-}" in
         --module) module=1; shift ;;
+        --config-replay) config_replay=1; shift ;;
         --static-tbset) static_tbset=1; shift ;;
         *) break ;;
     esac
 done
 if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
-    echo "usage: $0 [--module] [--static-tbset] LATC RUNNER X86_GUEST OUTPUT [TBSET]" >&2
+    echo "usage: $0 [--module | --config-replay] [--static-tbset] LATC RUNNER X86_GUEST OUTPUT [TBSET]" >&2
     exit 2
 fi
 
@@ -20,6 +22,13 @@ runner=$2
 guest=$3
 output=$4
 tbset=${5:-}
+
+if [ "$config_replay" -eq 1 ] && { [ "$module" -eq 1 ] ||
+   [ "$static_tbset" -eq 1 ] || [ -z "$tbset" ] ||
+   [ -z "${LATC_TRANSLATION_CONFIG_FROM:-}" ]; }; then
+    echo 'latc: config replay requires a configuration and explicit TB set' >&2
+    exit 2
+fi
 
 unset LATC_NATIVE_STATIC_CHECK
 if [ "$module" -eq 1 ] && [ -z "${LATC_TBSET_SELECTION+x}" ]; then
@@ -182,7 +191,12 @@ if [ ! -s "$output" ]; then
     echo "latc: native compilation produced no image" >&2
     exit 1
 fi
-if [ "$module" -eq 0 ]; then
+if [ "$config_replay" -eq 1 ]; then
+    if ! "$latc" validate-replay-native "$output" "$LATC_TRANSLATION_CONFIG_FROM"; then
+        rm -f "$output"
+        exit 1
+    fi
+elif [ "$module" -eq 0 ]; then
     "$latc" mark-native-x86 "$output"
 fi
 "$latc" inspect-native --json "$output"

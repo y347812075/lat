@@ -36,6 +36,7 @@ static void usage(const char *name)
             " [--tbset-ignore-outside-exec] [--aot FILE]\n"
             "  %s inspect [--json] BUNDLE\n", name, name, name, name);
     fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
+    fprintf(stderr, "  %s validate-replay-native IMAGE CONFIG\n", name);
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
     fprintf(stderr, "  %s merge-native BASE DELTA -o OUTPUT\n", name);
     fprintf(stderr, "  %s plan-native-tus IMAGE SEED_TBSET -o OUTPUT_TBSET\n", name);
@@ -684,6 +685,30 @@ int main(int argc, char **argv)
         }
         if (!path) { usage(argv[0]); return 2; }
         return inspect_native(path, json);
+    }
+    if (strcmp(argv[1], "validate-replay-native") == 0) {
+        gchar *image = NULL, *config = NULL;
+        gsize image_size = 0, config_size = 0;
+        char error[256] = {0};
+        if (argc != 4) { usage(argv[0]); return 2; }
+        bool valid = g_file_get_contents(argv[2], &image, &image_size, NULL) &&
+            g_file_get_contents(argv[3], &config, &config_size, NULL) &&
+            !lat_native_image_validate(image, image_size, error, sizeof(error));
+        if (valid) {
+            const LatNativeImageHeaderV2 *header = (const void *)image;
+            valid = (header->flags & LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED) &&
+                header->translation_config_size == config_size &&
+                config_size <= image_size &&
+                !memcmp(image + image_size - config_size, config, config_size);
+        }
+        g_free(image);
+        g_free(config);
+        if (!valid) {
+            fprintf(stderr, "latc: invalid or mismatched replay native%s%s\n",
+                    error[0] ? ": " : "", error);
+            return 1;
+        }
+        return 0;
     }
     if (strcmp(argv[1], "inspect-module") == 0) {
         int json = 0;

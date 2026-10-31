@@ -17,6 +17,7 @@ def main():
     runner = prefix / 'bin/latx-x86_64'
     latc = prefix / 'bin/latc'
     script = prefix / 'libexec/latc/scripts/compile-aot.sh'
+    native_script = prefix / 'libexec/latc/scripts/compile-native-image.sh'
     env = {k: v for k, v in os.environ.items() if not k.startswith(('LAT', 'SAVE_XMM'))}
     home = work / 'home'
     (home / '.config').mkdir(parents=True)
@@ -79,6 +80,15 @@ def main():
                 assert 'not authorized for modules' in rejected.stderr
                 run([latc, 'mark-native-x86', output], success=False)
     assert content(work / '0-True.native')[0] != content(work / '1-True.native')[0]
+    isolated = work / 'isolated.native'
+    run([native_script, '--config-replay', latc, runner, guest, isolated, keys],
+        {'LATX_CVT_OPT': '1', 'LATC_TRANSLATION_CONFIG_FROM': str(work / 'config-0')})
+    assert content(isolated) == content(work / '0-True.native')
+    run([latc, 'validate-replay-native', isolated, work / 'config-1'], success=False)
+    run([latc, 'validate-replay-native', work / '0-False.native', work / 'config-0'], success=False)
+    run([native_script, '--config-replay', latc, runner, guest, work / 'missing.native', keys],
+        success=False)
+    assert not (work / 'missing.native').exists()
     run([latc, 'merge-native', work / '0-True.native', work / '0-True.native',
          '-o', work / 'same.native'])
     assert (work / 'same.native').read_bytes().endswith((work / 'config-0').read_bytes())
