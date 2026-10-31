@@ -28,6 +28,7 @@
 #include <glib.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <linux/memfd.h>
 #include <pthread.h>
 #include <poll.h>
 #include <signal.h>
@@ -1315,6 +1316,62 @@ static int pin_compiler_inputs(const char *const paths[4], int pins[4],
         }
     }
     return 0;
+}
+
+/* Worker inputs must not share an inode or an open file description with the
+ * cache. The parent retains the original pins until the task is registered. */
+static int snapshot_managed_inputs(const int pins[4], int copies[4],
+                                   char *error, size_t error_size)
+{
+    char buffer[65536];
+    for (unsigned i = 0; i < 4; i++) {
+        if (pins[i] < 0) continue;
+        struct stat before, after;
+        int fd = syscall(SYS_memfd_create, "latcd-worker-input",
+                         MFD_CLOEXEC | MFD_ALLOW_SEALING);
+        if (fd < 0) goto failed;
+        copies[i] = fd;
+        if (fstat(pins[i], &before) || before.st_size < 0) goto failed;
+        off_t offset = 0;
+        while (offset < before.st_size) {
+            size_t wanted = MIN((uint64_t)sizeof(buffer),
+                                (uint64_t)(before.st_size - offset));
+            ssize_t n = pread(pins[i], buffer, wanted, offset);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) { if (!n) errno = ESTALE; goto failed; }
+            size_t written = 0;
+            while (written < (size_t)n) {
+                ssize_t w = write(fd, buffer + written, n - written);
+                if (w < 0 && errno == EINTR) continue;
+                if (w <= 0) { if (!w) errno = EIO; goto failed; }
+                written += w;
+            }
+            offset += n;
+        }
+        if (fstat(pins[i], &after) || before.st_size != after.st_size ||
+            before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+            before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+            before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+            before.st_ctim.tv_nsec != after.st_ctim.tv_nsec) {
+            errno = ESTALE;
+            goto failed;
+        }
+        if (fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW |
+                                    F_SEAL_SHRINK | F_SEAL_SEAL) ||
+            lseek(fd, 0, SEEK_SET) < 0) goto failed;
+        int high = fcntl(fd, F_DUPFD_CLOEXEC, 16);
+        if (high < 0) goto failed;
+        close(fd);
+        copies[i] = high;
+    }
+    return 0;
+failed:
+    {
+        int saved = errno;
+        close_compiler_inputs(copies);
+        return fail(error, error_size, "cannot snapshot managed input: %s",
+                    strerror(saved));
+    }
 }
 
 static int open_task_directory(int parent, const char *name)
@@ -2864,6 +2921,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     const char *inputs[4] = {source, tbset, base_native, base_module};
     int input_pins[4] = {-1, -1, -1, -1};
     int pin_result = pin_compiler_inputs(inputs, input_pins, error, error_size);
+    int input_copies[4] = {-1, -1, -1, -1};
     const char *task_paths[6] = {source, tbset, base_native, base_module,
                                 output_native, output};
     char *task_id = NULL;
@@ -2885,6 +2943,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             }
         }
     }
+    if (!pin_result && config->managed &&
+        snapshot_managed_inputs(input_pins, input_copies, error, error_size))
+        pin_result = -1;
     int gate[2] = {-1, -1}, domain_fd = -1;
     LatcdManagedDomain domain = {0};
     pid_t child = -1;
@@ -2913,12 +2974,29 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         if (config->managed) {
             close(gate[1]);
             if (gate[0] != 3 && dup2(gate[0], 3) < 0) _exit(126);
+            for (unsigned i = 0; i < 4; i++) {
+                if (input_copies[i] >= 0) {
+                    if (dup2(input_copies[i], 4 + i) < 0) _exit(126);
+                } else {
+                    close(4 + i);
+                }
+            }
             close(0); close(1); close(2);
-            if (syscall(SYS_close_range, 4u, ~0u, 0u)) _exit(126);
+            if (syscall(SYS_close_range, 8u, ~0u, 0u)) _exit(126);
 #ifdef LATCD_GC_TIMER_TEST
             if (fcntl(0, F_GETFD) != -1 || errno != EBADF ||
                 fcntl(1, F_GETFD) != -1 || errno != EBADF ||
                 fcntl(2, F_GETFD) != -1 || errno != EBADF) _exit(126);
+            for (unsigned i = 0; i < 4; i++) {
+                if (input_copies[i] >= 0) {
+                    int seals = fcntl(4 + i, F_GET_SEALS);
+                    if (seals < 0 || (seals & (F_SEAL_WRITE | F_SEAL_GROW |
+                        F_SEAL_SHRINK | F_SEAL_SEAL)) != (F_SEAL_WRITE |
+                        F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) _exit(126);
+                } else if (fcntl(4 + i, F_GETFD) != -1 || errno != EBADF) {
+                    _exit(126);
+                }
+            }
 #endif
             char permit;
             ssize_t n;
@@ -2997,6 +3075,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         if (task_lease >= 0) close(task_lease);
         g_free(task_id);
         close_compiler_inputs(input_pins);
+        close_compiler_inputs(input_copies);
         release_compile_space(worker_index);
         g_free(library_path);
         g_free(temporary_path);
@@ -3071,6 +3150,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         fprintf(stderr, "latcd: compiler inputs still held or release not durable; retaining task root\n");
     g_free(task_id);
     close_compiler_inputs(input_pins);
+    close_compiler_inputs(input_copies);
     release_compile_space(worker_index);
     g_free(library_path);
     g_free(temporary_path);

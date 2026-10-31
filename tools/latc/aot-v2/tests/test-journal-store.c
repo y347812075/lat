@@ -666,6 +666,26 @@ int main(void)
     g_assert_cmpuint(tasks_for_compile->len, ==, 0);
     g_assert_cmpuint(reservation, ==, 0);
     g_ptr_array_free(tasks_for_compile, TRUE);
+    int pins[4] = {-1, -1, -1, -1}, copies[4] = {-1, -1, -1, -1};
+    pins[0] = syscall(SYS_memfd_create, "snapshot-test", MFD_CLOEXEC);
+    g_assert_cmpint(pins[0], >=, 0);
+    g_assert_cmpint(write(pins[0], "original", 8), ==, 8);
+    g_assert_cmpint(snapshot_managed_inputs(pins, copies, isolation_error,
+                                            sizeof(isolation_error)), ==, 0);
+    struct stat original_stat, copy_stat;
+    g_assert_cmpint(fstat(pins[0], &original_stat), ==, 0);
+    g_assert_cmpint(fstat(copies[0], &copy_stat), ==, 0);
+    g_assert_true(original_stat.st_dev != copy_stat.st_dev ||
+                  original_stat.st_ino != copy_stat.st_ino);
+    g_assert_cmpint(pwrite(pins[0], "changed!", 8, 0), ==, 8);
+    char snapshot[8];
+    g_assert_cmpint(read(copies[0], snapshot, sizeof(snapshot)), ==, 8);
+    g_assert_cmpmem(snapshot, sizeof(snapshot), "original", 8);
+    errno = 0;
+    g_assert_cmpint(pwrite(copies[0], "x", 1, 0), ==, -1);
+    g_assert_cmpint(errno, ==, EPERM);
+    close_compiler_inputs(copies);
+    close_compiler_inputs(pins);
     char *directory = g_dir_make_tmp("journal-store-XXXXXX", NULL);
     g_assert_nonnull(directory);
     char *socket_path = g_build_filename(directory, "socket", NULL);
