@@ -121,6 +121,9 @@ fi
 "$latcd" --submit --socket "$socket" --tbset "$work/delta.tbset" "$guest" >"$work/delta-submit"
 "$latcd" --flush-source --socket "$socket" "$guest" >"$work/delta-flush"
 grep -q '^status=0$' "$work/delta-flush"
+if [ "${LATCD_TEST_REQUIRE_INCREMENTAL:-0}" = 1 ]; then
+    grep -q '^latcd: test incremental module validated$' "$work/server.err"
+fi
 if [ "${LATCD_TEST_IDLE_SECONDS:-0}" != 0 ]; then
     sleep 2
     kill -0 "$pid"

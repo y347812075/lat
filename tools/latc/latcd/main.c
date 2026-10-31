@@ -5289,6 +5289,11 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         status = LATCD_STATUS_INVALID_MODULE;
         goto out;
     }
+#ifdef LATCD_GC_TIMER_TEST
+    if (base_native && !retry_full) {
+        fprintf(stderr, "latcd: test incremental module validated\n");
+    }
+#endif
     if (retained_tbset && lat_aot_v2_module_validate_tbset_file(
             module, retained_tbset, error, sizeof(error))) {
         status = LATCD_STATUS_INVALID_MODULE;
