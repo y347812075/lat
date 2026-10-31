@@ -8,7 +8,7 @@ runtime=$5
 guest=$6
 work=$7
 mode=${8:-pin}
-case "$mode" in pin|pin-restart|unreferenced|capture) ;; *) exit 2 ;; esac
+case "$mode" in pin|pin-restart|unreferenced|capture|capture-restart) ;; *) exit 2 ;; esac
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 mkdir -m 700 "$work" "$work/cache" "$work/broker"
 cache=$work/cache
@@ -61,7 +61,7 @@ delta = (entry + 14 - base, 3)
 assert delta not in old
 write_key_set(guest, work / 'delta.tbset', [delta])
 PY
-if [ "$mode" = capture ]; then
+if [ "$mode" = capture ] || [ "$mode" = capture-restart ]; then
     LD_LIBRARY_PATH="$runtime" LATX_AOT_V2_CACHE_DIR="$cache" LATX_AOT_V2_LATCD_SOCKET="$socket" \
         LATX_AOT_V2_STRICT=1 LATC_DISABLE_PRETRANSLATE=1 LATC_STRICT_AOT=1 \
         LATX_AOT_V2_TEST_CAPTURE_READY="$work/capture-ready" \
@@ -145,13 +145,13 @@ done
 python3 - "$cache" "$work/retired.json" "$work/old.json" "$mode" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1]); names = json.loads(pathlib.Path(sys.argv[2]).read_text())
-if sys.argv[4] == 'capture':
+if sys.argv[4] in ('capture', 'capture-restart'):
     old = json.loads(pathlib.Path(sys.argv[3]).read_text())
     assert old['module'] in names and (root / old['module']).is_file()
 else:
     assert all((root / name).is_file() for name in names)
 PY
-if [ "$mode" = pin-restart ]; then
+if [ "$mode" = pin-restart ] || [ "$mode" = capture-restart ]; then
     kill -KILL "$pid"; wait "$pid" 2>/dev/null || :; pid=
     rm -f "$socket"
     LATCD_TEST_RECOVER_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
@@ -166,13 +166,17 @@ if [ "$mode" = pin-restart ]; then
     done
     grep -q 'test recovered page waiting' "$work/restart.err"
     cp "$work/restart.err" "$work/restart-startup.err"
-    python3 - "$cache" "$guest" "$work" <<'PY'
+    python3 - "$cache" "$guest" "$work" "$mode" <<'PY'
 import hashlib, json, pathlib, sys
-cache, guest, work = map(pathlib.Path, sys.argv[1:])
+cache, guest, work = map(pathlib.Path, sys.argv[1:4])
 retired = json.loads((work / 'retired.json').read_text())
 current = json.loads((work / 'new.json').read_text())
 source = hashlib.sha256(guest.read_bytes()).hexdigest()
-assert all((cache / name).is_file() for name in retired)
+if sys.argv[4] == 'capture-restart':
+    old = json.loads((work / 'old.json').read_text())
+    assert old['module'] in retired and (cache / old['module']).is_file()
+else:
+    assert all((cache / name).is_file() for name in retired)
 assert json.loads((cache / (source + '.current')).read_text()) == current
 assert all((cache / current[k]).is_file() for k in ('module', 'native', 'tbset'))
 PY
@@ -180,7 +184,7 @@ PY
 else
     log=$work/server.err
 fi
-if [ "$mode" = capture ]; then
+if [ "$mode" = capture ] || [ "$mode" = capture-restart ]; then
     touch "$work/capture-release"
     set +e
     wait "$pin_pid"
