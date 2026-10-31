@@ -891,6 +891,30 @@ int main(void)
     check_collection(&config, stream_fd, &identity);
     g_assert_cmpint(kill(daemon, SIGTERM), ==, 0);
     wait_ok(daemon);
+    int receipt_before = openat(stream_fd, "received.tbset", O_RDONLY | O_CLOEXEC);
+    g_assert_cmpint(receipt_before, >=, 0);
+    char managed_receipt_before[65], managed_receipt_after[65];
+    g_assert_true(receipt_digest(receipt_before, managed_receipt_before));
+    close(receipt_before);
+    LatcdConfig managed_config = config;
+    managed_config.managed = true;
+    LatcdService managed_service = {0};
+    LatcdResponseV2 managed_response = { .request_id = 42 };
+    g_assert_cmpint(journal_queue_receipts(&managed_config, &managed_service,
+        build, codegen, false, &managed_response), ==, -1);
+    g_assert_cmpint(managed_response.status, ==, LATCD_STATUS_IO_ERROR);
+    g_assert_nonnull(strstr(managed_response.message,
+                            "journal configuration replay is not admitted"));
+    g_assert_cmpuint(managed_response.accepted_sequence, ==, 0);
+    g_assert_cmpuint(managed_response.published_sequence, ==, 0);
+    g_assert_cmpuint(managed_service.next_sequence, ==, 0);
+    g_assert_cmpuint(managed_service.queued, ==, 0);
+    int receipt_after = openat(stream_fd, "received.tbset", O_RDONLY | O_CLOEXEC);
+    g_assert_cmpint(receipt_after, >=, 0);
+    g_assert_true(receipt_digest(receipt_after, managed_receipt_after));
+    close(receipt_after);
+    g_assert_cmpstr(managed_receipt_before, ==, managed_receipt_after);
+    check_receipt(stream_fd, &identity, 3);
     LatcdJournalCompileInput input;
     g_assert_cmpint(latcd_journal_open_compile_input(cache, registered.message,
         build, codegen, config.max_cache_bytes, &input, error, sizeof(error)), ==, 0);
