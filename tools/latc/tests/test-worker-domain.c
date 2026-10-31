@@ -42,6 +42,28 @@ int main(int argc, char **argv)
     assert(!latcd_worker_delegation_init(parent, &manager) && manager >= 0);
     int domain = latcd_worker_domain_create(parent, "latcd-domain-test", &identity);
     assert(domain >= 0);
+    int rejoined = -1;
+    assert(!latcd_worker_delegation_init(parent, &rejoined) && rejoined >= 0);
+    close(rejoined);
+    int hold[2], ready_manager[2];
+    assert(!pipe(hold) && !pipe(ready_manager));
+    pid_t competing = fork();
+    assert(competing >= 0);
+    if (!competing) {
+        close(hold[1]); close(ready_manager[0]);
+        char byte = '1';
+        if (write(ready_manager[1], &byte, 1) != 1 || read(hold[0], &byte, 1) != 0) _exit(1);
+        _exit(0);
+    }
+    close(hold[0]); close(ready_manager[1]);
+    char manager_ready;
+    assert(read(ready_manager[0], &manager_ready, 1) == 1);
+    close(ready_manager[0]);
+    assert(latcd_worker_delegation_init(parent, &rejoined) < 0 && errno == EBUSY);
+    close(hold[1]);
+    int competing_status;
+    assert(waitpid(competing, &competing_status, 0) == competing &&
+           WIFEXITED(competing_status) && !WEXITSTATUS(competing_status));
     assert(latcd_worker_domain_set_limits(domain, 0, 1) < 0 && errno == EINVAL);
     assert(!latcd_worker_domain_set_limits(domain, 268435456, 32));
     assert(!latcd_worker_domain_populated(parent, "latcd-domain-test", &identity, &value) && !value);
