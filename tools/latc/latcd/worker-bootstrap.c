@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 /* fd 3 is a private SOCK_SEQPACKET channel to the daemon. */
@@ -39,6 +40,7 @@ int main(int argc, char **argv, char **envp)
     do { n = recv(3, &ack, 1, 0); } while (n < 0 && errno == EINTR);
     close(3);
     if (n != 1 || ack != '1') return 126;
+    if (syscall(SYS_close_range, 3u, ~0u, 0u)) return 126;
     execve(argv[1], argv + 1, envp);
     return 127;
 }
