@@ -28,6 +28,7 @@ def run(binary):
                 raise AssertionError(process.stderr.read())
             task_path = root / '.gc/tasks' / (task_id + '.ini')
             state_path = root / '.gc/managed-task-state' / (task_id + '.ini')
+            budget_path = root / '.gc/compiler-budgets' / (task_id + '.ini')
             raw = task_path.read_bytes()
             task, state = configparser.ConfigParser(), configparser.ConfigParser()
             task.read_string(raw.decode())
@@ -42,6 +43,12 @@ def run(binary):
             assert int(state['managed']['task_device']) == task_path.stat().st_dev
             assert int(state['managed']['task_inode']) == task_path.stat().st_ino
             assert state['managed']['task_sha256'] == hashlib.sha256(raw).hexdigest()
+            budget = configparser.ConfigParser()
+            budget.read(budget_path)
+            assert budget['budget']['task_id'] == task_id
+            assert int(budget['budget']['task_device']) == task_path.stat().st_dev
+            assert int(budget['budget']['task_inode']) == task_path.stat().st_ino
+            assert int(budget['budget']['bytes']) == 4096
             with task_path.open('rb') as probe:
                 try:
                     fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -60,24 +67,31 @@ def run(binary):
                 process.wait(timeout=10)
             for stream in (process.stdin, process.stdout, process.stderr):
                 stream.close()
-    with tempfile.TemporaryDirectory(prefix='latcd-managed-crash-',
-                                     dir=Path.home() / 'tmp') as directory:
-        root = Path(directory)
-        (root / '.tmp').mkdir(mode=0o700)
-        (root / '.tmp/input').write_bytes(b'test input')
-        env = dict(os.environ, LATCD_TEST_MANAGED_AFTER_ROOT='1')
-        process = subprocess.run([binary, '--test-managed-task', str(root)],
-                                 env=env, capture_output=True, timeout=10)
-        assert process.returncode == -signal.SIGKILL, process.stderr
-        tasks = list((root / '.gc/tasks').iterdir())
-        assert len(tasks) == 1
-        task = configparser.ConfigParser()
-        task.read(tasks[0])
-        assert task['task']['kind'] == 'MANAGED_COMPILER'
-        assert task['task']['state'] == 'PREPARED'
-        assert not list((root / '.gc/managed-task-state').iterdir())
-        with tasks[0].open('rb') as probe:
-            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    for point in ('ROOT', 'BUDGET'):
+        with tempfile.TemporaryDirectory(prefix='latcd-managed-crash-',
+                                         dir=Path.home() / 'tmp') as directory:
+            root = Path(directory)
+            (root / '.tmp').mkdir(mode=0o700)
+            (root / '.tmp/input').write_bytes(b'test input')
+            env = dict(os.environ, **{'LATCD_TEST_MANAGED_AFTER_' + point: '1'})
+            process = subprocess.run([binary, '--test-managed-task', str(root)],
+                                     env=env, capture_output=True, timeout=10)
+            assert process.returncode == -signal.SIGKILL, process.stderr
+            tasks = list((root / '.gc/tasks').iterdir())
+            assert len(tasks) == 1
+            task = configparser.ConfigParser()
+            task.read(tasks[0])
+            assert task['task']['kind'] == 'MANAGED_COMPILER'
+            assert task['task']['state'] == 'PREPARED'
+            assert not list((root / '.gc/managed-task-state').iterdir())
+            budgets = list((root / '.gc/compiler-budgets').iterdir())
+            assert len(budgets) == (point == 'BUDGET')
+            if budgets:
+                budget = configparser.ConfigParser()
+                budget.read(budgets[0])
+                assert int(budget['budget']['task_inode']) == tasks[0].stat().st_ino
+            with tasks[0].open('rb') as probe:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
     print('test-managed-task-record: PASS')
 
 

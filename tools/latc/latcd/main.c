@@ -1488,11 +1488,15 @@ static void task_root_test_barrier(bool copying, char stage)
     do { count = read((int)input, &stage, 1); } while (count < 0 && errno == EINTR);
 }
 
+static int record_compiler_budget(const LatcdConfig *config, const char *id,
+                                   const struct stat *task, uint64_t bytes);
+
 /* The immutable record is also the lease inode. No completion or deletion claim. */
 static int record_task(const LatcdConfig *config, bool copying,
                                 const char *const paths[6], const int pins[4],
                                 const uint8_t digest[32],
                                 const char *const environment[],
+                                uint64_t managed_budget,
                                 char **task_id, char *error, size_t error_size)
 {
     int root = -1, gc = -1, tasks = -1, temporary = -1, collected = -1, lease = -1;
@@ -1590,10 +1594,17 @@ static int record_task(const LatcdConfig *config, bool copying,
     if (lease < 0) goto failed;
     task_root_test_barrier(copying, 'p');
     if (managed) {
+#ifdef LATCD_GC_TIMER_TEST
+        if (getenv("LATCD_TEST_MANAGED_AFTER_ROOT")) raise(SIGKILL);
+#endif
+        struct stat identity;
+        if (!managed_budget || fstat(lease, &identity) ||
+            record_compiler_budget(config, id, &identity, managed_budget))
+            goto failed;
         close(roots);
         roots = -1;
 #ifdef LATCD_GC_TIMER_TEST
-        if (getenv("LATCD_TEST_MANAGED_AFTER_ROOT")) raise(SIGKILL);
+        if (getenv("LATCD_TEST_MANAGED_AFTER_BUDGET")) raise(SIGKILL);
 #endif
         if (latcd_managed_task_prepare(config->cache_dir, id, lease, error, error_size))
             goto failed;
@@ -2769,7 +2780,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                                 output_native, output};
     char *task_id = NULL;
     int task_lease = pin_result ? -1 : record_task(config, false, task_paths,
-        input_pins, digest, environment, &task_id, error, error_size);
+        input_pins, digest, environment, cache_peak, &task_id, error, error_size);
     if (task_lease < 0) pin_result = -1;
     if (task_lease >= 0) {
         LatcdCompilerTask *task = g_new0(LatcdCompilerTask, 1);
@@ -2780,7 +2791,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         } else {
             compiler_task_local(task_id, true);
             g_ptr_array_add(compiler_tasks, task);
-            if (record_compiler_budget(config, task_id, &task->identity, cache_peak)) {
+            if (!config->managed && record_compiler_budget(config, task_id, &task->identity, cache_peak)) {
                 pin_result = -1;
                 fail(error, error_size, "capacity: cannot persist compiler budget");
             }
@@ -3097,7 +3108,7 @@ static int snapshot_task_copy(const LatcdConfig *config, const char *source,
     char *output = g_build_filename(temporary, name, NULL);
     const char *paths[6] = {source, NULL, NULL, NULL, output, NULL};
     int inputs[4] = {input, -1, -1, -1};
-    *task_pin = record_task(config, true, paths, inputs, digest, NULL,
+    *task_pin = record_task(config, true, paths, inputs, digest, NULL, 0,
                             task_id, error, error_size);
     if (*task_pin >= 0) copy_test_barrier("recorded");
     int result = *task_pin < 0 ? -1 : snapshot_cached_fd(input, temporary,
@@ -7292,7 +7303,7 @@ static int test_managed_task_record(const char *root)
     latcd_cache_capacity_metadata_bind(&generation_capacity, LATCD_DEFAULT_MAX_CACHE_BYTES);
     pins[0] = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (pins[0] < 0) goto out;
-    lease = record_task(&config, false, paths, pins, digest, environment,
+    lease = record_task(&config, false, paths, pins, digest, environment, 4096,
                         &id, error, sizeof(error));
     if (lease < 0) goto out;
     printf("%s\n", id);
