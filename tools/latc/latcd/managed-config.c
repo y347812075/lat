@@ -22,7 +22,7 @@ void latcd_managed_config_clear(LatcdManagedConfig *c)
     free(c->cache); free(c->admin); free(c->broker);
     free(c->compiler); free(c->runner); free(c->runtime);
     free(c->worker_cgroup);
-    free(c->worker_bwrap); free(c->worker_bootstrap);
+    free(c->worker_bwrap); free(c->worker_bootstrap); free(c->worker_closure);
     memset(c, 0, sizeof(*c));
 }
 
@@ -96,7 +96,7 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
     int result = -1;
     size_t count = object ? json_object_get_count(object) : 0;
     if (!object || count < sizeof(keys) / sizeof(keys[0]) ||
-        count > sizeof(keys) / sizeof(keys[0]) + 3 ||
+        count > sizeof(keys) / sizeof(keys[0]) + 4 ||
         !json_object_get_string(object, keys[0]) || !json_object_get_string(object, keys[1]) ||
         strlen(json_object_get_string(object, keys[0])) != json_object_get_string_len(object, keys[0]) ||
         strlen(json_object_get_string(object, keys[1])) != json_object_get_string_len(object, keys[1]) ||
@@ -116,18 +116,18 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
         c->worker_cgroup = strdup(s);
         if (!c->worker_cgroup) goto out;
     }
-    const char *optional[] = {"worker_bwrap", "worker_bootstrap"};
-    char **targets[] = {&c->worker_bwrap, &c->worker_bootstrap};
-    for (unsigned i = 0; i < 2; i++) if (json_object_has_value(object, optional[i])) {
+    const char *optional[] = {"worker_bwrap", "worker_bootstrap", "worker_closure"};
+    char **targets[] = {&c->worker_bwrap, &c->worker_bootstrap, &c->worker_closure};
+    for (unsigned i = 0; i < 3; i++) if (json_object_has_value(object, optional[i])) {
         const char *s = json_object_get_string(object, optional[i]);
         if (!s || s[0] != '/' || !s[1] ||
             strlen(s) != json_object_get_string_len(object, optional[i])) goto out;
         *targets[i] = strdup(s);
         if (!*targets[i]) goto out;
     }
-    if (!!c->worker_bwrap != !!c->worker_bootstrap ||
+    if (!!c->worker_bwrap != !!c->worker_bootstrap || (c->worker_closure && !c->worker_bwrap) ||
         count != sizeof(keys) / sizeof(keys[0]) + !!c->worker_cgroup +
-                 !!c->worker_bwrap + !!c->worker_bootstrap) goto out;
+                 !!c->worker_bwrap + !!c->worker_bootstrap + !!c->worker_closure) goto out;
     result = 0;
 out:
     if (value) json_value_free(value);

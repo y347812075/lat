@@ -108,6 +108,8 @@ typedef struct LatcdConfig {
     bool flush_only;
     uint32_t idle_seconds;
     bool managed;
+    const char *worker_bwrap, *worker_bootstrap, *worker_toolroot;
+    bool worker_real_compile;
     const char *broker_dir;
     uid_t broker_uid;
 } LatcdConfig;
@@ -3123,18 +3125,12 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     int gate[2] = {-1, -1}, domain_fd = -1;
     int workspace = -1;
     int handoff[2] = {-1, -1}, filter = -1;
-    bool use_bootstrap = false;
-    bool real_managed_compile = false;
-    const char *bootstrap = NULL, *toolroot = NULL, *bwrap = NULL;
-#ifdef LATCD_GC_TIMER_TEST
-    use_bootstrap = config->managed && getenv("LATCD_TEST_BOOTSTRAP");
-    real_managed_compile = use_bootstrap && getenv("LATCD_TEST_REAL_COMPILE");
-    bootstrap = use_bootstrap ? getenv("LATCD_TEST_BOOTSTRAP") : NULL;
-    toolroot = use_bootstrap ? getenv("LATCD_TEST_TOOLROOT") : NULL;
-    bwrap = use_bootstrap ? getenv("LATCD_TEST_BWRAP") : NULL;
-#endif
+    bool use_bootstrap = config->managed && config->worker_bootstrap;
+    bool real_managed_compile = use_bootstrap && config->worker_real_compile;
+    const char *bootstrap = config->worker_bootstrap, *toolroot = config->worker_toolroot;
+    const char *bwrap = config->worker_bwrap;
     bool handoff_failed = false;
-    if (use_bootstrap && (!toolroot || bootstrap[0] != '/' || toolroot[0] != '/' ||
+    if (use_bootstrap && ((!worker_closure.files && (!toolroot || toolroot[0] != '/')) || bootstrap[0] != '/' ||
         socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, handoff) ||
         (filter = latcd_worker_seccomp_fd()) < 0)) pin_result = -1;
     int handoff_child = handoff[1] < 0 ? -1 : fcntl(handoff[1], F_DUPFD_CLOEXEC, 16);
@@ -8202,6 +8198,10 @@ static int test_managed_compiler_run(const char *root, const char *delegation)
     LatcdConfig config = { .cache_dir = root, .managed = true, .compiler = "/bin/false",
         .runner = "/bin/false", .runtime_dir = root, .workers = 1,
         .address_space_limit = 268435456, .max_cache_bytes = LATCD_DEFAULT_MAX_CACHE_BYTES };
+    config.worker_bootstrap = getenv("LATCD_TEST_BOOTSTRAP");
+    config.worker_bwrap = getenv("LATCD_TEST_BWRAP");
+    config.worker_toolroot = getenv("LATCD_TEST_TOOLROOT");
+    config.worker_real_compile = getenv("LATCD_TEST_REAL_COMPILE") != NULL;
     char error[512] = {0};
     char *source = g_build_filename(root, ".tmp", "input", NULL);
     char *native = g_build_filename(root, ".tmp", "output-native", NULL);
@@ -8320,6 +8320,9 @@ int main(int argc, char **argv)
         config.runtime_dir = managed_config.runtime;
         config.broker_dir = managed_config.broker;
         config.broker_uid = managed_config.client_uid;
+        config.worker_bwrap = managed_config.worker_bwrap;
+        config.worker_bootstrap = managed_config.worker_bootstrap;
+        config.worker_real_compile = managed_config.worker_closure != NULL;
     }
     for (int i = managed_entry ? argc : 1; i < argc; i++) {
         if (!strcmp(argv[i], "--once")) once = 1;
@@ -8459,6 +8462,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "latcd: managed launcher rejected: %s\n", strerror(errno));
         return 1;
     }
+    if (managed_entry && managed_config.worker_closure &&
+        latcd_worker_closure_load(managed_config.worker_closure, LATC_BUILD_ID, TRUE, &worker_closure)) {
+        fprintf(stderr, "latcd: managed worker closure rejected: %s\n", strerror(errno));
+        return 1;
+    }
 #ifdef LATCD_GC_TIMER_TEST
     const char *test_delegation = getenv("LATCD_TEST_SERVICE_DELEGATION");
     if (test_delegation && *test_delegation && serve && !managed_entry) {
@@ -8470,6 +8478,10 @@ int main(int argc, char **argv)
             return 1;
         }
         config.managed = true;
+        config.worker_bootstrap = getenv("LATCD_TEST_BOOTSTRAP");
+        config.worker_bwrap = getenv("LATCD_TEST_BWRAP");
+        config.worker_toolroot = getenv("LATCD_TEST_TOOLROOT");
+        config.worker_real_compile = true;
         test_managed_compiler = true;
         const char *manifest = getenv("LATCD_TEST_WORKER_CLOSURE");
         if (manifest && latcd_worker_closure_load(manifest, LATC_BUILD_ID, FALSE,

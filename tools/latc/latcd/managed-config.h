@@ -6,7 +6,7 @@ typedef struct LatcdManagedConfig {
     uid_t service_uid, client_uid;
     char *cache, *admin, *broker, *compiler, *runner, *runtime;
     char *worker_cgroup;
-    char *worker_bwrap, *worker_bootstrap;
+    char *worker_bwrap, *worker_bootstrap, *worker_closure;
 } LatcdManagedConfig;
 
 /* Returns two held descriptors; managed mode enforces root-owned paths. */

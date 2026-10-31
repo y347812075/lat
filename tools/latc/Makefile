@@ -239,8 +239,9 @@ $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer \
 $(BUILD)/tests/test-journal-store $(BUILD)/tests/test-latcd-channel \
 $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/managed-config.o $(BUILD)/latcd/managed-path.o
 
-$(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer: $(BUILD)/latcd/worker-seccomp.o
-$(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer: $(BUILD)/latcd/worker-closure.o
+$(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-journal-store \
+$(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
+	$(BUILD)/latcd/worker-seccomp.o $(BUILD)/latcd/worker-closure.o
 $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-journal-store \
 $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/worker-domain.o
 

@@ -57,6 +57,15 @@ if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
     echo 'incomplete launcher accepted' >&2; exit 1
 fi
 grep -q 'managed configuration rejected' "$work/incomplete.err"
+sed 's|}$|,"worker_closure":"/opt/latcd-managed-test/missing-closure"}|' "$work/config" > "$work/missing-closure-config"
+if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
+    env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/missing-closure-config" \
+    >"$work/closure.out" 2>"$work/closure.err"; then
+    echo 'missing worker closure accepted' >&2; exit 1
+fi
+grep -q 'managed worker closure rejected' "$work/closure.err"
+test ! -e "$work/admin/admin.sock"
+test ! -e "$work/broker/broker.sock"
 chmod 777 "$work/broker"
 expect_rejected
 chmod 755 "$work/broker"
