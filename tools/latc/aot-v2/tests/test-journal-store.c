@@ -898,6 +898,22 @@ int main(void)
     gsize captured_size;
     const void *captured_data = g_bytes_get_data(bytes, &captured_size);
     g_assert_cmpmem(input.config, input.config_size, captured_data, captured_size);
+    int config_seals = fcntl(input.config_fd, F_GET_SEALS);
+    g_assert_cmpint(config_seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL),
+        ==, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);
+    g_assert_cmpint(pwrite(input.config_fd, "x", 1, 0), ==, -1);
+    g_assert_cmpint(errno, ==, EPERM);
+    g_assert_cmpint(renameat(stream_fd, "config", stream_fd, "config.saved"), ==, 0);
+    int config_replacement = openat(stream_fd, "config", O_CREAT | O_EXCL | O_WRONLY, 0400);
+    g_assert_cmpint(config_replacement, >=, 0);
+    g_assert_cmpint(write(config_replacement, "replacement", 11), ==, 11);
+    close(config_replacement);
+    uint8_t frozen_config[LATCD_JOURNAL_CONFIG_LIMIT];
+    g_assert_cmpint(pread(input.config_fd, frozen_config, input.config_size, 0),
+                    ==, input.config_size);
+    g_assert_cmpmem(frozen_config, input.config_size, captured_data, captured_size);
+    g_assert_cmpint(unlinkat(stream_fd, "config", 0), ==, 0);
+    g_assert_cmpint(renameat(stream_fd, "config.saved", stream_fd, "config"), ==, 0);
     int seals = fcntl(input.receipt_fd, F_GET_SEALS);
     g_assert_cmpint(seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL),
         ==, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);
@@ -920,6 +936,7 @@ int main(void)
         bad_build, codegen, config.max_cache_bytes, &input, error, sizeof(error)), ==, -1);
     g_assert_cmpint(input.source_fd, ==, -1);
     g_assert_cmpint(input.receipt_fd, ==, -1);
+    g_assert_cmpint(input.config_fd, ==, -1);
     g_assert_cmpint(fchmodat(stream_fd, "config", 0600, 0), ==, 0);
     g_assert_cmpint(latcd_journal_open_compile_input(cache, registered.message,
         build, codegen, config.max_cache_bytes, &input, error, sizeof(error)), ==, -1);

@@ -9,6 +9,7 @@
 typedef struct LatcdJournalCompileInput {
     int source_fd;
     int receipt_fd;
+    int config_fd;
     LatKeyJournalIdentity identity;
     uint8_t receipt_sha256[32];
     uint8_t config[LATCD_JOURNAL_CONFIG_LIMIT];
@@ -16,7 +17,7 @@ typedef struct LatcdJournalCompileInput {
 } LatcdJournalCompileInput;
 
 /* A verified request provenance snapshot, not compilation authorization.
- * receipt_fd is sealed; caller owns both descriptors and must close them. */
+ * receipt_fd and config_fd are sealed; caller owns all descriptors. */
 int latcd_journal_open_compile_input(const char *cache, const char *stream,
     const uint8_t build[32], const uint8_t codegen[32], uint64_t max_bytes,
     LatcdJournalCompileInput *input, char *error, size_t error_size);

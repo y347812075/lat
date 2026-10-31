@@ -6723,6 +6723,17 @@ static int journal_queue_receipts(const LatcdConfig *config,
             close(receipt);
             source = input.source_fd;
             receipt = input.receipt_fd;
+            if (config->managed) {
+                failures++;
+                snprintf(error, sizeof(error),
+                         "journal configuration replay is not admitted");
+                close(input.config_fd);
+                close(source);
+                close(receipt);
+                if (directory >= 0) close(directory);
+                break;
+            }
+            close(input.config_fd);
             char digest[65] = {0};
             if (!receipt_digest(receipt, digest)) {
                 failures++;

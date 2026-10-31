@@ -367,7 +367,8 @@ void latcd_journal_close_compile_input(LatcdJournalCompileInput *input)
 {
     if (input->source_fd >= 0) close(input->source_fd);
     if (input->receipt_fd >= 0) close(input->receipt_fd);
-    input->source_fd = input->receipt_fd = -1;
+    if (input->config_fd >= 0) close(input->config_fd);
+    input->source_fd = input->receipt_fd = input->config_fd = -1;
 }
 
 int latcd_journal_open_compile_input(const char *cache, const char *stream,
@@ -376,7 +377,7 @@ int latcd_journal_open_compile_input(const char *cache, const char *stream,
 {
     if (!input) return fail(error, error_size, "missing journal input");
     memset(input, 0, sizeof(*input));
-    input->source_fd = input->receipt_fd = -1;
+    input->source_fd = input->receipt_fd = input->config_fd = -1;
     if (!cache || !stream || !build || !codegen || !stream_name(stream))
         return fail(error, error_size, "invalid journal input identity");
     int root = root_open(cache, false);
@@ -397,7 +398,9 @@ int latcd_journal_open_compile_input(const char *cache, const char *stream,
         !memcmp(record.identity.codegen_sha256, codegen, 32) &&
         record.capacity && record.capacity <= LAT_KEY_JOURNAL_MAX_SLOTS;
     fd = ok ? readonly_file(directory, "config", sizeof(input->config), true, &st) : -1;
-    ok = ok && fd >= 0 && read_exact(fd, input->config, st.st_size);
+    input->config_fd = fd >= 0 ? sealed_copy(fd, st.st_size) : -1;
+    ok = ok && input->config_fd >= 0 &&
+        read_exact(input->config_fd, input->config, st.st_size);
     if (ok) input->config_size = st.st_size;
     if (fd >= 0) close(fd);
     LatTranslationConfig decoded;
