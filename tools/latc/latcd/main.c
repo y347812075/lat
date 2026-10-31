@@ -1356,7 +1356,7 @@ static int prepare_metadata_directories(const char *cache_dir)
         "source-locks", "tasks", "compiler-budgets", "compiler-releases",
         "compiler-output-releases", "copy-releases", "copy-receipts",
         "copy-handoffs", "transactions", "tombstones", "holds", "mount-leases",
-        "retirement-schedule"
+        "retirement-schedule", "managed-task-state"
     };
     int root = open(cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int gc = root < 0 ? -1 : open_task_directory(root, ".gc");
@@ -1491,6 +1491,7 @@ static int record_task(const LatcdConfig *config, bool copying,
                                 char **task_id, char *error, size_t error_size)
 {
     int root = -1, gc = -1, tasks = -1, temporary = -1, collected = -1, lease = -1;
+    bool managed = config->managed && !copying;
     GKeyFile *record = g_key_file_new();
     char *id = g_uuid_string_random();
     char *tmp = g_build_filename(config->cache_dir, ".tmp", NULL);
@@ -1518,10 +1519,11 @@ static int record_task(const LatcdConfig *config, bool copying,
         goto failed;
     }
     task_object_identity(record, "temporary", &st);
-    g_key_file_set_string(record, "task", "version", copying ? "2" : "1");
+    g_key_file_set_string(record, "task", "version", managed ? "3" : copying ? "2" : "1");
     if (copying) g_key_file_set_string(record, "task", "kind", "COPY");
+    if (managed) g_key_file_set_string(record, "task", "kind", "MANAGED_COMPILER");
     g_key_file_set_string(record, "task", "id", id);
-    g_key_file_set_string(record, "task", "state", "BOUND");
+    g_key_file_set_string(record, "task", "state", managed ? "PREPARED" : "BOUND");
     g_key_file_set_string(record, "task", "source", source_hex);
     g_key_file_set_string(record, "task", "build_id", LATC_BUILD_ID);
     if (!copying) {
@@ -1582,6 +1584,12 @@ static int record_task(const LatcdConfig *config, bool copying,
     lease = persist_task_record(tasks, id, record);
     if (lease < 0) goto failed;
     task_root_test_barrier(copying, 'p');
+    if (managed) {
+        close(roots);
+        roots = -1;
+        if (latcd_managed_task_prepare(config->cache_dir, id, lease, error, error_size))
+            goto failed;
+    }
     if (task_id) *task_id = g_strdup(id);
     goto out;
 failed:
@@ -1787,11 +1795,13 @@ static int restore_compiler_budgets_step(const LatcdConfig *config,
                 g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
             char *version = g_key_file_get_string(record, "task", "version", NULL);
             bool copying = version && !strcmp(version, "2");
-            valid &= version && (!strcmp(version, "1") || copying);
+            bool managed = version && !strcmp(version, "3");
+            valid &= version && (!strcmp(version, "1") || copying || managed);
             g_free(version);
             const char *fields[] = {"id", "state", "kind"};
-            const char *values[] = {id, "BOUND", "COPY"};
-            for (unsigned i = 0; valid && i < (copying ? 3u : 2u); i++) {
+            const char *values[] = {id, managed ? "PREPARED" : "BOUND",
+                                    managed ? "MANAGED_COMPILER" : "COPY"};
+            for (unsigned i = 0; valid && i < ((copying || managed) ? 3u : 2u); i++) {
                 char *value = g_key_file_get_string(record, "task", fields[i], NULL);
                 valid = value && !strcmp(value, values[i]);
                 g_free(value);

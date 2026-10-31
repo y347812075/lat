@@ -23,7 +23,7 @@ def run(prefix, guest, work):
         path.write_text(contents)
         path.chmod(0o400)
 
-    for mode in ('precise', 'missing', 'unsafe'):
+    for mode in ('precise', 'missing', 'managed-missing', 'unsafe'):
         directory = work / mode
         cache = directory / 'cache'
         tasks, budgets = cache / '.gc/tasks', cache / '.gc/compiler-budgets'
@@ -35,6 +35,9 @@ def run(prefix, guest, work):
             task_id = str(uuid.uuid4())
             record = (f'[task]\nversion=1\nid={task_id}\nstate=BOUND\n'
                       f'source={"a" * 64}\nbuild_id={"b" * 64}\nenvironment_sha256={"c" * 64}\n')
+            if mode == 'managed-missing':
+                record = record.replace('version=1', 'version=3').replace(
+                    'state=BOUND', 'state=PREPARED\nkind=MANAGED_COMPILER')
             for role, path in (('cache', cache), ('temporary', cache / '.tmp'), ('source', source)):
                 st = path.stat()
                 record += (f'[{role}]\ndevice={st.st_dev}\ninode={st.st_ino}\n'
@@ -46,7 +49,7 @@ def run(prefix, guest, work):
                        f'[output_module]\nname=module-{task_id}\n')
             task = tasks / (task_id + '.ini')
             put(task, record)
-            if mode != 'missing':
+            if mode not in ('missing', 'managed-missing'):
                 st, root = task.stat(), cache.stat()
                 put(budgets / task.name,
                     f'[budget]\nversion=1\ntask_id={task_id}\n'
@@ -64,14 +67,24 @@ def run(prefix, guest, work):
             try:
                 deadline = time.monotonic() + 30
                 while not stats.exists():
-                    assert daemon.poll() is None and time.monotonic() < deadline
+                    if daemon.poll() is not None:
+                        break
+                    assert time.monotonic() < deadline
                     time.sleep(.01)
+                if not stats.exists():
+                    assert mode in ('missing', 'managed-missing', 'unsafe'), mode
+                    assert daemon.wait(timeout=10) != 0
+                    if mode != 'unsafe':
+                        assert b'capacity index invalid after compiler budget recovery' in (directory / 'daemon.log').read_bytes()
+                    continue
                 value = json.loads(stats.read_bytes())
-                assert value['compiler_budget_recovery_state'] == 0, value
-                result = subprocess.run([str(latcd), '--submit', '--socket', str(socket),
-                                         '--tbset', str(keys), str(guest)], env=env,
-                                        capture_output=True, timeout=10)
-                assert result.returncode != 0 and b'budget recovery' in result.stdout + result.stderr, result
+                if value['compiler_budget_recovery_state'] == 0:
+                    result = subprocess.run([str(latcd), '--submit', '--socket', str(socket),
+                                             '--tbset', str(keys), str(guest)], env=env,
+                                            capture_output=True, timeout=10)
+                    # Recovery can finish between the stats read and the request.
+                    if result.returncode != 0:
+                        assert b'budget recovery' in result.stdout + result.stderr, result
                 # Control requests stay responsive while the cursor advances.
                 subprocess.run([str(latcd), '--flush-all', '--socket', str(socket)],
                                env=env, check=True, capture_output=True, timeout=2)
@@ -91,7 +104,7 @@ def run(prefix, guest, work):
                     subprocess.run([str(latcd), '--flush-source', '--socket', str(socket),
                                     str(guest)], env=env, check=True, capture_output=True, timeout=120)
                     assert list(cache.glob('*.current'))
-                elif mode == 'missing':
+                elif mode in ('missing', 'managed-missing'):
                     assert value['unknown_compiler_budget_tasks'] == 320, value
                 else:
                     result = subprocess.run([str(latcd), '--submit', '--socket', str(socket),
@@ -106,7 +119,7 @@ def run(prefix, guest, work):
                 if daemon.poll() is None:
                     daemon.kill()
                     daemon.wait(timeout=10)
-    print('test-compiler-budget-recovery: bounded/pending/control/precise/missing/unsafe PASS')
+    print('test-compiler-budget-recovery: bounded/pending/control/precise/missing/managed-missing/unsafe PASS')
 
 
 if __name__ == '__main__':

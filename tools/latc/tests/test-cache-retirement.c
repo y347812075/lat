@@ -8018,7 +8018,7 @@ static void test_task_root_admission(bool copying, bool executor)
     remove_root(root); g_free(root);
 }
 
-static void test_unknown_task_release(bool executor)
+static void test_unknown_task_release(bool executor, bool managed)
 {
     char *root = root_new(), error[256];
     char *name = g_strconcat(source, ".native", NULL);
@@ -8040,14 +8040,15 @@ static void test_unknown_task_release(bool executor)
     char *release_path = g_build_filename(releases, filename, NULL);
     struct stat cache, object;
     assert(!stat(root, &cache) && !stat(path, &object));
-    char *task = g_strdup_printf("[task]\nversion=3\nid=%s\nstate=BOUND\nsource=%s\n"
-        "build_id=%s\nenvironment_sha256=%s\n"
+    char *task = g_strdup_printf("[task]\nversion=3\nid=%s\nstate=%s\nsource=%s\n"
+        "build_id=%s\nenvironment_sha256=%s\n%s"
         "[cache]\ndevice=%llu\ninode=%llu\nsize=0\nmode=16832\nuid=0\nmtime_sec=0\nmtime_nsec=0\n"
         "[temporary]\ndevice=0\ninode=0\nsize=0\nmode=16832\nuid=0\nmtime_sec=0\nmtime_nsec=0\n"
         "[source]\nname=%s\ndirectory=cache\ndevice=%llu\ninode=%llu\nsize=%llu\n"
         "mode=%u\nuid=%u\nmtime_sec=0\nmtime_nsec=0\n"
         "[output_native]\nname=task-output\n[output_module]\nname=task-module\n",
-        id, source, source, source, (unsigned long long)cache.st_dev,
+        id, managed ? "PREPARED" : "BOUND", source, source, source,
+        managed ? "kind=MANAGED_COMPILER\n" : "", (unsigned long long)cache.st_dev,
         (unsigned long long)cache.st_ino, name, (unsigned long long)object.st_dev,
         (unsigned long long)object.st_ino, (unsigned long long)object.st_size,
         object.st_mode, object.st_uid);
@@ -8058,12 +8059,64 @@ static void test_unknown_task_release(bool executor)
         "task_device=%llu\ntask_inode=%llu\n", id,
         (unsigned long long)identity.st_dev, (unsigned long long)identity.st_ino);
     put(release_path, release);
+    char *state_dir = NULL, *state_path = NULL, *state = NULL;
+    if (managed) {
+        state_dir = g_build_filename(root, ".gc", "managed-task-state", NULL);
+        assert(!mkdir(state_dir, 0700));
+        state_path = g_build_filename(state_dir, filename, NULL);
+        char *digest = g_compute_checksum_for_string(G_CHECKSUM_SHA256, task, -1);
+        state = g_strdup_printf("[managed]\nversion=1\ntask_id=%s\ntask_device=%llu\n"
+            "task_inode=%llu\ntask_sha256=%s\nstate=PREPARED\n", id,
+            (unsigned long long)identity.st_dev, (unsigned long long)identity.st_ino, digest);
+        g_free(digest);
+        int task_fd = open(task_path, O_RDONLY | O_CLOEXEC);
+        assert(task_fd >= 0 && !flock(task_fd, LOCK_SH | LOCK_NB));
+        int wrong_fd = open(path, O_RDONLY | O_CLOEXEC);
+        assert(wrong_fd >= 0 && latcd_managed_task_prepare(root, id, wrong_fd, error, sizeof(error)));
+        close(wrong_fd);
+        assert(access(state_path, F_OK));
+        assert(!latcd_managed_task_prepare(root, id, task_fd, error, sizeof(error)));
+        assert(latcd_managed_task_prepare(root, id, task_fd, error, sizeof(error)));
+        close(task_fd);
+        if (!executor) {
+            char *other = g_strdup_printf("%s.so", source);
+            char *other_path = g_build_filename(root, other, NULL);
+            put(other_path, "unrelated object\n");
+            const char *other_names[] = {other};
+            char *other_evidence = latcd_retirement_capture_objects(root, source, other_names, 1);
+            int other_fd = open(other_path, O_RDONLY | O_CLOEXEC);
+            assert(other_evidence && other_fd >= 0 &&
+                !latcd_retirement_tombstone(root, source, other, other_fd, other_evidence, error, sizeof(error)));
+            close(other_fd);
+            char *bad_state = g_strdup_printf("[managed]\nversion=1\ntask_id=%s\ntask_device=%llu\n"
+                "task_inode=%llu\ntask_sha256=%s\nstate=PREPARED\n", id,
+                (unsigned long long)identity.st_dev, (unsigned long long)identity.st_ino + 1, source);
+            put(state_path, bad_state);
+            other_fd = open(other_path, O_RDONLY | O_CLOEXEC);
+            assert(other_fd >= 0 && latcd_retirement_tombstone(root, source, other, other_fd,
+                                                               other_evidence, error, sizeof(error)));
+            close(other_fd);
+            put(state_path, state);
+            g_free(bad_state);
+            g_free(other_evidence); g_free(other_path); g_free(other);
+        }
+    }
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     assert(fd >= 0);
     int result = executor ? latcd_tombstone_delete(root, name, error, sizeof(error)) :
         latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error));
     assert(result && !access(path, F_OK));
     close(fd);
+    if (managed) {
+        assert(!unlink(state_path));
+        fd = open(path, O_RDONLY | O_CLOEXEC);
+        assert(fd >= 0);
+        result = executor ? latcd_tombstone_delete(root, name, error, sizeof(error)) :
+            latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error));
+        assert(result && !access(path, F_OK));
+        close(fd);
+    }
+    g_free(state); g_free(state_path); g_free(state_dir);
     g_free(release); g_free(task); g_free(release_path); g_free(task_path);
     g_free(filename); g_free(id); g_free(releases); g_free(tasks);
     g_free(evidence); g_free(path); g_free(name); remove_root(root); g_free(root);
@@ -9723,8 +9776,10 @@ int main(int argc, char **argv)
         test_task_root_admission(copying, false);
         test_task_root_admission(copying, true);
     }
-    test_unknown_task_release(false);
-    test_unknown_task_release(true);
+    test_unknown_task_release(false, false);
+    test_unknown_task_release(true, false);
+    test_unknown_task_release(false, true);
+    test_unknown_task_release(true, true);
     const char *hold_points[] = {"created", "written", "file-synced", "renamed", "directory-synced"};
     for (unsigned i = 0; i < G_N_ELEMENTS(hold_points); i++) {
         test_hold_crash(false, hold_points[i]);

@@ -4256,6 +4256,79 @@ static int task_inputs_released(int gc, const char *name, bool copying,
 
 /* Defense in depth, not the full reference graph. The management owner must
  * serialize local publisher transitions. No unbounded task walk under S. */
+static bool managed_task_state_valid(int gc, const char *name, const char *id,
+                                     const struct stat *task, const char *raw, size_t size)
+{
+    int states = open_directory(gc, "managed-task-state", false);
+    if (states < 0) return false;
+    char *data = NULL;
+    size_t length = 0;
+    bool valid = !read_file(states, name, RECORD_LIMIT, &data, &length) &&
+                 !memchr(data, 0, length);
+    GKeyFile *record = g_key_file_new();
+    valid = valid && g_key_file_load_from_data(record, data, length, 0, NULL);
+    const char *keys[] = {"version", "task_id", "task_device", "task_inode", "task_sha256", "state"};
+    gsize groups = 0;
+    char **names = g_key_file_get_groups(record, &groups);
+    valid = valid && groups == 1 && exact_keys(record, "managed", keys, G_N_ELEMENTS(keys)) &&
+        record_string_is(record, "managed", "version", "1") &&
+        record_string_is(record, "managed", "task_id", id) &&
+        record_string_is(record, "managed", "state", "PREPARED");
+    uint64_t device, inode;
+    valid = valid && record_uint64(record, "managed", "task_device", &device) &&
+        record_uint64(record, "managed", "task_inode", &inode) &&
+        device == (uint64_t)task->st_dev && inode == (uint64_t)task->st_ino;
+    char *digest = g_compute_checksum_for_data(G_CHECKSUM_SHA256, (const guchar *)raw, size);
+    valid = valid && record_string_is(record, "managed", "task_sha256", digest);
+    g_free(digest); g_strfreev(names); g_key_file_unref(record); g_free(data); close(states);
+    return valid;
+}
+
+int latcd_managed_task_prepare(const char *root, const char *id, int task_fd,
+                               char *error, size_t error_size)
+{
+    if (!root || !id || strlen(id) != 36 || !g_uuid_string_is_valid(id) || task_fd < 0)
+        return fail(error, error_size, "invalid managed task identity");
+    int roots = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, error_size);
+    if (roots < 0) return -1;
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
+    int tasks = gc < 0 ? -1 : open_directory(gc, "tasks", false);
+    int states = gc < 0 ? -1 : open_directory(gc, "managed-task-state", true);
+    char *name = g_strdup_printf("%s.ini", id), *raw = NULL;
+    size_t size = 0;
+    struct stat held, snapshot, existing;
+    GKeyFile *task = g_key_file_new(), *state = g_key_file_new();
+    bool valid = states >= 0 && tasks >= 0 && !fstat(task_fd, &held) &&
+        !read_file_snapshot(tasks, name, RECORD_LIMIT, &raw, &size, &snapshot, NULL) &&
+        object_stat_equal(&held, &snapshot) && !memchr(raw, 0, size) &&
+        g_key_file_load_from_data(task, raw, size, 0, NULL) &&
+        record_string_is(task, "task", "version", "3") &&
+        record_string_is(task, "task", "id", id) &&
+        record_string_is(task, "task", "kind", "MANAGED_COMPILER") &&
+        record_string_is(task, "task", "state", "PREPARED") &&
+        fstatat(states, name, &existing, AT_SYMLINK_NOFOLLOW) && errno == ENOENT;
+    int result = -1;
+    if (valid) {
+        char *digest = g_compute_checksum_for_data(G_CHECKSUM_SHA256, (const guchar *)raw, size);
+        g_key_file_set_string(state, "managed", "version", "1");
+        g_key_file_set_string(state, "managed", "task_id", id);
+        g_key_file_set_uint64(state, "managed", "task_device", held.st_dev);
+        g_key_file_set_uint64(state, "managed", "task_inode", held.st_ino);
+        g_key_file_set_string(state, "managed", "task_sha256", digest);
+        g_key_file_set_string(state, "managed", "state", "PREPARED");
+        g_free(digest);
+        result = write_record(states, name, state);
+    }
+    g_key_file_unref(state); g_key_file_unref(task); g_free(raw); g_free(name);
+    if (states >= 0) close(states);
+    if (tasks >= 0) close(tasks);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    close(roots);
+    return result ? fail(error, error_size, "cannot persist managed task preparation") : 0;
+}
+
 static int object_task_status(int root, const char *name, const struct stat *object)
 {
     int gc = open_directory(root, ".gc", false);
@@ -4288,12 +4361,17 @@ static int object_task_status(int root, const char *name, const struct stat *obj
         char id[37];
         memcpy(id, entry->d_name, 36); id[36] = 0;
         bool copying = record_string_is(record, "task", "version", "2");
+        bool managed = record_string_is(record, "task", "version", "3");
         const char *task_keys[] = {"version", "id", "state", "source", "build_id",
                                   copying ? "kind" : "environment_sha256"};
-        valid = valid && (copying || record_string_is(record, "task", "version", "1")) &&
-            exact_keys(record, "task", task_keys, G_N_ELEMENTS(task_keys)) &&
-            record_string_is(record, "task", "id", id) && record_string_is(record, "task", "state", "BOUND");
+        const char *managed_keys[] = {"version", "id", "state", "source", "build_id", "environment_sha256", "kind"};
+        valid = valid && (managed || copying || record_string_is(record, "task", "version", "1")) &&
+            (managed ? exact_keys(record, "task", managed_keys, G_N_ELEMENTS(managed_keys)) :
+                       exact_keys(record, "task", task_keys, G_N_ELEMENTS(task_keys))) &&
+            record_string_is(record, "task", "id", id) && record_string_is(record, "task", "state", managed ? "PREPARED" : "BOUND");
         if (copying) valid &= record_string_is(record, "task", "kind", "COPY");
+        if (managed) valid &= record_string_is(record, "task", "kind", "MANAGED_COMPILER") &&
+            managed_task_state_valid(gc, entry->d_name, id, &before, raw, size);
         const char *digests[] = {"source", "build_id", "environment_sha256"};
         for (unsigned i = 0; valid && i < (copying ? 2u : 3u); i++) {
             char *value = g_key_file_get_string(record, "task", digests[i], NULL);
@@ -4346,7 +4424,7 @@ static int object_task_status(int root, const char *name, const struct stat *obj
         g_strfreev(groups);
         if (!valid) result = -1;
         else if (referenced) {
-            int released = task_inputs_released(gc, entry->d_name, copying, task, &before);
+            int released = managed ? 0 : task_inputs_released(gc, entry->d_name, copying, task, &before);
             if (released > 0 && copying) {
                 char *output = g_key_file_get_string(record, "output", "name", NULL);
                 int temporary = open_directory(root, ".tmp", false);
