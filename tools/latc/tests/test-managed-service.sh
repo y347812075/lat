@@ -70,6 +70,14 @@ while [ ! -S "$work/broker/broker.sock" ]; do
     n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
 done
 test -S "$work/admin/admin.sock"
+if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
+    env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/invalid-cgroup-config" \
+    >"$work/second.out" 2>"$work/second.err"; then
+    echo 'second cache owner accepted' >&2; exit 1
+fi
+if grep -q 'worker delegation rejected' "$work/second.err"; then
+    echo 'worker delegation touched before acquiring cache ownership' >&2; exit 1
+fi
 # Managed services must remain available to process retirement deadlines even
 # when no clients send requests; their lifetime is controlled externally.
 sleep 2

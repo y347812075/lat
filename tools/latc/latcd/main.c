@@ -128,6 +128,8 @@ static int cached_module_inspect(const char *path, const uint8_t digest[32],
 static _Atomic unsigned int active_precompiles;
 static char cache_domain_id[37];
 static bool cache_domain_managed;
+static int worker_delegation_fd = -1;
+static int worker_manager_fd = -1;
 
 static uint32_t default_worker_count(void)
 {
@@ -7322,19 +7324,6 @@ int main(int argc, char **argv)
         latcd_managed_config_clear(&managed_config);
         return 1;
     }
-    if (managed_entry && managed_config.worker_cgroup) {
-        int parent = latcd_worker_delegation_open(managed_config.worker_cgroup);
-        int manager = -1;
-        if (parent < 0 || latcd_worker_delegation_init(parent, &manager)) {
-            fprintf(stderr, "latcd: worker delegation rejected: %s\n", strerror(errno));
-            if (parent >= 0) close(parent);
-            latcd_managed_config_clear(&managed_config);
-            return 1;
-        }
-        /* Retain both identities for the lifetime of this process. Admission
-         * remains closed until task isolation and recovery are connected. */
-        fprintf(stderr, "latcd: worker delegation initialized; compiler disabled\n");
-    }
     if (argc >= 2 && !strcmp(argv[1], "gc")) {
         return run_gc_plan(argc, argv);
     }
@@ -7534,6 +7523,18 @@ int main(int argc, char **argv)
         close(cache_owner);
         return 1;
     }
+    if (managed_entry && managed_config.worker_cgroup) {
+        worker_delegation_fd = latcd_worker_delegation_open(managed_config.worker_cgroup);
+        if (worker_delegation_fd < 0 ||
+            latcd_worker_delegation_init(worker_delegation_fd, &worker_manager_fd)) {
+            fprintf(stderr, "latcd: worker delegation rejected: %s\n", strerror(errno));
+            if (worker_delegation_fd >= 0) close(worker_delegation_fd);
+            close(cache_owner);
+            latcd_managed_config_clear(&managed_config);
+            return 1;
+        }
+        fprintf(stderr, "latcd: worker delegation initialized; compiler disabled\n");
+    }
     int domain = latcd_cache_domain_validate(config.cache_dir, cache_domain_id,
                                               error, sizeof(error));
     if (domain < 0) {
@@ -7669,6 +7670,8 @@ int main(int argc, char **argv)
     if (compiler_budget_recovery.cursor) closedir(compiler_budget_recovery.cursor);
     g_clear_pointer(&compiler_budget_recovery.snapshots, g_hash_table_unref);
     latcd_cache_capacity_close(&generation_capacity);
+    if (worker_manager_fd >= 0) close(worker_manager_fd);
+    if (worker_delegation_fd >= 0) close(worker_delegation_fd);
     close(cache_owner);
     return result;
 }
