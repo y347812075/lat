@@ -505,8 +505,8 @@ static int read_program_build_id(const char *label, const char *path,
     return 0;
 }
 
-static int validate_toolchain(const LatcdConfig *config, char *error,
-                              size_t error_size)
+static int validate_toolchain_paths(const LatcdConfig *config, const char *runtime_override,
+                                    char *error, size_t error_size)
 {
     char actual[65];
     if (read_program_build_id("latc", config->compiler, "build-id",
@@ -528,7 +528,7 @@ static int validate_toolchain(const LatcdConfig *config, char *error,
                     config->runner, LATC_BUILD_ID, actual);
     }
 
-    char *runtime_path = g_build_filename(
+    char *runtime_path = runtime_override ? g_strdup(runtime_override) : g_build_filename(
         config->runtime_dir, LAT_AOT_V2_RUNTIME_SONAME, NULL);
     void *runtime = dlopen(runtime_path, RTLD_NOW | RTLD_LOCAL);
     if (!runtime) {
@@ -564,6 +564,11 @@ static int validate_toolchain(const LatcdConfig *config, char *error,
     dlclose(runtime);
     g_free(runtime_path);
     return 0;
+}
+
+static int validate_toolchain(const LatcdConfig *config, char *error, size_t error_size)
+{
+    return validate_toolchain_paths(config, NULL, error, error_size);
 }
 
 static void signal_stop(int signal_number)
@@ -3033,6 +3038,34 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     const char *sandbox_env[] = {"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", NULL};
     const char *compile_args[128];
     char *sandbox_runtime = g_build_filename(config->runtime_dir, "liblat-aot-runtime.so.2", NULL);
+    int tool_fds[3] = {-1, -1, -1};
+    int tool_child[3] = {-1, -1, -1};
+    if (test_real_compile) {
+        const char *tools[] = {config->compiler, config->runner, sandbox_runtime};
+        struct stat before[3], after;
+        for (unsigned i = 0; i < 3; i++) {
+            tool_fds[i] = open(tools[i], O_PATH | O_CLOEXEC | O_NOFOLLOW);
+            if (tool_fds[i] < 0 || fstat(tool_fds[i], &before[i]) || !S_ISREG(before[i].st_mode) ||
+                (tool_child[i] = fcntl(tool_fds[i], F_DUPFD_CLOEXEC, 16)) < 0)
+                pin_result = -1;
+        }
+        if (!pin_result) {
+            char paths[3][64];
+            for (unsigned i = 0; i < 3; i++)
+                snprintf(paths[i], sizeof(paths[i]), "/proc/self/fd/%d", tool_fds[i]);
+            LatcdConfig pinned = *config;
+            pinned.compiler = paths[0]; pinned.runner = paths[1];
+            if (validate_toolchain_paths(&pinned, paths[2], error, error_size)) pin_result = -1;
+            for (unsigned i = 0; !pin_result && i < 3; i++) {
+                if (fstat(tool_fds[i], &after) || before[i].st_dev != after.st_dev ||
+                    before[i].st_ino != after.st_ino || before[i].st_size != after.st_size ||
+                    before[i].st_mtim.tv_sec != after.st_mtim.tv_sec ||
+                    before[i].st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+                    before[i].st_ctim.tv_sec != after.st_ctim.tv_sec ||
+                    before[i].st_ctim.tv_nsec != after.st_ctim.tv_nsec) pin_result = -1;
+            }
+        }
+    }
     size_t arg = 0;
 #define TEST_ARG(value) (compile_args[arg++] = (value))
     if (test_real_compile) {
@@ -3042,9 +3075,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             "--proc", "/proc", "--dev", "/dev", "--size", "268435456", "--tmpfs", "/work",
             "--dir", "/input"};
         for (size_t i = 0; i < G_N_ELEMENTS(initial); i++) TEST_ARG(initial[i]);
-        TEST_ARG("--ro-bind"); TEST_ARG(config->compiler); TEST_ARG("/usr/bin/latc");
-        TEST_ARG("--ro-bind"); TEST_ARG(config->runner); TEST_ARG("/usr/bin/latx-x86_64");
-        TEST_ARG("--ro-bind"); TEST_ARG(sandbox_runtime); TEST_ARG("/usr/lib/liblat-aot-runtime.so.2");
+        TEST_ARG("--ro-bind-fd"); TEST_ARG("10"); TEST_ARG("/usr/bin/latc");
+        TEST_ARG("--ro-bind-fd"); TEST_ARG("11"); TEST_ARG("/usr/bin/latx-x86_64");
+        TEST_ARG("--ro-bind-fd"); TEST_ARG("12"); TEST_ARG("/usr/lib/liblat-aot-runtime.so.2");
         const char *fds[] = {"4", "5", "6", "7"};
         const char *paths[] = {"/input/source", "/input/tbset", "/input/base.native", "/input/base.so"};
         for (unsigned i = 0; i < 4; i++) if (input_copies[i] >= 0) {
@@ -3111,6 +3144,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             }
 #ifdef LATCD_GC_TIMER_TEST
             if (test_bootstrap && (dup2(handoff_child, 8) < 0 || dup2(filter_child, 9) < 0)) _exit(126);
+            if (test_real_compile) for (unsigned i = 0; i < 3; i++)
+                if (dup2(tool_child[i], 10 + i) < 0) _exit(126);
 #endif
             close(0); close(1);
 #ifdef LATCD_GC_TIMER_TEST
@@ -3120,7 +3155,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
 #endif
             if (syscall(SYS_close_range,
 #ifdef LATCD_GC_TIMER_TEST
-                        test_bootstrap ? 10u : 8u,
+                        test_real_compile ? 13u : test_bootstrap ? 10u : 8u,
 #else
                         8u,
 #endif
@@ -3225,6 +3260,10 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (handoff_child >= 0) close(handoff_child);
     if (filter_child >= 0) close(filter_child);
     if (filter >= 0) close(filter);
+    for (unsigned i = 0; i < 3; i++) {
+        if (tool_child[i] >= 0) close(tool_child[i]);
+        if (tool_fds[i] >= 0) close(tool_fds[i]);
+    }
     if (test_bootstrap && child > 0) {
         struct pollfd ready = {.fd = handoff[0], .events = POLLIN};
         char payload[32];
