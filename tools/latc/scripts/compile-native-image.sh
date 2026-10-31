@@ -51,7 +51,7 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 
 missing="$work/missing.tbset"
 rm -f "$output"
-if [ "$module" -eq 1 ]; then
+if [ "$module" -eq 1 ] || [ "$config_replay" -eq 1 ]; then
     export LATC_NATIVE_ALLOW_MISSING=1
 else
     unset LATC_NATIVE_ALLOW_MISSING
@@ -192,7 +192,7 @@ if [ ! -s "$output" ]; then
     exit 1
 fi
 if [ "$config_replay" -eq 1 ]; then
-    if ! "$latc" validate-replay-native "$output" "$LATC_TRANSLATION_CONFIG_FROM"; then
+    if ! "$latc" validate-replay-native "$output" "$LATC_TRANSLATION_CONFIG_FROM" "$tbset"; then
         rm -f "$output"
         exit 1
     fi

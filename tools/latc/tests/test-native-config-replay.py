@@ -9,6 +9,7 @@ import subprocess
 import sys
 import re
 import hashlib
+from tb_key_set import read_key_set, write_key_set_digest
 
 
 def main():
@@ -84,8 +85,18 @@ def main():
     run([native_script, '--config-replay', latc, runner, guest, isolated, keys],
         {'LATX_CVT_OPT': '1', 'LATC_TRANSLATION_CONFIG_FROM': str(work / 'config-0')})
     assert content(isolated) == content(work / '0-True.native')
-    run([latc, 'validate-replay-native', isolated, work / 'config-1'], success=False)
-    run([latc, 'validate-replay-native', work / '0-False.native', work / 'config-0'], success=False)
+    source_hash, _, requested = read_key_set(keys)
+    missing_keys = work / 'missing-keys.tbset'
+    write_key_set_digest(source_hash, missing_keys, requested + [(0xfffffffffffffff0, 3)])
+    missing_check = run([latc, 'validate-replay-native', isolated,
+                         work / 'config-0', missing_keys], success=False)
+    assert 'missing requested TB' in missing_check.stderr
+    wrong_source = work / 'wrong-source.tbset'
+    write_key_set_digest(bytes(32), wrong_source, requested)
+    run([latc, 'validate-replay-native', isolated, work / 'config-0', wrong_source],
+        success=False)
+    run([latc, 'validate-replay-native', isolated, work / 'config-1', keys], success=False)
+    run([latc, 'validate-replay-native', work / '0-False.native', work / 'config-0', keys], success=False)
     run([native_script, '--config-replay', latc, runner, guest, work / 'missing.native', keys],
         success=False)
     assert not (work / 'missing.native').exists()

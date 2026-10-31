@@ -36,7 +36,7 @@ static void usage(const char *name)
             " [--tbset-ignore-outside-exec] [--aot FILE]\n"
             "  %s inspect [--json] BUNDLE\n", name, name, name, name);
     fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
-    fprintf(stderr, "  %s validate-replay-native IMAGE CONFIG\n", name);
+    fprintf(stderr, "  %s validate-replay-native IMAGE CONFIG TBSET\n", name);
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
     fprintf(stderr, "  %s merge-native BASE DELTA -o OUTPUT\n", name);
     fprintf(stderr, "  %s plan-native-tus IMAGE SEED_TBSET -o OUTPUT_TBSET\n", name);
@@ -690,7 +690,8 @@ int main(int argc, char **argv)
         gchar *image = NULL, *config = NULL;
         gsize image_size = 0, config_size = 0;
         char error[256] = {0};
-        if (argc != 4) { usage(argv[0]); return 2; }
+        LatTbKeySet requested = {0}, available = {0}, missing = {0};
+        if (argc != 5) { usage(argv[0]); return 2; }
         bool valid = g_file_get_contents(argv[2], &image, &image_size, NULL) &&
             g_file_get_contents(argv[3], &config, &config_size, NULL) &&
             !lat_native_image_validate(image, image_size, error, sizeof(error));
@@ -700,7 +701,34 @@ int main(int argc, char **argv)
                 header->translation_config_size == config_size &&
                 config_size <= image_size &&
                 !memcmp(image + image_size - config_size, config, config_size);
+            if (valid) {
+                const LatNativeTbV1 *tbs = (const void *)(image + header->tb_table_offset);
+                memcpy(available.source_sha256, header->guest_sha256, 32);
+                available.keys = g_new0(LatTbKey, header->tb_count);
+                available.count = header->tb_count;
+                for (size_t i = 0; i < available.count; i++) {
+                    if (tbs[i].guest_pc < header->preferred_guest_base) {
+                        valid = false;
+                        break;
+                    }
+                    available.keys[i].guest_rva = tbs[i].guest_pc - header->preferred_guest_base;
+                    available.keys[i].flags = tbs[i].flags;
+                }
+                if (valid && (lat_tb_key_set_sort_unique(&available, error, sizeof(error)) ||
+                    lat_tb_key_set_read_file(argv[4], header->guest_sha256, &requested,
+                                             error, sizeof(error)) ||
+                    lat_tb_key_set_difference(&requested, &available, &missing,
+                                              error, sizeof(error)) || missing.count)) {
+                    if (missing.count) snprintf(error, sizeof(error),
+                        "missing requested TB rva=0x%" PRIx64 " flags=0x%x",
+                        missing.keys[0].guest_rva, missing.keys[0].flags);
+                    valid = false;
+                }
+            }
         }
+        lat_tb_key_set_destroy(&requested);
+        lat_tb_key_set_destroy(&available);
+        lat_tb_key_set_destroy(&missing);
         g_free(image);
         g_free(config);
         if (!valid) {

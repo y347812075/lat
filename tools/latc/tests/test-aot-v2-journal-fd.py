@@ -567,6 +567,31 @@ def run_case(prefix, guests, root, mode):
                 missing = set(expected) - {(rva, flags) for rva, flags, _ in keys}
                 if missing:
                     failures.append(f'collector missing executed fixture keys: {sorted(missing)}')
+                if mode == 'replay-domain':
+                    native = work / 'receipt-replay.native'
+                    config = journal.parent / 'config'
+                    compile_env = {key: value for key, value in env.items()
+                                   if not key.startswith(('LAT', 'SAVE_XMM'))} | {
+                        'LATC_TRANSLATION_CONFIG_FROM': str(config),
+                        'LATC_TBSET_SELECTION': 'exact', 'LATC_AOT_THREADS': '1',
+                    }
+                    command = [str(prefix / 'libexec/latc/scripts/compile-native-image.sh'),
+                               '--config-replay', str(prefix / 'bin/latc'),
+                               str(prefix / 'bin/latx-x86_64'), str(guest),
+                               str(native), str(receipt)]
+                    evidence['commands'].append(command)
+                    replay = subprocess.run(command, env=compile_env, capture_output=True,
+                                            text=True, timeout=120)
+                    evidence['receipt_replay'] = {'rc': replay.returncode,
+                                                  'stdout': replay.stdout,
+                                                  'stderr': replay.stderr}
+                    require(replay.returncode == 0, 'journal receipt replay failed')
+                    require('missing TB targets' in replay.stderr,
+                            'fixture did not exercise unresolved branch targets')
+                    require(json.loads(replay.stdout.splitlines()[-1])['flags'] & 64,
+                            'receipt replay native is not quarantined')
+                    require(native.read_bytes().endswith(config_bytes),
+                            'receipt replay did not retain journal configuration')
             else:
                 failures.append('collector did not publish a receipt')
             if mode == 'overwrite':
