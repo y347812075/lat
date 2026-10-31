@@ -2232,6 +2232,15 @@ static bool page_driver_stage_requested(void)
 #endif
 }
 
+static bool page_recovery_admitted(void)
+{
+#ifdef LATCD_GC_TIMER_TEST
+    return getenv("LATCD_TEST_RECOVER_PAGE") != NULL;
+#else
+    return page_driver_admitted();
+#endif
+}
+
 /* The caller owns the sole scheduler queue and the page budget. */
 static int test_waiting_page_step(LatcdPageDriver *driver, const LatcdConfig *config, LatcdRetirementQueue *executor,
                                   uint64_t *deadline, char *error, size_t error_size)
@@ -2371,8 +2380,7 @@ execute:
     }
     return -1;
 }
-#ifdef LATCD_GC_TIMER_TEST
-static int test_retirement_page_has_deferred(const LatcdConfig *config,
+static int retirement_page_has_deferred(const LatcdConfig *config,
                                              char *error, size_t error_size)
 {
     LatcdRetirementPageState page;
@@ -2393,7 +2401,6 @@ static int test_retirement_page_has_deferred(const LatcdConfig *config,
     }
     return 0;
 }
-#endif
 static int test_stage_retirement_page(LatcdPageDriver *driver, const LatcdConfig *config,
                                       char *error, size_t error_size)
 {
@@ -7605,19 +7612,15 @@ int main(int argc, char **argv)
     LatcdPageBudget retry_budget = {0};
     LatcdRetirementRetryPage *retry_page = g_new0(LatcdRetirementRetryPage, 1);
     bool retry_recovered = false;
-#ifdef LATCD_GC_TIMER_TEST
-    bool test_page_recovered = false;
-#endif
+    bool page_recovered = false;
     if (!budget_result && latcd_retirement_page_startup_check(config.cache_dir, error, sizeof(error))) {
-#ifdef LATCD_GC_TIMER_TEST
-        if (getenv("LATCD_TEST_RECOVER_PAGE")) {
+        if (page_recovery_admitted()) {
             LatcdRetirementPageState page;
             if (latcd_retirement_page_restore_budget(config.cache_dir, &generation_capacity,
                     config.max_cache_bytes, LATCD_RETIREMENT_GRACE_US,
                     &page_driver_state.budget, &page, error, sizeof(error))) budget_result = -1;
-            else test_page_recovered = true;
+            else page_recovered = true;
         } else
-#endif
         {
         char retry_error[sizeof(error)];
         if (latcd_retirement_retry_page_load(config.cache_dir, retry_page, retry_error, sizeof(retry_error)))
@@ -7630,20 +7633,23 @@ int main(int argc, char **argv)
     }
     if (!budget_result && latcd_cache_capacity_recovery_finish(&generation_capacity))
         budget_result = fail(error, sizeof(error), "capacity index invalid after compiler budget recovery");
-#ifdef LATCD_GC_TIMER_TEST
-    if (!budget_result && test_page_recovered) {
+    if (!budget_result && page_recovered) {
         page_driver_state.staged = true;
-        int deferred = test_retirement_page_has_deferred(&config, error, sizeof(error));
+        int deferred = retirement_page_has_deferred(&config, error, sizeof(error));
         if (deferred < 0) budget_result = -1;
         else {
             page_driver_state.waiting = true;
+#ifdef LATCD_GC_TIMER_TEST
             page_driver_state.recovery_auto = !deferred;
             fprintf(stderr, deferred && !getenv("LATCD_TEST_WAITING_DRIVER") ?
                 "latcd: test recovered page waiting; automatic retry unavailable\n" :
                 "latcd: test recovered page waiting; worker recovery enabled\n");
+#else
+            page_driver_state.recovery_auto = true;
+            fprintf(stderr, "latcd: recovered retirement page waiting; worker recovery enabled\n");
+#endif
         }
     }
-#endif
     if (!budget_result && retry_recovered) {
         LatcdRetryRecovery *retry = latcd_retry_recovery_new(config.cache_dir,
             LATCD_RETIREMENT_GRACE_US, &retry_budget, false);
