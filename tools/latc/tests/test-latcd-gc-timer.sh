@@ -31,11 +31,12 @@ start() {
 stop() { kill -TERM "$pid"; wait "$pid"; pid=; }
 wait_page_consumed() {
     n=0
+    limit=${1:-600}
     while ! grep -q 'test waiting page consumed' "$work/server.err"; do
         if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then
             cat "$work/server.err" >&2; return 1
         fi
-        n=$((n + 1)); [ "$n" -lt 600 ]; sleep 0.05
+        n=$((n + 1)); [ "$n" -lt "$limit" ]; sleep 0.05
     done
 }
 wait_stats() {
@@ -247,6 +248,16 @@ c = configparser.ConfigParser(); assert c.read(sys.argv[1])
 assert any(c.getint(s, 'busy_count') >= 1 and c.getint(s, 'retry_at') > 0
            for s in c.sections() if s != 'queue')
 PY
+LATCD_TEST_RECOVER_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 start
+wait_page_consumed 2400
+test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
+python3 - "$cache" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+manifest = json.loads((root / (f'{7:064x}' + '.current')).read_text())
+assert all((root / manifest[key]).is_file() for key in ('module', 'native', 'tbset'))
+PY
+stop
 cache=$work/busy-fair-cache
 socket=$work/busy-fair.sock
 stats=$work/busy-fair-stats.json
