@@ -25,7 +25,7 @@ if [ "$mode" = pin ]; then export LATCD_TEST_BROKER_DIRECTORY="$work/broker"; fi
 LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
     "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" --latc "$latc" \
     --runner "$runner" --runtime-dir "$runtime" --stats "$work/stats.json" \
-    --workers 1 --flush-only --idle-seconds 0 >"$work/server.out" 2>"$work/server.err" &
+    --workers 1 --flush-only --idle-seconds "${LATCD_TEST_IDLE_SECONDS:-0}" >"$work/server.out" 2>"$work/server.err" &
 pid=$!
 n=0
 while [ ! -S "$socket" ]; do
@@ -100,6 +100,10 @@ fi
 "$latcd" --submit --socket "$socket" --tbset "$work/delta.tbset" "$guest" >"$work/delta-submit"
 "$latcd" --flush-source --socket "$socket" "$guest" >"$work/delta-flush"
 grep -q '^status=0$' "$work/delta-flush"
+if [ "${LATCD_TEST_IDLE_SECONDS:-0}" != 0 ]; then
+    sleep 2
+    kill -0 "$pid"
+fi
 python3 - "$cache" "$guest" "$work" "$script_dir" <<'PY'
 import hashlib, json, pathlib, sys
 cache, guest, work = map(pathlib.Path, sys.argv[1:4]); sys.path.insert(0, sys.argv[4])

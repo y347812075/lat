@@ -263,6 +263,8 @@ static LatcdBudgetRecovery compiler_budget_recovery;
 static pthread_mutex_t retirement_queue_lock = PTHREAD_MUTEX_INITIALIZER;
 static LatcdRetirementQueueStats retirement_queue_stats;
 static atomic_int retirement_notify_fd = ATOMIC_VAR_INIT(-1);
+static bool retirement_idle_hold;
+static uint64_t retirement_idle_generation;
 static uint64_t retirement_timer_wakeups, retirement_publication_wakeups;
 
 static void retirement_notify(void)
@@ -2423,6 +2425,15 @@ static bool page_driver_admitted(void)
 #endif
 }
 
+static void retirement_hold_for_discovery(void)
+{
+    if (!page_driver_admitted()) return;
+    pthread_mutex_lock(&retirement_queue_lock);
+    retirement_idle_hold = true;
+    retirement_idle_generation++;
+    pthread_mutex_unlock(&retirement_queue_lock);
+}
+
 static bool page_driver_stage_requested(void)
 {
 #ifdef LATCD_GC_TIMER_TEST
@@ -2641,6 +2652,8 @@ static void *compiler_input_recovery_worker(void *opaque)
     int64_t next = 0;
     int64_t next_retirement = 0;
     bool failed = false;
+    bool idle_scan_active = false;
+    uint64_t idle_scan_generation = 0;
     int timer = timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC | TFD_NONBLOCK);
     LatcdRetirementQueue *retirement = latcd_retirement_queue_new(work->config->cache_dir,
         LATCD_RETIREMENT_GRACE_US);
@@ -2690,6 +2703,12 @@ static void *compiler_input_recovery_worker(void *opaque)
             now >= next_retirement) {
             LatcdRetirementQueueStats stats;
             char error[256] = {0};
+            if (!idle_scan_active) {
+                pthread_mutex_lock(&retirement_queue_lock);
+                idle_scan_generation = retirement_idle_generation;
+                pthread_mutex_unlock(&retirement_queue_lock);
+                idle_scan_active = true;
+            }
             int result = latcd_retirement_queue_step(retirement, 32, 10000,
                 &stats, error, sizeof(error));
             if (result < 0) {
@@ -2704,7 +2723,12 @@ static void *compiler_input_recovery_worker(void *opaque)
             }
             pthread_mutex_lock(&retirement_queue_lock);
             retirement_queue_stats = stats;
+            if (!result && retirement_safe && stats.complete && !stats.candidates &&
+                !page_driver_state.waiting && !page_driver_state.discovery &&
+                idle_scan_generation == retirement_idle_generation)
+                retirement_idle_hold = false;
             pthread_mutex_unlock(&retirement_queue_lock);
+            if (result <= 0) idle_scan_active = false;
             if (!result && stats.ready && !page_driver_state.staged && page_driver_stage_requested()) {
                 if (page_driver_admitted()) start_page_discovery = true;
 #ifndef LATCD_GC_TIMER_TEST
@@ -4235,6 +4259,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
             fprintf(stderr, "latcd: %s; transaction retained for recovery\n",
                     retirement_error);
         }
+        retirement_hold_for_discovery();
         retirement_notify();
     }
     if (!result && crash && !strcmp(crash, "retired")) raise(SIGKILL);
@@ -7321,6 +7346,7 @@ static int run_service(const LatcdConfig *config)
         stop_requested = 1;
     }
     pthread_t recovery_thread;
+    retirement_hold_for_discovery();
     bool recovery_started = !pthread_create(&recovery_thread, NULL,
         compiler_input_recovery_worker, &task_recovery);
     if (!recovery_started) {
@@ -7382,6 +7408,9 @@ static int run_service(const LatcdConfig *config)
             busy |= atomic_load(&active_precompiles) ||
                 (precompile_pool && g_thread_pool_unprocessed(precompile_pool));
             busy |= test_broker_started && broker_server_busy(&test_broker);
+            pthread_mutex_lock(&retirement_queue_lock);
+            busy |= retirement_idle_hold;
+            pthread_mutex_unlock(&retirement_queue_lock);
             if (busy) last_activity = g_get_monotonic_time();
             if (config->idle_seconds &&
                 g_get_monotonic_time() - last_activity >=
