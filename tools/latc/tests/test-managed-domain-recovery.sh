@@ -40,15 +40,28 @@ rmdir "$scope/worker/$id" "$scope/worker/manager" "$scope/worker"
 mkdir "$scope/worker" /work/compile-cache /work/compile-cache/.tmp
 chmod 700 /work/compile-cache /work/compile-cache/.tmp
 printf input > /work/compile-cache/.tmp/input
-LATCD_TEST_DOMAIN_DESCENDANT=1 sh -c '
+if LATCD_TEST_DOMAIN_DESCENDANT=1 sh -c '
     printf "%s\n" "$$" > "$1/cgroup.procs"; shift
     exec "$@"
-' sh "$scope/worker" "$binary" --test-managed-compiler /work/compile-cache "$scope/worker" >/work/compile-id
-id=$(cat /work/compile-id)
-grep -qx 'state=DOMAIN_EMPTY' "/work/compile-cache/.gc/managed-task-state/$id.ini"
+' sh "$scope/worker" "$binary" --test-managed-compiler /work/compile-cache "$scope/worker"; then
+    echo 'worker with surviving descendant returned success' >&2; exit 1
+fi
+state=$(find /work/compile-cache/.gc/managed-task-state -name '*.ini')
+id=$(basename "$state" .ini)
+grep -qx 'state=CANCELLED_DOMAIN_EMPTY' "$state"
 test "$(awk '$1 == "populated" {print $2}' "$scope/worker/$id/cgroup.events")" = 0
 test -f "/work/compile-cache/.gc/compiler-budgets/$id.ini"
 test ! -e "/work/compile-cache/.gc/compiler-releases/$id.ini"
+rmdir "$scope/worker/$id" "$scope/worker/manager" "$scope/worker"
+mkdir "$scope/worker" /work/success-cache /work/success-cache/.tmp
+chmod 700 /work/success-cache /work/success-cache/.tmp
+printf input > /work/success-cache/.tmp/input
+sh -c '
+    printf "%s\n" "$$" > "$1/cgroup.procs"; shift
+    exec "$@"
+' sh "$scope/worker" "$binary" --test-managed-compiler /work/success-cache "$scope/worker" >/work/success-id
+id=$(cat /work/success-id)
+grep -qx 'state=DOMAIN_EMPTY' "/work/success-cache/.gc/managed-task-state/$id.ini"
 rmdir "$scope/worker/$id" "$scope/worker/manager" "$scope/worker"
 mkdir "$scope/worker" /work/crash-cache /work/crash-cache/.tmp
 chmod 700 /work/crash-cache /work/crash-cache/.tmp

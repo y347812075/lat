@@ -2980,10 +2980,13 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (config->managed) {
         int populated = 1;
         bool empty = false;
+        bool cancelled = waited != child || !WIFEXITED(status) || WEXITSTATUS(status);
         if (!latcd_worker_domain_populated(worker_delegation_fd, task_id,
                                             &domain.domain, &populated)) {
-            if (populated)
+            if (populated) {
+                cancelled = true;
                 (void)latcd_worker_domain_kill(worker_delegation_fd, task_id, &domain.domain);
+            }
             for (unsigned i = 0; i < 100; i++) {
                 if (latcd_worker_domain_populated(worker_delegation_fd, task_id,
                                                    &domain.domain, &populated)) break;
@@ -2991,13 +2994,15 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                 usleep(10000);
             }
         }
-        unsigned terminal = waited == child && WIFEXITED(status) && !WEXITSTATUS(status) ?
-            LATCD_MANAGED_DOMAIN_EMPTY : LATCD_MANAGED_CANCELLED;
+        unsigned terminal = cancelled ? LATCD_MANAGED_CANCELLED : LATCD_MANAGED_DOMAIN_EMPTY;
         if (!empty || latcd_managed_task_domain(config->cache_dir, task_id, task_lease,
                                                  &domain, terminal,
                                                  error, error_size)) {
             waited = -1;
             errno = EBUSY;
+        } else if (cancelled && waited == child && WIFEXITED(status) && !WEXITSTATUS(status)) {
+            waited = -1;
+            errno = ECANCELED;
         }
     }
     /*
