@@ -38,6 +38,7 @@ static void usage(const char *name)
             "  %s inspect [--json] BUNDLE\n", name, name, name, name);
     fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
     fprintf(stderr, "  %s validate-replay-native IMAGE CONFIG TBSET\n", name);
+    fprintf(stderr, "  %s compile-replay-native X86_ELF -o IMAGE --runner RUNNER --tbset TBSET --config CONFIG\n", name);
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
     fprintf(stderr, "  %s merge-native BASE DELTA -o OUTPUT\n", name);
     fprintf(stderr, "  %s plan-native-tus IMAGE SEED_TBSET -o OUTPUT_TBSET\n", name);
@@ -407,6 +408,49 @@ static int compile_module(const char *input, const char *output,
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
+static int compile_replay_native(const char *input, const char *output,
+                                 const char *runner, const char *tbset,
+                                 const char *config)
+{
+    GError *gerror = NULL;
+    gchar *executable = g_file_read_link("/proc/self/exe", &gerror);
+    if (!executable) {
+        fprintf(stderr, "latc: cannot locate compiler executable: %s\n",
+                gerror ? gerror->message : "unknown error");
+        g_clear_error(&gerror);
+        return 1;
+    }
+#ifdef LATC_INSTALLED_SCRIPT_DIR
+    gchar *script = g_build_filename(LATC_INSTALLED_SCRIPT_DIR,
+                                     "compile-native-image.sh", NULL);
+#else
+    gchar *build_dir = g_path_get_dirname(executable);
+    gchar *tool_dir = g_path_get_dirname(build_dir);
+    gchar *script = g_build_filename(tool_dir, "scripts",
+                                     "compile-native-image.sh", NULL);
+#endif
+    pid_t child = fork();
+    if (child == 0) {
+        if (setenv("LATC_TRANSLATION_CONFIG_FROM", config, 1)) _exit(126);
+        execl(script, script, "--config-replay", executable, runner, input,
+              output, tbset, (char *)NULL);
+        fprintf(stderr, "latc: cannot execute %s: %s\n", script, strerror(errno));
+        _exit(127);
+    }
+    g_free(script);
+#ifndef LATC_INSTALLED_SCRIPT_DIR
+    g_free(tool_dir);
+    g_free(build_dir);
+#endif
+    g_free(executable);
+    if (child < 0) return 1;
+    int status;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) return 1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
 static int compile_bundle(const char *input, const char *output,
                           const char *runner, const char *tbset,
                           int tbset_ignore_outside_exec, const char *aot)
@@ -634,6 +678,19 @@ int main(int argc, char **argv)
         if (!output || !runner) { usage(argv[0]); return 2; }
         return compile_bundle(input, output, runner, tbset,
                               tbset_ignore_outside_exec, aot);
+    }
+    if (strcmp(argv[1], "compile-replay-native") == 0) {
+        const char *output = NULL, *runner = NULL, *tbset = NULL, *config = NULL;
+        for (int i = 3; i < argc; i++) {
+            if (!strcmp(argv[i], "-o") && i + 1 < argc) output = argv[++i];
+            else if (!strcmp(argv[i], "--runner") && i + 1 < argc) runner = argv[++i];
+            else if (!strcmp(argv[i], "--tbset") && i + 1 < argc) tbset = argv[++i];
+            else if (!strcmp(argv[i], "--config") && i + 1 < argc) config = argv[++i];
+            else { usage(argv[0]); return 2; }
+        }
+        if (!output || !*output || !runner || !*runner || !tbset || !*tbset ||
+            !config || !*config) { usage(argv[0]); return 2; }
+        return compile_replay_native(argv[2], output, runner, tbset, config);
     }
     if (strcmp(argv[1], "compile-module") == 0) {
         const char *input = argv[2];

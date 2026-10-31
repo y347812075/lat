@@ -85,6 +85,15 @@ def main():
     run([native_script, '--config-replay', latc, runner, guest, isolated, keys],
         {'LATX_CVT_OPT': '1', 'LATC_TRANSLATION_CONFIG_FROM': str(work / 'config-0')})
     assert content(isolated) == content(work / '0-True.native')
+    cli_isolated = work / 'cli-isolated.native'
+    run([latc, 'compile-replay-native', guest, '-o', cli_isolated,
+         '--runner', runner, '--tbset', keys, '--config', work / 'config-0'],
+        {'LATX_CVT_OPT': '1', 'LATC_TRANSLATION_CONFIG_FROM': str(work / 'config-1')})
+    assert content(cli_isolated) == content(isolated)
+    assert cli_isolated.read_bytes().endswith((work / 'config-0').read_bytes())
+    run([latc, 'compile-replay-native', guest, '-o', work / 'no-config.native',
+         '--runner', runner, '--tbset', keys], success=False)
+    assert not (work / 'no-config.native').exists()
     source_hash, _, requested = read_key_set(keys)
     missing_keys = work / 'missing-keys.tbset'
     write_key_set_digest(source_hash, missing_keys, requested + [(0xfffffffffffffff0, 3)])
