@@ -161,7 +161,7 @@ if [ "$mode" = pin-restart ] || [ "$mode" = capture-restart ]; then
     LATCD_TEST_RECOVER_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
         "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" --latc "$latc" \
         --runner "$runner" --runtime-dir "$runtime" --stats "$work/stats.json" \
-        --workers 1 --flush-only --idle-seconds 0 >"$work/restart.out" 2>"$work/restart.err" &
+        --workers 1 --flush-only --idle-seconds "${LATCD_TEST_IDLE_SECONDS:-0}" >"$work/restart.out" 2>"$work/restart.err" &
     pid=$!
     n=0
     while [ ! -S "$socket" ]; do

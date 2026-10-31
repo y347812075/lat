@@ -2437,7 +2437,8 @@ static void retirement_hold_for_discovery(void)
 static bool page_driver_stage_requested(void)
 {
 #ifdef LATCD_GC_TIMER_TEST
-    return getenv("LATCD_TEST_STAGE_PAGE") != NULL;
+    return getenv("LATCD_TEST_STAGE_PAGE") != NULL ||
+           getenv("LATCD_TEST_RECOVER_PAGE") != NULL;
 #else
     return true;
 #endif
@@ -2794,7 +2795,8 @@ static void *compiler_input_recovery_worker(void *opaque)
                         else fprintf(stderr, "latcd: test page deferred\n");
                     }
                 }
-                if (getenv("LATCD_TEST_CONSUME_PAGE")) {
+                if (getenv("LATCD_TEST_CONSUME_PAGE") ||
+                    (getenv("LATCD_TEST_RECOVER_PAGE") && test_page_driver)) {
                     page_driver_state.waiting = true;
                     next_retirement = 0;
                 }
