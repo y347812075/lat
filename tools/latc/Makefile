@@ -104,6 +104,14 @@ test-worker-seccomp: $(BUILD)/tests/test-worker-seccomp
 	$(BUILD)/tests/test-worker-seccomp
 test: test-worker-seccomp
 
+$(BUILD)/tests/test-worker-domain: tests/test-worker-domain.c latcd/worker-domain.c latcd/worker-domain.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test-worker-domain.c latcd/worker-domain.c -Wl,--wrap=read
+.PHONY: test-worker-domain
+test-worker-domain: $(BUILD)/tests/test-worker-domain
+	$(BUILD)/tests/test-worker-domain
+test: test-worker-domain
+
 test-native-config-replay:
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)" || \
 	  { echo "usage: make test-native-config-replay INSTALL_PREFIX=... X86_GUEST=... TBSET=... WORK=..."; exit 2; }

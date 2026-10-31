@@ -8018,6 +8018,57 @@ static void test_task_root_admission(bool copying, bool executor)
     remove_root(root); g_free(root);
 }
 
+static void test_unknown_task_release(bool executor)
+{
+    char *root = root_new(), error[256];
+    char *name = g_strconcat(source, ".native", NULL);
+    char *path = g_build_filename(root, name, NULL);
+    put(path, "unknown task input\n");
+    const char *names[] = {name};
+    char *evidence = latcd_retirement_capture_objects(root, source, names, 1);
+    assert(evidence);
+    if (executor) {
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        assert(fd >= 0 && !latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error)));
+        close(fd);
+    }
+    char *tasks = g_build_filename(root, ".gc", "tasks", NULL);
+    char *releases = g_build_filename(root, ".gc", "compiler-releases", NULL);
+    assert(!g_mkdir_with_parents(tasks, 0700) && !mkdir(releases, 0700));
+    char *id = g_uuid_string_random(), *filename = g_strdup_printf("%s.ini", id);
+    char *task_path = g_build_filename(tasks, filename, NULL);
+    char *release_path = g_build_filename(releases, filename, NULL);
+    struct stat cache, object;
+    assert(!stat(root, &cache) && !stat(path, &object));
+    char *task = g_strdup_printf("[task]\nversion=3\nid=%s\nstate=BOUND\nsource=%s\n"
+        "build_id=%s\nenvironment_sha256=%s\n"
+        "[cache]\ndevice=%llu\ninode=%llu\nsize=0\nmode=16832\nuid=0\nmtime_sec=0\nmtime_nsec=0\n"
+        "[temporary]\ndevice=0\ninode=0\nsize=0\nmode=16832\nuid=0\nmtime_sec=0\nmtime_nsec=0\n"
+        "[source]\nname=%s\ndirectory=cache\ndevice=%llu\ninode=%llu\nsize=%llu\n"
+        "mode=%u\nuid=%u\nmtime_sec=0\nmtime_nsec=0\n"
+        "[output_native]\nname=task-output\n[output_module]\nname=task-module\n",
+        id, source, source, source, (unsigned long long)cache.st_dev,
+        (unsigned long long)cache.st_ino, name, (unsigned long long)object.st_dev,
+        (unsigned long long)object.st_ino, (unsigned long long)object.st_size,
+        object.st_mode, object.st_uid);
+    put(task_path, task);
+    struct stat identity;
+    assert(!stat(task_path, &identity));
+    char *release = g_strdup_printf("[handoff]\nversion=1\ntask_id=%s\nstate=INPUTS_RELEASED\n"
+        "task_device=%llu\ntask_inode=%llu\n", id,
+        (unsigned long long)identity.st_dev, (unsigned long long)identity.st_ino);
+    put(release_path, release);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(fd >= 0);
+    int result = executor ? latcd_tombstone_delete(root, name, error, sizeof(error)) :
+        latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error));
+    assert(result && !access(path, F_OK));
+    close(fd);
+    g_free(release); g_free(task); g_free(release_path); g_free(task_path);
+    g_free(filename); g_free(id); g_free(releases); g_free(tasks);
+    g_free(evidence); g_free(path); g_free(name); remove_root(root); g_free(root);
+}
+
 static void test_hold_crash(bool release, const char *point)
 {
     char *root = root_new(), error[256];
@@ -9672,6 +9723,8 @@ int main(int argc, char **argv)
         test_task_root_admission(copying, false);
         test_task_root_admission(copying, true);
     }
+    test_unknown_task_release(false);
+    test_unknown_task_release(true);
     const char *hold_points[] = {"created", "written", "file-synced", "renamed", "directory-synced"};
     for (unsigned i = 0; i < G_N_ELEMENTS(hold_points); i++) {
         test_hold_crash(false, hold_points[i]);
