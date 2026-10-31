@@ -37,4 +37,36 @@ test -f "/work/cache/.gc/tasks/$id.ini"
 test -f "/work/cache/.gc/compiler-budgets/$id.ini"
 test ! -e "/work/cache/.gc/compiler-releases/$id.ini"
 rmdir "$scope/worker/$id" "$scope/worker/manager" "$scope/worker"
+mkdir "$scope/worker" /work/compile-cache /work/compile-cache/.tmp
+chmod 700 /work/compile-cache /work/compile-cache/.tmp
+printf input > /work/compile-cache/.tmp/input
+sh -c '
+    printf "%s\n" "$$" > "$1/cgroup.procs"; shift
+    exec "$@"
+' sh "$scope/worker" "$binary" --test-managed-compiler /work/compile-cache "$scope/worker" >/work/compile-id
+id=$(cat /work/compile-id)
+grep -qx 'state=EXEC_AUTHORIZED' "/work/compile-cache/.gc/managed-task-state/$id.ini"
+test "$(awk '$1 == "populated" {print $2}' "$scope/worker/$id/cgroup.events")" = 0
+test -f "/work/compile-cache/.gc/compiler-budgets/$id.ini"
+test ! -e "/work/compile-cache/.gc/compiler-releases/$id.ini"
+rmdir "$scope/worker/$id" "$scope/worker/manager" "$scope/worker"
+mkdir "$scope/worker" /work/crash-cache /work/crash-cache/.tmp
+chmod 700 /work/crash-cache /work/crash-cache/.tmp
+printf input > /work/crash-cache/.tmp/input
+if LATCD_TEST_KILL_BEFORE_AUTH=1 sh -c '
+    printf "%s\n" "$$" > "$1/cgroup.procs"; shift
+    exec "$@"
+' sh "$scope/worker" "$binary" --test-managed-compiler /work/crash-cache "$scope/worker"; then
+    echo 'expected pre-authorization crash' >&2; exit 1
+fi
+state=$(find /work/crash-cache/.gc/managed-task-state -name '*.ini')
+grep -qx 'state=DOMAIN_BOUND' "$state"
+id=$(basename "$state" .ini)
+sh -c '
+    printf "%s\n" "$$" > "$1/cgroup.procs"; shift
+    exec "$@"
+' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/crash-cache "$scope/worker"
+grep -qx 'state=CANCELLED_DOMAIN_EMPTY' "$state"
+test "$(awk '$1 == "populated" {print $2}' "$scope/worker/$id/cgroup.events")" = 0
+rmdir "$scope/worker/$id" "$scope/worker/manager" "$scope/worker"
 echo 'test-managed-domain-recovery: PASS'

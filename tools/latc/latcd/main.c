@@ -43,6 +43,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/syscall.h>
 #include <sys/timerfd.h>
 #include <time.h>
 
@@ -2693,6 +2694,9 @@ static void *compiler_input_recovery_worker(void *opaque)
     return NULL;
 }
 
+#ifdef LATCD_GC_TIMER_TEST
+static bool test_managed_compiler;
+#endif
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *source, const char *tbset,
                         bool static_tbset,
@@ -2705,9 +2709,12 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     /* A managed worker must not inherit access to the cache or task locks.
      * Until its isolated task domain is available, never run it unsandboxed. */
     if (config->managed) {
+#ifdef LATCD_GC_TIMER_TEST
+        if (!test_managed_compiler)
+#endif
         return fail(error, error_size, "managed compiler isolation unavailable");
     }
-    if (validate_toolchain(config, error, error_size)) {
+    if (!config->managed && validate_toolchain(config, error, error_size)) {
         return -1;
     }
     const char *arguments[] = {
@@ -2833,8 +2840,37 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             }
         }
     }
-    pid_t child = pin_result ? -1 : fork();
+    int gate[2] = {-1, -1}, domain_fd = -1;
+    LatcdManagedDomain domain = {0};
+    pid_t child = -1;
+    if (!pin_result && config->managed) {
+        char *boot = NULL;
+        gsize size = 0;
+        if (worker_delegation_fd < 0 || fstat(worker_delegation_fd, &domain.delegation) ||
+            (domain_fd = latcd_worker_domain_create(worker_delegation_fd, task_id, &domain.domain)) < 0 ||
+            latcd_worker_domain_set_limits(domain_fd, config->address_space_limit, 32) ||
+            !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, &size, NULL)) {
+            pin_result = -1;
+        } else {
+            g_strchomp(boot);
+            g_strlcpy(domain.boot, boot, sizeof(domain.boot));
+            if (latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
+                                          LATCD_MANAGED_BOUND, error, error_size) ||
+                socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, gate)) pin_result = -1;
+        }
+        g_free(boot);
+    }
+    if (!pin_result) child = config->managed ? latcd_worker_domain_clone(domain_fd) : fork();
     if (child == 0) {
+        if (config->managed) {
+            close(gate[1]);
+            if (gate[0] != 3 && dup2(gate[0], 3) < 0) _exit(126);
+            if (syscall(SYS_close_range, 4u, ~0u, 0u)) _exit(126);
+            char permit;
+            ssize_t n;
+            do { n = read(3, &permit, 1); } while (n < 0 && errno == EINTR);
+            _exit(n == 1 && permit == '1' ? 0 : 126);
+        }
         /* Only this compiler inherits these OFDs; unrelated execs keep CLOEXEC. */
         for (unsigned i = 0; i < 4; i++) {
             if (input_pins[i] >= 0 && fcntl(input_pins[i], F_SETFD, 0)) _exit(126);
@@ -2869,6 +2905,24 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                (char *const *)environment);
         _exit(127);
     }
+    if (config->managed && child > 0) {
+        close(gate[0]); gate[0] = -1;
+#ifdef LATCD_GC_TIMER_TEST
+        if (getenv("LATCD_TEST_KILL_BEFORE_AUTH")) raise(SIGKILL);
+#endif
+        if (latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
+                                       LATCD_MANAGED_AUTHORIZED, error, error_size) ||
+            send(gate[1], "1", 1, MSG_NOSIGNAL) != 1) {
+            close(gate[1]); gate[1] = -1;
+            (void)latcd_worker_domain_kill(worker_delegation_fd, task_id, &domain.domain);
+            while (waitpid(child, NULL, 0) < 0 && errno == EINTR) { }
+            child = -1;
+            pin_result = -1;
+        }
+    }
+    if (gate[0] >= 0) close(gate[0]);
+    if (gate[1] >= 0) close(gate[1]);
+    if (domain_fd >= 0) close(domain_fd);
     if (child < 0) {
         if (task_lease >= 0) close(task_lease);
         g_free(task_id);
@@ -2888,9 +2942,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         return fail(error, error_size, "cannot start compiler: %s",
                     strerror(errno));
     }
-    setpgid(child, child);
-    compiler_process_groups[worker_index] = child;
-    if (stop_requested) {
+    if (!config->managed) setpgid(child, child);
+    if (!config->managed) compiler_process_groups[worker_index] = child;
+    if (stop_requested && !config->managed) {
         kill(-child, SIGTERM);
     }
     int status = 0;
@@ -2904,7 +2958,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
      * when the leader is reaped: terminate any remaining descendants before
      * marking this worker idle.
      */
-    if (!kill(-child, 0) || errno == EPERM) {
+    if (!config->managed && (!kill(-child, 0) || errno == EPERM)) {
         struct timespec grace = { .tv_nsec = 100 * 1000 * 1000 };
         kill(-child, SIGTERM);
         nanosleep(&grace, NULL);
@@ -2915,7 +2969,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     bool task_known = !fstat(task_lease, &task_identity);
     close(task_lease);
     /* An independent EX probe cannot unlock a descendant's inherited SH OFD. */
-    if (task_known && record_compiler_release(config, task_id, &task_identity, false))
+    if (!config->managed && task_known && record_compiler_release(config, task_id, &task_identity, false))
         fprintf(stderr, "latcd: compiler inputs still held or release not durable; retaining task root\n");
     g_free(task_id);
     close_compiler_inputs(input_pins);
@@ -7410,6 +7464,42 @@ out:
     worker_delegation_fd = -1;
     return result;
 }
+
+static int test_managed_compiler_run(const char *root, const char *delegation)
+{
+    LatcdConfig config = { .cache_dir = root, .managed = true, .compiler = "/bin/false",
+        .runner = "/bin/false", .runtime_dir = root, .workers = 1,
+        .address_space_limit = 268435456, .max_cache_bytes = LATCD_DEFAULT_MAX_CACHE_BYTES };
+    char error[512] = {0};
+    char *source = g_build_filename(root, ".tmp", "input", NULL);
+    char *native = g_build_filename(root, ".tmp", "output-native", NULL);
+    char *module = g_build_filename(root, ".tmp", "output-module", NULL);
+    GPtrArray *tasks = g_ptr_array_new_with_free_func(g_free);
+    uint8_t digest[32] = {0};
+    uint64_t reservation = 0;
+    int manager = -1, result = 1;
+    if (prepare_metadata_directories(root) ||
+        latcd_cache_capacity_scan(&generation_capacity, root, error, sizeof(error))) goto out;
+    latcd_cache_capacity_metadata_bind(&generation_capacity, LATCD_DEFAULT_MAX_CACHE_BYTES);
+    worker_delegation_fd = latcd_worker_delegation_open(delegation);
+    if (worker_delegation_fd < 0 || latcd_worker_delegation_init(worker_delegation_fd, &manager)) goto out;
+    test_managed_compiler = true;
+    if (run_compiler(&config, 0, source, NULL, false, NULL, NULL, native, module,
+                     digest, tasks, &reservation, error, sizeof(error))) goto out;
+    if (tasks->len != 1) goto out;
+    printf("%s\n", ((LatcdCompilerTask *)g_ptr_array_index(tasks, 0))->id);
+    result = 0;
+out:
+    if (result) fprintf(stderr, "managed compiler test: %s: %s\n", error, strerror(errno));
+    if (reservation) latcd_cache_capacity_finish_transient(&generation_capacity, reservation, true);
+    if (manager >= 0) close(manager);
+    if (worker_delegation_fd >= 0) close(worker_delegation_fd);
+    worker_delegation_fd = -1;
+    latcd_cache_capacity_close(&generation_capacity);
+    g_ptr_array_free(tasks, TRUE);
+    g_free(source); g_free(native); g_free(module);
+    return result;
+}
 #endif
 
 int main(int argc, char **argv)
@@ -7419,6 +7509,8 @@ int main(int argc, char **argv)
         return test_managed_task_record(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "--test-managed-recovery"))
         return test_managed_task_recovery(argv[2], argv[3]);
+    if (argc == 4 && !strcmp(argv[1], "--test-managed-compiler"))
+        return test_managed_compiler_run(argv[2], argv[3]);
 #endif
     LatcdManagedConfig managed_config = {0};
     bool managed_entry = argc == 3 && !strcmp(argv[1], "--managed-config");
