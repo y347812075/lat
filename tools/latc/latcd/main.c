@@ -2044,8 +2044,14 @@ static void recover_managed_domain(const LatcdConfig *config, const char *id, in
     int populated;
     if (latcd_worker_domain_populated(worker_delegation_fd, id, &domain.domain, &populated)) goto out;
     if (populated) {
-        (void)latcd_worker_domain_kill(worker_delegation_fd, id, &domain.domain);
-        goto out;
+        if (latcd_worker_domain_kill(worker_delegation_fd, id, &domain.domain)) goto out;
+        for (unsigned i = 0; i < 100; i++) {
+            if (latcd_worker_domain_populated(worker_delegation_fd, id, &domain.domain,
+                                               &populated)) goto out;
+            if (!populated) break;
+            usleep(10000);
+        }
+        if (populated) goto out;
     }
     (void)latcd_managed_task_domain(config->cache_dir, id, task, &domain,
                                     LATCD_MANAGED_CANCELLED, error, sizeof(error));
@@ -7505,7 +7511,8 @@ static int test_managed_task_recovery(const char *root, const char *delegation)
     int manager = -1, result = 1;
     worker_delegation_fd = latcd_worker_delegation_open(delegation);
     if (worker_delegation_fd < 0 || latcd_worker_delegation_init(worker_delegation_fd, &manager)) goto out;
-    for (unsigned i = 0; i < 100; i++) {
+    unsigned attempts = getenv("LATCD_TEST_RECOVERY_ONCE") ? 1 : 100;
+    for (unsigned i = 0; i < attempts; i++) {
         if (recover_compiler_inputs(&config, error, sizeof(error))) goto out;
         usleep(50000);
     }

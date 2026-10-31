@@ -27,7 +27,7 @@ grep -qx 'state=EXEC_AUTHORIZED' "$state"
 test "$(awk '$1 == "populated" {print $2}' "$scope/worker/$id/cgroup.events")" = 1
 kill -KILL "$pid"
 wait "$pid" 2>/dev/null || :
-sh -c '
+LATCD_TEST_RECOVERY_ONCE=1 sh -c '
     printf "%s\n" "$$" > "$1/cgroup.procs"; shift
     exec "$@"
 ' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/cache "$scope/worker"
