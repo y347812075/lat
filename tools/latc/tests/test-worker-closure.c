@@ -1,0 +1,53 @@
+#define _GNU_SOURCE
+#include "../latcd/worker-closure.h"
+#include <assert.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static void write_file(const char *path, const char *data)
+{
+    assert(g_file_set_contents(path, data, -1, NULL));
+}
+
+int main(void)
+{
+    char *dir = g_build_filename(g_get_home_dir(), "tmp", "latcd-closure-XXXXXX", NULL);
+    assert(mkdtemp(dir));
+    char *source = g_build_filename(dir, "source", NULL);
+    char *old = g_build_filename(dir, "old", NULL);
+    char *manifest = g_build_filename(dir, "manifest", NULL);
+    write_file(source, "original");
+    char *sha = g_compute_checksum_for_string(G_CHECKSUM_SHA256, "original", -1);
+    char *entry = g_strdup_printf("{\"source\":\"%s\",\"destination\":\"/usr/bin/tool\",\"sha256\":\"%s\"}", source, sha);
+    char *json = g_strdup_printf("{\"version\":1,\"build_id\":\"build\",\"files\":[%s]}", entry);
+    write_file(manifest, json);
+    LatcdWorkerClosure closure = {0};
+    assert(!latcd_worker_closure_load(manifest, "build", FALSE, &closure));
+    LatcdClosureFile *file = g_ptr_array_index(closure.files, 0);
+    struct stat before, after;
+    assert(!fstat(file->fd, &before));
+    assert(!rename(source, old));
+    write_file(source, "replacement");
+    assert(!fstat(file->fd, &after) && before.st_dev == after.st_dev && before.st_ino == after.st_ino);
+    char buf[9] = {0};
+    assert(pread(file->fd, buf, 8, 0) == 8 && !strcmp(buf, "original"));
+    latcd_worker_closure_clear(&closure);
+    assert(latcd_worker_closure_load(manifest, "build", FALSE, &closure) < 0 && !closure.files);
+    assert(!rename(old, source));
+    char *duplicate = g_strdup_printf("{\"version\":1,\"build_id\":\"build\",\"files\":[%s,%s]}", entry, entry);
+    write_file(manifest, duplicate);
+    assert(latcd_worker_closure_load(manifest, "build", FALSE, &closure) < 0 && !closure.files);
+    char *escape = g_strdup_printf("{\"version\":1,\"build_id\":\"build\",\"files\":[{\"source\":\"%s\",\"destination\":\"/usr/../escape\",\"sha256\":\"%s\"}]}", source, sha);
+    write_file(manifest, escape);
+    assert(latcd_worker_closure_load(manifest, "build", FALSE, &closure) < 0 && !closure.files);
+    write_file(manifest, json);
+    assert(latcd_worker_closure_load(manifest, "other-build", FALSE, &closure) < 0 && !closure.files);
+    assert(!unlink(source) && !unlink(manifest) && !rmdir(dir));
+    g_free(escape); g_free(duplicate); g_free(json); g_free(entry); g_free(sha);
+    g_free(manifest); g_free(old); g_free(source); g_free(dir);
+    return 0;
+}

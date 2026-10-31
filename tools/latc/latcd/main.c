@@ -20,6 +20,7 @@
 #include "worker-domain.h"
 #include "worker-seccomp.h"
 #include "managed-path.h"
+#include "worker-closure.h"
 
 #include <dlfcn.h>
 #include <dirent.h>
@@ -137,6 +138,9 @@ static bool cache_domain_managed;
 static int worker_delegation_fd = -1;
 static int managed_launcher_fds[2] = {-1, -1};
 static int managed_tool_fds[3] = {-1, -1, -1};
+#ifdef LATCD_GC_TIMER_TEST
+static LatcdWorkerClosure test_worker_closure;
+#endif
 static int worker_manager_fd = -1;
 
 static uint32_t default_worker_count(void)
@@ -3159,6 +3163,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     const char *sandbox_env[] = {"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", NULL};
     GPtrArray *compile_options = g_ptr_array_new();
     GPtrArray *compile_exec = g_ptr_array_new();
+    GPtrArray *closure_strings = g_ptr_array_new_with_free_func(g_free);
     int tool_fds[3] = {-1, -1, -1};
     int tool_child[3] = {-1, -1, -1};
     if (test_real_compile) {
@@ -3180,11 +3185,24 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
 #define TEST_ARG(value) g_ptr_array_add(compile_options, (gpointer)(value))
     if (test_real_compile) {
         const char *initial[] = {"--unshare-all", "--die-with-parent",
-            "--ro-bind", toolroot, "/usr", "--symlink", "usr/bin", "/bin",
+            "--symlink", "usr/bin", "/bin",
             "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
             "--proc", "/proc", "--dev", "/dev", "--size", "268435456", "--tmpfs", "/work",
             "--dir", "/input"};
         for (size_t i = 0; i < G_N_ELEMENTS(initial); i++) TEST_ARG(initial[i]);
+        if (test_worker_closure.files) {
+            for (guint i = 0; i < test_worker_closure.files->len; i++) {
+                LatcdClosureFile *file = g_ptr_array_index(test_worker_closure.files, i);
+                char *dir = g_path_get_dirname(file->destination);
+                char *fd = g_strdup_printf("%d", file->fd);
+                g_ptr_array_add(closure_strings, dir);
+                g_ptr_array_add(closure_strings, fd);
+                TEST_ARG("--dir"); TEST_ARG(dir);
+                TEST_ARG("--ro-bind-fd"); TEST_ARG(fd); TEST_ARG(file->destination);
+            }
+        } else {
+            TEST_ARG("--ro-bind"); TEST_ARG(toolroot); TEST_ARG("/usr");
+        }
         TEST_ARG("--ro-bind-fd"); TEST_ARG("10"); TEST_ARG("/usr/bin/latc");
         TEST_ARG("--ro-bind-fd"); TEST_ARG("11"); TEST_ARG("/usr/bin/latx-x86_64");
         TEST_ARG("--ro-bind-fd"); TEST_ARG("12"); TEST_ARG("/usr/lib/liblat-aot-runtime.so.2");
@@ -3293,8 +3311,19 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
 #else
                         8u,
 #endif
-                        ~0u, 0u)) _exit(126);
+                        ~0u,
 #ifdef LATCD_GC_TIMER_TEST
+                        test_real_compile && test_worker_closure.files ? CLOSE_RANGE_CLOEXEC : 0u
+#else
+                        0u
+#endif
+                        )) _exit(126);
+#ifdef LATCD_GC_TIMER_TEST
+            if (test_real_compile && test_worker_closure.files)
+                for (guint i = 0; i < test_worker_closure.files->len; i++) {
+                    LatcdClosureFile *file = g_ptr_array_index(test_worker_closure.files, i);
+                    if (fcntl(file->fd, F_SETFD, 0)) _exit(126);
+                }
             if (fcntl(0, F_GETFD) != -1 || errno != EBADF ||
                 fcntl(1, F_GETFD) != -1 || errno != EBADF ||
                 (!test_bootstrap && (fcntl(2, F_GETFD) != -1 || errno != EBADF))) _exit(126);
@@ -3398,6 +3427,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (args_fd >= 0) close(args_fd);
     g_ptr_array_free(compile_options, TRUE);
     g_ptr_array_free(compile_exec, TRUE);
+    g_ptr_array_free(closure_strings, TRUE);
     for (unsigned i = 0; i < 3; i++) {
         if (tool_child[i] >= 0) close(tool_child[i]);
         if (tool_fds[i] >= 0) close(tool_fds[i]);
@@ -8455,6 +8485,12 @@ int main(int argc, char **argv)
         }
         config.managed = true;
         test_managed_compiler = true;
+        const char *manifest = getenv("LATCD_TEST_WORKER_CLOSURE");
+        if (manifest && latcd_worker_closure_load(manifest, LATC_BUILD_ID, FALSE,
+                                                  &test_worker_closure)) {
+            fprintf(stderr, "latcd: test worker closure rejected: %s\n", strerror(errno));
+            return 1;
+        }
     }
 #endif
     struct rlimit inherited_cpu;

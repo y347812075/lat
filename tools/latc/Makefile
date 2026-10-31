@@ -96,6 +96,16 @@ test-managed-environment: $(BUILD)/tests/test-managed-environment
 	$(BUILD)/tests/test-managed-environment
 test: test-managed-environment
 
+$(BUILD)/tests/test-worker-closure: tests/test-worker-closure.c \
+		$(BUILD)/latcd/worker-closure.o $(BUILD)/latcd/managed-path.o \
+		$(BUILD)/latcd/parson/parson.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+.PHONY: test-worker-closure
+test-worker-closure: $(BUILD)/tests/test-worker-closure
+	$(BUILD)/tests/test-worker-closure
+test: test-worker-closure
+
 $(BUILD)/tests/test-worker-seccomp: tests/test-worker-seccomp.c latcd/worker-seccomp.c latcd/worker-seccomp.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test-worker-seccomp.c latcd/worker-seccomp.c -pthread
@@ -230,6 +240,7 @@ $(BUILD)/tests/test-journal-store $(BUILD)/tests/test-latcd-channel \
 $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/managed-config.o $(BUILD)/latcd/managed-path.o
 
 $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer: $(BUILD)/latcd/worker-seccomp.o
+$(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer: $(BUILD)/latcd/worker-closure.o
 $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-journal-store \
 $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/worker-domain.o
 
