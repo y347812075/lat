@@ -1624,13 +1624,16 @@ static int record_compiler_budget(const LatcdConfig *config, const char *id,
 static _Thread_local bool task_roots_busy;
 
 /* The immutable record is also the lease inode. No completion or deletion claim. */
-static int record_task(const LatcdConfig *config, bool copying,
+static int record_task(const LatcdConfig *config, bool copying, bool replay,
                                 const char *const paths[6], const int pins[4],
                                 const uint8_t digest[32],
                                 const char *const environment[],
                                 uint64_t managed_budget,
                                 char **task_id, char *error, size_t error_size)
 {
+    if (replay && (!config->managed || copying || !paths[0] || !paths[1] ||
+                   !paths[2] || paths[3] || !paths[4] || !paths[5]))
+        return fail(error, error_size, "invalid replay task mode");
     int root = -1, gc = -1, tasks = -1, temporary = -1, collected = -1, lease = -1;
     bool managed = config->managed && !copying;
     GKeyFile *record = g_key_file_new();
@@ -1665,7 +1668,7 @@ static int record_task(const LatcdConfig *config, bool copying,
     task_object_identity(record, "temporary", &st);
     g_key_file_set_string(record, "task", "version", managed ? "3" : copying ? "2" : "1");
     if (copying) g_key_file_set_string(record, "task", "kind", "COPY");
-    if (managed) g_key_file_set_string(record, "task", "kind", "MANAGED_COMPILER");
+    if (managed) g_key_file_set_string(record, "task", "kind", replay ? "MANAGED_REPLAY" : "MANAGED_COMPILER");
     g_key_file_set_string(record, "task", "id", id);
     g_key_file_set_string(record, "task", "state", managed ? "PREPARED" : "BOUND");
     g_key_file_set_string(record, "task", "source", source_hex);
@@ -1680,7 +1683,7 @@ static int record_task(const LatcdConfig *config, bool copying,
                                g_checksum_get_string(configuration));
         g_checksum_free(configuration);
     }
-    const char *roles[] = {copying ? "input" : "source", "tbset", "base_native",
+    const char *roles[] = {copying ? "input" : "source", "tbset", replay ? "config" : "base_native",
                           "base_module", copying ? "output" : "output_native", "output_module"};
     for (unsigned i = 0; i < 6; i++) {
         if (!paths[i]) continue;
@@ -2167,7 +2170,7 @@ static int release_copy_task(const LatcdConfig *config, int task_pin,
                               char *error, size_t error_size);
 
 /* Caller owns the daemon lease and the exclusive task lease. */
-static int recover_managed_domain(const LatcdConfig *config, const char *id, int task)
+static int recover_managed_domain(const LatcdConfig *config, const char *id, int task, bool replay)
 {
     LatcdManagedDomain domain = {0};
     char error[256], *boot = NULL;
@@ -2177,7 +2180,13 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
     if (worker_delegation_fd < 0 ||
         latcd_managed_task_domain(config->cache_dir, id, task, &domain,
                                   LATCD_MANAGED_PREPARED, error, sizeof(error))) goto out;
-    if (domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY ||
+    if (replay && (domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY)) {
+        result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
+                                            LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error));
+        goto out;
+    }
+    if (domain.state == LATCD_MANAGED_REPLAY_DISCARDED ||
+        domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY ||
         domain.state == LATCD_MANAGED_OUTPUTS_REMOVED) {
         result = 0;
         goto out;
@@ -2217,6 +2226,9 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
     }
     result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
                                        LATCD_MANAGED_CANCELLED, error, sizeof(error));
+    if (!result && replay)
+        result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
+                                           LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error));
 out:
     g_free(boot);
     return result;
@@ -2309,12 +2321,16 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
             errno = ESTALE; result = -1; break;
         }
         if (managed) {
-            bool unsafe = !valid || recover_managed_domain(config, id, task);
+            char *kind = g_key_file_get_string(record, "task", "kind", NULL);
+            bool replay = !g_strcmp0(kind, "MANAGED_REPLAY");
+            bool unsafe = !valid || recover_managed_domain(config, id, task, replay);
+            g_free(kind);
             LatcdManagedDomain terminal = {0};
             char state_error[256];
             if (!unsafe && !latcd_managed_task_domain(config->cache_dir, id, task, &terminal,
                     LATCD_MANAGED_PREPARED, state_error, sizeof(state_error)) &&
-                terminal.state == LATCD_MANAGED_OUTPUTS_REMOVED)
+                (terminal.state == LATCD_MANAGED_OUTPUTS_REMOVED ||
+                 terminal.state == LATCD_MANAGED_REPLAY_DISCARDED))
                 latcd_cache_capacity_release_task(&generation_capacity, id);
             g_key_file_free(record);
             if (task >= 0) close(task);
@@ -3099,7 +3115,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     const char *task_paths[6] = {source, tbset, base_native, base_module,
                                 output_native, output};
     char *task_id = NULL;
-    int task_lease = pin_result ? -1 : record_task(config, false, task_paths,
+    int task_lease = pin_result ? -1 : record_task(config, false, false, task_paths,
         input_pins, digest, environment, cache_peak, &task_id, error, error_size);
     if (task_lease < 0) pin_result = -1;
     if (task_lease >= 0) {
@@ -3840,7 +3856,7 @@ static int snapshot_task_copy(const LatcdConfig *config, const char *source,
     char *output = g_build_filename(temporary, name, NULL);
     const char *paths[6] = {source, NULL, NULL, NULL, output, NULL};
     int inputs[4] = {input, -1, -1, -1};
-    *task_pin = record_task(config, true, paths, inputs, digest, NULL, 0,
+    *task_pin = record_task(config, true, false, paths, inputs, digest, NULL, 0,
                             task_id, error, error_size);
     if (*task_pin >= 0) copy_test_barrier("recorded");
     int result = *task_pin < 0 ? -1 : snapshot_cached_fd(input, temporary,
@@ -8089,7 +8105,11 @@ static int test_managed_task_record(const char *root)
     char *source = g_build_filename(root, ".tmp", "input", NULL);
     char *native = g_build_filename(root, ".tmp", "output-native", NULL);
     char *module = g_build_filename(root, ".tmp", "output-module", NULL);
-    const char *paths[6] = {source, NULL, NULL, NULL, native, module};
+    bool replay = getenv("LATCD_TEST_REPLAY_RECORD") != NULL;
+    char *tbset = g_build_filename(root, ".tmp", "tbset", NULL);
+    char *configuration = g_build_filename(root, ".tmp", "configuration", NULL);
+    const char *paths[6] = {source, replay ? tbset : NULL,
+                            replay ? configuration : NULL, NULL, native, module};
     const char *environment[] = {"LANG=C", NULL};
     uint8_t digest[32] = {0};
     int pins[4] = {-1, -1, -1, -1};
@@ -8100,10 +8120,25 @@ static int test_managed_task_record(const char *root)
         goto out;
     latcd_cache_capacity_metadata_bind(&generation_capacity, LATCD_DEFAULT_MAX_CACHE_BYTES);
     pins[0] = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (pins[0] < 0) goto out;
-    lease = record_task(&config, false, paths, pins, digest, environment, 4096,
+    if (replay) {
+        pins[1] = open(tbset, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        pins[2] = open(configuration, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    }
+    if (pins[0] < 0 || (replay && (pins[1] < 0 || pins[2] < 0))) goto out;
+    lease = record_task(&config, false, replay, paths, pins, digest, environment, 4096,
                         &id, error, sizeof(error));
     if (lease < 0) goto out;
+    if (replay) {
+        LatcdManagedDomain domain = {0};
+        g_strlcpy(domain.boot, "12345678-1234-1234-1234-123456789abc", sizeof(domain.boot));
+        domain.delegation.st_ino = 2; domain.domain.st_ino = 4;
+        if (latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_BOUND, error, sizeof(error)) ||
+            latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_AUTHORIZED, error, sizeof(error)) ||
+            latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_DOMAIN_EMPTY, error, sizeof(error)) ||
+            !latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_ADOPTING, error, sizeof(error)) ||
+            latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error)))
+            goto out;
+    }
     const char *delegation_path = getenv("LATCD_TEST_DELEGATION");
     if (delegation_path) {
         int manager = -1, domain_fd = -1;
@@ -8147,9 +8182,9 @@ domain_ready:
 out:
     if (result) fprintf(stderr, "managed task test: %s: %s\n", error, strerror(errno));
     if (lease >= 0) close(lease);
-    if (pins[0] >= 0) close(pins[0]);
+    close_compiler_inputs(pins);
     latcd_cache_capacity_close(&generation_capacity);
-    g_free(id); g_free(source); g_free(native); g_free(module);
+    g_free(id); g_free(source); g_free(native); g_free(module); g_free(tbset); g_free(configuration);
     return result;
 }
 

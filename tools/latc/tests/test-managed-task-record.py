@@ -13,6 +13,23 @@ import tempfile
 
 
 def run(binary):
+    with tempfile.TemporaryDirectory(prefix='latcd-managed-replay-',
+                                     dir=Path.home() / 'tmp') as directory:
+        root = Path(directory)
+        (root / '.tmp').mkdir(mode=0o700)
+        for name in ('input', 'tbset', 'configuration'):
+            (root / '.tmp' / name).write_bytes(name.encode())
+        env = os.environ | {'LATCD_TEST_REPLAY_RECORD': '1'}
+        result = subprocess.run([binary, '--test-managed-task', str(root)], input='x',
+                                capture_output=True, text=True, env=env, timeout=20)
+        assert result.returncode == 0, result.stderr
+        task_id = result.stdout.strip()
+        task, state = configparser.ConfigParser(), configparser.ConfigParser()
+        task.read(root / '.gc/tasks' / (task_id + '.ini'))
+        state.read(root / '.gc/managed-task-state' / (task_id + '.ini'))
+        assert task['task']['kind'] == 'MANAGED_REPLAY'
+        assert task['config']['name'] == 'configuration'
+        assert state['managed']['state'] == 'REPLAY_DISCARDED'
     with tempfile.TemporaryDirectory(prefix='latcd-managed-output-',
                                      dir=Path.home() / 'tmp') as directory:
         root = Path(directory)
