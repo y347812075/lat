@@ -3217,6 +3217,31 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     }
     TEST_ARG(NULL);
 #undef TEST_ARG
+    int args_fd = -1, args_child = -1;
+    const char *compile_exec_args[20] = {bwrap, "--args", "15", "--"};
+    if (test_real_compile && !pin_result) {
+        args_fd = syscall(SYS_memfd_create, "latcd-bwrap-args",
+                          MFD_CLOEXEC | MFD_ALLOW_SEALING);
+        if (args_fd < 0) pin_result = -1;
+        size_t i = 1;
+        for (; !pin_result && compile_args[i] && strcmp(compile_args[i], "--"); i++) {
+            size_t length = strlen(compile_args[i]) + 1;
+            if (write(args_fd, compile_args[i], length) != (ssize_t)length)
+                pin_result = -1;
+        }
+        if (!pin_result && compile_args[i]) {
+            size_t out = 4;
+            for (i++; compile_args[i] && out + 1 < G_N_ELEMENTS(compile_exec_args); i++)
+                compile_exec_args[out++] = compile_args[i];
+            if (compile_args[i]) pin_result = -1;
+            compile_exec_args[out] = NULL;
+        } else pin_result = -1;
+        if (!pin_result && (fcntl(args_fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW |
+                                  F_SEAL_SHRINK | F_SEAL_SEAL) ||
+                            lseek(args_fd, 0, SEEK_SET) < 0 ||
+                            (args_child = fcntl(args_fd, F_DUPFD_CLOEXEC, 16)) < 0))
+            pin_result = -1;
+    }
 #endif
     LatcdManagedDomain domain = {0};
     pid_t child = -1;
@@ -3261,6 +3286,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             if (test_bootstrap && (dup2(launcher_child[0], 13) < 0 ||
                                    dup2(launcher_child[1], 14) < 0 ||
                                    fcntl(13, F_SETFD, FD_CLOEXEC))) _exit(126);
+            if (test_real_compile && dup2(args_child, 15) < 0) _exit(126);
 #endif
             close(0); close(1);
 #ifdef LATCD_GC_TIMER_TEST
@@ -3270,7 +3296,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
 #endif
             if (syscall(SYS_close_range,
 #ifdef LATCD_GC_TIMER_TEST
-                        test_bootstrap ? 15u : 8u,
+                        test_real_compile ? 16u : (test_bootstrap ? 15u : 8u),
 #else
                         8u,
 #endif
@@ -3297,7 +3323,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             if (test_bootstrap) {
                 if (n != 1 || permit != '1' || dup2(8, 3) < 0) _exit(126);
                 close(8);
-                syscall(SYS_execveat, 13, "", (char *const *)(test_real_compile ? compile_args : sandbox_args),
+                syscall(SYS_execveat, 13, "", (char *const *)(test_real_compile ? compile_exec_args : sandbox_args),
                         (char *const *)sandbox_env, AT_EMPTY_PATH);
                 _exit(127);
             }
@@ -3375,6 +3401,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (handoff_child >= 0) close(handoff_child);
     if (filter_child >= 0) close(filter_child);
     if (filter >= 0) close(filter);
+    if (args_child >= 0) close(args_child);
+    if (args_fd >= 0) close(args_fd);
     for (unsigned i = 0; i < 3; i++) {
         if (tool_child[i] >= 0) close(tool_child[i]);
         if (tool_fds[i] >= 0) close(tool_fds[i]);
