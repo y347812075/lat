@@ -360,6 +360,31 @@ def run_case(prefix, guests, root, mode):
             require(bool(config_flags & 2) == (mode == 'replay-domain'),
                     'journal native replay domain does not match runtime mode')
             evidence['config_flags'] = config_flags
+            if mode == 'replay-domain':
+                native = work / 'journal-replay.native'
+                config = journal.parent / 'config'
+                compile_env = {key: value for key, value in env.items()
+                               if not key.startswith(('LAT', 'SAVE_XMM'))} | {
+                    'LATC_TRANSLATION_CONFIG_FROM': str(config),
+                    'LATC_TBSET_SELECTION': 'exact',
+                    'LATC_AOT_THREADS': '1',
+                }
+                command = [str(prefix / 'libexec/latc/scripts/compile-native-image.sh'),
+                           '--config-replay', str(prefix / 'bin/latc'),
+                           str(prefix / 'bin/latx-x86_64'), str(guest),
+                           str(native), str(work / 'expected.tbset')]
+                evidence['commands'].append(command)
+                replay = subprocess.run(command, env=compile_env, capture_output=True,
+                                        text=True, timeout=120)
+                evidence['journal_replay'] = {
+                    'rc': replay.returncode, 'stdout': replay.stdout,
+                    'stderr': replay.stderr,
+                }
+                require(replay.returncode == 0, 'journal configuration replay failed')
+                inspection = json.loads(replay.stdout.splitlines()[-1])
+                require(inspection['flags'] & 64, 'replay native is not quarantined')
+                require(native.read_bytes().endswith(config_bytes),
+                        'replay native did not retain journal configuration')
             stat = journal.stat()
             main_table = Path(f'/proc/{runner.pid}/fd')
             main_descriptors = descriptors_for_inode(main_table, stat)
