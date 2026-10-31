@@ -13,6 +13,10 @@ import tempfile
 
 
 def run(binary):
+    with tempfile.TemporaryDirectory(prefix='latcd-managed-scan-',
+                                     dir=Path.home() / 'tmp') as directory:
+        subprocess.run([binary, '--test-managed-scan-identity', directory],
+                       check=True, timeout=20)
     with tempfile.TemporaryDirectory(prefix='latcd-managed-task-',
                                      dir=Path.home() / 'tmp') as directory:
         root = Path(directory)

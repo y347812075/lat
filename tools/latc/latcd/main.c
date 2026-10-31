@@ -2086,6 +2086,14 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
         directory = fdopendir(scan);
         if (!directory) { close(scan); goto out; }
     }
+    if (config->managed) {
+        struct stat identity;
+        if (fstat(tasks, &identity) ||
+            !budget_directory_identity(dirfd(directory), &identity)) {
+            errno = ESTALE;
+            goto out;
+        }
+    }
     for (;;) {
         if (stop_requested) { result = 1; break; }
         if (*visited >= budget || (*visited &&
@@ -7563,6 +7571,27 @@ out:
     return result;
 }
 
+static int test_managed_scan_identity(const char *root)
+{
+    LatcdConfig config = { .cache_dir = root, .managed = true };
+    DIR *cursor = NULL;
+    unsigned visited;
+    char error[256] = {0};
+    char *tasks = g_build_filename(root, ".gc", "tasks", NULL);
+    char *old = g_build_filename(root, ".gc", "tasks-old", NULL);
+    int result = 1;
+    if (prepare_metadata_directories(root) ||
+        recover_compiler_inputs_step(&config, &cursor, 0, &visited, error, sizeof(error)) != 1 ||
+        !cursor || rename(tasks, old) || mkdir(tasks, 0700)) goto out;
+    if (recover_compiler_inputs_step(&config, &cursor, 32, &visited, error, sizeof(error)) < 0 &&
+        !cursor) result = 0;
+out:
+    if (cursor) closedir(cursor);
+    g_free(tasks);
+    g_free(old);
+    return result;
+}
+
 static int test_managed_compiler_run(const char *root, const char *delegation)
 {
     LatcdConfig config = { .cache_dir = root, .managed = true, .compiler = "/bin/false",
@@ -7607,6 +7636,8 @@ int main(int argc, char **argv)
         return test_managed_task_record(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "--test-managed-recovery"))
         return test_managed_task_recovery(argv[2], argv[3]);
+    if (argc == 3 && !strcmp(argv[1], "--test-managed-scan-identity"))
+        return test_managed_scan_identity(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "--test-managed-compiler"))
         return test_managed_compiler_run(argv[2], argv[3]);
 #endif
