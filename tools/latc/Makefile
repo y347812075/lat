@@ -116,6 +116,10 @@ $(BUILD)/latcd/worker-bootstrap: latcd/worker-bootstrap.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $<
 
+.PHONY: test-worker-bootstrap
+test-worker-bootstrap: $(BUILD)/latcd/worker-bootstrap
+	python3 tests/test-worker-bootstrap.py $(abspath $(BUILD)/latcd/worker-bootstrap)
+
 test-native-config-replay:
 	@test -n "$(INSTALL_PREFIX)" -a -n "$(X86_GUEST)" -a -n "$(TBSET)" -a -n "$(WORK)" || \
 	  { echo "usage: make test-native-config-replay INSTALL_PREFIX=... X86_GUEST=... TBSET=... WORK=..."; exit 2; }
