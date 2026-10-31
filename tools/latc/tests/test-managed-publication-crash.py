@@ -47,7 +47,7 @@ def run(test_daemon, prefix, guest, work):
     digest = hashlib.sha256(guest.read_bytes()).hexdigest()
     env = dict(os.environ, LD_LIBRARY_PATH=str(prefix / 'lib'))
     for phase, replacement in ((p, r) for r in (False, True)
-                               for p in ('ADOPTING', 'OUTPUT_ADOPTED', 'OUTPUT_UNLINK', 'CURRENT_SYNCED')):
+                               for p in ('ADOPTING', 'OUTPUT_PREPARED', 'PARTIAL_ADOPTION', 'OUTPUT_ADOPTED', 'OUTPUT_UNLINK', 'CURRENT_SYNCED')):
         directory = work / (phase + ('-replacement' if replacement else '-first'))
         directory.mkdir(mode=0o700)
         cache, socket = directory / 'cache', directory / 'd.sock'

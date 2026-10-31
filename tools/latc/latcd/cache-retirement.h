@@ -30,6 +30,8 @@ int latcd_managed_outputs_verify(const char *root, const char *id, int task_fd,
                                  char *error, size_t error_size);
 int latcd_managed_outputs_discard(const char *root, const char *id, int task_fd,
                                  char *error, size_t error_size);
+int latcd_managed_outputs_prepare(const char *root, const char *id, int task_fd,
+                                 const int outputs[2], char *error, size_t error_size);
 /* Owner lease required. Acquire after source latch, never wait under cache_lock.
  * Publishers hold SH through transaction finish; retirement/deletion holds EX.
  * Returned CLOEXEC fd is released by close only. Not domain admission. */

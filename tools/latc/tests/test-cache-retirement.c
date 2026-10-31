@@ -8160,11 +8160,19 @@ static void test_unknown_task_release(bool executor, bool managed)
                                              LATCD_MANAGED_AUTHORIZED, error, sizeof(error)));
             assert(latcd_managed_task_domain(root, id, task_fd, &domain,
                                              LATCD_MANAGED_OUTPUT_ADOPTED, error, sizeof(error)));
-            put(native, "native output\n");
-            put(module, "module output\n");
-            assert(!chmod(native, 0600) && !chmod(module, 0600));
-            assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
-                                              LATCD_MANAGED_OUTPUT_ADOPTED, error, sizeof(error)));
+            int tmpdir = open(temporary, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            int outputs[] = {openat(tmpdir, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600),
+                             openat(tmpdir, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600)};
+            assert(tmpdir >= 0 && outputs[0] >= 0 && outputs[1] >= 0);
+            assert(write(outputs[0], "native output\n", 14) == 14);
+            assert(write(outputs[1], "module output\n", 14) == 14);
+            assert(!latcd_managed_outputs_prepare(root, id, task_fd, outputs, error, sizeof(error)));
+            char descriptor[64];
+            snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", outputs[0]);
+            assert(!linkat(AT_FDCWD, descriptor, AT_FDCWD, native, AT_SYMLINK_FOLLOW));
+            snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", outputs[1]);
+            assert(!linkat(AT_FDCWD, descriptor, AT_FDCWD, module, AT_SYMLINK_FOLLOW));
+            close(outputs[0]); close(outputs[1]); close(tmpdir);
             GKeyFile *adopted = g_key_file_new();
             assert(g_key_file_load_from_file(adopted, state_path, 0, NULL));
             char *hash = g_key_file_get_string(adopted, "managed", "native_sha256", NULL);

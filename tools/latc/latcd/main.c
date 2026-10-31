@@ -3328,6 +3328,10 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         !WEXITSTATUS(status) && domain.state == LATCD_MANAGED_DOMAIN_EMPTY) {
         const char *names[] = {"output.native", "output.so"};
         const char *destinations[] = {output_native, output};
+        int outputs[2] = {-1, -1};
+        char *parent = g_path_get_dirname(output);
+        int temporary = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (temporary < 0) waited = -1;
         if (latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
                                      LATCD_MANAGED_ADOPTING, error, error_size)) waited = -1;
         if (waited == child && getenv("LATCD_TEST_CRASH_AFTER_ADOPTING"))
@@ -3340,7 +3344,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                 if (fd >= 0) close(fd);
                 waited = -1; errno = EINVAL; break;
             }
-            int out = open(destinations[i], O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+            int out = openat(temporary, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
+            outputs[i] = out;
             char bytes[65536];
             off_t offset = 0;
             bool copied = out >= 0;
@@ -3359,16 +3364,27 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                 offset += n;
             }
             if (copied && fsync(out)) copied = false;
-            if (out >= 0) close(out);
             close(fd);
             if (!copied) { waited = -1; errno = EIO; break; }
         }
-        char *parent = g_path_get_dirname(output);
+        if (waited == child && latcd_managed_outputs_prepare(config->cache_dir, task_id,
+                task_lease, outputs, error, error_size)) waited = -1;
+        if (waited == child && getenv("LATCD_TEST_CRASH_AFTER_OUTPUT_PREPARED"))
+            kill(getpid(), SIGKILL);
+        for (unsigned i = 0; waited == child && i < 2; i++) {
+            char descriptor[64];
+            snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", outputs[i]);
+            if (linkat(AT_FDCWD, descriptor, AT_FDCWD, destinations[i], AT_SYMLINK_FOLLOW)) {
+                waited = -1; break;
+            }
+            if (i == 0 && getenv("LATCD_TEST_CRASH_AFTER_PARTIAL_ADOPTION"))
+                kill(getpid(), SIGKILL);
+        }
         if (waited == child && (sync_directory(parent, error, error_size) ||
-            latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
-                                      LATCD_MANAGED_OUTPUT_ADOPTED, error, error_size) ||
             latcd_managed_outputs_verify(config->cache_dir, task_id, task_lease,
                                          error, error_size))) waited = -1;
+        for (unsigned i = 0; i < 2; i++) if (outputs[i] >= 0) close(outputs[i]);
+        if (temporary >= 0) close(temporary);
         if (waited == child && getenv("LATCD_TEST_CRASH_AFTER_OUTPUT_ADOPTED"))
             kill(getpid(), SIGKILL);
         g_free(parent);

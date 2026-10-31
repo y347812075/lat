@@ -4417,6 +4417,73 @@ static bool managed_outputs_removed(int root, const char *raw, size_t size)
     return valid;
 }
 
+int latcd_managed_outputs_prepare(const char *root, const char *id, int task_fd,
+                                 const int outputs[2], char *error, size_t error_size)
+{
+    if (!root || !id || !g_uuid_string_is_valid(id) || task_fd < 0 || !outputs)
+        return fail(error, error_size, "invalid managed output preparation");
+    int roots = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, error_size);
+    if (roots < 0) return -1;
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
+    int tasks = gc < 0 ? -1 : open_directory(gc, "tasks", false);
+    int states = gc < 0 ? -1 : open_directory(gc, "managed-task-state", false);
+    char *name = g_strdup_printf("%s.ini", id), *raw = NULL, *state_raw = NULL;
+    size_t size = 0, state_size = 0;
+    struct stat held, snapshot, temporary;
+    LatcdManagedDomain domain = {0};
+    GKeyFile *state = g_key_file_new();
+    int tmp = directory < 0 ? -1 : openat(directory, ".tmp", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool valid = states >= 0 && tasks >= 0 && tmp >= 0 && !fstat(tmp, &temporary) &&
+        !fstat(task_fd, &held) &&
+        !read_file_snapshot(tasks, name, RECORD_LIMIT, &raw, &size, &snapshot, NULL) &&
+        object_stat_equal(&held, &snapshot) &&
+        managed_task_state_read(gc, name, id, &held, raw, size, &domain) &&
+        domain.state == LATCD_MANAGED_ADOPTING && managed_outputs_removed(directory, raw, size) &&
+        !read_file(states, name, RECORD_LIMIT, &state_raw, &state_size) &&
+        !memchr(state_raw, 0, state_size) &&
+        g_key_file_load_from_data(state, state_raw, state_size, 0, NULL);
+    const char *prefixes[] = {"native", "module"};
+    for (unsigned i = 0; valid && i < 2; i++) {
+        struct stat before, after;
+        valid = outputs[i] >= 0 && !fsync(outputs[i]) && !fstat(outputs[i], &before) && S_ISREG(before.st_mode) &&
+            before.st_uid == geteuid() && before.st_dev == temporary.st_dev &&
+            before.st_nlink == 0 && !(before.st_mode & 0077) && before.st_size > 0;
+        GChecksum *hash = g_checksum_new(G_CHECKSUM_SHA256);
+        char buffer[65536]; uint64_t offset = 0;
+        while (valid && offset < (uint64_t)before.st_size) {
+            ssize_t n = pread(outputs[i], buffer, MIN(sizeof(buffer), (uint64_t)before.st_size - offset), offset);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) { valid = false; break; }
+            offset += n; g_checksum_update(hash, (const guchar *)buffer, n);
+        }
+        valid = valid && !fstat(outputs[i], &after) && object_stat_equal(&before, &after);
+        if (valid) {
+            char *key = g_strdup_printf("%s_device", prefixes[i]);
+            g_key_file_set_uint64(state, "managed", key, before.st_dev); g_free(key);
+            key = g_strdup_printf("%s_inode", prefixes[i]);
+            g_key_file_set_uint64(state, "managed", key, before.st_ino); g_free(key);
+            key = g_strdup_printf("%s_size", prefixes[i]);
+            g_key_file_set_uint64(state, "managed", key, before.st_size); g_free(key);
+            key = g_strdup_printf("%s_sha256", prefixes[i]);
+            g_key_file_set_string(state, "managed", key, g_checksum_get_string(hash)); g_free(key);
+        }
+        g_checksum_free(hash);
+    }
+    if (valid) {
+        g_key_file_set_string(state, "managed", "state", "OUTPUT_ADOPTED");
+        valid = !write_record(states, name, state);
+    }
+    g_key_file_unref(state); g_free(state_raw); g_free(raw); g_free(name);
+    if (tmp >= 0) close(tmp);
+    if (states >= 0) close(states);
+    if (tasks >= 0) close(tasks);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    close(roots);
+    return valid ? 0 : fail(error, error_size, "cannot prepare managed outputs");
+}
+
 /* The caller must hold the task's exclusive lease throughout recovery. */
 int latcd_managed_outputs_discard(const char *root, const char *id, int task_fd,
                                   char *error, size_t error_size)
