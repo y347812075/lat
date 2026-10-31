@@ -3,10 +3,9 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/sched.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
-#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -32,24 +31,31 @@ int main(int argc, char **argv)
     assert(ordinary >= 0);
     assert(latcd_worker_domain_create(ordinary, "../bad", &identity) < 0 && errno == EINVAL);
     assert(latcd_worker_domain_create(ordinary, "test", &identity) < 0 && errno == EINVAL);
+    assert(latcd_worker_domain_set_limits(ordinary, 1, 1) < 0 && errno == EINVAL);
+    assert(latcd_worker_domain_clone(ordinary) < 0 && errno == EINVAL);
     close(ordinary);
     if (argc != 2) return 0;
     int parent = open(argv[1], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     assert(parent >= 0);
     int domain = latcd_worker_domain_create(parent, "latcd-domain-test", &identity);
     assert(domain >= 0);
+    assert(latcd_worker_domain_set_limits(domain, 0, 1) < 0 && errno == EINVAL);
+    assert(!latcd_worker_domain_set_limits(domain, 268435456, 32));
     assert(!latcd_worker_domain_populated(parent, "latcd-domain-test", &identity, &value) && !value);
     struct stat wrong = identity;
     wrong.st_ino++;
     assert(latcd_worker_domain_populated(parent, "latcd-domain-test", &wrong, &value) < 0 && errno == ESTALE);
     assert(latcd_worker_domain_kill(parent, "latcd-domain-test", &wrong) < 0 && errno == ESTALE);
-    int ready[2];
-    assert(!pipe(ready));
-    struct clone_args args = { .flags = CLONE_INTO_CGROUP, .exit_signal = SIGCHLD, .cgroup = domain };
-    pid_t child = syscall(SYS_clone3, &args, sizeof(args));
+    int ready[2], gate[2];
+    assert(!pipe(ready) && !pipe(gate));
+    pid_t child = latcd_worker_domain_clone(domain);
     assert(child >= 0);
     if (!child) {
         close(ready[0]);
+        close(gate[1]);
+        char permit;
+        if (read(gate[0], &permit, 1) != 1 || permit != '1') _exit(2);
+        close(gate[0]);
         pid_t descendant = fork();
         if (descendant < 0) _exit(1);
         if (!descendant) {
@@ -60,6 +66,12 @@ int main(int argc, char **argv)
         _exit(0);
     }
     close(ready[1]);
+    close(gate[0]);
+    assert(!latcd_worker_domain_populated(parent, "latcd-domain-test", &identity, &value) && value);
+    struct pollfd pollfd = { .fd = ready[0], .events = POLLIN };
+    assert(poll(&pollfd, 1, 50) == 0);
+    assert(write(gate[1], "1", 1) == 1);
+    close(gate[1]);
     char signal_byte;
     assert(read(ready[0], &signal_byte, 1) == 1);
     close(ready[0]);
@@ -73,6 +85,18 @@ int main(int argc, char **argv)
         usleep(10000);
     }
     assert(!value);
+    assert(!pipe(gate));
+    child = latcd_worker_domain_clone(domain);
+    assert(child >= 0);
+    if (!child) {
+        close(gate[1]);
+        char permit;
+        _exit(read(gate[0], &permit, 1) == 1 && permit == '1' ? 0 : 2);
+    }
+    close(gate[0]);
+    close(gate[1]);
+    assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 2);
+    assert(!latcd_worker_domain_populated(parent, "latcd-domain-test", &identity, &value) && !value);
     replacement_parent = parent;
     assert(latcd_worker_domain_populated(parent, "latcd-domain-test", &identity, &value) < 0 && errno == ESTALE);
     close(domain);

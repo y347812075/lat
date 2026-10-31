@@ -678,6 +678,7 @@ if 'CONFIG_LATX' in config_host
       'tools/latc/latcd/managed-config.c',
       'tools/latc/latcd/managed-path.c',
       'tools/latc/latcd/worker-seccomp.c',
+      'tools/latc/latcd/worker-domain.c',
       'tools/latc/latcd/protocol.c',
       'tools/latc/latcd/precompile.c',
       'tools/latc/latcd/journal-store.c',

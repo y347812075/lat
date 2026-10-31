@@ -5,9 +5,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
+#include <linux/sched.h>
+#include <signal.h>
 #include <stdbool.h>
+#include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/statfs.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 static bool valid_name(const char *name)
@@ -26,6 +31,41 @@ static int cgroup_dir(int fd)
         return -1;
     }
     return 0;
+}
+
+static int write_limit(int dir, const char *name, uint64_t value)
+{
+    char data[32];
+    int length = snprintf(data, sizeof(data), "%" PRIu64, value);
+    if (length <= 0 || (size_t)length >= sizeof(data)) { errno = EINVAL; return -1; }
+    int fd = openat(dir, name, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    ssize_t n;
+    do { n = write(fd, data, length); } while (n < 0 && errno == EINTR);
+    int saved = errno;
+    close(fd);
+    if (n != length) { errno = n < 0 ? saved : EIO; return -1; }
+    return 0;
+}
+
+int latcd_worker_domain_set_limits(int domain, uint64_t memory_bytes,
+                                   uint64_t processes)
+{
+    if (!memory_bytes || !processes) { errno = EINVAL; return -1; }
+    if (cgroup_dir(domain) || write_limit(domain, "memory.max", memory_bytes) ||
+        write_limit(domain, "pids.max", processes)) return -1;
+    return 0;
+}
+
+pid_t latcd_worker_domain_clone(int domain)
+{
+    if (cgroup_dir(domain)) return -1;
+    struct clone_args args = {
+        .flags = CLONE_INTO_CGROUP,
+        .exit_signal = SIGCHLD,
+        .cgroup = (uint64_t)domain,
+    };
+    return syscall(SYS_clone3, &args, sizeof(args));
 }
 
 int latcd_worker_domain_create(int parent, const char *name, struct stat *identity)
