@@ -296,4 +296,14 @@ _, _, c = read_key_set(work / 'third.tbset'); _, _, result = read_key_set(cache 
 assert set(a) | set(b) | set(c) <= set(result)
 assert all((cache / new[k]).is_file() for k in ('module', 'native', 'tbset'))
 PY
+n=0
+while [ "$(grep -c 'test waiting page consumed' "$log" || :)" -lt 2 ]; do
+    if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$log"; then cat "$log" >&2; exit 1; fi
+    n=$((n + 1)); [ "$n" -lt 1000 ]; sleep 0.1
+done
+python3 - "$cache" "$work/new.json" <<'PY'
+import json, pathlib, sys
+cache = pathlib.Path(sys.argv[1]); old = json.loads(pathlib.Path(sys.argv[2]).read_text())
+assert all(not (cache / old[k]).exists() for k in ('module', 'native', 'tbset'))
+PY
 kill -TERM "$pid"; wait "$pid"; pid=

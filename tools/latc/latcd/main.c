@@ -2619,8 +2619,18 @@ static int test_stage_retirement_page(LatcdPageDriver *driver, const LatcdConfig
     int result = 0;
     if (!page_driver_admitted()) return fail(error, error_size, "page driver admission unavailable");
     if (!driver->discovery) {
-        if (latcd_retirement_page_round_begin(config->cache_dir,
-                LATCD_RETIREMENT_GRACE_US, &page, error, error_size)) return -1;
+        struct timespec ts;
+        char *boot = NULL;
+        if (clock_gettime(CLOCK_BOOTTIME, &ts) ||
+            !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, NULL, NULL)) return -1;
+        g_strchomp(boot);
+        uint64_t now = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+        result = latcd_retirement_page_state_resume(config->cache_dir, boot,
+            LATCD_RETIREMENT_GRACE_US, now, &page, error, error_size);
+        g_free(boot);
+        if (result < 0 || (result == 1 && latcd_retirement_page_round_begin(config->cache_dir,
+                LATCD_RETIREMENT_GRACE_US, &page, error, error_size))) return -1;
+        result = 0;
         driver->discovery = latcd_retirement_queue_new(
             config->cache_dir, LATCD_RETIREMENT_GRACE_US);
         result = latcd_retirement_queue_page_discovery_begin(driver->discovery,
@@ -2634,11 +2644,13 @@ static int test_stage_retirement_page(LatcdPageDriver *driver, const LatcdConfig
             fprintf(stderr, "latcd: test page discovery yielded\n");
             return 1;
         }
-        if (!stop_requested && result < 0 &&
-            !latcd_retirement_queue_aggregated_page(driver->discovery, &page) && page.count)
-            result = latcd_retirement_queue_page_stage(driver->discovery, &generation_capacity,
-                config->max_cache_bytes, &driver->budget, error, error_size);
-        else result = -1;
+        if (!stop_requested && result < 0) {
+            if (!latcd_retirement_queue_aggregated_page(driver->discovery, &page) && page.count)
+                result = latcd_retirement_queue_page_stage(driver->discovery, &generation_capacity,
+                    config->max_cache_bytes, &driver->budget, error, error_size);
+            else
+                result = latcd_retirement_queue_round_advance(driver->discovery, error, error_size) ? -1 : 2;
+        } else result = -1;
     }
     latcd_retirement_queue_free(driver->discovery);
     driver->discovery = NULL;
@@ -2684,6 +2696,7 @@ static void *compiler_input_recovery_worker(void *opaque)
                 fprintf(stderr, "latcd: test waiting page failed: %s\n", error);
             } else if (!result) {
                 page_driver_state.waiting = false;
+                page_driver_state.staged = false;
                 fprintf(stderr, "latcd: test waiting page consumed\n");
             } else if (result == 1) {
                 if (timer >= 0) {
@@ -2790,6 +2803,7 @@ static void *compiler_input_recovery_worker(void *opaque)
                 next_retirement = 0;
 #endif
             }
+            if (stage == 2) next_retirement = 0;
             if (page_driver_state.discovery) next_retirement = g_get_monotonic_time() + 100000;
         }
         if (now >= next) {
