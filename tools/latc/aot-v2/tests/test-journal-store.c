@@ -898,6 +898,12 @@ int main(void)
     gsize captured_size;
     const void *captured_data = g_bytes_get_data(bytes, &captured_size);
     g_assert_cmpmem(input.config, input.config_size, captured_data, captured_size);
+    uint8_t sequential_config[LATCD_JOURNAL_CONFIG_LIMIT];
+    g_assert_cmpint(read(input.config_fd, sequential_config, input.config_size),
+                    ==, input.config_size);
+    g_assert_cmpmem(sequential_config, input.config_size, captured_data, captured_size);
+    g_assert_cmpint(lseek(input.config_fd, 0, SEEK_SET), ==, 0);
+    g_assert_cmpint(lseek(input.receipt_fd, 0, SEEK_CUR), ==, 0);
     int config_seals = fcntl(input.config_fd, F_GET_SEALS);
     g_assert_cmpint(config_seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL),
         ==, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);

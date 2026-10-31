@@ -117,7 +117,7 @@ static int sealed_copy(int source, off_t size)
         offset += n;
     }
     if (fcntl(target, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW |
-              F_SEAL_SHRINK | F_SEAL_SEAL)) goto fail;
+              F_SEAL_SHRINK | F_SEAL_SEAL) || lseek(target, 0, SEEK_SET) < 0) goto fail;
     return target;
 fail:
     close(target);
