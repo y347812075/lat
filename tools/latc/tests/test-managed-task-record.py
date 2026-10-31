@@ -13,6 +13,26 @@ import tempfile
 
 
 def run(binary):
+    with tempfile.TemporaryDirectory(prefix='latcd-managed-output-',
+                                     dir=Path.home() / 'tmp') as directory:
+        root = Path(directory)
+        native, module = root / 'output.native', root / 'output.so'
+        native.write_bytes(b'abc')
+        module.write_bytes(b'defg')
+
+        def accepted(reservation):
+            return subprocess.run([binary, '--test-managed-output-pair', str(root),
+                                   str(reservation)], timeout=10).returncode == 0
+
+        assert accepted(7)
+        assert not accepted(6)
+        assert not accepted(0)
+        module.unlink()
+        module.symlink_to(native)
+        assert not accepted(7)
+        module.unlink()
+        module.write_bytes(b'')
+        assert not accepted(7)
     with tempfile.TemporaryDirectory(prefix='latcd-managed-scan-',
                                      dir=Path.home() / 'tmp') as directory:
         subprocess.run([binary, '--test-managed-scan-identity', directory],

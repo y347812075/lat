@@ -2952,6 +2952,29 @@ static void *compiler_input_recovery_worker(void *opaque)
 
 #ifdef LATCD_GC_TIMER_TEST
 static bool test_managed_compiler;
+
+static int managed_output_open_pair(int workspace, uint64_t reservation,
+                                    int files[2], off_t sizes[2])
+{
+    const char *names[] = {"output.native", "output.so"};
+    uint64_t total = 0;
+    files[0] = files[1] = -1;
+    for (unsigned i = 0; i < 2; i++) {
+        struct stat st;
+        files[i] = openat(workspace, names[i], O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (files[i] < 0 || fstat(files[i], &st) || !S_ISREG(st.st_mode) ||
+            st.st_nlink != 1 || st.st_size <= 0 || st.st_size > 64 * 1024 * 1024 ||
+            (uint64_t)st.st_size > reservation - total) {
+            for (unsigned j = 0; j < 2; j++) if (files[j] >= 0) close(files[j]);
+            files[0] = files[1] = -1;
+            errno = EINVAL;
+            return -1;
+        }
+        sizes[i] = st.st_size;
+        total += (uint64_t)st.st_size;
+    }
+    return 0;
+}
 #endif
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *source, const char *tbset,
@@ -3450,9 +3473,10 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
 #ifdef LATCD_GC_TIMER_TEST
     if (test_real_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&
         !WEXITSTATUS(status) && domain.state == LATCD_MANAGED_DOMAIN_EMPTY) {
-        const char *names[] = {"output.native", "output.so"};
         const char *destinations[] = {output_native, output};
         int outputs[2] = {-1, -1};
+        int files[2] = {-1, -1};
+        off_t sizes[2];
         char *parent = g_path_get_dirname(output);
         int temporary = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (temporary < 0) waited = -1;
@@ -3460,22 +3484,17 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                                      LATCD_MANAGED_ADOPTING, error, error_size)) waited = -1;
         if (waited == child && getenv("LATCD_TEST_CRASH_AFTER_ADOPTING"))
             kill(getpid(), SIGKILL);
+        if (waited == child && managed_output_open_pair(workspace, *transient_reservation,
+                                                        files, sizes)) waited = -1;
         for (unsigned i = 0; waited == child && i < 2; i++) {
-            int fd = openat(workspace, names[i], O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-            struct stat st;
-            if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
-                st.st_size <= 0 || st.st_size > 64 * 1024 * 1024) {
-                if (fd >= 0) close(fd);
-                waited = -1; errno = EINVAL; break;
-            }
             int out = openat(temporary, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
             outputs[i] = out;
             char bytes[65536];
             off_t offset = 0;
             bool copied = out >= 0;
-            while (copied && offset < st.st_size) {
-                size_t wanted = MIN((uint64_t)sizeof(bytes), (uint64_t)(st.st_size - offset));
-                ssize_t n = pread(fd, bytes, wanted, offset);
+            while (copied && offset < sizes[i]) {
+                size_t wanted = MIN((uint64_t)sizeof(bytes), (uint64_t)(sizes[i] - offset));
+                ssize_t n = pread(files[i], bytes, wanted, offset);
                 if (n < 0 && errno == EINTR) continue;
                 if (n <= 0) { copied = false; break; }
                 ssize_t done = 0;
@@ -3488,9 +3507,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                 offset += n;
             }
             if (copied && fsync(out)) copied = false;
-            close(fd);
             if (!copied) { waited = -1; errno = EIO; break; }
         }
+        for (unsigned i = 0; i < 2; i++) if (files[i] >= 0) close(files[i]);
         if (waited == child && latcd_managed_outputs_prepare(config->cache_dir, task_id,
                 task_lease, outputs, error, error_size)) waited = -1;
         if (waited == child && getenv("LATCD_TEST_CRASH_AFTER_OUTPUT_PREPARED"))
@@ -8163,6 +8182,20 @@ out:
 int main(int argc, char **argv)
 {
 #ifdef LATCD_GC_TIMER_TEST
+    if (argc == 4 && !strcmp(argv[1], "--test-managed-output-pair")) {
+        char *end = NULL;
+        errno = 0;
+        unsigned long long reservation = strtoull(argv[3], &end, 10);
+        if (errno || !*argv[3] || *end || *argv[3] == '-') return 1;
+        int workspace = open(argv[2], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int files[2];
+        off_t sizes[2];
+        if (workspace < 0) return 1;
+        int result = managed_output_open_pair(workspace, reservation, files, sizes);
+        if (!result) { close(files[0]); close(files[1]); }
+        close(workspace);
+        return result ? 1 : 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "--test-managed-task"))
         return test_managed_task_record(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "--test-managed-recovery"))
