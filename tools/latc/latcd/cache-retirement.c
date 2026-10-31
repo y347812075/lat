@@ -4256,8 +4256,9 @@ static int task_inputs_released(int gc, const char *name, bool copying,
 
 /* Defense in depth, not the full reference graph. The management owner must
  * serialize local publisher transitions. No unbounded task walk under S. */
-static bool managed_task_state_valid(int gc, const char *name, const char *id,
-                                     const struct stat *task, const char *raw, size_t size)
+static bool managed_task_state_read(int gc, const char *name, const char *id,
+                                    const struct stat *task, const char *raw, size_t size,
+                                    LatcdManagedDomain *domain)
 {
     int states = open_directory(gc, "managed-task-state", false);
     if (states < 0) return false;
@@ -4270,18 +4271,54 @@ static bool managed_task_state_valid(int gc, const char *name, const char *id,
     const char *keys[] = {"version", "task_id", "task_device", "task_inode", "task_sha256", "state"};
     gsize groups = 0;
     char **names = g_key_file_get_groups(record, &groups);
-    valid = valid && groups == 1 && exact_keys(record, "managed", keys, G_N_ELEMENTS(keys)) &&
+    const char *bound_keys[] = {"version", "task_id", "task_device", "task_inode", "task_sha256", "state",
+        "cache_device", "cache_inode", "boot", "delegation_device", "delegation_inode", "domain_device", "domain_inode"};
+    bool prepared = record_string_is(record, "managed", "state", "PREPARED");
+    bool bound = record_string_is(record, "managed", "state", "DOMAIN_BOUND");
+    bool authorized = record_string_is(record, "managed", "state", "EXEC_AUTHORIZED");
+    bool cancelled = record_string_is(record, "managed", "state", "CANCELLED_DOMAIN_EMPTY");
+    valid = valid && groups == 1 && (prepared ? exact_keys(record, "managed", keys, G_N_ELEMENTS(keys)) :
+        exact_keys(record, "managed", bound_keys, G_N_ELEMENTS(bound_keys))) &&
         record_string_is(record, "managed", "version", "1") &&
         record_string_is(record, "managed", "task_id", id) &&
-        record_string_is(record, "managed", "state", "PREPARED");
+        (prepared || bound || authorized || cancelled);
     uint64_t device, inode;
     valid = valid && record_uint64(record, "managed", "task_device", &device) &&
         record_uint64(record, "managed", "task_inode", &inode) &&
         device == (uint64_t)task->st_dev && inode == (uint64_t)task->st_ino;
     char *digest = g_compute_checksum_for_data(G_CHECKSUM_SHA256, (const guchar *)raw, size);
     valid = valid && record_string_is(record, "managed", "task_sha256", digest);
+    LatcdManagedDomain parsed = { .state = prepared ? LATCD_MANAGED_PREPARED :
+        bound ? LATCD_MANAGED_BOUND : authorized ? LATCD_MANAGED_AUTHORIZED : LATCD_MANAGED_CANCELLED };
+    if (valid && !prepared) {
+        struct stat cache;
+        int root = openat(gc, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        uint64_t cd, ci, dd, di, wd, wi;
+        char *boot = g_key_file_get_string(record, "managed", "boot", NULL);
+        valid = root >= 0 && !fstat(root, &cache) && boot && g_uuid_string_is_valid(boot) &&
+            record_uint64(record, "managed", "cache_device", &cd) && cd == (uint64_t)cache.st_dev &&
+            record_uint64(record, "managed", "cache_inode", &ci) && ci == (uint64_t)cache.st_ino &&
+            record_uint64(record, "managed", "delegation_device", &dd) &&
+            record_uint64(record, "managed", "delegation_inode", &di) && di &&
+            record_uint64(record, "managed", "domain_device", &wd) &&
+            record_uint64(record, "managed", "domain_inode", &wi) && wi;
+        if (valid) {
+            g_strlcpy(parsed.boot, boot, sizeof(parsed.boot));
+            parsed.delegation.st_dev = dd; parsed.delegation.st_ino = di;
+            parsed.domain.st_dev = wd; parsed.domain.st_ino = wi;
+        }
+        if (root >= 0) close(root);
+        g_free(boot);
+    }
+    if (valid && domain) *domain = parsed;
     g_free(digest); g_strfreev(names); g_key_file_unref(record); g_free(data); close(states);
     return valid;
+}
+
+static bool managed_task_state_valid(int gc, const char *name, const char *id,
+                                     const struct stat *task, const char *raw, size_t size)
+{
+    return managed_task_state_read(gc, name, id, task, raw, size, NULL);
 }
 
 int latcd_managed_task_prepare(const char *root, const char *id, int task_fd,
@@ -4348,6 +4385,66 @@ int latcd_managed_task_prepare(const char *root, const char *id, int task_fd,
     if (directory >= 0) close(directory);
     close(roots);
     return result ? fail(error, error_size, "cannot persist managed task preparation") : 0;
+}
+
+int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
+                              LatcdManagedDomain *domain, unsigned next,
+                              char *error, size_t error_size)
+{
+    if (!root || !id || !g_uuid_string_is_valid(id) || task_fd < 0 || !domain ||
+        next > LATCD_MANAGED_CANCELLED)
+        return fail(error, error_size, "invalid managed domain request");
+    int roots = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, error_size);
+    if (roots < 0) return -1;
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
+    int tasks = gc < 0 ? -1 : open_directory(gc, "tasks", false);
+    int states = gc < 0 ? -1 : open_directory(gc, "managed-task-state", false);
+    char *name = g_strdup_printf("%s.ini", id), *raw = NULL;
+    size_t size = 0;
+    struct stat held, snapshot, cache;
+    LatcdManagedDomain old = {0};
+    bool valid = states >= 0 && tasks >= 0 && !fstat(directory, &cache) && !fstat(task_fd, &held) &&
+        !read_file_snapshot(tasks, name, RECORD_LIMIT, &raw, &size, &snapshot, NULL) &&
+        object_stat_equal(&held, &snapshot) &&
+        managed_task_state_read(gc, name, id, &held, raw, size, &old);
+    int result = -1;
+    if (valid && next == LATCD_MANAGED_PREPARED) {
+        *domain = old;
+        result = 0;
+    } else if (valid && ((old.state == LATCD_MANAGED_PREPARED && next == LATCD_MANAGED_BOUND) ||
+               (old.state == LATCD_MANAGED_BOUND && (next == LATCD_MANAGED_AUTHORIZED || next == LATCD_MANAGED_CANCELLED)) ||
+               (old.state == LATCD_MANAGED_AUTHORIZED && next == LATCD_MANAGED_CANCELLED))) {
+        LatcdManagedDomain value = old.state == LATCD_MANAGED_PREPARED ? *domain : old;
+        if (g_uuid_string_is_valid(value.boot) && value.delegation.st_ino && value.domain.st_ino) {
+            const char *names[] = {"PREPARED", "DOMAIN_BOUND", "EXEC_AUTHORIZED", "CANCELLED_DOMAIN_EMPTY"};
+            GKeyFile *record = g_key_file_new();
+            char *digest = g_compute_checksum_for_data(G_CHECKSUM_SHA256, (const guchar *)raw, size);
+            g_key_file_set_string(record, "managed", "version", "1");
+            g_key_file_set_string(record, "managed", "task_id", id);
+            g_key_file_set_uint64(record, "managed", "task_device", held.st_dev);
+            g_key_file_set_uint64(record, "managed", "task_inode", held.st_ino);
+            g_key_file_set_string(record, "managed", "task_sha256", digest);
+            g_key_file_set_string(record, "managed", "state", names[next]);
+            g_key_file_set_uint64(record, "managed", "cache_device", cache.st_dev);
+            g_key_file_set_uint64(record, "managed", "cache_inode", cache.st_ino);
+            g_key_file_set_string(record, "managed", "boot", value.boot);
+            g_key_file_set_uint64(record, "managed", "delegation_device", value.delegation.st_dev);
+            g_key_file_set_uint64(record, "managed", "delegation_inode", value.delegation.st_ino);
+            g_key_file_set_uint64(record, "managed", "domain_device", value.domain.st_dev);
+            g_key_file_set_uint64(record, "managed", "domain_inode", value.domain.st_ino);
+            result = write_record(states, name, record);
+            if (!result) { value.state = next; *domain = value; }
+            g_free(digest); g_key_file_unref(record);
+        }
+    }
+    g_free(raw); g_free(name);
+    if (states >= 0) close(states);
+    if (tasks >= 0) close(tasks);
+    if (gc >= 0) close(gc);
+    if (directory >= 0) close(directory);
+    close(roots);
+    return result ? fail(error, error_size, "managed domain state rejected") : 0;
 }
 
 static int object_task_status(int root, const char *name, const struct stat *object)

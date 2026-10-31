@@ -2025,6 +2025,33 @@ static int release_copy_task(const LatcdConfig *config, int task_pin,
 
 /* Caller owns the daemon lease. Surviving tasks retain SH on the task inode;
  * only absent outputs may reach a recovered terminal state. */
+static void recover_managed_domain(const LatcdConfig *config, const char *id, int task)
+{
+    LatcdManagedDomain domain = {0};
+    char error[256], *boot = NULL;
+    gsize length = 0;
+    struct stat delegation;
+    if (worker_delegation_fd < 0 ||
+        latcd_managed_task_domain(config->cache_dir, id, task, &domain,
+                                  LATCD_MANAGED_PREPARED, error, sizeof(error)) ||
+        (domain.state != LATCD_MANAGED_BOUND && domain.state != LATCD_MANAGED_AUTHORIZED) ||
+        fstat(worker_delegation_fd, &delegation) ||
+        delegation.st_dev != domain.delegation.st_dev || delegation.st_ino != domain.delegation.st_ino ||
+        !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, &length, NULL)) goto out;
+    g_strchomp(boot);
+    if (strcmp(boot, domain.boot)) goto out;
+    int populated;
+    if (latcd_worker_domain_populated(worker_delegation_fd, id, &domain.domain, &populated)) goto out;
+    if (populated) {
+        (void)latcd_worker_domain_kill(worker_delegation_fd, id, &domain.domain);
+        goto out;
+    }
+    (void)latcd_managed_task_domain(config->cache_dir, id, task, &domain,
+                                    LATCD_MANAGED_CANCELLED, error, sizeof(error));
+out:
+    g_free(boot);
+}
+
 static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
                                     unsigned budget, unsigned *visited,
                                     char *error, size_t error_size)
@@ -2077,7 +2104,15 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
             g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
         char *version = g_key_file_get_string(record, "task", "version", NULL);
         bool copying = version && !strcmp(version, "2");
+        bool managed = version && !strcmp(version, "3");
         g_free(version);
+        if (managed) {
+            if (valid) recover_managed_domain(config, id, task);
+            g_key_file_free(record);
+            if (task >= 0) close(task);
+            retained++;
+            continue;
+        }
         if (valid && copying) {
             char *kind = g_key_file_get_string(record, "task", "kind", NULL);
             valid = kind && !strcmp(kind, "COPY");
@@ -7307,6 +7342,42 @@ static int test_managed_task_record(const char *root)
     lease = record_task(&config, false, paths, pins, digest, environment, 4096,
                         &id, error, sizeof(error));
     if (lease < 0) goto out;
+    const char *delegation_path = getenv("LATCD_TEST_DELEGATION");
+    if (delegation_path) {
+        int manager = -1, domain_fd = -1;
+        LatcdManagedDomain domain = {0};
+        char *boot = NULL;
+        gsize length = 0;
+        worker_delegation_fd = latcd_worker_delegation_open(delegation_path);
+        if (worker_delegation_fd < 0 || latcd_worker_delegation_init(worker_delegation_fd, &manager) ||
+            fstat(worker_delegation_fd, &domain.delegation) ||
+            (domain_fd = latcd_worker_domain_create(worker_delegation_fd, id, &domain.domain)) < 0 ||
+            latcd_worker_domain_set_limits(domain_fd, 268435456, 32) ||
+            !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, &length, NULL))
+            goto domain_failed;
+        g_strchomp(boot);
+        g_strlcpy(domain.boot, boot, sizeof(domain.boot));
+        if (latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_BOUND, error, sizeof(error)) ||
+            latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_AUTHORIZED, error, sizeof(error)))
+            goto domain_failed;
+        pid_t child = latcd_worker_domain_clone(domain_fd);
+        if (child < 0) goto domain_failed;
+        if (!child) {
+            close(lease); close(pins[0]); close(domain_fd); close(manager); close(worker_delegation_fd);
+            for (;;) pause();
+        }
+        g_free(boot); close(domain_fd); close(manager); close(worker_delegation_fd);
+        worker_delegation_fd = -1;
+        goto domain_ready;
+domain_failed:
+        g_free(boot);
+        if (domain_fd >= 0) close(domain_fd);
+        if (manager >= 0) close(manager);
+        if (worker_delegation_fd >= 0) close(worker_delegation_fd);
+        worker_delegation_fd = -1;
+        goto out;
+    }
+domain_ready:
     printf("%s\n", id);
     fflush(stdout);
     char byte;
@@ -7319,6 +7390,26 @@ out:
     g_free(id); g_free(source); g_free(native); g_free(module);
     return result;
 }
+
+static int test_managed_task_recovery(const char *root, const char *delegation)
+{
+    LatcdConfig config = { .cache_dir = root, .managed = true };
+    char error[256] = {0};
+    int manager = -1, result = 1;
+    worker_delegation_fd = latcd_worker_delegation_open(delegation);
+    if (worker_delegation_fd < 0 || latcd_worker_delegation_init(worker_delegation_fd, &manager)) goto out;
+    for (unsigned i = 0; i < 100; i++) {
+        if (recover_compiler_inputs(&config, error, sizeof(error))) goto out;
+        usleep(50000);
+    }
+    result = 0;
+out:
+    if (result) fprintf(stderr, "managed recovery test: %s: %s\n", error, strerror(errno));
+    if (manager >= 0) close(manager);
+    if (worker_delegation_fd >= 0) close(worker_delegation_fd);
+    worker_delegation_fd = -1;
+    return result;
+}
 #endif
 
 int main(int argc, char **argv)
@@ -7326,6 +7417,8 @@ int main(int argc, char **argv)
 #ifdef LATCD_GC_TIMER_TEST
     if (argc == 3 && !strcmp(argv[1], "--test-managed-task"))
         return test_managed_task_record(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "--test-managed-recovery"))
+        return test_managed_task_recovery(argv[2], argv[3]);
 #endif
     LatcdManagedConfig managed_config = {0};
     bool managed_entry = argc == 3 && !strcmp(argv[1], "--managed-config");

@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+# Run in a disposable container with a writable delegated cgroup and /work.
+binary=$1
+scope=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
+mkdir "$scope/supervisor"
+printf '%s\n' "$$" > "$scope/supervisor/cgroup.procs"
+printf '%s\n' '+memory +pids' > "$scope/cgroup.subtree_control"
+mkdir "$scope/worker" /work/cache /work/cache/.tmp
+chmod 700 /work/cache /work/cache/.tmp
+printf input > /work/cache/.tmp/input
+mkfifo /work/gate
+exec 3<>/work/gate
+LATCD_TEST_DELEGATION="$scope/worker" sh -c '
+    printf "%s\n" "$$" > "$1/cgroup.procs"; shift
+    exec "$@"
+' sh "$scope/worker" "$binary" --test-managed-task /work/cache </work/gate >/work/id 2>/work/first.err &
+pid=$!
+n=0
+while [ ! -s /work/id ]; do
+    kill -0 "$pid" || { cat /work/first.err >&2; exit 1; }
+    n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+done
+id=$(cat /work/id)
+state=/work/cache/.gc/managed-task-state/$id.ini
+grep -qx 'state=EXEC_AUTHORIZED' "$state"
+test "$(awk '$1 == "populated" {print $2}' "$scope/worker/$id/cgroup.events")" = 1
+kill -KILL "$pid"
+wait "$pid" 2>/dev/null || :
+sh -c '
+    printf "%s\n" "$$" > "$1/cgroup.procs"; shift
+    exec "$@"
+' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/cache "$scope/worker"
+grep -qx 'state=CANCELLED_DOMAIN_EMPTY' "$state"
+test "$(awk '$1 == "populated" {print $2}' "$scope/worker/$id/cgroup.events")" = 0
+test -f "/work/cache/.gc/tasks/$id.ini"
+test -f "/work/cache/.gc/compiler-budgets/$id.ini"
+test ! -e "/work/cache/.gc/compiler-releases/$id.ini"
+rmdir "$scope/worker/$id" "$scope/worker/manager" "$scope/worker"
+echo 'test-managed-domain-recovery: PASS'
