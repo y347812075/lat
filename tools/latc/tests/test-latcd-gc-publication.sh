@@ -306,4 +306,13 @@ import json, pathlib, sys
 cache = pathlib.Path(sys.argv[1]); old = json.loads(pathlib.Path(sys.argv[2]).read_text())
 assert all(not (cache / old[k]).exists() for k in ('module', 'native', 'tbset'))
 PY
-kill -TERM "$pid"; wait "$pid"; pid=
+if [ "${LATCD_TEST_IDLE_SECONDS:-0}" != 0 ]; then
+    n=0
+    while kill -0 "$pid" 2>/dev/null; do
+        n=$((n + 1)); [ "$n" -lt 400 ]; sleep 0.1
+    done
+    wait "$pid"; pid=
+    grep -q 'retirement exit handoff persisted (IDLE)' "$log"
+else
+    kill -TERM "$pid"; wait "$pid"; pid=
+fi
