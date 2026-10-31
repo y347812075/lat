@@ -670,7 +670,16 @@ int main(void)
     pins[0] = syscall(SYS_memfd_create, "snapshot-test", MFD_CLOEXEC);
     g_assert_cmpint(pins[0], >=, 0);
     g_assert_cmpint(write(pins[0], "original", 8), ==, 8);
-    g_assert_cmpint(snapshot_managed_inputs(pins, copies, isolation_error,
+    GChecksum *snapshot_hash = g_checksum_new(G_CHECKSUM_SHA256);
+    g_checksum_update(snapshot_hash, (const guchar *)"original", 8);
+    uint8_t snapshot_digest[32];
+    gsize snapshot_digest_length = sizeof(snapshot_digest);
+    g_checksum_get_digest(snapshot_hash, snapshot_digest, &snapshot_digest_length);
+    g_checksum_free(snapshot_hash);
+    g_assert_cmpint(snapshot_managed_inputs(pins, copies, digest, isolation_error,
+                                            sizeof(isolation_error)), ==, -1);
+    g_assert_cmpint(copies[0], ==, -1);
+    g_assert_cmpint(snapshot_managed_inputs(pins, copies, snapshot_digest, isolation_error,
                                             sizeof(isolation_error)), ==, 0);
     struct stat original_stat, copy_stat;
     g_assert_cmpint(fstat(pins[0], &original_stat), ==, 0);

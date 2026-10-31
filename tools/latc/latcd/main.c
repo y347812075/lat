@@ -1321,9 +1321,12 @@ static int pin_compiler_inputs(const char *const paths[4], int pins[4],
 /* Worker inputs must not share an inode or an open file description with the
  * cache. The parent retains the original pins until the task is registered. */
 static int snapshot_managed_inputs(const int pins[4], int copies[4],
+                                   const uint8_t source_digest[32],
                                    char *error, size_t error_size)
 {
     char buffer[65536];
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    if (!checksum || pins[0] < 0) { errno = EINVAL; goto failed; }
     for (unsigned i = 0; i < 4; i++) {
         if (pins[i] < 0) continue;
         struct stat before, after;
@@ -1339,6 +1342,7 @@ static int snapshot_managed_inputs(const int pins[4], int copies[4],
             ssize_t n = pread(pins[i], buffer, wanted, offset);
             if (n < 0 && errno == EINTR) continue;
             if (n <= 0) { if (!n) errno = ESTALE; goto failed; }
+            if (!i) g_checksum_update(checksum, (const guchar *)buffer, n);
             size_t written = 0;
             while (written < (size_t)n) {
                 ssize_t w = write(fd, buffer + written, n - written);
@@ -1364,10 +1368,19 @@ static int snapshot_managed_inputs(const int pins[4], int copies[4],
         close(fd);
         copies[i] = high;
     }
+    uint8_t actual[32];
+    gsize length = sizeof(actual);
+    g_checksum_get_digest(checksum, actual, &length);
+    if (length != sizeof(actual) || memcmp(actual, source_digest, sizeof(actual))) {
+        errno = ESTALE;
+        goto failed;
+    }
+    g_checksum_free(checksum);
     return 0;
 failed:
     {
         int saved = errno;
+        if (checksum) g_checksum_free(checksum);
         close_compiler_inputs(copies);
         return fail(error, error_size, "cannot snapshot managed input: %s",
                     strerror(saved));
@@ -2944,7 +2957,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         }
     }
     if (!pin_result && config->managed &&
-        snapshot_managed_inputs(input_pins, input_copies, error, error_size))
+        snapshot_managed_inputs(input_pins, input_copies, digest, error, error_size))
         pin_result = -1;
     int gate[2] = {-1, -1}, domain_fd = -1;
     LatcdManagedDomain domain = {0};
@@ -7682,7 +7695,12 @@ static int test_managed_compiler_run(const char *root, const char *delegation)
     char *native = g_build_filename(root, ".tmp", "output-native", NULL);
     char *module = g_build_filename(root, ".tmp", "output-module", NULL);
     GPtrArray *tasks = g_ptr_array_new_with_free_func(g_free);
-    uint8_t digest[32] = {0};
+    uint8_t digest[32];
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    g_checksum_update(checksum, (const guchar *)"input", 5);
+    gsize digest_length = sizeof(digest);
+    g_checksum_get_digest(checksum, digest, &digest_length);
+    g_checksum_free(checksum);
     uint64_t reservation = 0;
     int manager = -1, result = 1;
     if (prepare_metadata_directories(root) ||
