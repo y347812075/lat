@@ -1407,7 +1407,9 @@ static int persist_task_record(int directory, const char *id, GKeyFile *record)
     if (lease < 0 || flock(lease, LOCK_SH | LOCK_NB)) goto failed;
     const char *point = getenv("LATCD_TEST_TASK_RECORD_CRASH");
     const char *kind = getenv("LATCD_TEST_TASK_RECORD_KIND");
-    bool copying = g_key_file_has_key(record, "task", "kind", NULL);
+    char *task_kind = g_key_file_get_string(record, "task", "kind", NULL);
+    bool copying = task_kind && !strcmp(task_kind, "COPY");
+    g_free(task_kind);
     bool inject = point && kind && g_key_file_has_group(record, "task") &&
         !strcmp(kind, copying ? "COPY" : "COMPILER");
     if (inject && !strcmp(point, "created")) raise(SIGKILL);
@@ -1587,6 +1589,9 @@ static int record_task(const LatcdConfig *config, bool copying,
     if (managed) {
         close(roots);
         roots = -1;
+#ifdef LATCD_GC_TIMER_TEST
+        if (getenv("LATCD_TEST_MANAGED_AFTER_ROOT")) raise(SIGKILL);
+#endif
         if (latcd_managed_task_prepare(config->cache_dir, id, lease, error, error_size))
             goto failed;
     }
@@ -7264,8 +7269,49 @@ static int run_gc_plan(int argc, char **argv)
     return 1;
 }
 
+#ifdef LATCD_GC_TIMER_TEST
+static int test_managed_task_record(const char *root)
+{
+    char error[512] = {0};
+    LatcdConfig config = { .cache_dir = root, .managed = true };
+    char *source = g_build_filename(root, ".tmp", "input", NULL);
+    char *native = g_build_filename(root, ".tmp", "output-native", NULL);
+    char *module = g_build_filename(root, ".tmp", "output-module", NULL);
+    const char *paths[6] = {source, NULL, NULL, NULL, native, module};
+    const char *environment[] = {"LANG=C", NULL};
+    uint8_t digest[32] = {0};
+    int pins[4] = {-1, -1, -1, -1};
+    char *id = NULL;
+    int result = 1, lease = -1;
+    if (prepare_metadata_directories(root) ||
+        latcd_cache_capacity_scan(&generation_capacity, root, error, sizeof(error)))
+        goto out;
+    latcd_cache_capacity_metadata_bind(&generation_capacity, LATCD_DEFAULT_MAX_CACHE_BYTES);
+    pins[0] = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (pins[0] < 0) goto out;
+    lease = record_task(&config, false, paths, pins, digest, environment,
+                        &id, error, sizeof(error));
+    if (lease < 0) goto out;
+    printf("%s\n", id);
+    fflush(stdout);
+    char byte;
+    if (read(STDIN_FILENO, &byte, 1) == 1) result = 0;
+out:
+    if (result) fprintf(stderr, "managed task test: %s: %s\n", error, strerror(errno));
+    if (lease >= 0) close(lease);
+    if (pins[0] >= 0) close(pins[0]);
+    latcd_cache_capacity_close(&generation_capacity);
+    g_free(id); g_free(source); g_free(native); g_free(module);
+    return result;
+}
+#endif
+
 int main(int argc, char **argv)
 {
+#ifdef LATCD_GC_TIMER_TEST
+    if (argc == 3 && !strcmp(argv[1], "--test-managed-task"))
+        return test_managed_task_record(argv[2]);
+#endif
     LatcdManagedConfig managed_config = {0};
     bool managed_entry = argc == 3 && !strcmp(argv[1], "--managed-config");
     if (managed_entry && (latcd_managed_environment_validate(environ) ||

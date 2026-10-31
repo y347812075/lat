@@ -189,7 +189,11 @@ test-latcd-gc-timer: all $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-cache
 	  sh tests/test-latcd-gc-timer.sh "$(abspath $(BUILD)/tests/latcd-gc-timer)" \
 	    "$(abspath $(BUILD)/tests/test-cache-retirement)" "$(abspath $(BUILD)/tests/test-cache-retirement)" \
 	    "$(abspath $(BUILD)/tests/test-cache-retirement)" "$$work" "$(abspath $(BUILD)/tests/gc-timer-runtime)"
-test: test-latcd-gc-timer
+test: test-latcd-gc-timer test-managed-task-record
+
+.PHONY: test-managed-task-record
+test-managed-task-record: $(BUILD)/tests/latcd-gc-timer
+	python3 tests/test-managed-task-record.py $(abspath $(BUILD)/tests/latcd-gc-timer)
 
 # Integration requires a matching configured installation and an x86 guest
 # built from tests/x86-cache-retirement.S on the designated x86 toolchain.
