@@ -8,7 +8,7 @@ runtime=$5
 guest=$6
 work=$7
 mode=${8:-pin}
-case "$mode" in pin|pin-restart|unreferenced) ;; *) exit 2 ;; esac
+case "$mode" in pin|pin-restart|unreferenced|capture) ;; *) exit 2 ;; esac
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 mkdir -m 700 "$work" "$work/cache" "$work/broker"
 cache=$work/cache
@@ -61,7 +61,30 @@ delta = (entry + 14 - base, 3)
 assert delta not in old
 write_key_set(guest, work / 'delta.tbset', [delta])
 PY
-if [ "$mode" != unreferenced ]; then
+if [ "$mode" = capture ]; then
+    LD_LIBRARY_PATH="$runtime" LATX_AOT_V2_CACHE_DIR="$cache" LATX_AOT_V2_LATCD_SOCKET="$socket" \
+        LATX_AOT_V2_STRICT=1 LATC_DISABLE_PRETRANSLATE=1 LATC_STRICT_AOT=1 \
+        LATX_AOT_V2_TEST_CAPTURE_READY="$work/capture-ready" \
+        LATX_AOT_V2_TEST_CAPTURE_RELEASE="$work/capture-release" \
+        "$runner" "$guest" >"$work/capture.out" 2>"$work/capture.err" &
+    pin_pid=$!
+    n=0
+    while [ ! -f "$work/capture-ready" ]; do
+        kill -0 "$pin_pid" || { cat "$work/capture.err" >&2; exit 1; }
+        n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+    done
+    python3 - "$cache" "$work/old.json" <<'PY'
+import fcntl, json, pathlib, sys
+cache = pathlib.Path(sys.argv[1]); old = json.loads(pathlib.Path(sys.argv[2]).read_text())
+with (cache / old['module']).open('rb') as module:
+    try:
+        fcntl.flock(module, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        pass
+    else:
+        raise AssertionError('runner did not pin the old module')
+PY
+elif [ "$mode" != unreferenced ]; then
 python3 - "$cache" "$work/old.json" "$work/pins-ready" <<'PY' &
 import fcntl, json, pathlib, signal, sys
 cache = pathlib.Path(sys.argv[1]); m = json.loads(pathlib.Path(sys.argv[2]).read_text())
@@ -119,10 +142,14 @@ while ! grep -q 'test page busy retry=' "$work/server.err"; do
     if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then cat "$work/server.err" >&2; exit 1; fi
     n=$((n + 1)); [ "$n" -lt 600 ]; sleep 0.05
 done
-python3 - "$cache" "$work/retired.json" <<'PY'
+python3 - "$cache" "$work/retired.json" "$work/old.json" "$mode" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1]); names = json.loads(pathlib.Path(sys.argv[2]).read_text())
-assert all((root / name).is_file() for name in names)
+if sys.argv[4] == 'capture':
+    old = json.loads(pathlib.Path(sys.argv[3]).read_text())
+    assert old['module'] in names and (root / old['module']).is_file()
+else:
+    assert all((root / name).is_file() for name in names)
 PY
 if [ "$mode" = pin-restart ]; then
     kill -KILL "$pid"; wait "$pid" 2>/dev/null || :; pid=
@@ -153,7 +180,17 @@ PY
 else
     log=$work/server.err
 fi
-kill "$pin_pid"; wait "$pin_pid" 2>/dev/null || :; pin_pid=
+if [ "$mode" = capture ]; then
+    touch "$work/capture-release"
+    set +e
+    wait "$pin_pid"
+    capture_status=$?
+    set -e
+    pin_pid=
+    test "$capture_status" -eq 42
+else
+    kill "$pin_pid"; wait "$pin_pid" 2>/dev/null || :; pin_pid=
+fi
 else
     log=$work/server.err
 fi
