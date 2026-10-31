@@ -21,7 +21,9 @@ cp "$runtime" "$work/runtime/liblat-aot-runtime.so.2"
 chmod 755 "$work/tools/latc" "$work/tools/runner"
 printf '%s\n' '{"service_uid":"1234","client_uid":"1235","cache":"/opt/latcd-managed-test/cache","admin":"/opt/latcd-managed-test/admin","broker":"/opt/latcd-managed-test/broker","compiler":"/opt/latcd-managed-test/tools/latc","runner":"/opt/latcd-managed-test/tools/runner","runtime":"/opt/latcd-managed-test/runtime"}' > "$work/config"
 pid=
+task_pid=
 cleanup() {
+    if [ -n "$task_pid" ]; then kill -KILL "$task_pid" 2>/dev/null || :; wait "$task_pid" 2>/dev/null || :; fi
     if [ -n "$pid" ]; then kill -TERM "$pid" 2>/dev/null || :; wait "$pid" 2>/dev/null || :; fi
 }
 trap cleanup EXIT HUP INT TERM
@@ -123,9 +125,17 @@ if [ "${LATCD_TEST_REAL_DELEGATION:-0}" = 1 ]; then
     grep -q 'worker delegation initialized; compiler disabled' "$work/delegated.err"
     grep -qx "$pid" "$scope/worker/manager/cgroup.procs"
     mkdir "$scope/worker/preserved-task"
-    kill -TERM "$pid"
-    wait "$pid"
+    sh -c 'printf "%s\n" "$$" > "$1/cgroup.procs"; exec sleep 120' sh "$scope/worker/preserved-task" &
+    task_pid=$!
+    n=0
+    while ! grep -qx "$task_pid" "$scope/worker/preserved-task/cgroup.procs"; do
+        kill -0 "$task_pid"; n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+    done
+    kill -KILL "$pid"
+    wait "$pid" 2>/dev/null || :
     pid=
+    test "$(awk '$1 == "populated" {print $2}' "$scope/worker/preserved-task/cgroup.events")" = 1
+    rm -f "$work/admin/admin.sock" "$work/broker/broker.sock"
     sh -c 'printf "%s\n" "$$" > "$1/cgroup.procs"; shift; exec "$@"' sh "$scope/worker/manager" \
         setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
         env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/delegated-config" \
@@ -139,9 +149,14 @@ if [ "${LATCD_TEST_REAL_DELEGATION:-0}" = 1 ]; then
     grep -q 'worker delegation initialized; compiler disabled' "$work/restarted.err"
     grep -qx "$pid" "$scope/worker/manager/cgroup.procs"
     test -d "$scope/worker/preserved-task"
+    kill -0 "$task_pid"
+    test "$(awk '$1 == "populated" {print $2}' "$scope/worker/preserved-task/cgroup.events")" = 1
     kill -TERM "$pid"
     wait "$pid"
     pid=
+    kill "$task_pid"
+    wait "$task_pid" 2>/dev/null || :
+    task_pid=
     rmdir "$scope/worker/preserved-task"
     rmdir "$scope/worker/manager" "$scope/worker"
 fi
