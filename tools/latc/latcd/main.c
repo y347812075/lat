@@ -1852,6 +1852,24 @@ static int record_compiler_release(const LatcdConfig *config, const char *id,
         observed.st_ino != expected->st_ino || observed.st_nlink != 1 ||
         !S_ISREG(observed.st_mode) || observed.st_uid != geteuid() ||
         (observed.st_mode & 0222) || flock(task, LOCK_EX | LOCK_NB)) goto out;
+    /* A lock alone proves release only for the original compiler task
+     * protocol. Future isolated tasks require their own completion proof. */
+    char task_data[65536];
+    GKeyFile *task_record = g_key_file_new();
+    bool compiler_v1 = observed.st_size > 0 &&
+        (uint64_t)observed.st_size <= sizeof(task_data) &&
+        pread(task, task_data, observed.st_size, 0) == observed.st_size &&
+        !memchr(task_data, 0, observed.st_size) &&
+        g_key_file_load_from_data(task_record, task_data, observed.st_size,
+                                  G_KEY_FILE_NONE, NULL);
+    char *version = compiler_v1 ? g_key_file_get_string(task_record, "task", "version", NULL) : NULL;
+    char *task_id = compiler_v1 ? g_key_file_get_string(task_record, "task", "id", NULL) : NULL;
+    char *state = compiler_v1 ? g_key_file_get_string(task_record, "task", "state", NULL) : NULL;
+    compiler_v1 = !g_strcmp0(version, "1") && !g_strcmp0(task_id, id) &&
+                  !g_strcmp0(state, "BOUND");
+    g_free(version); g_free(task_id); g_free(state);
+    g_key_file_free(task_record);
+    if (!compiler_v1) goto out;
     if (outputs) {
         char data[65537];
         GKeyFile *bound = g_key_file_new();

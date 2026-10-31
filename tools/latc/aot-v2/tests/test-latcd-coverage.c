@@ -637,6 +637,9 @@ static void test_publication_cleanup(void)
         "[output_native]\nname=native-output\n[output_module]\nname=module-output\n", -1, NULL));
     GKeyFile *bound = g_key_file_new();
     g_assert_true(g_key_file_load_from_file(bound, task_path, G_KEY_FILE_NONE, NULL));
+    g_key_file_set_string(bound, "task", "version", "1");
+    g_key_file_set_string(bound, "task", "id", task_id);
+    g_key_file_set_string(bound, "task", "state", "BOUND");
     struct stat tmp_identity;
     g_assert_cmpint(stat(temporary, &tmp_identity), ==, 0);
     task_object_identity(bound, "temporary", &tmp_identity);
