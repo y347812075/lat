@@ -291,6 +291,7 @@ source = hashlib.sha256(guest.read_bytes()).hexdigest()
 old = json.loads((work / 'new.json').read_text())
 new = json.loads((cache / (source + '.current')).read_text())
 assert old['module'] != new['module'] and old['native'] != new['native']
+(work / 'third.json').write_text(json.dumps(new))
 _, _, a = read_key_set(work / 'initial.tbset'); _, _, b = read_key_set(work / 'delta.tbset')
 _, _, c = read_key_set(work / 'third.tbset'); _, _, result = read_key_set(cache / new['tbset'])
 assert set(a) | set(b) | set(c) <= set(result)
@@ -301,10 +302,14 @@ while [ "$(grep -c 'test waiting page consumed' "$log" || :)" -lt 2 ]; do
     if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$log"; then cat "$log" >&2; exit 1; fi
     n=$((n + 1)); [ "$n" -lt 1000 ]; sleep 0.1
 done
-python3 - "$cache" "$work/new.json" <<'PY'
-import json, pathlib, sys
+python3 - "$cache" "$work/new.json" "$work/third.json" "$guest" <<'PY'
+import hashlib, json, pathlib, sys
 cache = pathlib.Path(sys.argv[1]); old = json.loads(pathlib.Path(sys.argv[2]).read_text())
+third = json.loads(pathlib.Path(sys.argv[3]).read_text())
+source = hashlib.sha256(pathlib.Path(sys.argv[4]).read_bytes()).hexdigest()
 assert all(not (cache / old[k]).exists() for k in ('module', 'native', 'tbset'))
+assert json.loads((cache / (source + '.current')).read_text()) == third
+assert all((cache / third[k]).is_file() for k in ('module', 'native', 'tbset'))
 PY
 if [ "${LATCD_TEST_IDLE_SECONDS:-0}" != 0 ]; then
     n=0
