@@ -29,6 +29,8 @@ int main(int argc, char **argv)
     int value;
     int ordinary = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     assert(ordinary >= 0);
+    assert(latcd_worker_delegation_open("relative") < 0 && errno == EINVAL);
+    assert(latcd_worker_delegation_open("/") < 0 && errno == EINVAL);
     assert(latcd_worker_domain_create(ordinary, "../bad", &identity) < 0 && errno == EINVAL);
     assert(latcd_worker_domain_create(ordinary, "test", &identity) < 0 && errno == EINVAL);
     assert(latcd_worker_domain_set_limits(ordinary, 1, 1) < 0 && errno == EINVAL);
@@ -37,7 +39,7 @@ int main(int argc, char **argv)
     assert(latcd_worker_delegation_init(ordinary, &manager) < 0 && errno == EINVAL);
     close(ordinary);
     if (argc != 2) return 0;
-    int parent = open(argv[1], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int parent = latcd_worker_delegation_open(argv[1]);
     assert(parent >= 0);
     assert(!latcd_worker_delegation_init(parent, &manager) && manager >= 0);
     int domain = latcd_worker_domain_create(parent, "latcd-domain-test", &identity);

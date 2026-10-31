@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
+#include <linux/openat2.h>
 #include <linux/sched.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -31,6 +32,24 @@ static int cgroup_dir(int fd)
         return -1;
     }
     return 0;
+}
+
+int latcd_worker_delegation_open(const char *path)
+{
+    if (!path || path[0] != '/' || !path[1]) { errno = EINVAL; return -1; }
+    struct open_how how = {
+        .flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC,
+        .resolve = RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
+    };
+    int fd = syscall(SYS_openat2, AT_FDCWD, path, &how, sizeof(how));
+    if (fd < 0) return -1;
+    if (cgroup_dir(fd)) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    return fd;
 }
 
 static int write_text(int dir, const char *name, const char *text)

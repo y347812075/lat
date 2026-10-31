@@ -8,6 +8,8 @@
  * caller is moved into manager; an existing manager may be rejoined only by
  * a caller already placed there. The caller must validate the delegation. */
 int latcd_worker_delegation_init(int parent, int *manager);
+/* Open an absolute delegation path without following symlinks. */
+int latcd_worker_delegation_open(const char *path);
 
 /* All operations use a held cgroup v2 directory, never a worker path. */
 int latcd_worker_domain_create(int parent, const char *name, struct stat *identity);

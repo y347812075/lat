@@ -5,6 +5,7 @@
 typedef struct LatcdManagedConfig {
     uid_t service_uid, client_uid;
     char *cache, *admin, *broker, *compiler, *runner, *runtime;
+    char *worker_cgroup;
 } LatcdManagedConfig;
 
 int latcd_managed_config_load(const char *path, LatcdManagedConfig *config);

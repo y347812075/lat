@@ -20,6 +20,7 @@ void latcd_managed_config_clear(LatcdManagedConfig *c)
     if (!c) return;
     free(c->cache); free(c->admin); free(c->broker);
     free(c->compiler); free(c->runner); free(c->runtime);
+    free(c->worker_cgroup);
     memset(c, 0, sizeof(*c));
 }
 
@@ -65,7 +66,9 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
     const char *keys[] = {"service_uid", "client_uid", "cache", "admin", "broker", "compiler", "runner", "runtime"};
     char **paths[] = {&c->cache, &c->admin, &c->broker, &c->compiler, &c->runner, &c->runtime};
     int result = -1;
-    if (!object || json_object_get_count(object) != sizeof(keys) / sizeof(keys[0]) ||
+    size_t count = object ? json_object_get_count(object) : 0;
+    if (!object || (count != sizeof(keys) / sizeof(keys[0]) &&
+                    count != sizeof(keys) / sizeof(keys[0]) + 1) ||
         !json_object_get_string(object, keys[0]) || !json_object_get_string(object, keys[1]) ||
         strlen(json_object_get_string(object, keys[0])) != json_object_get_string_len(object, keys[0]) ||
         strlen(json_object_get_string(object, keys[1])) != json_object_get_string_len(object, keys[1]) ||
@@ -77,6 +80,13 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
         if (!s || s[0] != '/' || !s[1] || strlen(s) != json_object_get_string_len(object, keys[i + 2])) goto out;
         *paths[i] = strdup(s);
         if (!*paths[i]) goto out;
+    }
+    if (count > sizeof(keys) / sizeof(keys[0])) {
+        const char *s = json_object_get_string(object, "worker_cgroup");
+        if (!s || s[0] != '/' || !s[1] ||
+            strlen(s) != json_object_get_string_len(object, "worker_cgroup")) goto out;
+        c->worker_cgroup = strdup(s);
+        if (!c->worker_cgroup) goto out;
     }
     result = 0;
 out:

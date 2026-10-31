@@ -17,6 +17,7 @@
 #include "broker-source.h"
 #include "broker-transport.h"
 #include "managed-config.h"
+#include "worker-domain.h"
 #include "managed-path.h"
 
 #include <dlfcn.h>
@@ -7320,6 +7321,19 @@ int main(int argc, char **argv)
         fprintf(stderr, "latcd: managed configuration rejected: %s\n", strerror(errno));
         latcd_managed_config_clear(&managed_config);
         return 1;
+    }
+    if (managed_entry && managed_config.worker_cgroup) {
+        int parent = latcd_worker_delegation_open(managed_config.worker_cgroup);
+        int manager = -1;
+        if (parent < 0 || latcd_worker_delegation_init(parent, &manager)) {
+            fprintf(stderr, "latcd: worker delegation rejected: %s\n", strerror(errno));
+            if (parent >= 0) close(parent);
+            latcd_managed_config_clear(&managed_config);
+            return 1;
+        }
+        /* Retain both identities for the lifetime of this process. Admission
+         * remains closed until task isolation and recovery are connected. */
+        fprintf(stderr, "latcd: worker delegation initialized; compiler disabled\n");
     }
     if (argc >= 2 && !strcmp(argv[1], "gc")) {
         return run_gc_plan(argc, argv);

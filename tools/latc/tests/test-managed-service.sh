@@ -43,6 +43,15 @@ chmod 755 "$work/tools/latc"
 chmod 777 "$work/broker"
 expect_rejected
 chmod 755 "$work/broker"
+sed 's|}$|,"worker_cgroup":"/opt/latcd-managed-test/cache"}|' "$work/config" > "$work/invalid-cgroup-config"
+if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
+    env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/invalid-cgroup-config" \
+    >"$work/cgroup.out" 2>"$work/cgroup.err"; then
+    echo 'ordinary directory accepted as worker cgroup' >&2; exit 1
+fi
+grep -q 'worker delegation rejected' "$work/cgroup.err"
+test ! -e "$work/admin/admin.sock"
+test ! -e "$work/broker/broker.sock"
 if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
     env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C LATCD_COMPILE_TMPDIR=/tmp \
     "$daemon" --managed-config "$work/config" >"$work/env.out" 2>"$work/env.err"; then
