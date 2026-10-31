@@ -2843,6 +2843,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     int gate[2] = {-1, -1}, domain_fd = -1;
     LatcdManagedDomain domain = {0};
     pid_t child = -1;
+#ifdef LATCD_GC_TIMER_TEST
+    bool test_descendant = config->managed && getenv("LATCD_TEST_DOMAIN_DESCENDANT");
+#endif
     if (!pin_result && config->managed) {
         char *boot = NULL;
         gsize size = 0;
@@ -2875,6 +2878,22 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             char permit;
             ssize_t n;
             do { n = read(3, &permit, 1); } while (n < 0 && errno == EINTR);
+#ifdef LATCD_GC_TIMER_TEST
+            if (n == 1 && permit == '1' && test_descendant) {
+                int ready[2];
+                if (pipe(ready)) _exit(126);
+                pid_t descendant = fork();
+                if (descendant < 0) _exit(126);
+                if (!descendant) {
+                    close(ready[0]);
+                    if (setsid() < 0) _exit(126);
+                    if (write(ready[1], "1", 1) != 1) _exit(126);
+                    for (;;) pause();
+                }
+                close(ready[1]);
+                if (read(ready[0], &permit, 1) != 1) _exit(126);
+            }
+#endif
             _exit(n == 1 && permit == '1' ? 0 : 126);
         }
         /* Only this compiler inherits these OFDs; unrelated execs keep CLOEXEC. */
@@ -2958,6 +2977,27 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     do {
         waited = waitpid(child, &status, 0);
     } while (waited < 0 && errno == EINTR);
+    if (config->managed) {
+        int populated = 1;
+        bool empty = false;
+        if (!latcd_worker_domain_populated(worker_delegation_fd, task_id,
+                                            &domain.domain, &populated)) {
+            if (populated)
+                (void)latcd_worker_domain_kill(worker_delegation_fd, task_id, &domain.domain);
+            for (unsigned i = 0; i < 100; i++) {
+                if (latcd_worker_domain_populated(worker_delegation_fd, task_id,
+                                                   &domain.domain, &populated)) break;
+                if (!populated) { empty = true; break; }
+                usleep(10000);
+            }
+        }
+        if (!empty || latcd_managed_task_domain(config->cache_dir, task_id, task_lease,
+                                                 &domain, LATCD_MANAGED_CANCELLED,
+                                                 error, error_size)) {
+            waited = -1;
+            errno = EBUSY;
+        }
+    }
     /*
      * Compiler shell scripts can exit after SIGTERM while a grandchild keeps
      * translating in the compiler's process group.  Do not lose the PGID
