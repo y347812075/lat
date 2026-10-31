@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 022
 
 # Run only in a disposable container with an empty /opt/latcd-managed-test.
 if [ "$#" -ne 3 ] || [ "$(id -u)" -ne 0 ]; then
@@ -19,6 +20,7 @@ cp "$fixture" "$work/tools/latc"
 cp "$fixture" "$work/tools/runner"
 cp "$runtime" "$work/runtime/liblat-aot-runtime.so.2"
 chmod 755 "$work/tools/latc" "$work/tools/runner"
+chmod 755 "$work/runtime/liblat-aot-runtime.so.2"
 printf '%s\n' '{"service_uid":"1234","client_uid":"1235","cache":"/opt/latcd-managed-test/cache","admin":"/opt/latcd-managed-test/admin","broker":"/opt/latcd-managed-test/broker","compiler":"/opt/latcd-managed-test/tools/latc","runner":"/opt/latcd-managed-test/tools/runner","runtime":"/opt/latcd-managed-test/runtime"}' > "$work/config"
 pid=
 task_pid=
@@ -86,6 +88,29 @@ sleep 2
 kill -0 "$pid"
 test -S "$work/admin/admin.sock"
 test -S "$work/broker/broker.sock"
+# Exercise the real service admission path while the periodic recovery scan
+# encounters an unrecognized task, and after the obstruction is removed.
+setpriv --reuid=1234 --regid=1234 --clear-groups \
+    sh -c 'printf invalid > "$1/.gc/tasks/not-a-task"' sh "$work/cache"
+n=0
+while ! grep -q 'cannot scan compiler task roots' "$work/stderr"; do
+    kill -0 "$pid"; n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+done
+submit_probe() {
+    setpriv --reuid=1234 --regid=1234 --clear-groups \
+        "$daemon" --submit --socket "$work/admin/admin.sock" \
+        --tbset /etc/hosts /etc/hosts >"$work/probe.out" 2>"$work/probe.err" || :
+}
+submit_probe
+grep -q 'managed task recovery pending or unsafe' "$work/probe.out"
+rm "$work/cache/.gc/tasks/not-a-task"
+n=0
+while :; do
+    submit_probe
+    if ! grep -q 'managed task recovery pending or unsafe' "$work/probe.out" &&
+       grep -q '^status=' "$work/probe.out"; then break; fi
+    kill -0 "$pid"; n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+done
 setpriv --reuid=1236 --regid=1236 --clear-groups python3 - "$work/broker/broker.sock" <<'PY'
 import socket, sys
 with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as s:

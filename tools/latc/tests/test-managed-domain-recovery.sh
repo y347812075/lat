@@ -47,6 +47,24 @@ test "$(awk '$1 == "populated" {print $2}' "$scope/worker/$id/cgroup.events")" =
 test -f "/work/cache/.gc/tasks/$id.ini"
 test -f "/work/cache/.gc/compiler-budgets/$id.ini"
 test ! -e "/work/cache/.gc/compiler-releases/$id.ini"
+printf invalid > /work/cache/.gc/tasks/not-a-task
+if LATCD_TEST_RECOVERY_ONCE=1 sh -c '
+    printf "%s\n" "$$" > "$1/cgroup.procs"; shift
+    exec "$@"
+' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/cache "$scope/worker"; then
+    echo 'unknown task record accepted during recovery' >&2; exit 1
+fi
+rm /work/cache/.gc/tasks/not-a-task
+bad_task=/work/cache/.gc/tasks/00000000-0000-0000-0000-000000000000.ini
+printf '[task]\nversion=1\n' > "$bad_task"
+chmod 400 "$bad_task"
+if LATCD_TEST_RECOVERY_ONCE=1 sh -c '
+    printf "%s\n" "$$" > "$1/cgroup.procs"; shift
+    exec "$@"
+' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/cache "$scope/worker"; then
+    echo 'malformed legacy task record accepted during recovery' >&2; exit 1
+fi
+rm "$bad_task"
 rmdir "$scope/worker/$id" "$scope/worker/manager" "$scope/worker"
 mkdir "$scope/worker" /work/compile-cache /work/compile-cache/.tmp
 chmod 700 /work/compile-cache /work/compile-cache/.tmp

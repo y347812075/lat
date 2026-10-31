@@ -242,6 +242,8 @@ static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
 static LatcdCacheCapacity generation_capacity = LATCD_CACHE_CAPACITY_INIT;
 /* Admission stays closed until both persistent compiler budget passes finish. */
 static atomic_int compiler_budget_recovery_state;
+/* 0: initial scan pending, 1: complete, -1: scan could not prove safety. */
+static atomic_int managed_task_recovery_state;
 typedef struct LatcdBudgetRecovery {
     DIR *cursor;
     bool scanning_tasks;
@@ -2095,14 +2097,23 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
         (*visited)++;
         const char *name = entry->d_name;
         char id[37];
-        if (strlen(name) != 40 || strcmp(name + 36, ".ini")) { retained++; continue; }
+        if (strlen(name) != 40 || strcmp(name + 36, ".ini")) {
+            if (config->managed) { errno = ESTALE; result = -1; break; }
+            retained++; continue;
+        }
         memcpy(id, name, 36);
         id[36] = 0;
-        if (!g_uuid_string_is_valid(id)) { retained++; continue; }
+        if (!g_uuid_string_is_valid(id)) {
+            if (config->managed) { errno = ESTALE; result = -1; break; }
+            retained++; continue;
+        }
         if (compiler_task_is_local(id)) { retained++; continue; }
         struct stat existing;
         bool input_exists = !fstatat(releases, name, &existing, AT_SYMLINK_NOFOLLOW);
-        if (!input_exists && errno != ENOENT) { retained++; continue; }
+        if (!input_exists && errno != ENOENT) {
+            if (config->managed) { result = -1; break; }
+            retained++; continue;
+        }
         int task = openat(tasks, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
         struct stat before, after, cache;
         char data[65536];
@@ -2118,7 +2129,13 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
         char *version = g_key_file_get_string(record, "task", "version", NULL);
         bool copying = version && !strcmp(version, "2");
         bool managed = version && !strcmp(version, "3");
+        bool known = version && (!strcmp(version, "1") || copying || managed);
         g_free(version);
+        if (config->managed && (!valid || !known)) {
+            g_key_file_free(record);
+            if (task >= 0) close(task);
+            errno = ESTALE; result = -1; break;
+        }
         if (managed) {
             bool unsafe = !valid || recover_managed_domain(config, id, task);
             g_key_file_free(record);
@@ -2148,6 +2165,11 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
             valid &= !parse_error && !fstat(root, &cache) &&
                 device == (guint64)cache.st_dev && inode == (guint64)cache.st_ino;
             g_clear_error(&parse_error);
+        }
+        if (config->managed && !valid) {
+            g_key_file_free(record);
+            if (task >= 0) close(task);
+            errno = ESTALE; result = -1; break;
         }
         bool temporary_matches = false;
         bool outputs_missing = false;
@@ -2634,6 +2656,8 @@ static void *compiler_input_recovery_worker(void *opaque)
                 if (atomic_load(&compiler_budget_recovery_state) < 0) break;
                 int result = recover_compiler_inputs_step(work->config, &cursor, 32,
                     &visited, error, sizeof(error));
+                if (work->config->managed && result <= 0)
+                    atomic_store(&managed_task_recovery_state, result < 0 ? -1 : 1);
                 if (result < 0 && !failed) fprintf(stderr, "latcd: %s\n", error);
                 failed = result < 0;
                 next = g_get_monotonic_time() + (result == 1 ? 100000 : 5000000);
@@ -5736,6 +5760,13 @@ static int service_queue_request(LatcdService *service, int source_fd,
     if (atomic_load(&compiler_budget_recovery_state) != 1) {
         response->status = LATCD_STATUS_QUEUE_FULL;
         g_strlcpy(response->message, "capacity: compiler budget recovery pending or unsafe",
+                  sizeof(response->message));
+        g_free(temporary_dir);
+        return -1;
+    }
+    if (service->config->managed && atomic_load(&managed_task_recovery_state) != 1) {
+        response->status = LATCD_STATUS_QUEUE_FULL;
+        g_strlcpy(response->message, "managed task recovery pending or unsafe",
                   sizeof(response->message));
         g_free(temporary_dir);
         return -1;
