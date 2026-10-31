@@ -2620,7 +2620,6 @@ static void *compiler_input_recovery_worker(void *opaque)
     /* Explicit stop may reach this thread before a publisher finishes. The
      * main thread requests the final handoff only after joining publishers. */
     while (!atomic_load(&work->stopping)) poll(NULL, 0, 50);
-#ifdef LATCD_GC_TIMER_TEST
     if (page_driver_state.discovery) {
         latcd_retirement_queue_free(page_driver_state.discovery);
         page_driver_state.discovery = NULL;
@@ -2631,15 +2630,10 @@ static void *compiler_input_recovery_worker(void *opaque)
     }
     if (page_driver_state.executing) {
         if (latcd_retirement_queue_cancel(retirement, retirement_error, sizeof(retirement_error)))
-            fprintf(stderr, "latcd: test retirement cancellation failed: %s\n", retirement_error);
-        else fprintf(stderr, "latcd: test retirement cancellation persisted\n");
+            fprintf(stderr, "latcd: retirement cancellation failed: %s\n", retirement_error);
+        else fprintf(stderr, "latcd: retirement cancellation persisted\n");
     }
-#endif
-    if (retirement_safe
-#ifdef LATCD_GC_TIMER_TEST
-        && !page_driver_state.waiting
-#endif
-       ) {
+    if (retirement_safe && !page_driver_state.waiting) {
         LatcdRetirementQueueStats stats;
         latcd_retirement_queue_step(retirement, 32, 10000, &stats,
                                     retirement_error, sizeof(retirement_error));

@@ -236,7 +236,9 @@ LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
     LATCD_TEST_SMALL_HASH_BUDGET=1 LATCD_TEST_STOP_ON_HASH_YIELD=1 start
 wait "$pid"; pid=
 grep -q 'test retirement hash yielded' "$work/server.err"
-grep -q 'test retirement cancellation persisted' "$work/server.err"
+grep -q 'latcd: retirement cancellation persisted' "$work/server.err"
+grep -q 'retirement exit handoff unavailable' "$work/server.err"
+if grep -q 'retirement exit handoff persisted' "$work/server.err"; then exit 1; fi
 old=$cache/$(printf '%064x' 7)
 test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
 python3 - "$cache/.gc/retirement-scheduler.ini" <<'PY'
