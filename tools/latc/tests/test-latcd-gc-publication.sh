@@ -37,6 +37,12 @@ if [ "${LATCD_TEST_REPLACE_LAUNCHER:-0}" = 1 ]; then
     printf invalid > "$LATCD_TEST_BWRAP"
     printf invalid > "$LATCD_TEST_BOOTSTRAP"
 fi
+if [ "${LATCD_TEST_REPLACE_TOOLS:-0}" = 1 ]; then
+    for file in "$latc" "$runner" "$runtime/liblat-aot-runtime.so.2"; do
+        mv "$file" "$file.saved"
+        printf invalid > "$file"
+    done
+fi
 python3 "$script_dir/make-tbset.py" "$guest" "$work/initial.tbset"
 "$latcd" --submit --socket "$socket" --tbset "$work/initial.tbset" "$guest" >"$work/initial-submit"
 "$latcd" --flush-source --socket "$socket" "$guest" >"$work/initial-flush"
@@ -44,6 +50,11 @@ grep -q '^status=0$' "$work/initial-flush"
 if [ "${LATCD_TEST_REPLACE_LAUNCHER:-0}" = 1 ]; then
     mv -f "$LATCD_TEST_BWRAP.saved" "$LATCD_TEST_BWRAP"
     mv -f "$LATCD_TEST_BOOTSTRAP.saved" "$LATCD_TEST_BOOTSTRAP"
+fi
+if [ "${LATCD_TEST_REPLACE_TOOLS:-0}" = 1 ]; then
+    for file in "$latc" "$runner" "$runtime/liblat-aot-runtime.so.2"; do
+        mv -f "$file.saved" "$file"
+    done
 fi
 if [ "$mode" = pin ]; then
     python3 "$script_dir/test-broker-publication.py" "$work/broker/broker.sock" "$cache" "$guest"

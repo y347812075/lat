@@ -136,6 +136,7 @@ static char cache_domain_id[37];
 static bool cache_domain_managed;
 static int worker_delegation_fd = -1;
 static int managed_launcher_fds[2] = {-1, -1};
+static int managed_tool_fds[3] = {-1, -1, -1};
 static int worker_manager_fd = -1;
 
 static uint32_t default_worker_count(void)
@@ -612,15 +613,6 @@ out:
         fds[i] = -1;
     }
     g_free(runtime);
-    return result;
-}
-
-static int validate_managed_toolchain(const LatcdConfig *config, char *error,
-                                      size_t error_size)
-{
-    int fds[3];
-    int result = open_validated_toolchain(config, true, fds, error, error_size);
-    if (!result) for (unsigned i = 0; i < 3; i++) close(fds[i]);
     return result;
 }
 
@@ -3169,7 +3161,14 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     int tool_fds[3] = {-1, -1, -1};
     int tool_child[3] = {-1, -1, -1};
     if (test_real_compile) {
-        if (open_validated_toolchain(config, false, tool_fds, error, error_size)) pin_result = -1;
+        if (managed_tool_fds[0] >= 0 && managed_tool_fds[1] >= 0 && managed_tool_fds[2] >= 0) {
+            for (unsigned i = 0; i < 3; i++) {
+                tool_fds[i] = fcntl(managed_tool_fds[i], F_DUPFD_CLOEXEC, 16);
+                if (tool_fds[i] < 0) pin_result = -1;
+            }
+        } else if (open_validated_toolchain(config, false, tool_fds, error, error_size)) {
+            pin_result = -1;
+        }
         if (!pin_result) {
             for (unsigned i = 0; i < 3; i++) {
                 if ((tool_child[i] = fcntl(tool_fds[i], F_DUPFD_CLOEXEC, 16)) < 0)
@@ -8404,7 +8403,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "latcd: --daemonize requires --serve\n");
         return 2;
     }
-    if ((managed_entry ? validate_managed_toolchain(&config, error, sizeof(error)) :
+    if ((managed_entry ? open_validated_toolchain(&config, true, managed_tool_fds, error, sizeof(error)) :
                          validate_toolchain(&config, error, sizeof(error)))) {
         fprintf(stderr, "latcd: %s\n", error);
         return 1;
@@ -8421,7 +8420,8 @@ int main(int argc, char **argv)
     if (test_delegation && *test_delegation && serve && !managed_entry) {
         if (!getenv("LATCD_TEST_BOOTSTRAP") || !getenv("LATCD_TEST_REAL_COMPILE") ||
             latcd_managed_launcher_open(getenv("LATCD_TEST_BWRAP"), getenv("LATCD_TEST_BOOTSTRAP"),
-                                        0, managed_launcher_fds)) {
+                                        0, managed_launcher_fds) ||
+            open_validated_toolchain(&config, false, managed_tool_fds, error, sizeof(error))) {
             fprintf(stderr, "latcd: incomplete test managed worker configuration\n");
             return 1;
         }
@@ -8633,6 +8633,7 @@ int main(int argc, char **argv)
     if (worker_manager_fd >= 0) close(worker_manager_fd);
     if (worker_delegation_fd >= 0) close(worker_delegation_fd);
     for (unsigned i = 0; i < 2; i++) if (managed_launcher_fds[i] >= 0) close(managed_launcher_fds[i]);
+    for (unsigned i = 0; i < 3; i++) if (managed_tool_fds[i] >= 0) close(managed_tool_fds[i]);
     close(cache_owner);
     return result;
 }
