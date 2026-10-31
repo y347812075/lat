@@ -573,6 +573,34 @@ static int validate_toolchain(const LatcdConfig *config, char *error, size_t err
     return validate_toolchain_paths(config, NULL, error, error_size);
 }
 
+static int validate_managed_toolchain(const LatcdConfig *config, char *error,
+                                      size_t error_size)
+{
+    char *runtime = g_build_filename(config->runtime_dir, LAT_AOT_V2_RUNTIME_SONAME, NULL);
+    int fds[3] = {-1, -1, -1};
+    const char *paths[] = {config->compiler, config->runner, runtime};
+    int result = -1;
+    for (unsigned i = 0; i < G_N_ELEMENTS(fds); i++) {
+        fds[i] = latcd_managed_file(paths[i], i < 2);
+        if (fds[i] < 0) {
+            fail(error, error_size, "cannot pin managed tool %s: %s", paths[i], strerror(errno));
+            goto out;
+        }
+    }
+    char pinned[3][64];
+    for (unsigned i = 0; i < G_N_ELEMENTS(fds); i++)
+        snprintf(pinned[i], sizeof(pinned[i]), "/proc/self/fd/%d", fds[i]);
+    LatcdConfig snapshot = *config;
+    snapshot.compiler = pinned[0];
+    snapshot.runner = pinned[1];
+    result = validate_toolchain_paths(&snapshot, pinned[2], error, error_size);
+out:
+    for (unsigned i = 0; i < G_N_ELEMENTS(fds); i++)
+        if (fds[i] >= 0) close(fds[i]);
+    g_free(runtime);
+    return result;
+}
+
 static void signal_stop(int signal_number)
 {
     (void)signal_number;
@@ -8315,7 +8343,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "latcd: --daemonize requires --serve\n");
         return 2;
     }
-    if (validate_toolchain(&config, error, sizeof(error))) {
+    if ((managed_entry ? validate_managed_toolchain(&config, error, sizeof(error)) :
+                         validate_toolchain(&config, error, sizeof(error)))) {
         fprintf(stderr, "latcd: %s\n", error);
         return 1;
     }
