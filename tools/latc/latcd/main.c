@@ -3032,6 +3032,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         "/usr/bin/true", NULL};
     const char *sandbox_env[] = {"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", NULL};
     const char *compile_args[128];
+    char *sandbox_runtime = g_build_filename(config->runtime_dir, "liblat-aot-runtime.so.2", NULL);
     size_t arg = 0;
 #define TEST_ARG(value) (compile_args[arg++] = (value))
     if (test_real_compile) {
@@ -3041,6 +3042,9 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             "--proc", "/proc", "--dev", "/dev", "--size", "268435456", "--tmpfs", "/work",
             "--dir", "/input"};
         for (size_t i = 0; i < G_N_ELEMENTS(initial); i++) TEST_ARG(initial[i]);
+        TEST_ARG("--ro-bind"); TEST_ARG(config->compiler); TEST_ARG("/usr/bin/latc");
+        TEST_ARG("--ro-bind"); TEST_ARG(config->runner); TEST_ARG("/usr/bin/latx-x86_64");
+        TEST_ARG("--ro-bind"); TEST_ARG(sandbox_runtime); TEST_ARG("/usr/lib/liblat-aot-runtime.so.2");
         const char *fds[] = {"4", "5", "6", "7"};
         const char *paths[] = {"/input/source", "/input/tbset", "/input/base.native", "/input/base.so"};
         for (unsigned i = 0; i < 4; i++) if (input_copies[i] >= 0) {
@@ -3399,6 +3403,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         g_free(parent);
     }
     if (workspace >= 0) close(workspace);
+    g_free(sandbox_runtime);
 #endif
     /*
      * Compiler shell scripts can exit after SIGTERM while a grandchild keeps

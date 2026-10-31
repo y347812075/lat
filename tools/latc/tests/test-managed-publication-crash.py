@@ -36,6 +36,10 @@ def submit(client, socket, tbset, guest, env):
 
 
 def run(test_daemon, prefix, guest, work):
+    toolroot = Path(os.environ['LATCD_TEST_TOOLROOT'])
+    for path in ('bin/latc', 'bin/latx-x86_64', 'lib/liblat-aot-runtime.so.2'):
+        placeholder = toolroot / path
+        assert placeholder.is_file() and placeholder.stat().st_size == 0
     work.mkdir(mode=0o700)
     client = prefix / 'bin/latcd'
     tbset = work / 'input.tbset'
