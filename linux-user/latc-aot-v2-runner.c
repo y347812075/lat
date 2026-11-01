@@ -1,5 +1,8 @@
 #include "qemu/osdep.h"
 #include "qemu/rcu.h"
+#include "qapi/qmp/qdict.h"
+#include "qapi/qmp/qjson.h"
+#include "qapi/qmp/qnum.h"
 
 #include "qemu.h"
 #include "exec/exec-all.h"
@@ -2429,32 +2432,46 @@ static GPtrArray *read_module_manifest(const char *cache,
         return NULL;
     }
     g_free(index_path);
-    if (!size || size >= 4096 || !strstr(contents, "\"version\":2")) {
-        snprintf(error, error_size, "AOT v2 module manifest is invalid");
-        g_free(contents);
-        errno = ENOEXEC;
-        return NULL;
+    QObject *parsed = !memchr(contents, 0, size) ?
+        qobject_from_json(contents, NULL) : NULL;
+    QDict *object = qobject_to(QDict, parsed);
+    const char *required[] = {"version", "module", "native", "tbset",
+        "source_sha256", "codegen_id", "published_sequence"};
+    const char *optional[] = {"module_sha256", "native_sha256"};
+    bool valid = object != NULL;
+    for (const QDictEntry *entry = valid ? qdict_first(object) : NULL;
+         entry; entry = qdict_next(object, entry)) {
+        const char *key = qdict_entry_key(entry);
+        bool known = false;
+        for (size_t i = 0; i < G_N_ELEMENTS(required); i++) known |= !strcmp(key, required[i]);
+        for (size_t i = 0; i < G_N_ELEMENTS(optional); i++) known |= !strcmp(key, optional[i]);
+        if (!known) { valid = false; break; }
     }
-    GPtrArray *modules = g_ptr_array_new_with_free_func(g_free);
-    char *cursor = strstr(contents, "\"module\":\"");
-    if (!cursor) {
-        snprintf(error, error_size, "AOT v2 module manifest has no module");
-        g_ptr_array_free(modules, TRUE);
-        g_free(contents);
-        errno = ENOEXEC;
-        return NULL;
+    for (size_t i = 0; valid && i < G_N_ELEMENTS(required); i++)
+        valid = qdict_haskey(object, required[i]);
+    QNum *version = valid ? qobject_to(QNum, qdict_get(object, "version")) : NULL;
+    QNum *sequence = valid ? qobject_to(QNum, qdict_get(object, "published_sequence")) : NULL;
+    uint64_t number;
+    valid = valid && version && qnum_get_try_uint(version, &number) && number == 2 &&
+        sequence && qnum_get_try_uint(sequence, &number);
+    const char *source = valid ? qdict_get_try_str(object, "source_sha256") : NULL;
+    const char *module = valid ? qdict_get_try_str(object, "module") : NULL;
+    valid = valid && source && !strcmp(source, source_hex) && module &&
+        strlen(module) >= 67 && strlen(module) < 192 && !strchr(module, '/') &&
+        g_str_has_suffix(module, ".so") && !strncmp(module, source_hex, 64);
+    const char *strings[] = {"native", "tbset", "codegen_id", "module_sha256", "native_sha256"};
+    for (size_t i = 0; valid && i < G_N_ELEMENTS(strings); i++) {
+        if (i >= 3 && !qdict_haskey(object, strings[i])) continue;
+        const char *s = qdict_get_try_str(object, strings[i]);
+        valid = s && (i < 2 ? strlen(s) < 192 && !strchr(s, '/') :
+            strlen(s) == 64 && strspn(s, "0123456789abcdef") == 64);
     }
-    cursor += strlen("\"module\":\"");
-    char *end = strchr(cursor, '\"');
-    if (end && end != cursor && end - cursor < 192 &&
-        !memchr(cursor, '/', end - cursor) && end - cursor > 3 &&
-        !memcmp(end - 3, ".so", 3) && !strncmp(cursor, source_hex, 64)) {
-        g_ptr_array_add(modules, g_strndup(cursor, end - cursor));
-    }
+    GPtrArray *modules = valid ? g_ptr_array_new_with_free_func(g_free) : NULL;
+    if (modules) g_ptr_array_add(modules, g_strdup(module));
+    qobject_unref(parsed);
     g_free(contents);
-    if (modules->len != 1) {
+    if (!modules) {
         snprintf(error, error_size, "AOT v2 module manifest is invalid");
-        g_ptr_array_free(modules, TRUE);
         errno = ENOEXEC;
         return NULL;
     }

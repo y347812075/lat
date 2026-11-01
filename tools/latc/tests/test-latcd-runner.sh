@@ -124,15 +124,43 @@ stop_daemon
 
 static_source_sha=$(sha256sum "$static_guest" | cut -d ' ' -f 1)
 static_tbset="$cache/.tbsets/$static_source_sha.tbset"
-static_tbset_sha=$(sha256sum "$static_tbset" | cut -d ' ' -f 1)
-python3 - "$cache/$static_source_sha.current" \
-  "$static_source_sha-$static_tbset_sha.so" <<'PY'
+python3 - "$cache/$static_source_sha.current" "$cache" "$static_source_sha" <<'PY'
 import json
 import sys
+from pathlib import Path
 current = json.load(open(sys.argv[1]))
 assert current["version"] == 2, current
-assert current["module"] == sys.argv[2], current
+assert current["module"].startswith(sys.argv[3] + '-'), current
+assert (Path(sys.argv[2]) / current["module"]).is_file(), current
 PY
+cp "$cache/$static_source_sha.current" "$work/valid-current.json"
+for mutation in config duplicate; do
+python3 - "$work/valid-current.json" "$cache/$static_source_sha.current" "$mutation" <<'PY'
+import json
+import sys
+from pathlib import Path
+source, output, mutation = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+data = json.loads(source.read_text())
+if mutation == 'config':
+    data['config_sha256'] = 'a' * 64
+    text = json.dumps(data)
+else:
+    text = json.dumps(data)[:-1] + ', "version": 2}'
+output.chmod(0o644)
+output.write_text(text)
+output.chmod(0o444)
+PY
+LD_LIBRARY_PATH="$runtime_dir" LATX_AOT_V2_CACHE_DIR="$cache" \
+LATX_AOT_V2_LATCD_SOCKET="$work/missing.sock" \
+LATX_AOT_V2_REPORT=1 LATC_DISABLE_PRETRANSLATE=1 \
+  timeout 60 "$runner" "$static_guest" \
+  >"$work/$mutation-current.stdout" 2>"$work/$mutation-current.stderr"
+test "$(cat "$work/$mutation-current.stdout")" = "Hello, LATC!"
+grep -q 'module=rejected reason=AOT v2 module manifest is invalid' \
+  "$work/$mutation-current.stderr"
+grep -Eq 'aot_lookups=0 jit_fallbacks=[1-9][0-9]*' \
+  "$work/$mutation-current.stderr"
+done
 chmod 0644 "$cache/$static_source_sha.current"
 printf '{broken current index\n' >"$cache/$static_source_sha.current"
 chmod 0444 "$cache/$static_source_sha.current"
