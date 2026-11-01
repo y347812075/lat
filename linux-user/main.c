@@ -2332,6 +2332,15 @@ int main(int argc, char **argv, char **envp)
     latc_bundle_pretranslate(cpu, info->exec_entry);
 
 #ifdef CONFIG_LATX_AOT
+    if (translation_config_native_worker) {
+        char error[256];
+        if (latx_translation_config_verify(env, cpu->tcg_cflags, &replay_config,
+                                           error, sizeof(error)) ||
+            !native_translation_config_domain()) {
+            fprintf(stderr, "latc: native replay changed during translation\n");
+            exit(EXIT_FAILURE);
+        }
+    }
     if (getenv("LATC_EMIT_AOT")) {
         aot_generate(cpu);
         _exit(EXIT_SUCCESS);
