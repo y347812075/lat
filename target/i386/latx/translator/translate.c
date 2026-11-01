@@ -414,7 +414,7 @@ void tr_disasm(struct TranslationBlock *ptb, int max_insns)
     defined(CONFIG_LATX_FLAG_REDUCTION_EXTEND)
     etb->_tb_type = get_etb_type(ir1_list + ir1_num - 1);
 
-    if (option_flag_reduction) {
+    if (latx_translation_flag_reduction()) {
         etb_add_succ(etb, 2);
         etb->flags |= SUCC_IS_SET_MASK;
     }

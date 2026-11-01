@@ -42,6 +42,7 @@ typedef struct {
 void flag_gen(IR1_INST *pir1);
 
 #ifdef CONFIG_LATX_FLAG_REDUCTION
+int latx_translation_flag_reduction(void);
 uint8 pending_use_of_succ(void *tb, int indirect_depth, int max_depth);
 void flag_reduction(IR1_INST *pir1, uint8 *pending_use);
 uint8 flag_reduction_check(TranslationBlock *tb);
@@ -52,7 +53,7 @@ uint8 flag_reduction_check(TranslationBlock *tb);
         _prex##_pending_use = flag_reduction_check(_tb)
 #define OPT_FLAG_RDTN(_prex, _inst) \
         do { \
-            if (option_flag_reduction) { \
+            if (latx_translation_flag_reduction()) { \
                 flag_reduction(_inst, &_prex##_pending_use); \
             } else { \
                 flag_gen(_inst); \

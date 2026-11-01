@@ -94,7 +94,7 @@ def main():
                 'latx-options.h', 'latx-options.c', 'latx-translation-config.c'):
             continue
         text = source.read_text()
-        for option in ('option_imm_reg', 'option_imm_rip',
+        for option in ('option_flag_reduction', 'option_imm_reg', 'option_imm_rip',
                        'option_imm_precache', 'option_imm_complex'):
             assert option not in text, (source, option)
     print('real TU configuration dependency export passed')

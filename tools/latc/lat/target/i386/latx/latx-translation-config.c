@@ -17,6 +17,7 @@
 #include <sys/auxv.h>
 #include <sys/mman.h>
 #include "translate.h"
+#include "flag-reduction.h"
 #include "lsenv.h"
 
 G_STATIC_ASSERT(FEATURE_WORDS <= LAT_TRANSLATION_CONFIG_FEATURE_LIMIT);
@@ -118,6 +119,9 @@ IMM_ACCESSOR(imm_complex, IMM_COMPLEX, option_imm_complex)
 IMM_ACCESSOR(fputag, FPUTAG, option_fputag)
 IMM_ACCESSOR(save_xmm, SAVE_XMM, option_save_xmm)
 IMM_ACCESSOR(enable_fcsr_exc, ENABLE_FCSR_EXC, option_enable_fcsr_exc)
+#ifdef CONFIG_LATX_FLAG_REDUCTION
+IMM_ACCESSOR(flag_reduction, FLAG_REDUCTION, option_flag_reduction)
+#endif
 #undef IMM_ACCESSOR
 
 void latx_translation_config_set_native_replay(const LatTranslationConfig *config)
