@@ -45,6 +45,7 @@ static bool native_replay;
 static uint8_t native_replay_digest[32];
 static GBytes *native_replay_bytes;
 static const LatTranslationConfig *native_replay_config;
+static const LatTranslationConfig *native_replay_projection;
 static __thread const LatTranslationConfig *thread_replay_config;
 
 void latx_translation_config_bind_thread(void)
@@ -65,7 +66,7 @@ static const LatTranslationConfig *replay_thread_config(void)
     if (!thread_replay_config || thread_replay_config != native_replay_config) {
         g_error("native replay translation thread has no bound configuration");
     }
-    return thread_replay_config;
+    return native_replay_projection;
 }
 
 bool latx_translation_native_replay(void)
@@ -119,6 +120,14 @@ IMM_ACCESSOR(imm_complex, IMM_COMPLEX, option_imm_complex)
 IMM_ACCESSOR(fputag, FPUTAG, option_fputag)
 IMM_ACCESSOR(save_xmm, SAVE_XMM, option_save_xmm)
 IMM_ACCESSOR(enable_fcsr_exc, ENABLE_FCSR_EXC, option_enable_fcsr_exc)
+IMM_ACCESSOR(lative, LATIVE, option_lative)
+IMM_ACCESSOR(close_parallel, CLOSE_PARALLEL, close_latx_parallel)
+IMM_ACCESSOR(monitor_shared_mem, MONITOR_SHARED_MEM, option_monitor_shared_mem)
+IMM_ACCESSOR(softfpu_fast, SOFTFPU_FAST, option_softfpu_fast)
+IMM_ACCESSOR(softfpu, SOFTFPU, option_softfpu)
+#ifdef CONFIG_LATX_INSTS_PATTERN
+IMM_ACCESSOR(instptn, INSTPTN, option_instptn)
+#endif
 #ifdef CONFIG_LATX_FLAG_REDUCTION
 IMM_ACCESSOR(flag_reduction, FLAG_REDUCTION, option_flag_reduction)
 #endif
@@ -141,16 +150,20 @@ void latx_translation_config_set_native_replay(const LatTranslationConfig *confi
                                       error, sizeof(error))) {
         g_error("cannot encode native replay configuration: %s", error);
     }
-    frozen = mmap(NULL, sizeof(*frozen), PROT_READ | PROT_WRITE,
+    frozen = mmap(NULL, 2 * sizeof(*frozen), PROT_READ | PROT_WRITE,
                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (frozen == MAP_FAILED) {
         g_error("cannot allocate native replay configuration: %s", strerror(errno));
     }
     *frozen = *config;
-    if (mprotect(frozen, sizeof(*frozen), PROT_READ)) {
+    frozen[1] = *config;
+    frozen[1].native_replay_domain = false;
+    frozen[1].values[LAT_CONFIG_LEGACY_AOT] = 1;
+    if (mprotect(frozen, 2 * sizeof(*frozen), PROT_READ)) {
         g_error("cannot freeze native replay configuration: %s", strerror(errno));
     }
     native_replay_config = frozen;
+    native_replay_projection = frozen + 1;
     native_replay = true;
 }
 

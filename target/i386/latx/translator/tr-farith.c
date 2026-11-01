@@ -1477,7 +1477,7 @@ bool translate_fxsave(IR1_INST *pir1)
 
     lsassert(offset <= 0x7ff);
     la_ld_wu(mxcsr_opnd, env_ir2_opnd, offset);
-    if (option_softfpu) {
+    if (latx_translation_softfpu()) {
         IR2_OPND fcsr = ra_alloc_itemp();
         IR2_OPND temp = ra_alloc_itemp();
 

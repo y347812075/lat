@@ -380,7 +380,7 @@ bool translate_ldmxcsr(IR1_INST *pir1)
 
     tr_gen_call_to_helper1((ADDR)update_mxcsr_status, 1,
                            LOAD_HELPER_UPDATE_MXCSR_STATUS);
-    if (option_softfpu) {
+    if (latx_translation_softfpu()) {
         gen_softfpu_x87_fcsr_exit();
     }
 

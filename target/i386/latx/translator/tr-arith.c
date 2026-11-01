@@ -296,7 +296,7 @@ bool translate_add(IR1_INST *pir1)
     CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
     CPUState *cpu = env_cpu(env);
     bool is_lock = ir1_is_prefix_lock(pir1) && ir1_opnd_is_mem(opnd0);
-    if (!close_latx_parallel) {
+    if (!latx_translation_close_parallel()) {
         is_lock = is_lock && (cpu->tcg_cflags & CF_PARALLEL);
     }
 
@@ -378,7 +378,7 @@ bool translate_adc(IR1_INST *pir1)
     CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
     CPUState *cpu = env_cpu(env);
     bool is_lock = ir1_is_prefix_lock(pir1) && ir1_opnd_is_mem(opnd0);
-    if (!close_latx_parallel) {
+    if (!latx_translation_close_parallel()) {
         is_lock = is_lock && (cpu->tcg_cflags & CF_PARALLEL);
     }
 
@@ -443,7 +443,7 @@ bool translate_inc(IR1_INST *pir1)
     CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
     CPUState *cpu = env_cpu(env);
     bool is_lock = ir1_is_prefix_lock(pir1) && ir1_opnd_is_mem(opnd0);
-    if (!close_latx_parallel) {
+    if (!latx_translation_close_parallel()) {
         is_lock = is_lock && (cpu->tcg_cflags & CF_PARALLEL);
     }
 
@@ -524,7 +524,7 @@ bool translate_dec(IR1_INST *pir1)
     CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
     CPUState *cpu = env_cpu(env);
     bool is_lock = ir1_is_prefix_lock(pir1) && ir1_opnd_is_mem(opnd0);
-    if (!close_latx_parallel) {
+    if (!latx_translation_close_parallel()) {
         is_lock = is_lock && (cpu->tcg_cflags & CF_PARALLEL);
     }
 
@@ -606,7 +606,7 @@ bool translate_sub(IR1_INST *pir1)
     CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
     CPUState *cpu = env_cpu(env);
     bool is_lock = ir1_is_prefix_lock(pir1) && ir1_opnd_is_mem(opnd0);
-    if (!close_latx_parallel) {
+    if (!latx_translation_close_parallel()) {
         is_lock = is_lock && (cpu->tcg_cflags & CF_PARALLEL);
     }
 
@@ -704,7 +704,7 @@ bool translate_sbb(IR1_INST *pir1)
     CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
     CPUState *cpu = env_cpu(env);
     bool is_lock = ir1_is_prefix_lock(pir1) && ir1_opnd_is_mem(opnd0);
-    if (!close_latx_parallel) {
+    if (!latx_translation_close_parallel()) {
         is_lock = is_lock && (cpu->tcg_cflags & CF_PARALLEL);
     }
 
@@ -768,7 +768,7 @@ bool translate_neg(IR1_INST *pir1)
     CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
     CPUState *cpu = env_cpu(env);
     bool is_lock = ir1_is_prefix_lock(pir1) && ir1_opnd_is_mem(opnd0);
-    if (!close_latx_parallel) {
+    if (!latx_translation_close_parallel()) {
         is_lock = is_lock && (cpu->tcg_cflags & CF_PARALLEL);
     }
 
@@ -1635,7 +1635,7 @@ bool translate_xadd(IR1_INST *pir1)
     CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
     CPUState *cpu = env_cpu(env);
     bool is_lock = ir1_is_prefix_lock(pir1) && ir1_opnd_is_mem(opnd0);
-    if (!close_latx_parallel) {
+    if (!latx_translation_close_parallel()) {
         is_lock = is_lock && (cpu->tcg_cflags & CF_PARALLEL);
     }
 

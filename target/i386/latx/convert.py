@@ -124,7 +124,7 @@ def generatingFunctionBody(name = str, opcode = str, opnd = list):
     convert_name = convertName(name)
     imm_num = 0
     if isMowgr2fcsr(name):
-        returnstr  = "    if (option_softfpu && fcsrl._reg_num == 0) {\n" \
+        returnstr  = "    if (latx_translation_softfpu() && fcsrl._reg_num == 0) {\n" \
                    + "        la_bstrins_w(rj, zero_ir2_opnd, 6, 6);\n" \
                    + "    }\n" \
                    + "    IR2_INST *pir2 = ir2_allocate();\n" \
@@ -179,7 +179,7 @@ def convertToConstructor(name = str, opcode = str, opnd = list, header_list = li
     function += "IR2_INST *generate_{}({}) {{\n{}}}\n\n".format(convert_name, parameter, func_body)
     function += "IR2_INST *la_{}({}) {{\n".format(convert_name, parameter)
     if isTopInst(name):
-        function += "    if (option_softfpu) {\n" + \
+        function += "    if (latx_translation_softfpu()) {\n" + \
                     "        return NULL;\n" + \
                     "    }\n"
     function += "    IR2_INST *pir2 = generate_{}({});\n".format(convert_name, parameter_to) + \

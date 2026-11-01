@@ -14,6 +14,7 @@
 #include "la-append.h"
 #include "ir2-relocate.h"
 #include "macro-inst.h"
+#include "latx-options.h"
 
 #include "aot.h"
 
@@ -111,7 +112,7 @@ TRANS_FUNC_GEN_REAL(opcode, TRANS_FUNC(function))
 #define TRANS_FPU_WRAP_GEN_NO_PROLOGUE(function)    \
 bool translate_##function##_wrap(IR1_INST *pir1)    \
 {                                                   \
-    if (option_softfpu) {                           \
+    if (latx_translation_softfpu()) {               \
         return translate_##function##_softfpu(pir1);\
     }                                               \
     return translate_##function(pir1);              \
@@ -120,9 +121,9 @@ bool translate_##function##_wrap(IR1_INST *pir1)    \
 #define TRANS_FPU_WRAP_GEN(function)                \
 bool translate_##function##_wrap(IR1_INST *pir1)    \
 {                                                   \
-    if (option_softfpu == 2) {                      \
+    if (latx_translation_softfpu() == 2) {          \
         return translate_##function##_softfpu(pir1);\
-    } else if (option_softfpu == 1) {               \
+    } else if (latx_translation_softfpu() == 1) {   \
         bool ret;                                   \
         gen_softfpu_helper_prologue(pir1);          \
         ret = translate_##function##_softfpu(pir1); \
@@ -1525,6 +1526,9 @@ bool latx_translation_native_replay(void);
 int latx_translation_fputag(void);
 int latx_translation_save_xmm(void);
 int latx_translation_enable_fcsr_exc(void);
+int latx_translation_lative(void);
+int latx_translation_close_parallel(void);
+int latx_translation_monitor_shared_mem(void);
 
 void tr_disasm(struct TranslationBlock *tb, int max_insns);
 void etb_add_succ(void* etb,int depth);

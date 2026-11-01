@@ -16,6 +16,10 @@
 #include "ir1.h"
 #include "ir2.h"
 
+#ifdef CONFIG_LATX_INSTS_PATTERN
+int latx_translation_instptn(void);
+#endif
+
 #define INSTPTN_BUF_SIZE 4
 
 #define INSTPTN_OPC_NONE        0x000000
@@ -65,7 +69,7 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
         __attribute__((unused)) bool scan_head = true;
 #define OPT_INSTS_PTN(tb, inst, index, _prex) \
         do { \
-            if (option_instptn) { \
+            if (latx_translation_instptn()) { \
                 insts_pattern_scan_con(tb, inst, index, _prex##_scaned_cond); \
                 if (scan_head)  \
                     scan_head = insts_pattern_scan_jcc_end(tb, inst, index, _prex##_scaned_jcc_end); \
@@ -84,14 +88,14 @@ bool insts_pattern_scan_jcc_end(TranslationBlock *tb, IR1_INST *ir1, int index, 
 #ifdef INSTPTN_OPTION_CHECK
 
 #define instptn_check_void() do { \
-    if (!option_instptn) return;        \
+    if (!latx_translation_instptn()) return;        \
 } while (0)
 #define instptn_check_false() do {    \
-    if (!option_instptn) return false;      \
+    if (!latx_translation_instptn()) return false;      \
 } while (0)
 
 #define INSTPTN_CHECK_XX_0(OPC) do {   \
-    if (!(option_instptn & (INSTPTN_OPC_##OPC >> 4))) return 0;      \
+    if (!(latx_translation_instptn() & (INSTPTN_OPC_##OPC >> 4))) return 0;      \
 } while (0)
 
 #define instptn_check_cmp_jcc_0() INSTPTN_CHECK_XX_0(CMP_JCC)

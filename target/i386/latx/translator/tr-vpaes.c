@@ -112,7 +112,7 @@ static inline IR2_OPND vreg(int i)
 
 static void vpaes_spill_low_fprs(void)
 {
-    if (!option_softfpu) {
+    if (!latx_translation_softfpu()) {
         IR2_OPND top = ra_alloc_itemp();
         la_x86mftop(top);
         la_st_w(top, env_ir2_opnd, lsenv_offset_of_top(lsenv));

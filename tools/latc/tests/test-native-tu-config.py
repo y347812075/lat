@@ -87,7 +87,9 @@ def main():
         text = source.read_text()
         for option in ('option_set_rounding_opt', 'option_vpaes', 'option_fast_atomic',
                        'option_enable_lasx', 'option_fputag', 'option_save_xmm',
-                       'option_enable_fcsr_exc'):
+                       'option_enable_fcsr_exc', 'option_lative',
+                       'close_latx_parallel', 'option_monitor_shared_mem',
+                       'option_softfpu_fast', 'option_softfpu'):
             assert option not in text, (source, option)
     for source in (root / 'target/i386/latx').rglob('*'):
         if source.suffix not in ('.c', '.h') or source.name in (
@@ -97,6 +99,10 @@ def main():
         for option in ('option_flag_reduction', 'option_imm_reg', 'option_imm_rip',
                        'option_imm_precache', 'option_imm_complex'):
             assert option not in text, (source, option)
+    assert 'option_instptn' not in (root / 'target/i386/latx/include/insts-pattern.h').read_text()
+    assert 'option_softfpu' not in (root / 'target/i386/latx/include/translate.h').read_text()
+    assert 'option_softfpu' not in (root / 'target/i386/latx/convert.py').read_text()
+    assert 'option_softfpu' not in (root / 'target/i386/latx/ir2/la-append.c').read_text()
     print('real TU configuration dependency export passed')
 
 

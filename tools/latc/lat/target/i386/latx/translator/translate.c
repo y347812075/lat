@@ -2007,7 +2007,7 @@ bool ir1_translate(IR1_INST *ir1)
         }
     }
 
-    if (option_softfpu) {
+    if (latx_translation_softfpu()) {
         int opnd_num = ir1_get_opnd_num(ir1);
         bool mmx_ins = false;
         for (int i = 0; i < opnd_num; i++) {
@@ -2026,7 +2026,7 @@ bool ir1_translate(IR1_INST *ir1)
     /*sse instructions need to reserve h128 bit of ymm\
         if support avx instructions*/
     IR2_OPND temp = ir2_opnd_new_none();
-    if (option_lative && latx_translation_enable_lasx() && ir1_need_reserve_h128(ir1)) {
+    if (latx_translation_lative() && latx_translation_enable_lasx() && ir1_need_reserve_h128(ir1)) {
         temp = save_h128_of_ymm(ir1);
     }
 
@@ -2066,7 +2066,7 @@ bool ir1_translate(IR1_INST *ir1)
     }
 
     /*restore h128 bit of ymm after translating sse instructions*/
-    if (option_lative && latx_translation_enable_lasx() && temp._type != IR2_OPND_NONE) {
+    if (latx_translation_lative() && latx_translation_enable_lasx() && temp._type != IR2_OPND_NONE) {
         restore_h128_of_ymm(ir1, temp);
     }
 
@@ -2385,7 +2385,7 @@ static SoftFPURegionClass softfpu_region_class(IR1_OPCODE opcode)
 {
     uint32_t fast_mask = softfpu_fast_mask(opcode);
 
-    if (fast_mask && (option_softfpu_fast & fast_mask)) {
+    if (fast_mask && (latx_translation_softfpu_fast() & fast_mask)) {
         return SOFTFPU_REGION_TRANSPARENT;
     }
 
@@ -2534,7 +2534,7 @@ int tr_ir2_generate(struct TranslationBlock *tb)
     lsenv->tr_data->softfpu_region_active = false;
 
 #ifdef CONFIG_LATX_MONITOR_SHARED_MEM
-    if (option_monitor_shared_mem && tb->checksum) {
+    if (latx_translation_monitor_shared_mem() && tb->checksum) {
         tr_check_x86ins_change(tb);
     }
 #endif
@@ -2648,7 +2648,7 @@ int tr_ir2_generate(struct TranslationBlock *tb)
         }
 #endif
 
-        bool x87_insn = option_softfpu &&
+        bool x87_insn = latx_translation_softfpu() &&
                          is_softfpu_x87_insn(ir1_opcode(pir1));
         if (x87_insn && !x87_fcsr_active) {
             gen_softfpu_x87_fcsr_enter();
@@ -2658,7 +2658,7 @@ int tr_ir2_generate(struct TranslationBlock *tb)
             x87_fcsr_active = false;
         }
 
-        if (option_softfpu == 2 && !reduce_proepo &&
+        if (latx_translation_softfpu() == 2 && !reduce_proepo &&
             softfpu_region_class(ir1_opcode(pir1)) ==
                 SOFTFPU_REGION_REQUIRED) {
             reduce_proepo = true;
@@ -2677,7 +2677,7 @@ int tr_ir2_generate(struct TranslationBlock *tb)
 #endif
         }
 
-        if (option_softfpu == 2 && reduce_proepo &&
+        if (latx_translation_softfpu() == 2 && reduce_proepo &&
             i == softfpu_region_end) {
             reduce_proepo = false;
             lsenv->tr_data->softfpu_region_active = false;
@@ -3721,7 +3721,7 @@ int generate_native_rotate_fpu_by(void *code_buf_addr)
 /* we have no inst to mov from gpr to top, so we have to be silly */
 void tr_load_top_from_env(void)
 {
-    if (option_softfpu) {
+    if (latx_translation_softfpu()) {
         return;
     }
 
@@ -4289,7 +4289,7 @@ void tr_save_registers_to_env(uint8 gpr_to_save, uint8 fpr_to_save,
 
     tr_save_gpr_to_env(gpr_to_save);
     /* 2. FPR (MMX) */
-    if (!option_softfpu) {
+    if (!latx_translation_softfpu()) {
         IR2_OPND top_opnd = ra_alloc_itemp();
         la_x86mftop(top_opnd);
         la_st_w(top_opnd, env_ir2_opnd,
@@ -4304,7 +4304,7 @@ void tr_save_registers_to_env(uint8 gpr_to_save, uint8 fpr_to_save,
     IR2_OPND label_fpu = ra_alloc_label();
 
     /* check current mode(mmx/fpu) */
-    if (option_softfpu == 2) {
+    if (latx_translation_softfpu() == 2) {
         la_ld_wu(mode_fpu, env_ir2_opnd, lsenv_offset_of_mode_fpu(lsenv));
         la_bne(mode_fpu, zero_ir2_opnd, label_fpu);
     }
@@ -4318,7 +4318,7 @@ void tr_save_registers_to_env(uint8 gpr_to_save, uint8 fpr_to_save,
         }
     }
 
-    if (option_softfpu == 2) {
+    if (latx_translation_softfpu() == 2) {
         la_label(label_fpu);
     }
     ra_free_temp(mode_fpu);
@@ -4389,7 +4389,7 @@ void tr_load_registers_from_env(uint8 gpr_to_load, uint8 fpr_to_load,
     IR2_OPND label_fpu = ra_alloc_label();
 
     /* check current mode(mmx/fpu) */
-    if (option_softfpu == 2) {
+    if (latx_translation_softfpu() == 2) {
         la_ld_bu(mode_fpu, env_ir2_opnd, lsenv_offset_of_mode_fpu(lsenv));
         if (fpr_to_load == 0xff) {
             /* A signal restore must initialize MMX without selecting it. */
@@ -4409,7 +4409,7 @@ void tr_load_registers_from_env(uint8 gpr_to_load, uint8 fpr_to_load,
         }
     }
 
-    if (option_softfpu == 2) {
+    if (latx_translation_softfpu() == 2) {
         la_label(label_fpu);
     }
     ra_free_temp(mode_fpu);

@@ -173,7 +173,7 @@ bool translate_btx(IR1_INST *pir1)
     CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
     CPUState *cpu = env_cpu(env);
     bool is_lock = ir1_is_prefix_lock(pir1);
-    if (!close_latx_parallel) {
+    if (!latx_translation_close_parallel()) {
         is_lock = is_lock && (cpu->tcg_cflags & CF_PARALLEL);
     }
 

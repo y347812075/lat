@@ -1560,7 +1560,7 @@ bool translate_xchg(IR1_INST *pir1)
         return true;
     }
 
-    if (!close_latx_parallel && !(cpu->tcg_cflags & CF_PARALLEL)) {
+    if (!latx_translation_close_parallel() && !(cpu->tcg_cflags & CF_PARALLEL)) {
         /* get src0 and src1*/
         src0 = load_ireg_from_ir1(opnd0, UNKNOWN_EXTENSION, false);
         src1 = load_ireg_from_ir1(opnd1, UNKNOWN_EXTENSION, false);
@@ -1724,7 +1724,7 @@ bool translate_cmpxchg(IR1_INST *pir1)
     CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
     CPUState *cpu = env_cpu(env);
     bool is_lock = ir1_is_prefix_lock(pir1) && ir1_opnd_is_mem(opnd0);
-    if (!close_latx_parallel) {
+    if (!latx_translation_close_parallel()) {
         is_lock = is_lock && (cpu->tcg_cflags & CF_PARALLEL);
     }
 

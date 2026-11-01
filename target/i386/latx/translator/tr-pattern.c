@@ -304,7 +304,7 @@ static bool translate_sub_jcc(IR1_INST *ir1)
     opnd0_size = ir1_opnd_size(opnd0);
 
     bool is_lock = ir1_is_prefix_lock(ir1) && ir1_opnd_is_mem(opnd0);
-    if (!close_latx_parallel) {
+    if (!latx_translation_close_parallel()) {
         is_lock = is_lock && (cpu->tcg_cflags & CF_PARALLEL);
     }
     if (is_lock) {
@@ -1465,7 +1465,7 @@ static bool translate_neg_cmovcc(IR1_INST *pir1)
     IR1_OPND *opnd0 = ir1_get_opnd(curr, 0);
 
     bool is_lock = ir1_is_prefix_lock(curr) && ir1_opnd_is_mem(opnd0);
-    if (!close_latx_parallel) {
+    if (!latx_translation_close_parallel()) {
         is_lock = is_lock && (cpu->tcg_cflags & CF_PARALLEL);
     }
 
@@ -2031,7 +2031,7 @@ static bool translate_and_jcc(IR1_INST *pir1)
     CPUArchState* env = (CPUArchState*)(lsenv->cpu_state);
     CPUState *cpu = env_cpu(env);
     bool is_lock = ir1_is_prefix_lock(curr) && ir1_opnd_is_mem(opnd0);
-    if (!close_latx_parallel) {
+    if (!latx_translation_close_parallel()) {
         is_lock = is_lock && (cpu->tcg_cflags & CF_PARALLEL);
     }
     if (is_lock) {
