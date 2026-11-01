@@ -85,7 +85,8 @@ def main():
             assert 'option_cvt_opt' not in source.read_text(), source
     for source in (root / 'target/i386/latx/translator').rglob('*.c'):
         text = source.read_text()
-        for option in ('option_set_rounding_opt', 'option_vpaes', 'option_fast_atomic'):
+        for option in ('option_set_rounding_opt', 'option_vpaes', 'option_fast_atomic',
+                       'option_enable_lasx'):
             assert option not in text, (source, option)
     print('real TU configuration dependency export passed')
 

@@ -13,7 +13,7 @@
 #ifdef CONFIG_LATX_AVX_OPT
 bool translate_vcvtph2ps(IR1_INST *pir1)
 {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvtph2ps_lsx(pir1);
     }
 
@@ -53,7 +53,7 @@ bool translate_vcvtph2ps(IR1_INST *pir1)
 
 bool translate_vcvtps2ph(IR1_INST *pir1)
 {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvtps2ph_lsx(pir1);
     }
 

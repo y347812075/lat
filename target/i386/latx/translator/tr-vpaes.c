@@ -480,7 +480,7 @@ static bool translate_aes_round(IR1_INST *pir1, int enc, int last)
     IR1_OPND *opnd0 = ir1_get_opnd(pir1, 0);
     IR1_OPND *opnd1 = ir1_get_opnd(pir1, 1);
     int d = ir1_opnd_base_reg_num(opnd0);
-    int lasx = option_enable_lasx;
+    int lasx = latx_translation_enable_lasx();
     IR2_OPND dst = ra_alloc_xmm(d);
     int key_aliases_dst = !ir1_opnd_is_mem(opnd1) &&
                           d == ir1_opnd_base_reg_num(opnd1);
@@ -569,7 +569,7 @@ bool latx_translate_aesimc_vpaes(IR1_INST *pir1)
 bool latx_translate_vaesimc_vpaes(IR1_INST *pir1)
 {
     bool ret = latx_translate_aesimc_vpaes(pir1);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         set_high128_xreg_to_zero(
             ra_alloc_xmm(ir1_opnd_base_reg_num(ir1_get_opnd(pir1, 0))));
     } else {
@@ -614,7 +614,7 @@ bool latx_translate_aeskeygenassist_vpaes(IR1_INST *pir1)
 bool latx_translate_vaeskeygenassist_vpaes(IR1_INST *pir1)
 {
     bool ret = latx_translate_aeskeygenassist_vpaes(pir1);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         set_high128_xreg_to_zero(
             ra_alloc_xmm(ir1_opnd_base_reg_num(ir1_get_opnd(pir1, 0))));
     } else {

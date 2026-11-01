@@ -194,7 +194,7 @@ bool translate_cvttpx2dq(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(opnd1);
     la_vbitsel_v(dest, vtemp1, vtemp2, vtemps);
     if (op == dt_X86_INS_CVTTPD2DQ) {
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvpickve_d(dest, dest, 0);
         } else {
             la_vinsgr2vr_d(dest, zero_ir2_opnd, 1);
@@ -354,7 +354,7 @@ bool translate_cvtpd2dq(IR1_INST *pir1)
      */
     IR2_OPND ftemp_final = ra_alloc_ftemp();
     la_vilvl_w(ftemp_final, ftemp_src2, ftemp_src1);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvpickve_d(dest, ftemp_final, 0);
     } else {
         la_vandi_b(dest, dest, 0);
@@ -745,7 +745,7 @@ bool translate_cvtpd2ps(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
     IR2_OPND src = load_freg128_from_ir1(ir1_get_opnd(pir1, 1));
     la_vfcvt_s_d(dest, src, src);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvpickve_d(dest, dest, 0);
     } else {
         la_vinsgr2vr_d(dest, zero_ir2_opnd, 1);
@@ -783,7 +783,7 @@ bool translate_cvtpi2pd(IR1_INST *pir1)
     la_ffint_d_w(temp0, src);
     la_vshuf4i_w(temp, src, 0x55);
     la_ffint_d_w(temp, temp);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_d(dest, temp, 1);
         la_xvinsve0_d(dest, temp0, 0);
     } else {
@@ -1043,7 +1043,7 @@ bool translate_cvtsd2ss(IR1_INST *pir1)
     } else {
         IR2_OPND temp = ra_alloc_ftemp();
         la_fcvt_s_d(temp, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_w(dest, temp, 0);
         } else {
             la_vextrins_w(dest, temp, 0);
@@ -1121,7 +1121,7 @@ bool translate_cvtss2sd(IR1_INST *pir1)
     } else {
         IR2_OPND temp = ra_alloc_ftemp();
         la_fcvt_d_s(temp, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_d(dest, temp, 0);
         } else {
             la_vextrins_d(dest, temp, 0);
@@ -1141,7 +1141,7 @@ bool translate_cvtps2pd(IR1_INST *pir1)
     la_fcvt_d_s(temp0, src);
     la_vshuf4i_w(temp, src, 0x55);
     la_fcvt_d_s(temp, temp);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_d(dest, temp, 1);
         la_xvinsve0_d(dest, temp0, 0);
     } else {

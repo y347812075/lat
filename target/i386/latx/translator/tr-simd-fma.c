@@ -11,7 +11,7 @@
 
 #ifdef CONFIG_LATX_AVX_OPT
 bool translate_vfmaddsubxxxps(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vfmaddsubxxxps_lsx(pir1);
     }
 
@@ -60,7 +60,7 @@ bool translate_vfmaddsubxxxps(IR1_INST * pir1) {
 }
 
 bool translate_vfmaddsubxxxpd(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vfmaddsubxxxpd_lsx(pir1);
     }
 
@@ -107,7 +107,7 @@ bool translate_vfmaddsubxxxpd(IR1_INST * pir1) {
 }
 
 bool translate_vfmsubaddxxxps(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vfmsubaddxxxps_lsx(pir1);
     }
 
@@ -156,7 +156,7 @@ bool translate_vfmsubaddxxxps(IR1_INST * pir1) {
 }
 
 bool translate_vfmsubaddxxxpd(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vfmsubaddxxxpd_lsx(pir1);
     }
 

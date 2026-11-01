@@ -1950,7 +1950,7 @@ static bool translate_cmpxchg16b_scq(IR1_INST *pir1)
  */
 bool translate_cmpxchg16b(IR1_INST *pir1)
 {
-    if (have_scq()) {
+    if (latx_translation_host_scq()) {
         return translate_cmpxchg16b_scq(pir1);
     }
 
@@ -1975,7 +1975,7 @@ bool translate_movq(IR1_INST *pir1)
     IR1_OPND *src = ir1_get_opnd(pir1, 1);
     if (ir1_opnd_is_xmm(dest) && ir1_opnd_is_mem(src)) {
         IR2_OPND temp = load_freg_from_ir1_1(src, false, IS_INTEGER);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvpickve_d(ra_alloc_xmm(ir1_opnd_base_reg_num(dest)), temp, 0);
         } else {
             la_vandi_b(ra_alloc_xmm(ir1_opnd_base_reg_num(dest)),
@@ -1988,7 +1988,7 @@ bool translate_movq(IR1_INST *pir1)
                           false, false);
         return true;
     } else if (ir1_opnd_is_xmm(dest) && ir1_opnd_is_xmm(src)) {
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvpickve_d(ra_alloc_xmm(ir1_opnd_base_reg_num(dest)),
                           ra_alloc_xmm(ir1_opnd_base_reg_num(src)), 0);
         } else {
@@ -2066,7 +2066,7 @@ bool translate_movd(IR1_INST *pir1)
     IR1_OPND *src = ir1_get_opnd(pir1, 1);
     if (ir1_opnd_is_xmm(dest) && ir1_opnd_is_mem(src)) {
         IR2_OPND temp = load_freg_from_ir1_1(src, false, false);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvpickve_w(ra_alloc_xmm(ir1_opnd_base_reg_num(dest)), temp, 0);
         } else {
             la_vandi_b(ra_alloc_xmm(ir1_opnd_base_reg_num(dest)),
@@ -2076,7 +2076,7 @@ bool translate_movd(IR1_INST *pir1)
         return true;
     }
     if (ir1_opnd_is_xmm(dest) && ir1_opnd_is_gpr(src)) {
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             IR2_OPND temp = ra_alloc_ftemp();
             la_movgr2fr_w(temp, ra_alloc_gpr(ir1_opnd_base_reg_num(src)));
             la_xvpickve_w(ra_alloc_xmm(ir1_opnd_base_reg_num(dest)), temp, 0);

@@ -68,6 +68,16 @@ int latx_translation_fast_atomic(void)
     return native_replay ? native_replay_config.values[LAT_CONFIG_FAST_ATOMIC] : option_fast_atomic;
 }
 
+int latx_translation_enable_lasx(void)
+{
+    return native_replay ? native_replay_config.values[LAT_CONFIG_ENABLE_LASX] : option_enable_lasx;
+}
+
+int latx_translation_host_scq(void)
+{
+    return native_replay ? native_replay_config.values[LAT_CONFIG_HOST_SCQ] : !!have_scq();
+}
+
 void latx_translation_config_set_native_replay(const LatTranslationConfig *config)
 {
     char error[128];

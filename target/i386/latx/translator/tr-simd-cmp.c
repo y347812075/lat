@@ -331,7 +331,7 @@ bool translate_cmpeqsd(IR1_INST *pir1)
     la_vreplve_d(src_temp, src, zero_ir2_opnd);
     la_vreplve_d(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_d(dest_transfer, dest_temp, src_temp, X86_FCMP_COND_EQ);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_d(dest, dest_transfer, 0);
     } else {
         la_vextrins_d(dest, dest_transfer, 0);
@@ -358,7 +358,7 @@ bool translate_cmpltsd(IR1_INST *pir1)
     la_vreplve_d(src_temp, src, zero_ir2_opnd);
     la_vreplve_d(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_d(dest_transfer, dest_temp, src_temp, X86_FCMP_COND_LT);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_d(dest, dest_transfer, 0);
     } else {
         la_vextrins_d(dest, dest_transfer, 0);
@@ -385,7 +385,7 @@ bool translate_cmplesd(IR1_INST *pir1)
     la_vreplve_d(src_temp, src, zero_ir2_opnd);
     la_vreplve_d(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_d(dest_transfer, dest_temp, src_temp, X86_FCMP_COND_LE);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_d(dest, dest_transfer, 0);
     } else {
         la_vextrins_d(dest, dest_transfer, 0);
@@ -411,7 +411,7 @@ bool translate_cmpunordsd(IR1_INST *pir1)
     la_vreplve_d(src_temp, src, zero_ir2_opnd);
     la_vreplve_d(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_d(dest_transfer, dest_temp, src_temp, X86_FCMP_COND_UNORD);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_d(dest, dest_transfer, 0);
     } else {
         la_vextrins_d(dest, dest_transfer, 0);
@@ -437,7 +437,7 @@ bool translate_cmpneqsd(IR1_INST *pir1)
     la_vreplve_d(src_temp, src, zero_ir2_opnd);
     la_vreplve_d(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_d(dest_transfer, dest_temp, src_temp, X86_FCMP_COND_NEQ);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_d(dest, dest_transfer, 0);
     } else {
         la_vextrins_d(dest, dest_transfer, 0);
@@ -469,7 +469,7 @@ bool translate_cmpnltsd(IR1_INST *pir1)
     la_vreplve_d(src_temp, src, zero_ir2_opnd);
     la_vreplve_d(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_d(dest_transfer, src_temp, dest_temp, X86_FCMP_COND_NLT);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_d(dest, dest_transfer, 0);
     } else {
         la_vextrins_d(dest, dest_transfer, 0);
@@ -501,7 +501,7 @@ bool translate_cmpnlesd(IR1_INST *pir1)
     la_vreplve_d(src_temp, src, zero_ir2_opnd);
     la_vreplve_d(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_d(dest_transfer, src_temp, dest_temp, X86_FCMP_COND_NLE);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_d(dest, dest_transfer, 0);
     } else {
         la_vextrins_d(dest, dest_transfer, 0);
@@ -527,7 +527,7 @@ bool translate_cmpordsd(IR1_INST *pir1)
     la_vreplve_d(src_temp, src, zero_ir2_opnd);
     la_vreplve_d(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_d(dest_transfer, dest_temp, src_temp, X86_FCMP_COND_ORD);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_d(dest, dest_transfer, 0);
     } else {
         la_vextrins_d(dest, dest_transfer, 0);
@@ -553,7 +553,7 @@ bool translate_cmpeqss(IR1_INST *pir1)
     la_vreplve_w(src_temp, src, zero_ir2_opnd);
     la_vreplve_w(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_s(dest_transfer, dest_temp, src_temp, X86_FCMP_COND_EQ);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_w(dest, dest_transfer, 0);
     } else {
         la_vextrins_w(dest, dest_transfer, 0);
@@ -579,7 +579,7 @@ bool translate_cmpltss(IR1_INST *pir1)
     la_vreplve_w(src_temp, src, zero_ir2_opnd);
     la_vreplve_w(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_s(dest_transfer, dest_temp, src_temp, X86_FCMP_COND_LT);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_w(dest, dest_transfer, 0);
     } else {
         la_vextrins_w(dest, dest_transfer, 0);
@@ -605,7 +605,7 @@ bool translate_cmpless(IR1_INST *pir1)
     la_vreplve_w(src_temp, src, zero_ir2_opnd);
     la_vreplve_w(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_s(dest_transfer, dest_temp, src_temp, X86_FCMP_COND_LE);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_w(dest, dest_transfer, 0);
     } else {
         la_vextrins_w(dest, dest_transfer, 0);
@@ -629,7 +629,7 @@ bool translate_cmpunordss(IR1_INST *pir1)
     la_vreplve_w(src_temp, src, zero_ir2_opnd);
     la_vreplve_w(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_s(dest_transfer, dest_temp, src_temp, X86_FCMP_COND_UNORD);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_w(dest, dest_transfer, 0);
     } else {
         la_vextrins_w(dest, dest_transfer, 0);
@@ -654,7 +654,7 @@ bool translate_cmpneqss(IR1_INST *pir1)
     la_vreplve_w(src_temp, src, zero_ir2_opnd);
     la_vreplve_w(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_s(dest_transfer, dest_temp, src_temp, X86_FCMP_COND_NEQ);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_w(dest, dest_transfer, 0);
     } else {
         la_vextrins_w(dest, dest_transfer, 0);
@@ -681,7 +681,7 @@ bool translate_cmpnltss(IR1_INST *pir1)
     la_vreplve_w(dest_temp, dest, zero_ir2_opnd);
     /* A !< B & UOR == B <= A & UOR */
     la_vfcmp_cond_s(dest_transfer, src_temp, dest_temp, X86_FCMP_COND_NLT);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_w(dest, dest_transfer, 0);
     } else {
         la_vextrins_w(dest, dest_transfer, 0);
@@ -708,7 +708,7 @@ bool translate_cmpnless(IR1_INST *pir1)
     la_vreplve_w(dest_temp, dest, zero_ir2_opnd);
     /* A !<= B & UOR == B < A & UOR */
     la_vfcmp_cond_s(dest_transfer, src_temp, dest_temp, X86_FCMP_COND_NLE);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_w(dest, dest_transfer, 0);
     } else {
         la_vextrins_w(dest, dest_transfer, 0);
@@ -733,7 +733,7 @@ bool translate_cmpordss(IR1_INST *pir1)
     la_vreplve_w(src_temp, src, zero_ir2_opnd);
     la_vreplve_w(dest_temp, dest, zero_ir2_opnd);
     la_vfcmp_cond_s(dest_transfer, dest_temp, src_temp, X86_FCMP_COND_ORD);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_w(dest, dest_transfer, 0);
     } else {
         la_vextrins_w(dest, dest_transfer, 0);

@@ -11,7 +11,7 @@
 
 #ifdef CONFIG_LATX_AVX_OPT
 bool translate_vpslldq(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vpslldq_lsx(pir1);
     }
 
@@ -36,7 +36,7 @@ bool translate_vpslldq(IR1_INST * pir1) {
 }
 
 bool translate_vpsllx(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vpsllx_lsx(pir1);
     }
 
@@ -108,7 +108,7 @@ bool translate_vpsllx(IR1_INST * pir1) {
 }
 
 bool translate_vpsrldq(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vpsrldq_lsx(pir1);
     }
 
@@ -137,7 +137,7 @@ typedef IR2_INST *(*latx_avx_shift_var_fn)(IR2_OPND, IR2_OPND, IR2_OPND);
 
 
 bool translate_vpsrlx(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vpsrlx_lsx(pir1);
     }
     IR1_OPND * opnd0 = ir1_get_opnd(pir1, 0);
@@ -221,7 +221,7 @@ bool translate_vpsrlx(IR1_INST * pir1) {
 }
 
 bool translate_vpsrax(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vpsrax_lsx(pir1);
     }
 

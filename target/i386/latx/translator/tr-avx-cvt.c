@@ -13,7 +13,7 @@
 #ifdef CONFIG_LATX_AVX_OPT
 
 bool translate_vcvtps2pd(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvtps2pd_lsx(pir1);
     }
 
@@ -41,7 +41,7 @@ bool translate_vcvtps2pd(IR1_INST * pir1) {
 }
 
 bool translate_vcvtpd2ps(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvtpd2ps_lsx(pir1);
     }
 
@@ -70,7 +70,7 @@ bool translate_vcvtpd2ps(IR1_INST * pir1) {
 }
 
 bool translate_vcvtdq2ps(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvtdq2ps_lsx(pir1);
     }
 
@@ -129,7 +129,7 @@ static bool translate_vcvtps2dq_opt(IR1_INST * pir1) {
 }
 
 bool translate_vcvtps2dq(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvtps2dq_lsx(pir1);
     }
     prepare_sse_rounding_mode();
@@ -339,7 +339,7 @@ bool translate_vcvtps2dq(IR1_INST * pir1) {
 }
 
 bool translate_vcvtdq2pd(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvtdq2pd_lsx(pir1);
     }
 
@@ -429,7 +429,7 @@ static bool translate_vcvtpd2dq_opt(IR1_INST * pir1) {
     return true;
 }
 bool translate_vcvtpd2dq(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvtpd2dq_lsx(pir1);
     }
     prepare_sse_rounding_mode();
@@ -562,7 +562,7 @@ bool translate_vcvtpd2dq(IR1_INST * pir1) {
 }
 
 bool translate_vcvtsd2ss(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvtsd2ss_lsx(pir1);
     }
     lsassert(ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
@@ -583,7 +583,7 @@ bool translate_vcvtsd2ss(IR1_INST * pir1) {
 }
 
 bool translate_vcvtsi2sd(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvtsi2sd_lsx(pir1);
     }
     lsassert(ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)) &&
@@ -611,7 +611,7 @@ bool translate_vcvtsi2sd(IR1_INST * pir1) {
 }
 
 bool translate_vcvtss2sd(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvtss2sd_lsx(pir1);
     }
 
@@ -629,7 +629,7 @@ bool translate_vcvtss2sd(IR1_INST * pir1) {
 }
 
 bool translate_vcvtsi2ss(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvtsi2ss_lsx(pir1);
     }
 
@@ -696,7 +696,7 @@ static bool translate_vcvttpd2dq_opt(IR1_INST * pir1) {
 }
 
 bool translate_vcvttpd2dq(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvttpd2dq_lsx(pir1);
     }
 
@@ -861,7 +861,7 @@ static bool translate_vcvttps2dq_opt(IR1_INST * pir1) {
 }
 
 bool translate_vcvttps2dq(IR1_INST * pir1) {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         return translate_vcvttps2dq_lsx(pir1);
     }
 

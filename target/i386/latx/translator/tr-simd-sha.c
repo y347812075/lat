@@ -22,7 +22,7 @@ bool translate_sha1nexte(IR1_INST *pir1)
         int s1 = (d + 1) & 7;
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm(s1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -32,7 +32,7 @@ bool translate_sha1nexte(IR1_INST *pir1)
 
         tr_gen_call_to_helper_aes((ADDR)helper_sha1nexte, d, d, s1,
                 LOAD_HELPER_SHA1NEXTE);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);
@@ -55,7 +55,7 @@ bool translate_sha1msg1(IR1_INST *pir1)
         int s1 = (d + 1) & 7;
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm(s1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -65,7 +65,7 @@ bool translate_sha1msg1(IR1_INST *pir1)
 
         tr_gen_call_to_helper_aes((ADDR)helper_sha1msg1, d, d, s1,
                 LOAD_HELPER_SHA1MSG1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);
@@ -88,7 +88,7 @@ bool translate_sha1msg2(IR1_INST *pir1)
         int s1 = (d + 1) & 7;
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm(s1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -98,7 +98,7 @@ bool translate_sha1msg2(IR1_INST *pir1)
 
         tr_gen_call_to_helper_aes((ADDR)helper_sha1msg2, d, d, s1,
                 LOAD_HELPER_SHA1MSG2);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);
@@ -150,7 +150,7 @@ bool translate_sha1rnds4(IR1_INST *pir1)
             s1++;
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm(s1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -160,7 +160,7 @@ bool translate_sha1rnds4(IR1_INST *pir1)
 
         tr_gen_call_to_helper_aes((ADDR)helper_func, d, d, s1,
                 helper_kind);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);
@@ -186,7 +186,7 @@ bool translate_sha256rnds2(IR1_INST *pir1)
             s1++;
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm(s1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -196,7 +196,7 @@ bool translate_sha256rnds2(IR1_INST *pir1)
 
         tr_gen_call_to_helper_aes((ADDR)helper_sha256rnds2_xmm0, d, d, s1,
                 LOAD_HELPER_SHA256RNDS2_XMM0);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);
@@ -219,7 +219,7 @@ bool translate_sha256msg1(IR1_INST *pir1)
         int s1 = (d + 1) & 7;
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm(s1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -229,7 +229,7 @@ bool translate_sha256msg1(IR1_INST *pir1)
 
         tr_gen_call_to_helper_aes((ADDR)helper_sha256msg1, d, d, s1,
                 LOAD_HELPER_SHA256MSG1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);
@@ -252,7 +252,7 @@ bool translate_sha256msg2(IR1_INST *pir1)
         int s1 = (d + 1) & 7;
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm(s1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -262,7 +262,7 @@ bool translate_sha256msg2(IR1_INST *pir1)
 
         tr_gen_call_to_helper_aes((ADDR)helper_sha256msg2, d, d, s1,
                 LOAD_HELPER_SHA256MSG2);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);

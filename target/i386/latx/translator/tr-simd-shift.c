@@ -503,7 +503,7 @@ bool translate_addsubpd(IR1_INST *pir1)
 
     la_vfsub_d(temp_dest_sub, ftemp_dest_sub, ftemp_src_sub);
     la_vfadd_d(dest, ftemp_dest_add, ftemp_src_add);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_d(dest, temp_dest_sub, 0);
     } else {
         la_vextrins_d(dest, temp_dest_sub, 0);
@@ -554,13 +554,13 @@ bool translate_addsubps(IR1_INST *pir1)
    /*
     * Pick temp_sub data to [0:31] [64:95]
     */
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_w(dest, temp_dest_sub, 0);
     } else {
         la_vextrins_w(dest, temp_dest_sub, 0);
     }
     la_vbsrl_v(temp_dest_sub, temp_dest_sub, 8);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_w(dest, temp_dest_sub, 2);
     } else {
         la_vextrins_w(dest, temp_dest_sub, 0x2 << 4);

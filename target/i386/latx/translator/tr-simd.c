@@ -698,7 +698,7 @@ bool translate_addsd(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fadd_d(temp, dest, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_d(dest, temp, 0);
         } else {
             la_vextrins_d(dest, temp, 0);
@@ -718,7 +718,7 @@ bool translate_addss(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fadd_s(temp, dest, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_w(dest, temp, 0);
         } else {
             la_vextrins_w(dest, temp, 0);
@@ -786,7 +786,7 @@ bool translate_divsd(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fdiv_d(temp, dest, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_d(dest, temp, 0);
         } else {
             la_vextrins_d(dest, temp, 0);
@@ -806,7 +806,7 @@ bool translate_divss(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fdiv_s(temp, dest, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_w(dest, temp, 0);
         } else {
             la_vextrins_w(dest, temp, 0);
@@ -883,7 +883,7 @@ bool translate_maxsd(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fsel(temp, src, dest, fcc0_ir2_opnd);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_d(dest, temp, 0);
         } else {
             la_vextrins_d(dest, temp, 0);
@@ -912,7 +912,7 @@ bool translate_maxss(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fsel(temp, src, dest, fcc0_ir2_opnd);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_w(dest, temp, 0);
         } else {
             la_vextrins_w(dest, temp, 0);
@@ -996,7 +996,7 @@ bool translate_minsd(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fsel(temp, src, dest, fcc0_ir2_opnd);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_d(dest, temp, 0);
         } else {
             la_vextrins_d(dest, temp, 0);
@@ -1025,7 +1025,7 @@ bool translate_minss(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fsel(temp, src, dest, fcc0_ir2_opnd);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_w(dest, temp, 0);
         } else {
             la_vextrins_w(dest, temp, 0);
@@ -1080,7 +1080,7 @@ bool translate_mulsd(IR1_INST *pir1)
         } else {
             IR2_OPND temp = ra_alloc_ftemp();
             la_fmul_d(temp, dest, src);
-            if (option_enable_lasx) {
+            if (latx_translation_enable_lasx()) {
                 la_xvinsve0_d(dest, temp, 0);
             } else {
                 la_vextrins_d(dest, temp, 0);
@@ -1105,7 +1105,7 @@ bool translate_mulsd(IR1_INST *pir1)
         } else {
             IR2_OPND temp = ra_alloc_ftemp();
             la_fmul_d(temp, dest, src);
-            if (option_enable_lasx) {
+            if (latx_translation_enable_lasx()) {
                 la_xvinsve0_d(dest, temp, 0);
             } else {
                 la_vextrins_d(dest, temp, 0);
@@ -1126,7 +1126,7 @@ bool translate_mulsd(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fmul_d(temp, dest, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_d(dest, temp, 0);
         } else {
             la_vextrins_d(dest, temp, 0);
@@ -1146,7 +1146,7 @@ bool translate_mulss(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fmul_s(temp, dest, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_w(dest, temp, 0);
         } else {
             la_vextrins_w(dest, temp, 0);
@@ -1466,7 +1466,7 @@ bool translate_pshufhw(IR1_INST *pir1)
     }
     la_vori_b(temp, src, 0);
     la_vshuf4i_h(dest, dest, imm8);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_d(dest, temp, 0);
     } else {
         la_vextrins_d(dest, temp, 0);
@@ -1490,7 +1490,7 @@ bool translate_pshuflw(IR1_INST *pir1)
     la_vori_b(temp, src, 0);
     la_vbsrl_v(temp, temp, 8);
     la_vshuf4i_h(dest, dest, imm8);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvinsve0_d(dest, temp, 1);
     } else {
         la_vextrins_d(dest, temp, 0x1 << 4);
@@ -1537,7 +1537,7 @@ bool translate_rcpss(IR1_INST *pir1)
     } else {
         IR2_OPND temp = ra_alloc_ftemp();
         la_vfrecip_s(temp, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_w(dest, temp, 0);
         } else {
             la_vextrins_w(dest, temp, 0);
@@ -1565,7 +1565,7 @@ bool translate_rsqrtss(IR1_INST *pir1)
     } else {
         IR2_OPND temp = ra_alloc_ftemp();
         la_frsqrt_s(temp, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_w(dest, temp, 0);
         } else {
             la_vextrins_w(dest, temp, 0);
@@ -1590,7 +1590,7 @@ bool translate_sqrtpd(IR1_INST *pir1)
     IR2_OPND src = load_freg128_from_ir1(ir1_get_opnd(pir1, 1));
     prepare_sse_rounding_mode();
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND temp0 = ra_alloc_ftemp();
         la_fsqrt_d(temp0, src);
@@ -1612,7 +1612,7 @@ bool translate_sqrtps(IR1_INST *pir1)
     IR2_OPND src = load_freg128_from_ir1(ir1_get_opnd(pir1, 1));
     prepare_sse_rounding_mode();
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND temp0 = ra_alloc_ftemp();
         la_vfsqrt_s(temp0, src);
@@ -1759,7 +1759,7 @@ bool translate_subss(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fsub_s(temp, dest, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_w(dest, temp, 0);
         } else {
             la_vextrins_w(dest, temp, 0);
@@ -1784,7 +1784,7 @@ bool translate_subsd(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fsub_d(temp, dest, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_d(dest, temp, 0);
         } else {
             la_vextrins_d(dest, temp, 0);
@@ -1828,7 +1828,7 @@ bool translate_sqrtsd(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fsqrt_d(temp, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_d(dest, temp, 0);
         } else {
             la_vextrins_d(dest, temp, 0);
@@ -1849,7 +1849,7 @@ bool translate_sqrtss(IR1_INST *pir1)
     } else{
         IR2_OPND temp = ra_alloc_ftemp();
         la_fsqrt_s(temp, src);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_w(dest, temp, 0);
         } else {
             la_vextrins_w(dest, temp, 0);
@@ -2133,7 +2133,7 @@ bool translate_palignr(IR1_INST *pir1)
                 la_vori_b(dest, src, 0);
             } else {
                 la_vori_b(temp, src, 0);
-                if (option_enable_lasx) {
+                if (latx_translation_enable_lasx()) {
                     la_xvinsve0_d(temp, dest, 1);
                 } else {
                     la_vextrins_d(temp, dest, 0x1 << 4);
@@ -2498,7 +2498,7 @@ bool translate_dppd(IR1_INST *pir1)
     IR2_OPND temp2 = ra_alloc_ftemp();
     uint8_t imm = ir1_opnd_uimm(opnd2);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvxor_v(temp1, temp1, temp1);
         la_xvxor_v(temp2, temp2, temp2);
     } else {
@@ -2518,20 +2518,20 @@ bool translate_dppd(IR1_INST *pir1)
     la_vpackod_d(temp2, temp1, temp1);
     la_vpackev_d(temp1, temp1, temp1);
     la_vfadd_d(temp1, temp1, temp2);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvxor_v(dest, dest, dest);
     } else {
         la_vxor_v(dest, dest, dest);
     }
     if(imm & 0x1){
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvextrins_d(dest, temp1, 0x00);
         } else {
             la_vextrins_d(dest, temp1, 0x00);
         }
     }
     if(imm & 0x2){
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvextrins_d(dest, temp1, 0x11);
         } else {
             la_vextrins_d(dest, temp1, 0x11);
@@ -2687,7 +2687,7 @@ bool translate_roundss(IR1_INST *pir1)
     IR2_OPND fcsr = ra_alloc_itemp();
     IR2_OPND fcsr_save = ra_alloc_itemp();
     IR2_OPND mxcsr = ra_alloc_itemp();
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvreplve0_w(src, src1);
     } else {
         la_vreplvei_w(src, src1, 0);
@@ -2716,7 +2716,7 @@ bool translate_roundss(IR1_INST *pir1)
         la_movgr2fcsr(fcsr_ir2_opnd, fcsr);
         la_vfrint_s(temp_dest, src);
         if (!dead_high) {
-            if (option_enable_lasx) {
+            if (latx_translation_enable_lasx()) {
                 la_xvinsve0_w(dest, temp_dest, 0);
             } else {
                 la_vextrins_w(dest, temp_dest, 0);
@@ -2742,7 +2742,7 @@ bool translate_roundss(IR1_INST *pir1)
         la_vfrintrz_s(temp_dest, src);
 	}
     if (!dead_high) {
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_w(dest, temp_dest, 0);
         } else {
             la_vextrins_w(dest, temp_dest, 0);
@@ -2841,7 +2841,7 @@ bool translate_roundsd(IR1_INST *pir1)
     IR2_OPND fcsr_save = ra_alloc_itemp();
     IR2_OPND mxcsr = ra_alloc_itemp();
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvreplve0_d(src, src1);
     } else {
         la_vreplvei_d(src, src1, 0);
@@ -2870,7 +2870,7 @@ bool translate_roundsd(IR1_INST *pir1)
         la_movgr2fcsr(fcsr_ir2_opnd, fcsr);
         la_vfrint_d(temp_dest, src);
         if (!dead_high) {
-            if (option_enable_lasx) {
+            if (latx_translation_enable_lasx()) {
                 la_xvinsve0_d(dest, temp_dest, 0);
             } else {
                 la_vextrins_d(dest, temp_dest, 0);
@@ -2896,7 +2896,7 @@ bool translate_roundsd(IR1_INST *pir1)
         la_vfrintrz_d(temp_dest, src);
 	}
     if (!dead_high) {
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvinsve0_d(dest, temp_dest, 0);
         } else {
             la_vextrins_d(dest, temp_dest, 0);
@@ -3003,7 +3003,7 @@ bool translate_phminposuw(IR1_INST *pir1)
     IR2_OPND temp1 = ra_alloc_ftemp();
     IR2_OPND temp2 = ra_alloc_ftemp();
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvori_b(temp, src, 0x0);
     } else {
         la_vori_b(temp, src, 0x0);
@@ -3015,14 +3015,14 @@ bool translate_phminposuw(IR1_INST *pir1)
     la_vsrli_d(temp, temp, 0x10);
     la_vmin_hu(temp, temp, src);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvpickve_d(temp2, temp, 1);
     } else {
         la_vandi_b(temp2, temp2, 0);
         la_vextrins_d(temp2, temp, 1);
     }
     la_vmin_hu(temp, temp, temp2);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvreplve0_h(temp, temp);
     } else {
         la_vreplvei_h(temp, temp, 0);
@@ -3030,7 +3030,7 @@ bool translate_phminposuw(IR1_INST *pir1)
     la_vseq_h(temp1, src, temp);
     la_vfrstpi_h(temp2, temp1, 0);
     la_vpackev_h(dest, temp2, temp);
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvpickve_w(dest, dest, 0);
     } else {
         la_vinsgr2vr_d(dest, zero_ir2_opnd, 1);
@@ -3345,7 +3345,7 @@ bool translate_pmovsxbw(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(opnd0);
     IR2_OPND src = load_freg128_from_ir1(opnd1);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_vext2xv_h_b(dest, src);
     } else {
         la_vsllwil_h_b(dest, src, 0);
@@ -3361,7 +3361,7 @@ bool translate_pmovzxbw(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(opnd0);
     IR2_OPND src = load_freg128_from_ir1(opnd1);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_vext2xv_hu_bu(dest, src);
     } else {
         la_vsllwil_hu_bu(dest, src, 0);
@@ -3377,7 +3377,7 @@ bool translate_pmovsxbd(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(opnd0);
     IR2_OPND src = load_freg128_from_ir1(opnd1);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_vext2xv_w_b(dest, src);
     } else {
         la_vsllwil_h_b(dest, src, 0);
@@ -3394,7 +3394,7 @@ bool translate_pmovzxbd(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(opnd0);
     IR2_OPND src = load_freg128_from_ir1(opnd1);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_vext2xv_wu_bu(dest, src);
     } else {
         la_vsllwil_hu_bu(dest, src, 0);
@@ -3411,7 +3411,7 @@ bool translate_pmovsxbq(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(opnd0);
     IR2_OPND src = load_freg128_from_ir1(opnd1);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_vext2xv_d_b(dest, src);
     } else {
         la_vsllwil_h_b(dest, src, 0);
@@ -3429,7 +3429,7 @@ bool translate_pmovzxbq(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(opnd0);
     IR2_OPND src = load_freg128_from_ir1(opnd1);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_vext2xv_du_bu(dest, src);
     } else {
         la_vsllwil_hu_bu(dest, src, 0);
@@ -3447,7 +3447,7 @@ bool translate_pmovsxwd(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(opnd0);
     IR2_OPND src = load_freg128_from_ir1(opnd1);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_vext2xv_w_h(dest, src);
     } else {
         la_vsllwil_w_h(dest, src, 0);
@@ -3463,7 +3463,7 @@ bool translate_pmovzxwd(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(opnd0);
     IR2_OPND src = load_freg128_from_ir1(opnd1);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_vext2xv_wu_hu(dest, src);
     } else {
         la_vsllwil_wu_hu(dest, src, 0);
@@ -3479,7 +3479,7 @@ bool translate_pmovsxwq(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(opnd0);
     IR2_OPND src = load_freg128_from_ir1(opnd1);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_vext2xv_d_h(dest, src);
     } else {
         la_vsllwil_w_h(dest, src, 0);
@@ -3496,7 +3496,7 @@ bool translate_pmovzxwq(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(opnd0);
     IR2_OPND src = load_freg128_from_ir1(opnd1);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_vext2xv_du_hu(dest, src);
     } else {
         la_vsllwil_wu_hu(dest, src, 0);
@@ -3513,7 +3513,7 @@ bool translate_pmovsxdq(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(opnd0);
     IR2_OPND src = load_freg128_from_ir1(opnd1);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_vext2xv_d_w(dest, src);
     } else {
         la_vsllwil_d_w(dest, src, 0);
@@ -3529,7 +3529,7 @@ bool translate_pmovzxdq(IR1_INST *pir1)
     IR2_OPND dest = load_freg128_from_ir1(opnd0);
     IR2_OPND src = load_freg128_from_ir1(opnd1);
 
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_vext2xv_du_wu(dest, src);
     } else {
         la_vsllwil_du_wu(dest, src, 0);
@@ -3721,7 +3721,7 @@ bool translate_vpcmpestri(IR1_INST *pir1)
     } else {
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm((d + 1) % 8);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -3729,7 +3729,7 @@ bool translate_vpcmpestri(IR1_INST *pir1)
         load_freg128_from_ir1_mem(src, opnd1);
         tr_gen_call_to_helper_pcmpxstrx((ADDR)helper_pcmpestri_xmm, d, (d + 1) % 8, imm,
                 LOAD_HELPER_PCMPESTRI_XMM);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);
@@ -3757,7 +3757,7 @@ bool translate_pcmpestrm(IR1_INST *pir1)
     } else {
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm((d + 1) % 7 + 1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -3765,7 +3765,7 @@ bool translate_pcmpestrm(IR1_INST *pir1)
         load_freg128_from_ir1_mem(src, opnd1);
          tr_gen_call_to_helper_pcmpxstrx((ADDR)helper_pcmpestrm_xmm, d,
                  (d + 1) % 7 + 1, imm, LOAD_HELPER_PCMPESTRM_XMM);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);
@@ -3793,7 +3793,7 @@ bool translate_vpcmpistri(IR1_INST *pir1)
     } else {
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm((d + 1) % 8);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -3801,7 +3801,7 @@ bool translate_vpcmpistri(IR1_INST *pir1)
         load_freg128_from_ir1_mem(src, opnd1);
         tr_gen_call_to_helper_pcmpxstrx((ADDR)helper_pcmpistri_xmm, d, (d + 1) % 8, imm,
                 LOAD_HELPER_PCMPISTRI_XMM);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);
@@ -3825,7 +3825,7 @@ bool translate_pcmpistrm(IR1_INST *pir1)
     } else {
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm((d + 1) % 7 + 1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -3833,7 +3833,7 @@ bool translate_pcmpistrm(IR1_INST *pir1)
         load_freg128_from_ir1_mem(src, opnd1);
         tr_gen_call_to_helper_pcmpxstrx((ADDR)helper_pcmpistrm_xmm, d,
                 (d + 1) % 7 + 1, imm, LOAD_HELPER_PCMPISTRM_XMM);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);
@@ -4137,7 +4137,7 @@ bool translate_aesdec(IR1_INST *pir1)
         int s1 = (d + 1) & 7;
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm(s1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -4147,7 +4147,7 @@ bool translate_aesdec(IR1_INST *pir1)
 
         tr_gen_call_to_helper_aes((ADDR)helper_aesdec_xmm, d, s1, 0,
                 LOAD_HELPER_AESDEC_XMM);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);
@@ -4174,7 +4174,7 @@ bool translate_aesdeclast(IR1_INST *pir1)
         int s1 = (d + 1) & 7;
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm(s1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -4184,7 +4184,7 @@ bool translate_aesdeclast(IR1_INST *pir1)
 
         tr_gen_call_to_helper_aes((ADDR)helper_aesdeclast_xmm, d, s1, 0,
                 LOAD_HELPER_AESDECLAST_XMM);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);
@@ -4298,7 +4298,7 @@ bool translate_aesimc(IR1_INST *pir1)
     } else {
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm((d + 1) % 7 + 1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -4306,7 +4306,7 @@ bool translate_aesimc(IR1_INST *pir1)
         load_freg128_from_ir1_mem(src, opnd1);
         tr_gen_call_to_helper_pcmpxstrx((ADDR)helper_aesimc_xmm, d,
                 (d + 1) % 7 + 1, 0, LOAD_HELPER_AESIMC_XMM);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);
@@ -4334,7 +4334,7 @@ bool translate_aeskeygenassist(IR1_INST *pir1)
     } else {
         IR2_OPND temp = ra_alloc_ftemp();
         IR2_OPND src = ra_alloc_xmm((d + 1) % 7 + 1);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(temp, src, src);
         } else {
             la_vor_v(temp, src, src);
@@ -4342,7 +4342,7 @@ bool translate_aeskeygenassist(IR1_INST *pir1)
         load_freg128_from_ir1_mem(src, opnd1);
         tr_gen_call_to_helper_pcmpxstrx((ADDR)helper_aeskeygenassist_xmm, d,
                 (d + 1) % 7 + 1, imm, LOAD_HELPER_AESKEYGENASSIST_XMM);
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             la_xvor_v(src, temp, temp);
         } else {
             la_vor_v(src, temp, temp);

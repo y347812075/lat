@@ -124,7 +124,7 @@ bool translate_movq2dq(IR1_INST *pir1)
     IR1_OPND *dest = ir1_get_opnd(pir1, 0);
     IR1_OPND *src = ir1_get_opnd(pir1, 1);
     lsassert(ir1_opnd_is_xmm(ir1_get_opnd(pir1, 0)));
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvpickve_d(ra_alloc_xmm(ir1_opnd_base_reg_num(dest)),
                       ra_alloc_mmx(ir1_opnd_base_reg_num(src)), 0);
     } else {
@@ -196,7 +196,7 @@ bool translate_maskmovq(IR1_INST *pir1)
 bool translate_maskmovdqu(IR1_INST *pir1)
 {
 #ifdef CONFIG_LATX_AVX_OPT
-    if (!option_enable_lasx &&
+    if (!latx_translation_enable_lasx() &&
         ir1_opcode(pir1) == dt_X86_INS_VMASKMOVDQU) {
         return translate_maskmovdqu_lsx(pir1);
     }
@@ -535,7 +535,7 @@ bool translate_movsd(IR1_INST *pir1)
             } else {
                 IR2_OPND temp = ra_alloc_ftemp();
                 la_fld_d(temp, mem, offset);
-                if (option_enable_lasx) {
+                if (latx_translation_enable_lasx()) {
                     la_xvpickve_d(first_dest, temp, 0);
                 } else {
                     la_vandi_b(first_dest, first_dest, 0);
@@ -557,7 +557,7 @@ bool translate_movsd(IR1_INST *pir1)
             } else {
                 IR2_OPND temp = ra_alloc_ftemp();
                 la_fld_d(temp, mem, offset);
-                if (option_enable_lasx) {
+                if (latx_translation_enable_lasx()) {
                     la_xvpickve_d(second_dest, temp, 0);
                 } else {
                     la_vandi_b(second_dest, second_dest, 0);
@@ -591,7 +591,7 @@ bool translate_movsd(IR1_INST *pir1)
             load_freg_from_ir1_2(dest_opnd, src, IS_INTEGER);
         } else{
             IR2_OPND temp = load_freg_from_ir1_1(src, false, IS_INTEGER);
-            if (option_enable_lasx) {
+            if (latx_translation_enable_lasx()) {
                 la_xvpickve_d(ra_alloc_xmm(ir1_opnd_base_reg_num(dest)), temp, 0);
             } else {
                 la_vandi_b(ra_alloc_xmm(ir1_opnd_base_reg_num(dest)),
@@ -606,7 +606,7 @@ bool translate_movsd(IR1_INST *pir1)
         if (ir1_opnd_base_reg_num(dest) == ir1_opnd_base_reg_num(src)) {
             return true;
         } else {
-            if (option_enable_lasx) {
+            if (latx_translation_enable_lasx()) {
                 la_xvinsve0_d(ra_alloc_xmm(ir1_opnd_base_reg_num(dest)),
                               ra_alloc_xmm(ir1_opnd_base_reg_num(src)), 0);
             } else {
@@ -631,7 +631,7 @@ bool translate_movss(IR1_INST *pir1)
         }
         IR2_OPND temp = load_freg_from_ir1_1(src, false, IS_INTEGER);
         IR2_OPND xmm_dest = ra_alloc_xmm(ir1_opnd_base_reg_num(dest));
-        if(option_enable_lasx) {
+        if(latx_translation_enable_lasx()) {
             la_xvpickve_w(xmm_dest, temp, 0);
         } else {
             la_vandi_b(xmm_dest, xmm_dest, 0);
@@ -646,7 +646,7 @@ bool translate_movss(IR1_INST *pir1)
         if (ir1_opnd_base_reg_num(dest) == ir1_opnd_base_reg_num(src)) {
             return true;
         } else {
-            if (option_enable_lasx) {
+            if (latx_translation_enable_lasx()) {
                 la_xvinsve0_w(ra_alloc_xmm(ir1_opnd_base_reg_num(dest)),
                               ra_alloc_xmm(ir1_opnd_base_reg_num(src)), 0);
             } else {
@@ -745,7 +745,7 @@ bool translate_movddup(IR1_INST *pir1)
     IR2_OPND src_lo =
         load_freg128_from_ir1(ir1_get_opnd(pir1, 1));
     IR2_OPND dest = load_freg128_from_ir1(ir1_get_opnd(pir1, 0));
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         la_xvreplve0_d(dest, src_lo);
     } else {
         la_vreplvei_d(dest, src_lo, 0);

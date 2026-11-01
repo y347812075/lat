@@ -2026,7 +2026,7 @@ bool ir1_translate(IR1_INST *ir1)
     /*sse instructions need to reserve h128 bit of ymm\
         if support avx instructions*/
     IR2_OPND temp = ir2_opnd_new_none();
-    if (option_lative && option_enable_lasx && ir1_need_reserve_h128(ir1)) {
+    if (option_lative && latx_translation_enable_lasx() && ir1_need_reserve_h128(ir1)) {
         temp = save_h128_of_ymm(ir1);
     }
 
@@ -2066,7 +2066,7 @@ bool ir1_translate(IR1_INST *ir1)
     }
 
     /*restore h128 bit of ymm after translating sse instructions*/
-    if (option_lative && option_enable_lasx && temp._type != IR2_OPND_NONE) {
+    if (option_lative && latx_translation_enable_lasx() && temp._type != IR2_OPND_NONE) {
         restore_h128_of_ymm(ir1, temp);
     }
 
@@ -4098,7 +4098,7 @@ void tr_save_xmm_to_env(uint8 xmm_to_save)
 #ifndef TARGET_X86_64
     for (int i = 0; i < 8; i++) {
         if (BITS_ARE_SET(xmm_to_save, 1 << i)) {
-            if (option_enable_lasx) {
+            if (latx_translation_enable_lasx()) {
                 la_xvst(ra_alloc_xmm(i),
                                      env_ir2_opnd, lsenv_offset_of_xmm(lsenv, i));
             } else {
@@ -4113,7 +4113,7 @@ void tr_save_xmm_to_env(uint8 xmm_to_save)
     la_addi_d(tmp_env_opnd, env_ir2_opnd, 0x7f0);
     for (int i = 0; i < 8; i++) {
         if (BITS_ARE_SET(xmm_to_save, 1 << i)) {
-            if (option_enable_lasx) {
+            if (latx_translation_enable_lasx()) {
                 la_xvst(ra_alloc_xmm(i),
                                      tmp_env_opnd, lsenv_offset_of_xmm(lsenv, i) - 0x7f0);
             } else {
@@ -4131,7 +4131,7 @@ void tr_load_xmm_from_env(uint8 xmm_to_load)
 #ifndef TARGET_X86_64
     for (int i = 0; i < 8; i++) {
         if (BITS_ARE_SET(xmm_to_load, 1 << i)) {
-            if (option_enable_lasx) {
+            if (latx_translation_enable_lasx()) {
                 la_xvld(ra_alloc_xmm(i), env_ir2_opnd, lsenv_offset_of_xmm(lsenv, i));
             } else {
                 la_vld(ra_alloc_xmm(i), env_ir2_opnd, lsenv_offset_of_xmm(lsenv, i));
@@ -4143,7 +4143,7 @@ void tr_load_xmm_from_env(uint8 xmm_to_load)
     la_addi_d(tmp_env_opnd, env_ir2_opnd, 0x7f0);
     for (int i = 0; i < 8; i++) {
         if (BITS_ARE_SET(xmm_to_load, 1 << i)) {
-            if (option_enable_lasx) {
+            if (latx_translation_enable_lasx()) {
                 la_xvld(ra_alloc_xmm(i), tmp_env_opnd,
                                      lsenv_offset_of_xmm(lsenv, i) - 0x7f0);
             } else {
@@ -4164,7 +4164,7 @@ void tr_save_xmm64_to_env(uint8 xmm_to_save)
     la_addi_d(tmp_env_opnd, env_ir2_opnd, 0x7f0);
     for (int i = 0; i < 8; i++) {
         if (BITS_ARE_SET(xmm_to_save, 1 << i)) {
-            if (option_enable_lasx) {
+            if (latx_translation_enable_lasx()) {
                 la_xvst(ra_alloc_xmm(i + 8), tmp_env_opnd,
                     lsenv_offset_of_xmm(lsenv, i + 8) - 0x7f0);
             } else {
@@ -4183,7 +4183,7 @@ void tr_load_xmm64_from_env(uint8 xmm_to_load)
     la_addi_d(tmp_env_opnd, env_ir2_opnd, 0x7f0);
     for (int i = 0; i < 8; i++) {
         if (BITS_ARE_SET(xmm_to_load, 1 << i)) {
-            if (option_enable_lasx) {
+            if (latx_translation_enable_lasx()) {
                 la_xvld(ra_alloc_xmm(i + 8), tmp_env_opnd,
                     lsenv_offset_of_xmm(lsenv, i + 8) - 0x7f0);
             } else {
@@ -4246,7 +4246,7 @@ static void tr_save_ymm_to_env_lsx(uint16 ymm_to_save)
 
 void tr_save_ymm_to_env(uint16 ymm_to_save)
 {
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         tr_save_ymm_to_env_lsx(ymm_to_save);
         return;
     }
@@ -4260,7 +4260,7 @@ void tr_save_ymm_to_env(uint16 ymm_to_save)
 
 void tr_load_ymm_high_from_env(uint16 ymm_to_load)
 {
-    if (option_enable_lasx) {
+    if (latx_translation_enable_lasx()) {
         return;
     }
 
@@ -4324,7 +4324,7 @@ void tr_save_registers_to_env(uint8 gpr_to_save, uint8 fpr_to_save,
     ra_free_temp(mode_fpu);
 
     /* 3. XMM */
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         /* LSX keeps YMM high halves in ymmh_regs instead of host registers. */
         tr_save_ymm_to_env(xmm_to_save);
     } else {
@@ -4380,7 +4380,7 @@ void tr_load_registers_from_env(uint8 gpr_to_load, uint8 fpr_to_load,
 
     /* 3. XMM */
     tr_load_xmm_from_env(xmm_to_load);
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         tr_load_ymm_high_from_env(xmm_to_load);
     }
 
@@ -4442,7 +4442,7 @@ void tr_save_x64_8_registers_to_env(uint8 gpr_to_save, uint8 xmm_to_save)
                               lsenv_offset_of_gpr(lsenv, i + 8));
         }
     }
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         tr_save_ymm_to_env((uint16_t)xmm_to_save << 8);
     } else {
         tr_save_xmm64_to_env(xmm_to_save);
@@ -4460,7 +4460,7 @@ void tr_load_x64_8_registers_from_env(uint8 gpr_to_load, uint8 xmm_to_load)
         }
     }
     tr_load_xmm64_from_env(xmm_to_load);
-    if (!option_enable_lasx) {
+    if (!latx_translation_enable_lasx()) {
         tr_load_ymm_high_from_env((uint16_t)xmm_to_load << 8);
     }
 }
@@ -5087,7 +5087,7 @@ void smc_store_helper_restore_cpu_state(void *_env)
     }
 
     for (i = 0; i < nb_xmm_regs; i++) {
-        if (option_enable_lasx) {
+        if (latx_translation_enable_lasx()) {
             __vst256_native_vreg(&(env->xmm_regs[i].ZMM_Q(0)), i);
         } else {
             __vst128_native_vreg(&(env->xmm_regs[i].ZMM_Q(0)), i);
