@@ -34,7 +34,9 @@ LAT_LD_PREFIX="$rootfs" \
   "$work/plugin.tbset" >/dev/null
 plugin_sha=$(sha256sum "$plugin" | awk '{print $1}')
 cp "$work/plugin.so" "$work/cache/$plugin_sha.so"
-printf '{"version":2,"module":"%s.so"}\n' "$plugin_sha" \
+codegen_id=$($latc build-id)
+printf '{"version":2,"module":"%s.so","native":"","tbset":"","source_sha256":"%s","codegen_id":"%s","published_sequence":1}\n' \
+  "$plugin_sha" "$plugin_sha" "$codegen_id" \
   >"$work/cache/$plugin_sha.current"
 chmod 444 "$work/cache/$plugin_sha.current"
 

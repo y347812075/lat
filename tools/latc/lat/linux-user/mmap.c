@@ -1261,7 +1261,6 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
     if (shadow_fd != -1) {
         close(shadow_fd);
     }
-    mmap_unlock();
 #if defined(CONFIG_LATX) && defined(TARGET_X86_64)
     if (aot_v2_fd >= 0) {
         if (target_prot & PROT_WRITE) {
@@ -1271,6 +1270,10 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
                                   aot_v2_offset);
         }
     }
+#endif
+    mmap_unlock();
+#if defined(CONFIG_LATX) && defined(TARGET_X86_64)
+    latc_aot_v2_drain_mmaps();
 #endif
     return start;
 fail:

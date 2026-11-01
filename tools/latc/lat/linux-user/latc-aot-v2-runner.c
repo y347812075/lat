@@ -2020,6 +2020,28 @@ static void remove_source_mappings_locked(uint64_t guest_start,
     }
 }
 
+static void remove_pending_mappings_locked(uint64_t guest_start,
+                                           uint64_t guest_end)
+{
+    LatAotV2PendingMapping **link = &pending_mapping_head;
+    while (*link) {
+        LatAotV2PendingMapping *pending = *link;
+        uint64_t end = pending->guest_start + pending->mapping_size;
+        if (guest_start < end && guest_end > pending->guest_start) {
+            *link = pending->next;
+            close(pending->fd);
+            g_free(pending);
+        } else {
+            link = &pending->next;
+        }
+    }
+    pending_mapping_tail = link;
+    if (!pending_mapping_head) {
+        atomic_store_explicit(&pending_key_discovery, false,
+                              memory_order_release);
+    }
+}
+
 static uint32_t instance_exec_range_overlap_count(
     const LatAotModuleInstanceV2 *instance, uint64_t guest_start,
     uint64_t guest_end)
@@ -2056,6 +2078,7 @@ bool latc_aot_v2_invalidate_range(CPUState *cpu, uint64_t guest_start,
     }
     if (reason != LATC_AOT_V2_INVALIDATE_CODE_WRITE &&
         reason != LATC_AOT_V2_INVALIDATE_PROTECTION) {
+        remove_pending_mappings_locked(guest_start, guest_end);
         remove_source_mappings_locked(guest_start, guest_end);
     }
     size_t deactivated = 0;
