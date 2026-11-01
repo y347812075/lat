@@ -8231,8 +8231,10 @@ static void test_unknown_task_release(bool executor, bool managed)
                                           LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error)));
         close(task_fd);
         g_free(native);
+        assert(!latcd_tombstone_delete(root, name, error, sizeof(error)));
+        assert(access(path, F_OK) && errno == ENOENT);
     }
-    if (managed) {
+    if (managed && !executor) {
         assert(!unlink(state_path));
         fd = open(path, O_RDONLY | O_CLOEXEC);
         assert(fd >= 0);
