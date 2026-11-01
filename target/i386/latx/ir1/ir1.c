@@ -1814,7 +1814,7 @@ bool ir1_is_tb_ending(IR1_INST *ir1)
         return true;
     }
 #endif
-    if (option_anonym &&
+    if (latx_translation_anonym() &&
         (ir1_opcode(ir1) == dt_X86_INS_POPF ||
          ir1_opcode(ir1) == dt_X86_INS_POPFD ||
          ir1_opcode(ir1) == dt_X86_INS_POPFQ)) {

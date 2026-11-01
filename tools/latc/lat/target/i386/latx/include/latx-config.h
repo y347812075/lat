@@ -13,6 +13,8 @@
 #include "latx-disassemble-trace.h"
 #include "lat-translation-config.h"
 
+int latx_translation_anonym(void);
+
 extern void *interpret_glue;
 extern ADDR context_switch_bt_to_native;
 #if defined(CONFIG_LATX_KZT)

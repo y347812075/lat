@@ -3234,7 +3234,7 @@ void tr_generate_exit_tb(IR1_INST *branch, int succ_id)
             tb->first_jmp_align = ir2_opnd_label_id(&label_first_jmp_align);
         }
 direct_jmp:
-        if (option_anonym && (tb->flags & HF_TF_MASK)) {
+        if (latx_translation_anonym() && (tb->flags & HF_TF_MASK)) {
             target_ulong call_offset __attribute__((unused)) =
                     aot_get_call_offset(succ_x86_addr);
 
@@ -3314,7 +3314,7 @@ direct_jmp:
     case dt_X86_INS_IRETD:
     case dt_X86_INS_IRETQ:
 indirect_jmp:
-        if (option_anonym && (tb->flags & HF_TF_MASK)) {
+        if (latx_translation_anonym() && (tb->flags & HF_TF_MASK)) {
             tr_generate_single_step_exit(succ_x86_addr_opnd);
             break;
         }

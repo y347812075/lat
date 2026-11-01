@@ -56,7 +56,7 @@ bool translate_popf(IR1_INST *pir1)
     ra_free_temp(eflags_temp_opnd);
 
     la_addi_addrx(esp_opnd, esp_opnd, sp_step);
-    if (option_anonym) {
+    if (latx_translation_anonym()) {
         tr_generate_exit_tb_to_next(pir1);
     }
     return true;

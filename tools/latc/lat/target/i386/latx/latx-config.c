@@ -99,7 +99,7 @@ int target_latx_host(CPUArchState *env, struct TranslationBlock *tb,
     TCGProfile *prof = &tcg_ctx->prof;
     int64_t ti = profile_getclock();
 #endif
-    if (option_anonym && (tb->flags & HF_TF_MASK)) {
+    if (latx_translation_anonym() && (tb->flags & HF_TF_MASK)) {
         max_insns = 1;
     }
     bool is_tbbridge = false;
