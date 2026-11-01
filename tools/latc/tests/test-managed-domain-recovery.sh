@@ -66,6 +66,32 @@ if LATCD_TEST_RECOVERY_ONCE=1 sh -c '
 fi
 rm "$bad_task"
 rmdir "$scope/worker/$id" "$scope/worker/manager" "$scope/worker"
+mkdir "$scope/worker" /work/unbound-cache /work/unbound-cache/.tmp
+chmod 700 /work/unbound-cache /work/unbound-cache/.tmp
+printf input > /work/unbound-cache/.tmp/input
+if LATCD_TEST_KILL_AFTER_DOMAIN_CREATE=1 sh -c '
+    printf "%s\n" "$$" > "$1/cgroup.procs"; shift
+    exec "$@"
+' sh "$scope/worker" "$binary" --test-managed-compiler /work/unbound-cache "$scope/worker"; then
+    echo 'expected crash after domain creation' >&2; exit 1
+fi
+state=$(find /work/unbound-cache/.gc/managed-task-state -name '*.ini')
+grep -qx 'state=DELEGATION_BOUND' "$state"
+grep -qx "boot=$(cat /proc/sys/kernel/random/boot_id)" "$state"
+grep -qx "delegation_device=$(stat -c %d "$scope/worker")" "$state"
+grep -qx "delegation_inode=$(stat -c %i "$scope/worker")" "$state"
+id=$(basename "$state" .ini)
+test -d "$scope/worker/$id"
+if LATCD_TEST_RECOVERY_ONCE=1 sh -c '
+    printf "%s\n" "$$" > "$1/cgroup.procs"; shift
+    exec "$@"
+' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/unbound-cache "$scope/worker"; then
+    echo 'unbound domain was accepted during recovery' >&2; exit 1
+fi
+grep -qx 'state=DELEGATION_BOUND' "$state"
+test -f "/work/unbound-cache/.gc/compiler-budgets/$id.ini"
+test ! -e "/work/unbound-cache/.gc/compiler-releases/$id.ini"
+rmdir "$scope/worker/$id" "$scope/worker/manager" "$scope/worker"
 mkdir "$scope/worker" /work/compile-cache /work/compile-cache/.tmp
 chmod 700 /work/compile-cache /work/compile-cache/.tmp
 printf input > /work/compile-cache/.tmp/input

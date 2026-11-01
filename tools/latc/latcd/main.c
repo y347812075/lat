@@ -3325,16 +3325,23 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         char *boot = NULL;
         gsize size = 0;
         if (worker_delegation_fd < 0 || fstat(worker_delegation_fd, &domain.delegation) ||
-            (domain_fd = latcd_worker_domain_create(worker_delegation_fd, task_id, &domain.domain)) < 0 ||
-            latcd_worker_domain_set_limits(domain_fd, config->address_space_limit, 32) ||
             !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, &size, NULL)) {
             pin_result = -1;
         } else {
             g_strchomp(boot);
             g_strlcpy(domain.boot, boot, sizeof(domain.boot));
             if (latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
+                                          LATCD_MANAGED_DELEGATION_BOUND, error, error_size) ||
+                (domain_fd = latcd_worker_domain_create(worker_delegation_fd, task_id, &domain.domain)) < 0 ||
+                latcd_worker_domain_set_limits(domain_fd, config->address_space_limit, 32)) {
+                pin_result = -1;
+            }
+#ifdef LATCD_GC_TIMER_TEST
+            if (!pin_result && getenv("LATCD_TEST_KILL_AFTER_DOMAIN_CREATE")) raise(SIGKILL);
+#endif
+            if (!pin_result && (latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
                                           LATCD_MANAGED_BOUND, error, error_size) ||
-                socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, gate)) pin_result = -1;
+                socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, gate))) pin_result = -1;
         }
         g_free(boot);
     }
@@ -8206,6 +8213,12 @@ static int test_managed_task_record(const char *root)
         LatcdManagedDomain domain = {0};
         g_strlcpy(domain.boot, "12345678-1234-1234-1234-123456789abc", sizeof(domain.boot));
         domain.delegation.st_ino = 2; domain.domain.st_ino = 4;
+        if (latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_DELEGATION_BOUND, error, sizeof(error)))
+            goto out;
+        domain.delegation.st_ino = 3;
+        if (!latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_BOUND, error, sizeof(error)))
+            goto out;
+        domain.delegation.st_ino = 2;
         if (latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_BOUND, error, sizeof(error)) ||
             latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_AUTHORIZED, error, sizeof(error)) ||
             latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_DOMAIN_EMPTY, error, sizeof(error)) ||
