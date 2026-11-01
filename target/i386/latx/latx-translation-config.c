@@ -79,6 +79,17 @@ int latx_translation_host_scq(void)
     return native_replay ? native_replay_config->values[LAT_CONFIG_HOST_SCQ] : !!have_scq();
 }
 
+#define IMM_ACCESSOR(name, field, option) \
+    int latx_translation_##name(void) \
+    { \
+        return native_replay ? native_replay_config->values[LAT_CONFIG_##field] : option; \
+    }
+IMM_ACCESSOR(imm_reg, IMM_REG, option_imm_reg)
+IMM_ACCESSOR(imm_rip, IMM_RIP, option_imm_rip)
+IMM_ACCESSOR(imm_precache, IMM_PRECACHE, option_imm_precache)
+IMM_ACCESSOR(imm_complex, IMM_COMPLEX, option_imm_complex)
+#undef IMM_ACCESSOR
+
 void latx_translation_config_set_native_replay(const LatTranslationConfig *config)
 {
     char error[128];

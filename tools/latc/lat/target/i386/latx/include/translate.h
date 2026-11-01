@@ -1517,6 +1517,10 @@ int latx_translation_vpaes(void);
 int latx_translation_fast_atomic(void);
 int latx_translation_enable_lasx(void);
 int latx_translation_host_scq(void);
+int latx_translation_imm_reg(void);
+int latx_translation_imm_rip(void);
+int latx_translation_imm_precache(void);
+int latx_translation_imm_complex(void);
 
 void tr_disasm(struct TranslationBlock *tb, int max_insns);
 void etb_add_succ(void* etb,int depth);

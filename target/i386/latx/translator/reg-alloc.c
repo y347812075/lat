@@ -310,7 +310,7 @@ IR2_OPND ra_alloc_itemp(void)
         abort();
     }
 #ifdef CONFIG_LATX_IMM_REG
-    if (option_imm_reg) {
+    if (latx_translation_imm_reg()) {
         int itemp_num = reg_itemp_reverse_map[itemp_reg_num];
         if (imm_cache_is_imm_itemp(itemp_num)) {
             // need free
@@ -372,7 +372,7 @@ void free_imm_reg_all(void)
 void imm_cache_free_temp_helper(IR2_OPND dest_op)
 {
     imm_log("[free_temp_helper]call\n");
-    if (!option_imm_reg ||
+    if (!latx_translation_imm_reg() ||
         lsenv->tr_data->imm_cache->itemp_allocated == true) {
         imm_log("[free_temp_helper]free_temp_auto\n");
         ra_free_temp_auto(dest_op);

@@ -2546,13 +2546,13 @@ int tr_ir2_generate(struct TranslationBlock *tb)
      */
 
     IMM_CACHE *imm_cache = lsenv->tr_data->imm_cache;
-    if (option_imm_reg) {
+    if (latx_translation_imm_reg()) {
         imm_log("======================================\n");
         imm_log("||[imm_cache init] TB:[0x" TARGET_FMT_lx "]||\n", tb->pc);
         imm_log("======================================\n");
 
         imm_cache->curr_pc = tb->pc;
-        if (!option_imm_precache) {
+        if (!latx_translation_imm_precache()) {
             imm_cache_init(imm_cache, CACHE_DEFAULT_CAPACITY);
         } else {
             imm_cache_init(imm_cache, ir1_nr);
@@ -2685,7 +2685,7 @@ int tr_ir2_generate(struct TranslationBlock *tb)
         }
 
 #ifdef CONFIG_LATX_IMM_REG
-        if (option_imm_reg) {
+        if (latx_translation_imm_reg()) {
             imm_cache_update_ir1_usage(imm_cache, pir1, i);
             // log translated ir2 if ir1 is opted by imm_reg
             imm_cache_print_tr_ir2_if_opted();
@@ -4352,7 +4352,7 @@ void tr_save_registers_to_env(uint8 gpr_to_save, uint8 fpr_to_save,
                           lsenv_offset_of_eflags(lsenv));
 #ifdef CONFIG_LATX_IMM_REG
     /* clear imm reg, the helper do not save this reg */
-    if (option_imm_reg)
+    if (latx_translation_imm_reg())
         free_imm_reg_all();
 #endif
 }
@@ -4426,7 +4426,7 @@ void tr_load_registers_from_env(uint8 gpr_to_load, uint8 fpr_to_load,
 
 #ifdef CONFIG_LATX_IMM_REG
     /* clear imm reg, the helper do not save this reg */
-    if (option_imm_reg)
+    if (latx_translation_imm_reg())
         free_imm_reg_all();
 #endif
 }

@@ -228,7 +228,7 @@ static IR2_OPND convert_mem_helper(IR1_OPND *opnd1, IR2_OPND *arg_dest_op,
 
 #ifdef CONFIG_LATX_IMM_REG
         if (dest_need_itmp) {
-            if (!option_imm_reg || !option_imm_rip || cache_skip) {
+            if (!latx_translation_imm_reg() || !latx_translation_imm_rip() || cache_skip) {
                 dest_op = ra_alloc_itemp();
                 imm_cache->itemp_allocated = true;
             } else {
@@ -254,7 +254,7 @@ static IR2_OPND convert_mem_helper(IR1_OPND *opnd1, IR2_OPND *arg_dest_op,
                                 aot_get_call_offset(res.offset);
                             aot_load_guest_addr(dest_op, res.offset,
                                                 LOAD_CALL_TARGET, call_offset);
-                            if (!option_imm_precache) {
+                            if (!latx_translation_imm_precache()) {
                                 fprintf(stderr,
                                         "pre_cache close but hit branch\n");
                                     lsassert(0);
@@ -319,7 +319,7 @@ static IR2_OPND convert_mem_helper(IR1_OPND *opnd1, IR2_OPND *arg_dest_op,
     has_base = ir1_opnd_has_base(opnd1);
 
 #ifdef CONFIG_LATX_IMM_REG
-    if (!option_imm_reg || !option_imm_complex) {
+    if (!latx_translation_imm_reg() || !latx_translation_imm_complex()) {
         cache_skip = true;
     }
     int base = -1;
