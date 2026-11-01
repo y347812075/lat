@@ -146,7 +146,7 @@ int ir2_opnd_is_ftemp(const IR2_OPND *opnd)
 int ir2_opnd_is_imm_reg(const IR2_OPND *opnd)
 {
 #ifdef CONFIG_LATX_IMM_REG
-    if (!option_imm_reg) {
+    if (!latx_translation_imm_reg()) {
         return false;
     }
     int reg_num = ir2_opnd_base_reg_num(opnd);
