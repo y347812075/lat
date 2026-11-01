@@ -23,6 +23,12 @@
 #ifndef LAT_AOT_FIXTURE_STACK_DELTA
 #define LAT_AOT_FIXTURE_STACK_DELTA 0
 #endif
+#ifndef LAT_AOT_FIXTURE_CONFIG
+#define LAT_AOT_FIXTURE_CONFIG 0
+#endif
+#ifndef LAT_AOT_FIXTURE_CONFIG_BYTE
+#define LAT_AOT_FIXTURE_CONFIG_BYTE 0x44
+#endif
 
 extern uint64_t lat_aot_fixture_entry(void);
 extern const uint8_t lat_aot_fixture_text_end[];
@@ -31,20 +37,23 @@ typedef struct LatAotElfNoteFixtureV2 {
     Elf64_Nhdr header;
     char name[4];
     LatAotNoteV2 description;
+#if LAT_AOT_FIXTURE_CONFIG
+    LatAotConfigIdentityV2 config;
+#endif
 } LatAotElfNoteFixtureV2;
 
 __attribute__((section(".note.lat.aot"), aligned(4), used))
 static const LatAotElfNoteFixtureV2 fixture_note = {
     .header = {
         .n_namesz = sizeof(LAT_AOT_V2_NOTE_NAME),
-        .n_descsz = sizeof(LatAotNoteV2),
+        .n_descsz = LAT_AOT_FIXTURE_CONFIG ? sizeof(LatAotConfigNoteV2) : sizeof(LatAotNoteV2),
         .n_type = LAT_AOT_V2_NOTE_TYPE,
     },
     .name = LAT_AOT_V2_NOTE_NAME,
     .description = {
         .magic = LAT_AOT_MAGIC_BYTES,
         .abi_version = LAT_AOT_V2_ABI_VERSION,
-        .struct_size = sizeof(LatAotNoteV2),
+        .struct_size = LAT_AOT_FIXTURE_CONFIG ? sizeof(LatAotConfigNoteV2) : sizeof(LatAotNoteV2),
         .module_flags = LAT_AOT_MODULE_PARTIAL |
                         LAT_AOT_MODULE_READONLY_TEXT |
                         LAT_AOT_MODULE_PRECISE_PC_MAP |
@@ -54,6 +63,10 @@ static const LatAotElfNoteFixtureV2 fixture_note = {
         .codegen_id = BYTE_32(0x22),
         .tbset_digest = BYTE_32(0x33),
     },
+#if LAT_AOT_FIXTURE_CONFIG
+    .config = { .revision = LAT_AOT_CONFIG_NOTE_REVISION, .schema = 1,
+                .domain = 1, .digest = BYTE_32(0x44) },
+#endif
 };
 
 __attribute__((section(".rodata.lat.map"), used))
@@ -81,10 +94,14 @@ static const LatAotTbV2 fixture_tbs[] = {
 };
 
 __attribute__((visibility("default"), section(".data.rel.ro.lat.module"), used))
+#if LAT_AOT_FIXTURE_CONFIG
+const LatAotConfigModuleV2 lat_aot_module_v2 = { .base = {
+#else
 const LatAotModuleV2 lat_aot_module_v2 = {
+#endif
     .magic = LAT_AOT_MAGIC_BYTES,
     .abi_version = LAT_AOT_V2_ABI_VERSION,
-    .struct_size = sizeof(LatAotModuleV2),
+    .struct_size = LAT_AOT_FIXTURE_CONFIG ? sizeof(LatAotConfigModuleV2) : sizeof(LatAotModuleV2),
     .module_flags = LAT_AOT_MODULE_PARTIAL |
                     LAT_AOT_MODULE_READONLY_TEXT |
                     LAT_AOT_MODULE_PRECISE_PC_MAP |
@@ -99,4 +116,8 @@ const LatAotModuleV2 lat_aot_module_v2 = {
     .tb_end = fixture_tbs + 1,
     .pc_map_begin = fixture_pc_maps,
     .pc_map_end = fixture_pc_maps + 1,
+#if LAT_AOT_FIXTURE_CONFIG
+    }, .config = { .revision = LAT_AOT_CONFIG_NOTE_REVISION, .schema = 1,
+                   .domain = 1, .digest = BYTE_32(LAT_AOT_FIXTURE_CONFIG_BYTE) },
+#endif
 };

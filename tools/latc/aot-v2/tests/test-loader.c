@@ -149,6 +149,53 @@ int main(int argc, char **argv)
 {
     if (argc >= 2 && (!strcmp(argv[1], "--inherited-holder") ||
                       !strcmp(argv[1], "--native-holder"))) return exec_holder(argc, argv);
+    if (argc == 4 && !strcmp(argv[1], "--config")) {
+        LatAotExpectedV2 expected = { .available_features = LAT_AOT_V2_REQUIRED_BASE_FEATURES };
+        LatAotConfigIdentityV2 config = { .revision = LAT_AOT_CONFIG_NOTE_REVISION,
+                                         .schema = 1, .domain = 1 };
+        LatAotLoadedModuleV2 loaded;
+        char error[256];
+        fill(0x11, expected.source_sha256);
+        fill(0x22, expected.codegen_id);
+        fill(0x44, config.digest);
+        int fd = lat_aot_v2_module_capture(argv[2], error, sizeof(error));
+        if (fd < 0 || lat_aot_v2_module_load_config_fd(fd, &expected, &config,
+                                                        &loaded, error, sizeof(error))) {
+            fprintf(stderr, "config load: %s\n", error);
+            return 1;
+        }
+        int ready[2], release[2];
+        if (pipe(ready) || pipe(release)) return 1;
+        pid_t child = fork();
+        if (child < 0) return 1;
+        if (!child) {
+            char pin[32], out[32], in[32];
+            close(ready[0]); close(release[1]);
+            snprintf(pin, sizeof(pin), "%d", loaded.backing_fd);
+            snprintf(out, sizeof(out), "%d", ready[1]);
+            snprintf(in, sizeof(in), "%d", release[0]);
+            execl("/proc/self/exe", "test-loader", "--inherited-holder", pin, out, in, (char *)NULL);
+            _exit(1);
+        }
+        close(ready[1]); close(release[0]);
+        char byte;
+        int inherited_ok = read(ready[0], &byte, 1) == 1;
+        if (inherited_ok) inherited_ok = write(release[1], &byte, 1) == 1;
+        int status;
+        if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+            WEXITSTATUS(status)) inherited_ok = 0;
+        close(ready[0]); close(release[1]);
+        if (!inherited_ok) return 1;
+        if (dlclose(loaded.dl_handle) ||
+            lat_aot_v2_cache_close_fd(loaded.backing_fd, true, error, sizeof(error))) return 1;
+        fd = lat_aot_v2_module_capture(argv[3], error, sizeof(error));
+        if (fd < 0 || !lat_aot_v2_module_load_config_fd(fd, &expected, &config,
+                                                         &loaded, error, sizeof(error))) return 1;
+        fd = lat_aot_v2_module_capture(argv[2], error, sizeof(error));
+        if (fd < 0 || !lat_aot_v2_module_load_fd(fd, &expected, &loaded, error, sizeof(error))) return 1;
+        puts("test-aot-v2-config-loader: PASS");
+        return 0;
+    }
     int expect_reject = argc == 3 && !strcmp(argv[1], "--expect-reject");
     int expect_pc_reject =
         argc == 3 && !strcmp(argv[1], "--expect-pc-map-reject");

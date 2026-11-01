@@ -66,7 +66,8 @@ static bool inherited_aot_fd(int fd, struct stat *status)
                 return false;
             if (note.n_type == LAT_AOT_V2_NOTE_TYPE &&
                 note.n_namesz == sizeof(LAT_AOT_V2_NOTE_NAME) &&
-                note.n_descsz == sizeof(LatAotNoteV2)) {
+                (note.n_descsz == sizeof(LatAotNoteV2) ||
+                 note.n_descsz == sizeof(LatAotConfigNoteV2))) {
                 char name[sizeof(LAT_AOT_V2_NOTE_NAME)];
                 LatAotNoteV2 value;
                 if (pread(fd, name, sizeof(name), phdr.p_offset + offset) == sizeof(name) &&
@@ -74,7 +75,7 @@ static bool inherited_aot_fd(int fd, struct stat *status)
                     pread(fd, &value, sizeof(value), phdr.p_offset + offset + names) == sizeof(value) &&
                     lat_aot_v2_magic_valid(value.magic) &&
                     value.abi_version == LAT_AOT_V2_ABI_VERSION &&
-                    value.struct_size == sizeof(value)) return true;
+                    value.struct_size == note.n_descsz) return true;
             }
             offset += names + desc;
         }
@@ -119,11 +120,12 @@ int lat_aot_v2_module_retain_inherited(uint64_t *count, uint64_t *bytes,
 
 static int descriptor_matches_note(const LatAotModuleV2 *descriptor,
                                    const LatAotNoteV2 *note,
+                                   size_t descriptor_size,
                                    char *error, size_t error_size)
 {
     if (!descriptor || !lat_aot_v2_magic_valid(descriptor->magic) ||
         descriptor->abi_version != LAT_AOT_V2_ABI_VERSION ||
-        descriptor->struct_size != sizeof(*descriptor)) {
+        descriptor->struct_size != descriptor_size) {
         return fail(error, error_size, "AOT descriptor ABI is invalid");
     }
     if (descriptor->module_flags != note->module_flags ||
@@ -292,9 +294,10 @@ int lat_aot_v2_module_capture(const char *path, char *error, size_t error_size)
     return fd;
 }
 
-int lat_aot_v2_module_load_fd(int fd, const LatAotExpectedV2 *expected,
-                              LatAotLoadedModuleV2 *module,
-                              char *error, size_t error_size)
+static int module_load_fd(int fd, const LatAotExpectedV2 *expected,
+                          const LatAotConfigIdentityV2 *config,
+                          LatAotLoadedModuleV2 *module,
+                          char *error, size_t error_size)
 {
     if (fd < 0 || !expected || !module) {
         if (fd >= 0) lat_aot_v2_cache_close_fd(fd, true, NULL, 0);
@@ -305,12 +308,16 @@ int lat_aot_v2_module_load_fd(int fd, const LatAotExpectedV2 *expected,
     module->backing_fd = -1;
     lat_aot_v2_internal_fd_allocation_lock();
     LatAotNoteV2 note;
-    if (lat_aot_v2_elf_validate_fd(fd, expected, &note,
-                                   error, error_size)) {
+    LatAotConfigNoteV2 config_note;
+    int invalid = config ? lat_aot_v2_elf_validate_config_fd(fd, expected, config,
+                       &config_note, error, error_size) :
+        lat_aot_v2_elf_validate_fd(fd, expected, &note, error, error_size);
+    if (invalid) {
         lat_aot_v2_internal_fd_unregister_close_locked(fd);
         lat_aot_v2_internal_fd_unlock();
         return -1;
     }
+    if (config) note = config_note.base;
     char fd_path[64];
     int length = snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
     if (length < 0 || (size_t)length >= sizeof(fd_path)) {
@@ -332,12 +339,27 @@ int lat_aot_v2_module_load_fd(int fd, const LatAotExpectedV2 *expected,
     const LatAotModuleV2 *descriptor =
         dlsym(handle, LAT_AOT_V2_DESCRIPTOR_SYMBOL);
     dl_error = dlerror();
-    if (dl_error || descriptor_matches_note(descriptor, &note,
+    Dl_info symbol_info;
+    const Elf64_Sym *symbol = NULL;
+    size_t descriptor_size = config ? sizeof(LatAotConfigModuleV2) : sizeof(LatAotModuleV2);
+    if (!dl_error && config &&
+        (!dladdr1(descriptor, &symbol_info, (void **)&symbol, RTLD_DL_SYMENT) ||
+         !symbol || symbol->st_size != descriptor_size))
+        dl_error = "invalid configuration descriptor size";
+    if (dl_error || descriptor_matches_note(descriptor, &note, descriptor_size,
                                             error, error_size)) {
         if (dl_error) {
             fail(error, error_size, "cannot resolve AOT descriptor: %s",
                  dl_error);
         }
+        dlclose(handle);
+        lat_aot_v2_internal_fd_unregister_close_locked(fd);
+        lat_aot_v2_internal_fd_unlock();
+        return -1;
+    }
+    if (config && memcmp(&((const LatAotConfigModuleV2 *)descriptor)->config,
+                         &config_note.config, sizeof(config_note.config))) {
+        fail(error, error_size, "AOT descriptor configuration mismatch");
         dlclose(handle);
         lat_aot_v2_internal_fd_unregister_close_locked(fd);
         lat_aot_v2_internal_fd_unlock();
@@ -349,6 +371,24 @@ int lat_aot_v2_module_load_fd(int fd, const LatAotExpectedV2 *expected,
     module->note = note;
     lat_aot_v2_internal_fd_unlock();
     return 0;
+}
+
+int lat_aot_v2_module_load_fd(int fd, const LatAotExpectedV2 *expected,
+                              LatAotLoadedModuleV2 *module,
+                              char *error, size_t error_size)
+{
+    return module_load_fd(fd, expected, NULL, module, error, error_size);
+}
+
+int lat_aot_v2_module_load_config_fd(int fd, const LatAotExpectedV2 *expected,
+    const LatAotConfigIdentityV2 *config, LatAotLoadedModuleV2 *module,
+    char *error, size_t error_size)
+{
+    if (!config) {
+        if (fd >= 0) lat_aot_v2_cache_close_fd(fd, true, NULL, 0);
+        return fail(error, error_size, "AOT configuration expectation is missing");
+    }
+    return module_load_fd(fd, expected, config, module, error, error_size);
 }
 
 int lat_aot_v2_module_open(const char *path,

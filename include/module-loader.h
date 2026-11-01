@@ -16,6 +16,11 @@ int lat_aot_v2_module_load_fd(int fd, const LatAotExpectedV2 *expected,
                               LatAotLoadedModuleV2 *module,
                               char *error, size_t error_size);
 
+/* Caller must authenticate the configuration; this API only checks identity. */
+int lat_aot_v2_module_load_config_fd(int fd, const LatAotExpectedV2 *expected,
+    const LatAotConfigIdentityV2 *config, LatAotLoadedModuleV2 *module,
+    char *error, size_t error_size);
+
 int lat_aot_v2_module_open(const char *path,
                            const LatAotExpectedV2 *expected,
                            LatAotLoadedModuleV2 *module,

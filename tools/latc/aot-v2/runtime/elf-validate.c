@@ -621,9 +621,10 @@ int lat_aot_v2_elf_validate_config_memory(const void *data, size_t size,
     return validate_memory(data, size, expected, config, NULL, note, error, error_size);
 }
 
-int lat_aot_v2_elf_validate_fd(int fd, const LatAotExpectedV2 *expected,
-                               LatAotNoteV2 *note, char *error,
-                               size_t error_size)
+static int validate_fd(int fd, const LatAotExpectedV2 *expected,
+                       const LatAotConfigIdentityV2 *config,
+                       LatAotNoteV2 *note, LatAotConfigNoteV2 *config_note,
+                       char *error, size_t error_size)
 {
     struct stat status;
     unsigned char *file;
@@ -643,8 +644,23 @@ int lat_aot_v2_elf_validate_fd(int fd, const LatAotExpectedV2 *expected,
     if (file == MAP_FAILED) {
         return reject(error, error_size, "cannot map AOT ELF");
     }
-    int result = lat_aot_v2_elf_validate_memory(file, file_size, expected,
-                                                note, error, error_size);
+    int result = validate_memory(file, file_size, expected, config, note,
+                                 config_note, error, error_size);
     munmap(file, file_size);
     return result;
+}
+
+int lat_aot_v2_elf_validate_fd(int fd, const LatAotExpectedV2 *expected,
+                               LatAotNoteV2 *note, char *error, size_t error_size)
+{
+    return validate_fd(fd, expected, NULL, note, NULL, error, error_size);
+}
+
+int lat_aot_v2_elf_validate_config_fd(int fd, const LatAotExpectedV2 *expected,
+    const LatAotConfigIdentityV2 *config, LatAotConfigNoteV2 *note,
+    char *error, size_t error_size)
+{
+    if (!expected || !config)
+        return reject(error, error_size, "AOT configuration expectation is missing");
+    return validate_fd(fd, expected, config, NULL, note, error, error_size);
 }

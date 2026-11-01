@@ -121,6 +121,11 @@ typedef struct LatAotModuleV2 {
     const LatAotGuestSlotV2 *guest_slot_end;
 } LatAotModuleV2;
 
+typedef struct LatAotConfigModuleV2 {
+    LatAotModuleV2 base;
+    LatAotConfigIdentityV2 config;
+} LatAotConfigModuleV2;
+
 typedef struct LatAotExpectedV2 {
     uint8_t source_sha256[32];
     uint8_t codegen_id[32];
@@ -235,6 +240,8 @@ _Static_assert(sizeof(LatAotGuestSlotV2) == 16,
                "AOT v2 guest slot ABI size changed");
 _Static_assert(sizeof(LatAotModuleV2) == 192,
                "AOT v2 module ABI size changed");
+_Static_assert(sizeof(LatAotConfigModuleV2) == 240,
+               "AOT configuration module size changed");
 _Static_assert(sizeof(LatAotRuntimeTargetsV2) == 520,
                "AOT v2 runtime target ABI size changed");
 

@@ -14,6 +14,9 @@ int lat_aot_v2_elf_validate_memory(const void *data, size_t size,
 int lat_aot_v2_elf_validate_config_memory(const void *data, size_t size,
     const LatAotExpectedV2 *expected, const LatAotConfigIdentityV2 *config,
     LatAotConfigNoteV2 *note, char *error, size_t error_size);
+int lat_aot_v2_elf_validate_config_fd(int fd, const LatAotExpectedV2 *expected,
+    const LatAotConfigIdentityV2 *config, LatAotConfigNoteV2 *note,
+    char *error, size_t error_size);
 
 int lat_aot_v2_elf_validate_fd(int fd, const LatAotExpectedV2 *expected,
                                LatAotNoteV2 *note, char *error,
