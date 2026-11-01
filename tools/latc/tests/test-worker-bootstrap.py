@@ -5,6 +5,7 @@ import socket
 import sys
 
 bootstrap = os.path.abspath(sys.argv[1])
+bwrap = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else '/usr/bin/bwrap'
 parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 pid = os.fork()
 if pid == 0:
@@ -15,7 +16,7 @@ if pid == 0:
     os.dup2(sentinel, 4, inheritable=True)
     os.set_inheritable(3, True)
     os.closerange(5, 256)
-    os.execv('/usr/bin/bwrap', [
+    os.execv(bwrap, [
         'bwrap', '--unshare-all', '--die-with-parent',
         '--ro-bind', '/usr', '/usr', '--symlink', 'usr/bin', '/bin',
         '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib64', '/lib64',
