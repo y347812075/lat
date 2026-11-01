@@ -675,22 +675,6 @@ static void handle_arg_translation_config_native(const char *arg)
     translation_config_export_domain = true;
 }
 
-static bool native_translation_config_domain(void)
-{
-#if defined(CONFIG_LATX_DEBUG) || defined(CONFIG_DEBUG_TCG)
-    return false;
-#else
-#if defined(CONFIG_LATX_KZT)
-    /* Bridge registrations can alter translation independently of the snapshot. */
-    if (option_kzt || wine_option_kzt) return false;
-#endif
-    return !option_real_maps && !option_begin_trace_addr &&
-           !option_end_trace_addr && !imm_skip_pc && !option_softfpu &&
-           !option_jr_ra && !option_anonym && !option_mem_test &&
-           !option_minke_16k_page_check;
-#endif
-}
-
 static int write_translation_config(const LatTranslationConfig *snapshot)
 {
     g_autoptr(GBytes) bytes = NULL;
@@ -796,7 +780,7 @@ static int load_translation_config(void)
             replay_config.values[LAT_CONFIG_ANONYM] ||
             replay_config.values[LAT_CONFIG_MEM_TEST] ||
             replay_config.values[LAT_CONFIG_MINKE_16K_PAGE_CHECK] ||
-            !native_translation_config_domain() ||
+            !latx_translation_config_native_domain() ||
             getenv("LATC_DISABLE_PRETRANSLATE")) {
             fprintf(stderr, "latc: unsupported native configuration replay mode\n");
             return -1;
@@ -2009,7 +1993,7 @@ int main(int argc, char **argv, char **envp)
         }
         latx_translation_config_capture(env, cpu->tcg_cflags, &snapshot);
         if (translation_config_export_domain) {
-            if (!native_translation_config_domain() ||
+            if (!latx_translation_config_native_domain() ||
                 snapshot.guest_abi != LAT_CONFIG_ABI_X86_64 ||
                 snapshot.values[LAT_CONFIG_LEGACY_AOT] != 0 ||
                 snapshot.values[LAT_CONFIG_PARALLEL] != 1) {
@@ -2312,7 +2296,7 @@ int main(int argc, char **argv, char **envp)
     target_cpu_copy_regs(env, regs);
 
 #ifdef CONFIG_LATX
-    if (latc_aot_v2_prepare(env, native_translation_config_domain() &&
+    if (latc_aot_v2_prepare(env, latx_translation_config_native_domain() &&
                             !getenv("LATC_DISABLE_PRETRANSLATE")) &&
         latc_aot_v2_strict_enabled()) {
         exit(EXIT_FAILURE);
@@ -2323,7 +2307,7 @@ int main(int argc, char **argv, char **envp)
         char error[256];
         if (latx_translation_config_verify(env, cpu->tcg_cflags, &replay_config,
                                           error, sizeof(error)) ||
-            !native_translation_config_domain()) {
+            !latx_translation_config_native_domain()) {
             fprintf(stderr, "latc: native replay changed before translation\n");
             exit(EXIT_FAILURE);
         }
@@ -2336,7 +2320,7 @@ int main(int argc, char **argv, char **envp)
         char error[256];
         if (latx_translation_config_verify(env, cpu->tcg_cflags, &replay_config,
                                            error, sizeof(error)) ||
-            !native_translation_config_domain()) {
+            !latx_translation_config_native_domain()) {
             fprintf(stderr, "latc: native replay changed during translation\n");
             exit(EXIT_FAILURE);
         }

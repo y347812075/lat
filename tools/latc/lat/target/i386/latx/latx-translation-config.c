@@ -20,6 +20,25 @@
 
 G_STATIC_ASSERT(FEATURE_WORDS <= LAT_TRANSLATION_CONFIG_FEATURE_LIMIT);
 
+#ifdef CONFIG_LATX_KZT
+extern int wine_option_kzt;
+#endif
+
+bool latx_translation_config_native_domain(void)
+{
+#if defined(CONFIG_LATX_DEBUG) || defined(CONFIG_DEBUG_TCG)
+    return false;
+#else
+#ifdef CONFIG_LATX_KZT
+    if (option_kzt || wine_option_kzt) return false;
+#endif
+    return !option_real_maps && !option_begin_trace_addr &&
+           !option_end_trace_addr && !imm_skip_pc && !option_softfpu &&
+           !option_jr_ra && !option_anonym && !option_mem_test &&
+           !option_minke_16k_page_check;
+#endif
+}
+
 static bool native_replay;
 static uint8_t native_replay_digest[32];
 static GBytes *native_replay_bytes;

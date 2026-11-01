@@ -47,6 +47,7 @@ void latx_handle_args(char *filename);
 GString *latx_translation_config_json(const LatTranslationConfig *snapshot);
 void latx_translation_config_capture(CPUX86State *env, uint32_t cflags,
                                     LatTranslationConfig *output);
+bool latx_translation_config_native_domain(void);
 int latx_translation_config_apply(const LatTranslationConfig *config,
                                  char *error, size_t error_size);
 int latx_translation_config_verify(CPUX86State *env, uint32_t cflags,
