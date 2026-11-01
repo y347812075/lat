@@ -371,6 +371,39 @@ void latcd_journal_close_compile_input(LatcdJournalCompileInput *input)
     input->source_fd = input->receipt_fd = input->config_fd = -1;
 }
 
+int latcd_journal_validate_frozen_input(const LatcdJournalCompileInput *input,
+    const int fds[3], uint64_t max_bytes, char *error, size_t error_size)
+{
+    if (!input || !fds) return fail(error, error_size, "missing frozen journal input");
+    const int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    struct stat st[3];
+    for (unsigned i = 0; i < 3; i++) {
+        int seals = fcntl(fds[i], F_GET_SEALS);
+        if (seals < 0 || (seals & required) != required || fstat(fds[i], &st[i]) ||
+            !S_ISREG(st[i].st_mode) || st[i].st_size <= 0 ||
+            (uint64_t)st[i].st_size > max_bytes)
+            return fail(error, error_size, "invalid frozen journal descriptor");
+    }
+    uint8_t digest[32], config[LATCD_JOURNAL_CONFIG_LIMIT];
+    LatTranslationConfig decoded;
+    LatTbKeySet set = {0};
+    bool ok = (uint64_t)st[2].st_size <= sizeof(config) &&
+        (size_t)st[2].st_size == input->config_size &&
+        read_exact(fds[2], config, st[2].st_size) &&
+        !memcmp(config, input->config, input->config_size) &&
+        !lat_translation_config_decode(config, st[2].st_size,
+            input->identity.build_sha256, &decoded, error, error_size) &&
+        !lat_translation_config_digest(&decoded, digest, error, error_size) &&
+        !memcmp(digest, input->identity.config_sha256, 32) &&
+        hash_fd(fds[0], digest) && !memcmp(digest, input->identity.source_sha256, 32) &&
+        hash_fd(fds[1], digest) && !memcmp(digest, input->receipt_sha256, 32) &&
+        !lat_tb_key_set_read_fd(fds[1], input->identity.source_sha256,
+                                &set, error, error_size) &&
+        !set.sequence && executable_keys(fds[0], &set);
+    lat_tb_key_set_destroy(&set);
+    return ok ? 0 : fail(error, error_size, "frozen journal identity mismatch");
+}
+
 int latcd_journal_open_compile_input(const char *cache, const char *stream,
     const uint8_t build[32], const uint8_t codegen[32], uint64_t max_bytes,
     LatcdJournalCompileInput *input, char *error, size_t error_size)

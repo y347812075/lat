@@ -23,6 +23,11 @@ int latcd_journal_open_compile_input(const char *cache, const char *stream,
     LatcdJournalCompileInput *input, char *error, size_t error_size);
 void latcd_journal_close_compile_input(LatcdJournalCompileInput *input);
 
+/* Validate the exact sealed copies passed to a replay worker against the
+ * already authenticated journal provenance. This does not admit a task. */
+int latcd_journal_validate_frozen_input(const LatcdJournalCompileInput *input,
+    const int fds[3], uint64_t max_bytes, char *error, size_t error_size);
+
 /* Conservative stream quota includes source, config, journal and atomic receipt
  * replacement. Inventory validates persisted streams, not just file sizes. */
 int latcd_journal_budget(int snapshot_fd, int config_fd, uint64_t capacity, uint64_t *bytes);

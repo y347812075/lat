@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#define LATCD_JOURNAL_SNAPSHOT_TEST
 #define main latcd_program_main
 #include "../../latcd/main.c"
 #undef main
@@ -926,8 +927,25 @@ int main(void)
     g_assert_cmpmem(&input.identity, sizeof(input.identity), &identity, sizeof(identity));
     int journal_pins[4] = {input.source_fd, input.receipt_fd, input.config_fd, -1};
     int worker_inputs[4] = {-1, -1, -1, -1};
-    g_assert_cmpint(snapshot_managed_inputs(journal_pins, worker_inputs,
-        input.identity.source_sha256, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(snapshot_journal_replay_input(&input, config.max_cache_bytes,
+        worker_inputs, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(latcd_journal_validate_frozen_input(&input, worker_inputs,
+        config.max_cache_bytes, error, sizeof(error)), ==, 0);
+    input.receipt_sha256[0] ^= 1;
+    g_assert_cmpint(latcd_journal_validate_frozen_input(&input, worker_inputs,
+        config.max_cache_bytes, error, sizeof(error)), ==, -1);
+    input.receipt_sha256[0] ^= 1;
+    input.identity.config_sha256[0] ^= 1;
+    g_assert_cmpint(latcd_journal_validate_frozen_input(&input, worker_inputs,
+        config.max_cache_bytes, error, sizeof(error)), ==, -1);
+    input.identity.config_sha256[0] ^= 1;
+    int swapped_inputs[3] = {worker_inputs[0], worker_inputs[2], worker_inputs[1]};
+    g_assert_cmpint(latcd_journal_validate_frozen_input(&input, swapped_inputs,
+        config.max_cache_bytes, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(latcd_journal_validate_frozen_input(&input, journal_pins,
+        config.max_cache_bytes, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(latcd_journal_validate_frozen_input(&input, worker_inputs,
+        1, error, sizeof(error)), ==, -1);
     for (unsigned i = 0; i < 3; i++) {
         struct stat original, copy;
         g_assert_cmpint(fstat(journal_pins[i], &original), ==, 0);
@@ -945,6 +963,16 @@ int main(void)
         g_assert_cmpstr(original_digest, ==, copied_digest);
     }
     close_compiler_inputs(worker_inputs);
+    g_assert_cmpint(snapshot_journal_replay_input(&input, 1, worker_inputs,
+        error, sizeof(error)), ==, -1);
+    for (unsigned i = 0; i < G_N_ELEMENTS(worker_inputs); i++)
+        g_assert_cmpint(worker_inputs[i], ==, -1);
+    input.receipt_sha256[0] ^= 1;
+    g_assert_cmpint(snapshot_journal_replay_input(&input, config.max_cache_bytes,
+        worker_inputs, error, sizeof(error)), ==, -1);
+    for (unsigned i = 0; i < G_N_ELEMENTS(worker_inputs); i++)
+        g_assert_cmpint(worker_inputs[i], ==, -1);
+    input.receipt_sha256[0] ^= 1;
     uint8_t wrong_source[32];
     memcpy(wrong_source, input.identity.source_sha256, sizeof(wrong_source));
     wrong_source[0] ^= 1;

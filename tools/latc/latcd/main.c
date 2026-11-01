@@ -1445,6 +1445,32 @@ failed:
     }
 }
 
+#ifdef LATCD_JOURNAL_SNAPSHOT_TEST
+static int snapshot_journal_replay_input(const LatcdJournalCompileInput *input,
+                                         uint64_t max_bytes, int copies[4],
+                                         char *error, size_t error_size)
+{
+    for (unsigned i = 0; i < 4; i++) copies[i] = -1;
+    if (!input) return fail(error, error_size, "missing journal replay input");
+    const int pins[4] = {input->source_fd, input->receipt_fd, input->config_fd, -1};
+    for (unsigned i = 0; i < 3; i++) {
+        struct stat st;
+        if (fstat(pins[i], &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+            (uint64_t)st.st_size > max_bytes ||
+            (i == 2 && (uint64_t)st.st_size > LATCD_JOURNAL_CONFIG_LIMIT))
+            return fail(error, error_size, "invalid journal replay input size");
+    }
+    if (snapshot_managed_inputs(pins, copies, input->identity.source_sha256,
+                                error, error_size)) return -1;
+    if (latcd_journal_validate_frozen_input(input, copies, max_bytes,
+                                            error, error_size)) {
+        close_compiler_inputs(copies);
+        return -1;
+    }
+    return 0;
+}
+#endif
+
 static int open_task_directory(int parent, const char *name)
 {
     int fd = latcd_cache_capacity_open_metadata_directory(parent, name);
