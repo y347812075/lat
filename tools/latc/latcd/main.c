@@ -22,6 +22,7 @@
 #include "managed-path.h"
 #include "worker-closure.h"
 #include "replay-validate.h"
+#include "parson/parson.h"
 
 #include <dlfcn.h>
 #include <dirent.h>
@@ -4594,17 +4595,10 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     return result;
 }
 
-static char *manifest_string(const char *contents, const char *field)
+static bool manifest_digest(const char *value)
 {
-    char *prefix = g_strdup_printf("\"%s\":\"", field);
-    const char *begin = strstr(contents, prefix);
-    g_free(prefix);
-    if (!begin) return NULL;
-    begin = strchr(begin, ':') + 2;
-    const char *end = strchr(begin, '\"');
-    if (!end || end - begin >= 192 ||
-        memchr(begin, '/', end - begin)) return NULL;
-    return g_strndup(begin, end - begin);
+    return value && strlen(value) == 64 &&
+        strspn(value, "0123456789abcdef") == 64;
 }
 
 static int current_manifest_read(const LatcdConfig *config, const char *hex,
@@ -4637,18 +4631,44 @@ static int current_manifest_read(const LatcdConfig *config, const char *hex,
         return -1;
     }
     contents[size] = '\0';
-    if (!strstr(contents, "\"version\":2")) { errno = ENOEXEC; return -1; }
-    manifest->module = manifest_string(contents, "module");
-    manifest->native = manifest_string(contents, "native");
-    manifest->tbset = manifest_string(contents, "tbset");
-    manifest->module_sha256 = manifest_string(contents, "module_sha256");
-    manifest->native_sha256 = manifest_string(contents, "native_sha256");
-    const char *sequence = strstr(contents, "\"published_sequence\":");
-    const char *sequence_value = sequence ? strchr(sequence, ':') + 1 : NULL;
+    JSON_Value *value = json_parse_string(contents);
+    JSON_Object *object = json_value_get_object(value);
+    const char *required[] = {"version", "module", "native", "tbset",
+        "source_sha256", "codegen_id", "published_sequence"};
+    const char *optional[] = {"module_sha256", "native_sha256"};
+    bool valid = object != NULL;
+    for (size_t i = 0; valid && i < json_object_get_count(object); i++) {
+        const char *key = json_object_get_name(object, i);
+        bool known = false;
+        for (size_t j = 0; j < G_N_ELEMENTS(required); j++) known |= !strcmp(key, required[j]);
+        for (size_t j = 0; j < G_N_ELEMENTS(optional); j++) known |= !strcmp(key, optional[j]);
+        valid = known;
+    }
+    for (size_t i = 0; valid && i < G_N_ELEMENTS(required); i++)
+        valid = json_object_has_value(object, required[i]);
+    const char *version = object ? lat_json_number_token(json_object_get_value(object, "version")) : NULL;
+    const char *sequence = object ? lat_json_number_token(json_object_get_value(object, "published_sequence")) : NULL;
+    const char *source = object ? json_object_get_string(object, "source_sha256") : NULL;
+    const char *codegen = object ? json_object_get_string(object, "codegen_id") : NULL;
     char *end = NULL;
-    manifest->published_sequence = sequence ?
-        g_ascii_strtoull(sequence_value, &end, 10) : 0;
-    int result = !manifest->module || !manifest->native || !manifest->tbset ||
+    errno = 0;
+    manifest->published_sequence = sequence ? g_ascii_strtoull(sequence, &end, 10) : 0;
+    valid = valid && version && !strcmp(version, "2") && sequence && *sequence &&
+        strspn(sequence, "0123456789") == strlen(sequence) && end && !*end && !errno &&
+        source && !strcmp(source, hex) && json_object_get_string_len(object, "source_sha256") == strlen(source) &&
+        manifest_digest(codegen) && json_object_get_string_len(object, "codegen_id") == strlen(codegen);
+    const char *fields[] = {"module", "native", "tbset", "module_sha256", "native_sha256"};
+    char **outputs[] = {&manifest->module, &manifest->native, &manifest->tbset,
+                        &manifest->module_sha256, &manifest->native_sha256};
+    for (size_t i = 0; valid && i < G_N_ELEMENTS(fields); i++) {
+        if (i >= 3 && !json_object_has_value(object, fields[i])) continue;
+        const char *s = json_object_get_string(object, fields[i]);
+        valid = s && json_object_get_string_len(object, fields[i]) == strlen(s) &&
+            (i < 3 ? strlen(s) < 192 && !strchr(s, '/') : manifest_digest(s));
+        if (valid) *outputs[i] = g_strdup(s);
+    }
+    json_value_free(value);
+    int result = !valid || !manifest->module || !manifest->native || !manifest->tbset ||
         strlen(manifest->module) <= 3 ||
         strcmp(manifest->module + strlen(manifest->module) - 3, ".so") ||
         strlen(manifest->native) <= 7 ||
@@ -4657,8 +4677,7 @@ static int current_manifest_read(const LatcdConfig *config, const char *hex,
          strcmp(manifest->tbset + strlen(manifest->tbset) - 6, ".tbset"))) ||
         strncmp(manifest->module, hex, 64) ||
         strncmp(manifest->native, hex, 64) ||
-        (*manifest->tbset && strncmp(manifest->tbset, hex, 64)) ||
-        !sequence || end == sequence_value || (*end != ',' && *end != '}');
+        (*manifest->tbset && strncmp(manifest->tbset, hex, 64));
     if (result) {
         current_manifest_clear(manifest);
         errno = ENOEXEC;
@@ -8834,6 +8853,13 @@ out:
 int main(int argc, char **argv)
 {
 #ifdef LATCD_GC_TIMER_TEST
+    if (argc == 4 && !strcmp(argv[1], "--test-current-manifest")) {
+        LatcdConfig config = { .cache_dir = argv[2] };
+        LatcdCurrentManifest manifest = {0};
+        int result = current_manifest_read(&config, argv[3], &manifest);
+        current_manifest_clear(&manifest);
+        return result ? 1 : 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "--test-managed-output-pair")) {
         char *end = NULL;
         errno = 0;

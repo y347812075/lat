@@ -212,6 +212,7 @@ test: test-latcd-gc-timer test-managed-task-record
 .PHONY: test-managed-task-record
 test-managed-task-record: $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-cache-retirement
 	python3 tests/test-managed-task-record.py $(abspath $(BUILD)/tests/latcd-gc-timer) $(abspath $(BUILD)/tests/test-cache-retirement)
+	TMPDIR="$${TMPDIR:-$$HOME/tmp}" python3 tests/test-current-manifest.py $(abspath $(BUILD)/tests/latcd-gc-timer)
 
 # Integration requires a matching configured installation and an x86 guest
 # built from tests/x86-cache-retirement.S on the designated x86 toolchain.

@@ -1677,8 +1677,9 @@ int main(int argc, char **argv)
     gchar *modern = NULL;
     g_assert_true(g_file_get_contents(manifest, &modern, NULL, NULL));
     char *legacy = g_strdup_printf("{\"version\":2,\"module\":\"%s\","
-        "\"native\":\"%s\",\"tbset\":\"%s\",\"published_sequence\":1}",
-        old_name, native_name, tbset_name);
+        "\"native\":\"%s\",\"tbset\":\"%s\",\"source_sha256\":\"%s\","
+        "\"codegen_id\":\"%064x\",\"published_sequence\":1}",
+        old_name, native_name, tbset_name, hex, 1);
     g_assert_true(g_file_set_contents(manifest, legacy, -1, NULL));
     g_assert_cmpint(current_manifest_read(&config, hex, &paired), ==, 0);
     g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
@@ -1773,11 +1774,13 @@ int main(int argc, char **argv)
     g_assert_true(g_file_set_contents(native_b, "native-b", 8, NULL));
     g_assert_true(g_file_set_contents(tbset_b, input_fixture, fixture_size, NULL));
     char *manifest_a = g_strdup_printf("{\"version\":2,\"module\":\"%s\","
-        "\"native\":\"%s\",\"tbset\":\"%s\",\"published_sequence\":1}",
-        new_name, native_b_name, tbset_b_name);
+        "\"native\":\"%s\",\"tbset\":\"%s\",\"source_sha256\":\"%s\","
+        "\"codegen_id\":\"%064x\",\"published_sequence\":1}",
+        new_name, native_b_name, tbset_b_name, hex, 1);
     char *manifest_b = g_strdup_printf("{\"version\":2,\"module\":\"%s\","
-        "\"native\":\"%s\",\"tbset\":\"%s\",\"published_sequence\":2}",
-        old_name, native_name, tbset_name);
+        "\"native\":\"%s\",\"tbset\":\"%s\",\"source_sha256\":\"%s\","
+        "\"codegen_id\":\"%064x\",\"published_sequence\":2}",
+        old_name, native_name, tbset_name, hex, 1);
     g_assert_true(g_file_set_contents(manifest, manifest_a, -1, NULL));
     g_assert_true(cache_contains_tbset(&config, digest, input));
     hook_path = manifest;
