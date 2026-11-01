@@ -17,6 +17,7 @@ cleanup() {
     if [ -n "$pid" ]; then kill -TERM "$pid" 2>/dev/null || :; wait "$pid" 2>/dev/null || :; fi
 }
 trap cleanup EXIT
+"$test_daemon" --test-retirement-recovery-gate
 start() {
     "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" \
         --latc "$compiler" --runner "$daemon" --runtime-dir "$runtime" \

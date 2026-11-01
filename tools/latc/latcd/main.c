@@ -2583,6 +2583,12 @@ typedef struct LatcdPageDriver {
 
 static LatcdPageDriver page_driver_state;
 
+static bool retirement_recovery_ready(const LatcdConfig *config)
+{
+    return atomic_load(&compiler_budget_recovery_state) == 1 &&
+        (!config->managed || atomic_load(&managed_task_recovery_state) == 1);
+}
+
 static bool page_driver_admitted(void)
 {
 #ifdef LATCD_GC_TIMER_TEST
@@ -2855,7 +2861,8 @@ static void *compiler_input_recovery_worker(void *opaque)
     while (!atomic_load(&work->stopping) && !stop_requested) {
         int64_t now = g_get_monotonic_time();
         bool start_page_discovery = false;
-        if (retirement_safe && page_driver_state.waiting && test_page_driver &&
+        if (retirement_safe && retirement_recovery_ready(work->config) &&
+            page_driver_state.waiting && test_page_driver &&
             page_driver_admitted() && now >= next_retirement) {
             uint64_t deadline = 0;
             char error[256] = {0};
@@ -2880,7 +2887,7 @@ static void *compiler_input_recovery_worker(void *opaque)
                 next_retirement = g_get_monotonic_time() + 5000000;
             } else next_retirement = 0;
         }
-        if (retirement_safe && atomic_load(&compiler_budget_recovery_state) == 1 &&
+        if (retirement_safe && retirement_recovery_ready(work->config) &&
             !page_driver_state.waiting && !page_driver_state.discovery &&
             now >= next_retirement) {
             LatcdRetirementQueueStats stats;
@@ -2935,7 +2942,7 @@ static void *compiler_input_recovery_worker(void *opaque)
             next_retirement = g_get_monotonic_time() + (result == 1 ? 100000 : 5000000);
             if (page_driver_state.waiting && test_page_driver) next_retirement = 0;
         }
-        if (retirement_safe && (start_page_discovery ||
+        if (retirement_safe && retirement_recovery_ready(work->config) && (start_page_discovery ||
             (page_driver_state.discovery && page_driver_admitted() && now >= next_retirement))) {
             char error[256] = {0};
             int stage = test_stage_retirement_page(&page_driver_state, work->config, error, sizeof(error));
@@ -3000,7 +3007,7 @@ static void *compiler_input_recovery_worker(void *opaque)
                 next = g_get_monotonic_time() + (result == 1 ? 100000 : 5000000);
             }
         }
-        int64_t wake = retirement_safe && atomic_load(&compiler_budget_recovery_state) == 1 &&
+        int64_t wake = retirement_safe && retirement_recovery_ready(work->config) &&
 #ifdef LATCD_GC_TIMER_TEST
             (!page_driver_state.waiting || test_page_driver) &&
 #endif
@@ -8853,6 +8860,20 @@ out:
 int main(int argc, char **argv)
 {
 #ifdef LATCD_GC_TIMER_TEST
+    if (argc == 2 && !strcmp(argv[1], "--test-retirement-recovery-gate")) {
+        LatcdConfig config = {0};
+        for (int budget = -1; budget <= 1; budget++) {
+            for (int managed = -1; managed <= 1; managed++) {
+                atomic_store(&compiler_budget_recovery_state, budget);
+                atomic_store(&managed_task_recovery_state, managed);
+                config.managed = false;
+                if (retirement_recovery_ready(&config) != (budget == 1)) return 1;
+                config.managed = true;
+                if (retirement_recovery_ready(&config) != (budget == 1 && managed == 1)) return 1;
+            }
+        }
+        return 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "--test-current-manifest")) {
         LatcdConfig config = { .cache_dir = argv[2] };
         LatcdCurrentManifest manifest = {0};
