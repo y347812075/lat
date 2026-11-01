@@ -3121,10 +3121,10 @@ static void tr_generate_single_step_exit(IR2_OPND next_pc)
     IR2_OPND helper_addr = ra_alloc_itemp();
 
     la_store_addrx(next_pc, env_ir2_opnd, lsenv_offset_of_eip(lsenv));
-    tr_save_registers_to_env(0xff, 0xff, option_save_xmm,
+    tr_save_registers_to_env(0xff, 0xff, latx_translation_save_xmm(),
                              options_to_save());
 #ifdef TARGET_X86_64
-    tr_save_x64_8_registers_to_env(0xff, option_save_xmm);
+    tr_save_x64_8_registers_to_env(0xff, latx_translation_save_xmm());
 #endif
     aot_load_host_addr(helper_addr, (ADDR)helper_raise_trapop,
                        LOAD_HELPER_RAISE_TRAPOP, 0);
@@ -3407,9 +3407,9 @@ void generate_context_switch_bt_to_native(void *code_buf)
     ra_free_temp(fcsr_value_opnd);
 
     /* load x86 registers from env. top, eflags, and ss */
-    tr_load_registers_from_env(0xff, 0xff, option_save_xmm, options_to_save());
+    tr_load_registers_from_env(0xff, 0xff, latx_translation_save_xmm(), options_to_save());
 #ifdef TARGET_X86_64
-    tr_load_x64_8_registers_from_env(0xff, option_save_xmm);
+    tr_load_x64_8_registers_from_env(0xff, latx_translation_save_xmm());
 #endif
     jrra_context_switch_bt_to_native();
 
@@ -3436,9 +3436,9 @@ void generate_context_switch_native_to_bt(void)
     la_label(label_cs);
 
     /* 3. store x86 MMX and XMM registers to env */
-    tr_save_registers_to_env(0xff, 0xff, option_save_xmm, options_to_save());
+    tr_save_registers_to_env(0xff, 0xff, latx_translation_save_xmm(), options_to_save());
 #ifdef TARGET_X86_64
-    tr_save_x64_8_registers_to_env(0xff, option_save_xmm);
+    tr_save_x64_8_registers_to_env(0xff, latx_translation_save_xmm());
 #endif
 
     /* 4. restore dbt FCSR (#31) */
@@ -3987,7 +3987,7 @@ void tr_fpu_pop(void) { tr_fpu_inc(); }
 
 void tr_fpu_inc(void)
 {
-    if (option_fputag) {
+    if (latx_translation_fputag()) {
         IR2_OPND tag_addr_opnd = ra_alloc_itemp();
         IR2_OPND temp = ra_alloc_itemp();
 
@@ -4012,7 +4012,7 @@ void tr_fpu_dec(void)
     /* 1. top = top - 1 */
     la_x86dectop();
 
-    if (option_fputag) {
+    if (latx_translation_fputag()) {
         IR2_OPND tag_addr_opnd = ra_alloc_itemp();
 
         /* 2. mark st(0) as valid */

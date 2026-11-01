@@ -854,7 +854,7 @@ bool translate_fxam(IR1_INST *pir1)
     la_ori(fpus, fpus, 0x200);
     la_label(not_set_c1);
 
-    if (option_fputag) {
+    if (latx_translation_fputag()) {
         /* empty is judged by FPU tag word */
         int tag_offset = lsenv_offset_of_tag_word(lsenv);
         lsassert(tag_offset <= 0x7ff);

@@ -143,7 +143,7 @@ static void update_fcsr_enable(IR2_OPND control_word, IR2_OPND fcsr)
 {
     IR2_OPND temp = ra_alloc_itemp();
 
-    if (option_enable_fcsr_exc) {
+    if (latx_translation_enable_fcsr_exc()) {
         /* reset enables */
         la_bstrins_w(fcsr, zero_ir2_opnd,
                      FCSR_OFF_EN_V, FCSR_OFF_EN_I);

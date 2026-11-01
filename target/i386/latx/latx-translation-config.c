@@ -93,6 +93,9 @@ IMM_ACCESSOR(imm_reg, IMM_REG, option_imm_reg)
 IMM_ACCESSOR(imm_rip, IMM_RIP, option_imm_rip)
 IMM_ACCESSOR(imm_precache, IMM_PRECACHE, option_imm_precache)
 IMM_ACCESSOR(imm_complex, IMM_COMPLEX, option_imm_complex)
+IMM_ACCESSOR(fputag, FPUTAG, option_fputag)
+IMM_ACCESSOR(save_xmm, SAVE_XMM, option_save_xmm)
+IMM_ACCESSOR(enable_fcsr_exc, ENABLE_FCSR_EXC, option_enable_fcsr_exc)
 #undef IMM_ACCESSOR
 
 void latx_translation_config_set_native_replay(const LatTranslationConfig *config)

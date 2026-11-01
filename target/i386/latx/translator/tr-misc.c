@@ -119,8 +119,8 @@ static void kzt_helper_pFpL(ADDR func, IR2_OPND ptr, IR2_OPND L)
 void kzt_native_to_wrapper(void);
 void kzt_native_to_wrapper(void)
 {
-    tr_save_registers_to_env(0xff, 0xff, option_save_xmm, options_to_save());
-    tr_save_x64_8_registers_to_env(0xff, option_save_xmm);
+    tr_save_registers_to_env(0xff, 0xff, latx_translation_save_xmm(), options_to_save());
+    tr_save_x64_8_registers_to_env(0xff, latx_translation_save_xmm());
     /* restore dbt FCSR (#31) */
     IR2_OPND fcsr_value_opnd = ra_alloc_itemp();
     /* save fcsr for native */
@@ -141,8 +141,8 @@ void kzt_wrapper_to_native(void)
     ra_free_temp(fcsr_value_opnd);
 
     /* load x86 registers from env. top, eflags, and ss */
-    tr_load_registers_from_env(0xff, 0xff, option_save_xmm, options_to_save());
-    tr_load_x64_8_registers_from_env(0xff, option_save_xmm);
+    tr_load_registers_from_env(0xff, 0xff, latx_translation_save_xmm(), options_to_save());
+    tr_load_x64_8_registers_from_env(0xff, latx_translation_save_xmm());
     /* load &HASH_JMP_CACHE[0] */
     IR2_OPND jmp_cache_addr = ra_alloc_static0();
     la_ld_d(jmp_cache_addr, env_ir2_opnd, lsenv_offset_of_tb_jmp_cache_ptr(lsenv));
@@ -286,7 +286,7 @@ bool translate_int_3(IR1_INST *pir1)
             offsetof(CPUX86State, sys.codemode));
     la_beq(codemode_value_opnd, zero_ir2_opnd, not_64);
     ra_free_temp(codemode_value_opnd);
-    tr_save_x64_8_registers_to_env(0xff, option_save_xmm);
+    tr_save_x64_8_registers_to_env(0xff, latx_translation_save_xmm());
     la_label(not_64);
 #endif
     tr_save_fcsr_to_env();
@@ -323,7 +323,7 @@ bool translate_in(IR1_INST *pir1)
     li_d(eip_opnd, ir1_addr(pir1));
     la_store_addrx(eip_opnd, env_ir2_opnd,
                     lsenv_offset_of_eip(lsenv));
-    tr_save_registers_to_env(0xff, 0xff, option_save_xmm, options_to_save());
+    tr_save_registers_to_env(0xff, 0xff, latx_translation_save_xmm(), options_to_save());
     aot_load_host_addr(tmp_opnd, (ADDR)helper_raise_gpf,
         LOAD_HELPER_RAISE_GPF, 0);
     la_jirl(zero_ir2_opnd, tmp_opnd, 0);
@@ -339,7 +339,7 @@ bool translate_out(IR1_INST *pir1)
     li_d(eip_opnd, ir1_addr(pir1));
     la_store_addrx(eip_opnd, env_ir2_opnd,
                     lsenv_offset_of_eip(lsenv));
-    tr_save_registers_to_env(0xff, 0xff, option_save_xmm, options_to_save());
+    tr_save_registers_to_env(0xff, 0xff, latx_translation_save_xmm(), options_to_save());
     aot_load_host_addr(tmp_opnd, (ADDR)helper_raise_gpf,
         LOAD_HELPER_RAISE_GPF, 0);
     la_jirl(zero_ir2_opnd, tmp_opnd, 0);
@@ -360,7 +360,7 @@ bool translate_into(IR1_INST *pir1)
     li_d(eip_opnd, ir1_addr(pir1));
     la_store_addrx(eip_opnd, env_ir2_opnd,
                     lsenv_offset_of_eip(lsenv));
-    tr_save_registers_to_env(0xff, 0xff, option_save_xmm, options_to_save());
+    tr_save_registers_to_env(0xff, 0xff, latx_translation_save_xmm(), options_to_save());
     aot_load_host_addr(tmp_opnd, (ADDR)helper_raise_into,
         LOAD_HELPER_RAISE_INTO, 0);
     la_jirl(zero_ir2_opnd, tmp_opnd, 0);
@@ -398,7 +398,7 @@ bool translate_bound(IR1_INST *pir1)
     li_d(eip_opnd, ir1_addr(pir1));
     la_store_addrx(eip_opnd, env_ir2_opnd,
                     lsenv_offset_of_eip(lsenv));
-    tr_save_registers_to_env(0xff, 0xff, option_save_xmm, options_to_save());
+    tr_save_registers_to_env(0xff, 0xff, latx_translation_save_xmm(), options_to_save());
     aot_load_host_addr(tmp_opnd, (ADDR)helper_raise_bound,
         LOAD_HELPER_RAISE_BOUND, 0);
     la_jirl(zero_ir2_opnd, tmp_opnd, 0);
@@ -544,9 +544,9 @@ bool translate_invalid(IR1_INST *pir1)
     li_d(eip_opnd, ir1_addr(pir1));
     la_store_addrx(eip_opnd, env_ir2_opnd,
                     lsenv_offset_of_eip(lsenv));
-    tr_save_registers_to_env(0xff, 0xff, option_save_xmm, options_to_save());
+    tr_save_registers_to_env(0xff, 0xff, latx_translation_save_xmm(), options_to_save());
 #ifdef TARGET_X86_64
-    tr_save_x64_8_registers_to_env(0xff, option_save_xmm);
+    tr_save_x64_8_registers_to_env(0xff, latx_translation_save_xmm());
 #endif
     aot_load_host_addr(tmp_opnd, (ADDR)helper_raise_illop,
         LOAD_HELPER_RAISE_ILLOP, 0);
@@ -1295,7 +1295,7 @@ bool translate_int(IR1_INST *pir1)
     la_ld_d(codemode_value_opnd, env_ir2_opnd, offsetof(CPUX86State, sys.codemode));
     la_beq(codemode_value_opnd, zero_ir2_opnd, not_64);
     ra_free_temp(codemode_value_opnd);
-    tr_save_x64_8_registers_to_env(0xff, option_save_xmm);
+    tr_save_x64_8_registers_to_env(0xff, latx_translation_save_xmm());
     la_label(not_64);
 #endif
 #ifdef CONFIG_LATX_SYSCALL_TUNNEL
@@ -1400,7 +1400,7 @@ bool translate_rdtsc(IR1_INST *pir1)
     eip_opnd = ra_alloc_dbt_arg2();
     li_d(eip_opnd, ir1_addr(pir1));
     la_store_addrx(eip_opnd, env_ir2_opnd, lsenv_offset_of_eip(lsenv));
-    tr_save_registers_to_env(0xff, 0xff, option_save_xmm, options_to_save());
+    tr_save_registers_to_env(0xff, 0xff, latx_translation_save_xmm(), options_to_save());
     aot_load_host_addr(tsc_mode, (ADDR)helper_raise_gpf,
                        LOAD_HELPER_RAISE_GPF, 0);
     la_jirl(zero_ir2_opnd, tsc_mode, 0);
@@ -1433,7 +1433,7 @@ bool translate_rdtscp(IR1_INST *pir1)
     eip_opnd = ra_alloc_dbt_arg2();
     li_d(eip_opnd, ir1_addr(pir1));
     la_store_addrx(eip_opnd, env_ir2_opnd, lsenv_offset_of_eip(lsenv));
-    tr_save_registers_to_env(0xff, 0xff, option_save_xmm, options_to_save());
+    tr_save_registers_to_env(0xff, 0xff, latx_translation_save_xmm(), options_to_save());
     aot_load_host_addr(tsc_mode, (ADDR)helper_raise_gpf,
                        LOAD_HELPER_RAISE_GPF, 0);
     la_jirl(zero_ir2_opnd, tsc_mode, 0);
@@ -1824,7 +1824,7 @@ bool translate_fnsave(IR1_INST *pir1)
     la_or(value, temp, value);
     la_st_w(value, mem_opnd, 4);
 
-    if (option_fputag) {
+    if (latx_translation_fputag()) {
         /* store FPU tag word from env to memory */
         tr_fpu_store_tag_to_mem(mem_opnd, 8);
     } else {
@@ -1923,7 +1923,7 @@ bool translate_frstor(IR1_INST *pir1)
                       lsenv_offset_of_status_word(lsenv)); /* status_word */
 
     /* tag word */
-    if (option_fputag) {
+    if (latx_translation_fputag()) {
         /* load FPU tag word from memory to env*/
         la_ld_h(value, mem_opnd, 8);
         tr_fpu_load_tag_to_env(value);

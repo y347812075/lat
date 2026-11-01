@@ -86,7 +86,8 @@ def main():
     for source in (root / 'target/i386/latx/translator').rglob('*.c'):
         text = source.read_text()
         for option in ('option_set_rounding_opt', 'option_vpaes', 'option_fast_atomic',
-                       'option_enable_lasx'):
+                       'option_enable_lasx', 'option_fputag', 'option_save_xmm',
+                       'option_enable_fcsr_exc'):
             assert option not in text, (source, option)
     for source in (root / 'target/i386/latx').rglob('*'):
         if source.suffix not in ('.c', '.h') or source.name in (
