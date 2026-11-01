@@ -67,6 +67,7 @@ typedef struct LatAotV2ModuleStats {
     _Atomic uint64_t registration_ns;
     _Atomic size_t live_instances;
     int source_fd;
+    int broker_snapshot_fd;
     GHashTable *jit_tbset;
     GHashTable *pending_tbset;
     GHashTable *committed_tbset;
@@ -193,6 +194,9 @@ static bool aot_v2_reject_miss;
 /* Collect keys without loading provisional modules into the live process. */
 static bool aot_v2_collect_only;
 static bool key_journal_enabled;
+static char *key_journal_broker;
+static uid_t key_journal_broker_uid;
+static bool key_journal_broker_invalid;
 static int key_journal_config_fd = -1;
 static uint8_t key_journal_config_digest[32];
 static pthread_mutex_t key_journal_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -485,6 +489,20 @@ void latc_aot_v2_consume_environment(void)
     aot_v2_reject_miss = getenv("LATC_STRICT_AOT") != NULL;
     aot_v2_collect_only = getenv("LATX_AOT_V2_COLLECT_ONLY") != NULL;
     key_journal_enabled = getenv("LATX_AOT_V2_KEY_JOURNAL") != NULL;
+    const char *broker = getenv("LATX_AOT_V2_JOURNAL_BROKER");
+    const char *uid = getenv("LATX_AOT_V2_JOURNAL_BROKER_UID");
+    if (broker || uid) {
+        char *end = NULL;
+        errno = 0;
+        guint64 value = uid && *uid ? g_ascii_strtoull(uid, &end, 10) : UINT64_MAX;
+        if (!key_journal_enabled || !broker || broker[0] != '/' || !uid ||
+            !*uid || *uid == '-' || !end || *end || errno || value >= UINT32_MAX) {
+            key_journal_broker_invalid = true;
+        } else {
+            key_journal_broker = g_strdup(broker);
+            key_journal_broker_uid = (uid_t)value;
+        }
+    }
 }
 
 int latc_aot_v2_retain_inherited_pins(void)
@@ -1235,6 +1253,7 @@ static LatAotV2ModuleStats *add_module_stats(
     if (!stats) {
         return NULL;
     }
+    stats->broker_snapshot_fd = -1;
     stats->source_fd = source_fd >= 0 ?
         fcntl(source_fd, F_DUPFD_CLOEXEC, 3) : -1;
     stats->key_exec_range_count = info->exec_range_count;
@@ -3319,12 +3338,102 @@ static bool key_journal_epoch_id(const char *epoch, uint64_t *id)
     return true;
 }
 
+static int broker_journal_request(LatAotV2ModuleStats *stats, uint32_t operation,
+                                  uint64_t sequence, char *error, size_t size)
+{
+    struct stat before, after;
+    int snapshot = -1;
+    GChecksum *sum = NULL;
+    int result = -1;
+    if (stats->broker_snapshot_fd >= 0) {
+        snapshot = stats->broker_snapshot_fd;
+        goto submit;
+    }
+    if (fstat(stats->source_fd, &before) || !S_ISREG(before.st_mode) ||
+        before.st_size <= 0 || (uint64_t)before.st_size > UINT64_C(1073741824))
+        goto out;
+    snapshot = create_internal_memfd("latc-broker-source", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    sum = g_checksum_new(G_CHECKSUM_SHA256);
+    if (snapshot < 0 || !sum) goto out;
+    char buffer[65536];
+    off_t offset = 0;
+    while (offset < before.st_size) {
+        size_t wanted = MIN(sizeof(buffer), (uint64_t)(before.st_size - offset));
+        ssize_t n = pread(stats->source_fd, buffer, wanted, offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { errno = ESTALE; goto out; }
+        g_checksum_update(sum, (const guchar *)buffer, n);
+        for (ssize_t done = 0; done < n;) {
+            ssize_t written = write(snapshot, buffer + done, n - done);
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) { errno = EIO; goto out; }
+            done += written;
+        }
+        offset += n;
+    }
+    uint8_t digest[32];
+    gsize digest_size = sizeof(digest);
+    g_checksum_get_digest(sum, digest, &digest_size);
+    if (fstat(stats->source_fd, &after) || before.st_size != after.st_size ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec || before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec || before.st_ctim.tv_nsec != after.st_ctim.tv_nsec ||
+        digest_size != sizeof(digest) || memcmp(digest, stats->source_sha256, sizeof(digest))) {
+        errno = ESTALE; goto out;
+    }
+    if (fcntl(snapshot, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) goto out;
+    char descriptor[64];
+    snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", snapshot);
+    lat_aot_v2_internal_fd_allocation_lock();
+    int readonly = open(descriptor, O_RDONLY | O_CLOEXEC);
+    if (readonly >= 0 && lat_aot_v2_internal_fd_register_locked(readonly)) {
+        int saved = errno;
+        close(readonly);
+        readonly = -1;
+        errno = saved;
+    }
+    lat_aot_v2_internal_fd_unlock();
+    if (readonly < 0) goto out;
+    close_internal_fd(snapshot);
+    snapshot = readonly;
+    stats->broker_snapshot_fd = snapshot;
+submit:
+    uint8_t epoch[16] = {0};
+    if (operation == LATCD_OP_APPEND_JOURNAL) {
+        for (unsigned i = 0; i < 16; i++) {
+            int high = g_ascii_xdigit_value(stats->journal_epoch[2 * i]);
+            int low = g_ascii_xdigit_value(stats->journal_epoch[2 * i + 1]);
+            if (high < 0 || low < 0) { errno = EINVAL; goto out; }
+            epoch[i] = (high << 4) | low;
+        }
+    }
+    const LatcdClientFdProtection protection = {
+        lat_aot_v2_internal_fd_allocation_lock, lat_aot_v2_internal_fd_unlock,
+        lat_aot_v2_internal_fd_register_locked, close_internal_fd,
+    };
+    uint64_t request = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
+    result = latcd_client_broker_journal(key_journal_broker, key_journal_broker_uid,
+        snapshot, key_journal_config_fd, stats->source_sha256, operation, request, sequence,
+        epoch, &protection, error, size);
+    if (!result && operation == LATCD_OP_REGISTER_JOURNAL) {
+        for (unsigned i = 0; i < 16; i++)
+            snprintf(stats->journal_epoch + 2 * i, 3, "%02x", epoch[i]);
+    }
+out:
+    if (result && error && size && !error[0])
+        snprintf(error, size, "cannot snapshot broker source: %s", strerror(errno));
+    if (sum) g_checksum_free(sum);
+    if (snapshot != stats->broker_snapshot_fd) close_internal_fd(snapshot);
+    return result;
+}
+
 static int register_broker_journal(LatAotV2ModuleStats *stats, char *error,
                                    size_t size)
 {
     uint64_t request = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
     int channel = atomic_load(&submission_channel);
-    int result = channel >= 0 ?
+    int result = key_journal_broker ?
+        broker_journal_request(stats, LATCD_OP_REGISTER_JOURNAL, 65536, error, size) :
+        channel >= 0 ?
         latcd_client_channel_register_journal(channel, stats->source_fd,
             key_journal_config_fd, stats->source_sha256, 65536, request,
             stats->journal_epoch, error, size) :
@@ -3337,7 +3446,7 @@ static int register_broker_journal(LatAotV2ModuleStats *stats, char *error,
         snprintf(error, size, "invalid journal epoch response");
         return -1;
     }
-    if (!result && !latc_aot_v2_record_journal_epoch(stats->journal_epoch)) {
+    if (!result && !key_journal_broker && !latc_aot_v2_record_journal_epoch(stats->journal_epoch)) {
         stats->journal_epoch[0] = 0;
         stats->journal_id = 0;
         snprintf(error, size, "cannot protect journal epoch objects");
@@ -3352,7 +3461,9 @@ static int append_broker_journal(LatAotV2ModuleStats *stats,
     int channel = atomic_load(&submission_channel);
     int result;
 
-    if (channel >= 0) {
+    if (key_journal_broker) {
+        result = broker_journal_request(stats, LATCD_OP_APPEND_JOURNAL, key->guest_rva, error, size);
+    } else if (channel >= 0) {
         result = latcd_client_channel_append_journal(channel, stats->source_fd,
             key_journal_config_fd, stats->source_sha256, stats->journal_id,
             key->guest_rva, error, size);
@@ -3402,7 +3513,8 @@ bool latc_aot_v2_key_retry_service(CPUState *cpu)
         pthread_mutex_unlock(&tbset_lock);
         if (!committed) {
             LatTbKey key = {.guest_rva = candidate.rva, .flags = candidate.flags};
-            bool available = atomic_load(&submission_channel) >= 0 || lat_aot_ensure_daemon();
+            bool available = !key_journal_broker_invalid && (key_journal_broker ||
+                atomic_load(&submission_channel) >= 0 || lat_aot_ensure_daemon());
             if (!available) snprintf(error, sizeof(error), "latcd unavailable for journal registration");
             ok = available && !open_key_journal(stats, error, sizeof(error)) &&
                 !append_broker_journal(stats, &key, error, sizeof(error));
