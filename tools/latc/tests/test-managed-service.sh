@@ -3,23 +3,25 @@ set -eu
 umask 022
 
 # Run only in a disposable container with an empty /opt/latcd-managed-test.
-if [ "$#" -ne 3 ] || [ "$(id -u)" -ne 0 ]; then
-    echo "usage: $0 LATCD FIXTURE RUNTIME (root in disposable container)" >&2
+if [ "$#" -ne 5 ] || [ "$(id -u)" -ne 0 ]; then
+    echo "usage: $0 LATCD LATC RUNNER RUNTIME STATIC_LAUNCHER (root in disposable container)" >&2
     exit 2
 fi
 daemon=$1
-fixture=$2
-runtime=$3
+compiler=$2
+runner=$3
+runtime=$4
+static_launcher=$5
 work=/opt/latcd-managed-test
 test ! -e "$work"
 mkdir -m 755 "$work" "$work/tools" "$work/runtime"
 mkdir -m 700 "$work/cache" "$work/admin"
 mkdir -m 755 "$work/broker"
 chown 1234:1234 "$work/cache" "$work/admin" "$work/broker"
-cp "$fixture" "$work/tools/latc"
-cp "$fixture" "$work/tools/runner"
-cp "$fixture" "$work/tools/bwrap"
-cp "$fixture" "$work/tools/bootstrap"
+cp "$compiler" "$work/tools/latc"
+cp "$runner" "$work/tools/runner"
+cp "$static_launcher" "$work/tools/bwrap"
+cp "$compiler" "$work/tools/bootstrap"
 cp "$runtime" "$work/runtime/liblat-aot-runtime.so.2"
 chmod 755 "$work/tools/latc" "$work/tools/runner"
 chmod 755 "$work/tools/bwrap" "$work/tools/bootstrap"
@@ -50,6 +52,11 @@ chmod 755 "$work/tools/latc"
 chmod 777 "$work/tools/bootstrap"
 expect_rejected
 chmod 755 "$work/tools/bootstrap"
+cp "$compiler" "$work/tools/bwrap.dynamic"
+mv "$work/tools/bwrap" "$work/tools/bwrap.static"
+mv "$work/tools/bwrap.dynamic" "$work/tools/bwrap"
+expect_rejected
+mv "$work/tools/bwrap.static" "$work/tools/bwrap"
 sed 's|,"worker_bootstrap":"/opt/latcd-managed-test/tools/bootstrap"||' "$work/config" > "$work/incomplete-config"
 if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
     env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/incomplete-config" \

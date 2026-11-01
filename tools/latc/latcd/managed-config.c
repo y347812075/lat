@@ -4,9 +4,11 @@
 #include "managed-config.h"
 #include "managed-path.h"
 #include "parson/parson.h"
+#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/capability.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +17,40 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+
+int latcd_managed_static_launcher(int fd)
+{
+    Elf64_Ehdr header;
+    struct stat before, after;
+    if (fd < 0 || fstat(fd, &before) || !S_ISREG(before.st_mode) ||
+        pread(fd, &header, sizeof(header), 0) != sizeof(header) ||
+        memcmp(header.e_ident, ELFMAG, SELFMAG) ||
+        header.e_ident[EI_CLASS] != ELFCLASS64 || header.e_ident[EI_DATA] != ELFDATA2LSB ||
+        header.e_ident[EI_VERSION] != EV_CURRENT || header.e_version != EV_CURRENT ||
+        header.e_machine != EM_LOONGARCH || header.e_type != ET_EXEC ||
+        header.e_ehsize != sizeof(header) || header.e_phentsize != sizeof(Elf64_Phdr) ||
+        !header.e_phnum || header.e_phnum == PN_XNUM ||
+        header.e_phoff > (uint64_t)before.st_size ||
+        (uint64_t)header.e_phnum * sizeof(Elf64_Phdr) > (uint64_t)before.st_size - header.e_phoff) {
+        errno = EINVAL; return -1;
+    }
+    bool load = false;
+    for (unsigned i = 0; i < header.e_phnum; i++) {
+        Elf64_Phdr phdr;
+        if (pread(fd, &phdr, sizeof(phdr), header.e_phoff + i * sizeof(phdr)) != sizeof(phdr) ||
+            phdr.p_type == PT_INTERP || phdr.p_type == PT_DYNAMIC) {
+            errno = EINVAL; return -1;
+        }
+        if (phdr.p_type == PT_LOAD && (phdr.p_flags & PF_X)) load = true;
+    }
+    if (!load || fstat(fd, &after) || before.st_dev != after.st_dev ||
+        before.st_ino != after.st_ino || before.st_size != after.st_size ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec || before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec || before.st_ctim.tv_nsec != after.st_ctim.tv_nsec) {
+        errno = ESTALE; return -1;
+    }
+    return 0;
+}
 
 void latcd_managed_config_clear(LatcdManagedConfig *c)
 {
@@ -38,6 +74,7 @@ int latcd_managed_launcher_open(const char *bwrap, const char *bootstrap,
             open(paths[i], O_PATH | O_CLOEXEC | O_NOFOLLOW);
         if (fds[i] < 0 || fstat(fds[i], &st) || !S_ISREG(st.st_mode) ||
             !(st.st_mode & 0111)) { errno = EACCES; goto fail; }
+        if (managed && i == 0 && latcd_managed_static_launcher(fds[i])) goto fail;
     }
     return 0;
 fail:

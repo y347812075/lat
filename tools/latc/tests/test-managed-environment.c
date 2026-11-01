@@ -2,11 +2,13 @@
 #include "../latcd/managed-config.h"
 #include "../latcd/managed-path.h"
 #include <assert.h>
+#include <elf.h>
 #include <errno.h>
 #include <stddef.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -52,6 +54,33 @@ int main(void)
     assert(!fstat(held[0], &pinned) && pinned.st_ino == original.st_ino &&
            pinned.st_dev == original.st_dev && pinned.st_ino != replacement.st_ino);
     close(held[0]); close(held[1]);
+    fd = open(file, O_RDWR | O_TRUNC);
+    assert(fd >= 0);
+    Elf64_Ehdr header = {0};
+    memcpy(header.e_ident, ELFMAG, SELFMAG);
+    header.e_ident[EI_CLASS] = ELFCLASS64;
+    header.e_ident[EI_DATA] = ELFDATA2LSB;
+    header.e_ident[EI_VERSION] = EV_CURRENT;
+    header.e_version = EV_CURRENT;
+    header.e_machine = EM_LOONGARCH;
+    header.e_type = ET_EXEC;
+    header.e_ehsize = sizeof(header);
+    header.e_phoff = sizeof(header);
+    header.e_phentsize = sizeof(Elf64_Phdr);
+    header.e_phnum = 1;
+    Elf64_Phdr phdr = {.p_type = PT_LOAD, .p_flags = PF_R | PF_X};
+    assert(write(fd, &header, sizeof(header)) == sizeof(header));
+    assert(write(fd, &phdr, sizeof(phdr)) == sizeof(phdr));
+    assert(!latcd_managed_static_launcher(fd));
+    phdr.p_type = PT_INTERP;
+    assert(pwrite(fd, &phdr, sizeof(phdr), sizeof(header)) == sizeof(phdr));
+    assert(latcd_managed_static_launcher(fd) < 0);
+    phdr.p_type = PT_DYNAMIC;
+    assert(pwrite(fd, &phdr, sizeof(phdr), sizeof(header)) == sizeof(phdr));
+    assert(latcd_managed_static_launcher(fd) < 0);
+    assert(!ftruncate(fd, sizeof(header)));
+    assert(latcd_managed_static_launcher(fd) < 0);
+    close(fd);
     assert(!unlink(file) && !unlink(moved) && !rmdir(path));
     return 0;
 }

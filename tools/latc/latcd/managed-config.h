@@ -12,6 +12,8 @@ typedef struct LatcdManagedConfig {
 /* Returns two held descriptors; managed mode enforces root-owned paths. */
 int latcd_managed_launcher_open(const char *bwrap, const char *bootstrap,
                                 int managed, int fds[2]);
+/* Reject launchers that require a host dynamic loader before sandbox setup. */
+int latcd_managed_static_launcher(int fd);
 
 int latcd_managed_config_load(const char *path, LatcdManagedConfig *config);
 /* Validate before any cache access, tool execution, or runtime loading. */
