@@ -659,12 +659,17 @@ int main(void)
     uint8_t digest[32] = {0};
     GPtrArray *tasks_for_compile = g_ptr_array_new_with_free_func(g_free);
     g_assert_cmpint(run_compiler(&managed, 0, NULL, NULL, false, NULL, NULL,
-                                 NULL, NULL, digest, tasks_for_compile,
+                                 NULL, NULL, NULL, digest, tasks_for_compile,
                                  &reservation, isolation_error,
                                  sizeof(isolation_error)), ==, -1);
     g_assert_cmpstr(isolation_error, ==, "managed compiler isolation unavailable");
     g_assert_cmpuint(tasks_for_compile->len, ==, 0);
     g_assert_cmpuint(reservation, ==, 0);
+    g_assert_false(managed_replay_sandbox_ready(&managed));
+    managed.worker_bootstrap = "/bootstrap";
+    g_assert_false(managed_replay_sandbox_ready(&managed));
+    managed.worker_real_compile = true;
+    g_assert_true(managed_replay_sandbox_ready(&managed));
     g_ptr_array_free(tasks_for_compile, TRUE);
     int pins[4] = {-1, -1, -1, -1}, copies[4] = {-1, -1, -1, -1};
     pins[0] = syscall(SYS_memfd_create, "snapshot-test", MFD_CLOEXEC);

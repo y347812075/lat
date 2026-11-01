@@ -688,6 +688,8 @@ if 'CONFIG_LATX' in config_host
       'tools/latc/latcd/journal-store.c',
       'tools/latc/latcd/cache-retirement.c',
       'tools/latc/latcd/cache-capacity.c',
+      'tools/latc/native/format/replay-validate.c',
+      'tools/latc/native/format/native-image.c',
       'tools/latc/latcd/parson/parson.c',
       'tools/latc/aot-v2/common/tb-key-set.c',
       'tools/latc/aot-v2/common/key-journal.c',
@@ -698,7 +700,7 @@ if 'CONFIG_LATX' in config_host
       'tools/latc/aot-v2/compiler/module-inspect.c',
       'tools/latc/aot-v2/runtime/elf-validate.c',
     ),
-    include_directories: latcd_inc,
+    include_directories: [latcd_inc, include_directories('tools/latc/native/include', 'tools/latc/native/format')],
     dependencies: [glib, libdl, dependency('threads')],
     link_args: qemu_static_link_args,
     c_args: [

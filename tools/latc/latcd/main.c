@@ -21,6 +21,7 @@
 #include "worker-seccomp.h"
 #include "managed-path.h"
 #include "worker-closure.h"
+#include "replay-validate.h"
 
 #include <dlfcn.h>
 #include <dirent.h>
@@ -2989,15 +2990,25 @@ static int managed_output_open_pair(int workspace, uint64_t reservation,
     }
     return 0;
 }
+
+static bool managed_replay_sandbox_ready(const LatcdConfig *config)
+{
+    return config->worker_bootstrap && config->worker_real_compile;
+}
+
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *source, const char *tbset,
                         bool static_tbset,
                         const char *base_native, const char *base_module,
+                        const char *replay_config,
                         const char *output_native,
                         const char *output, const uint8_t digest[32], GPtrArray *compiler_tasks,
                         uint64_t *transient_reservation,
                         char *error, size_t error_size)
 {
+    bool replay = replay_config != NULL;
+    if (replay && (!config->managed || !tbset || static_tbset || base_native || base_module))
+        return fail(error, error_size, "invalid managed replay inputs");
     /* A managed worker must not inherit access to the cache or task locks.
      * Until its isolated task domain is available, never run it unsandboxed. */
     if (config->managed) {
@@ -3006,6 +3017,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
 #endif
         return fail(error, error_size, "managed compiler isolation unavailable");
     }
+    if (replay && !managed_replay_sandbox_ready(config))
+        return fail(error, error_size, "managed replay requires a real sandbox");
     if (!config->managed && validate_toolchain(config, error, error_size)) {
         return -1;
     }
@@ -3108,14 +3121,14 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     environment[environment_count++] = selection_environment;
     environment[environment_count++] = "LATC_SKIP_FINAL_INSPECT=1";
     environment[environment_count] = NULL;
-    const char *inputs[4] = {source, tbset, base_native, base_module};
+    const char *inputs[4] = {source, tbset, replay ? replay_config : base_native, base_module};
     int input_pins[4] = {-1, -1, -1, -1};
     int pin_result = pin_compiler_inputs(inputs, input_pins, error, error_size);
     int input_copies[4] = {-1, -1, -1, -1};
-    const char *task_paths[6] = {source, tbset, base_native, base_module,
+    const char *task_paths[6] = {source, tbset, replay ? replay_config : base_native, base_module,
                                 output_native, output};
     char *task_id = NULL;
-    int task_lease = pin_result ? -1 : record_task(config, false, false, task_paths,
+    int task_lease = pin_result ? -1 : record_task(config, false, replay, task_paths,
         input_pins, digest, environment, cache_peak, &task_id, error, error_size);
     if (task_lease < 0) pin_result = -1;
     if (task_lease >= 0) {
@@ -3222,7 +3235,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         TEST_ARG("--ro-bind-fd"); TEST_ARG("11"); TEST_ARG("/usr/bin/latx-x86_64");
         TEST_ARG("--ro-bind-fd"); TEST_ARG("12"); TEST_ARG("/usr/lib/liblat-aot-runtime.so.2");
         const char *fds[] = {"4", "5", "6", "7"};
-        const char *paths[] = {"/input/source", "/input/tbset", "/input/base.native", "/input/base.so"};
+        const char *paths[] = {"/input/source", "/input/tbset", replay ? "/input/config" : "/input/base.native", "/input/base.so"};
         for (unsigned i = 0; i < 4; i++) if (input_copies[i] >= 0) {
             TEST_ARG("--ro-bind-data"); TEST_ARG(fds[i]); TEST_ARG(paths[i]);
         }
@@ -3242,10 +3255,13 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         if (allow_zero_eflags_stub) { TEST_ARG("--setenv"); TEST_ARG("LATC_AOT_ALLOW_ZERO_EFLAGS_STUB"); TEST_ARG("1"); }
         if (base_native) { TEST_ARG("--setenv"); TEST_ARG("LATC_NATIVE_BASE"); TEST_ARG(paths[2]); }
         if (base_module) { TEST_ARG("--setenv"); TEST_ARG("LATC_NATIVE_BASE_MODULE"); TEST_ARG(paths[3]); }
-        const char *command[] = {bwrap, "--args", "15", "--", "/bootstrap", "/usr/bin/latc", "compile-module", paths[0],
-            "-o", "/work/output.so", "--runner", "/usr/bin/latx-x86_64", "--runtime-dir", "/usr/lib"};
+        const char *command[] = {bwrap, "--args", "15", "--", "/bootstrap", "/usr/bin/latc",
+            replay ? "compile-replay-native" : "compile-module", paths[0],
+            "-o", replay ? "/work/output.native" : "/work/output.so", "--runner", "/usr/bin/latx-x86_64"};
         for (size_t i = 0; i < G_N_ELEMENTS(command); i++)
             g_ptr_array_add(compile_exec, (gpointer)command[i]);
+        if (replay) { g_ptr_array_add(compile_exec, (gpointer)"--config"); g_ptr_array_add(compile_exec, (gpointer)paths[2]); }
+        else { g_ptr_array_add(compile_exec, (gpointer)"--runtime-dir"); g_ptr_array_add(compile_exec, (gpointer)"/usr/lib"); }
         if (tbset) { g_ptr_array_add(compile_exec, (gpointer)"--tbset"); g_ptr_array_add(compile_exec, (gpointer)paths[1]); }
         if (static_tbset) g_ptr_array_add(compile_exec, (gpointer)"--static-tbset");
     }
@@ -3539,7 +3555,26 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             errno = ECANCELED;
         }
     }
-    if (real_managed_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&
+    if (replay && waited == child && WIFEXITED(status) && !WEXITSTATUS(status) &&
+        (!real_managed_compile || workspace < 0 || domain.state != LATCD_MANAGED_DOMAIN_EMPTY)) {
+        waited = -1;
+        errno = EIO;
+    }
+    if (replay && real_managed_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&
+        !WEXITSTATUS(status) && domain.state == LATCD_MANAGED_DOMAIN_EMPTY) {
+        int image = openat(workspace, "output.native", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        struct stat st;
+        if (image < 0 || fstat(image, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+            st.st_size <= 0 || st.st_size > 64 * 1024 * 1024 ||
+            (uint64_t)st.st_size > *transient_reservation ||
+            lat_replay_native_validate_fd(image, input_copies[2], input_copies[1], digest,
+                                          error, error_size)) {
+            waited = -1;
+            errno = EINVAL;
+        }
+        if (image >= 0) close(image);
+    }
+    if (!replay && real_managed_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&
         !WEXITSTATUS(status) && domain.state == LATCD_MANAGED_DOMAIN_EMPTY) {
         const char *destinations[] = {output_native, output};
         int outputs[2] = {-1, -1};
@@ -3609,6 +3644,13 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         g_free(parent);
     }
     if (workspace >= 0) close(workspace);
+    if (replay) close_compiler_inputs(input_copies);
+    if (replay && (domain.state == LATCD_MANAGED_DOMAIN_EMPTY || domain.state == LATCD_MANAGED_CANCELLED) &&
+        latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
+                                  LATCD_MANAGED_REPLAY_DISCARDED, error, error_size)) {
+        waited = -1;
+        errno = EIO;
+    }
     /*
      * Compiler shell scripts can exit after SIGTERM while a grandchild keeps
      * translating in the compiler's process group.  Do not lose the PGID
@@ -5257,7 +5299,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     unlink(native);
     int compiler_result = run_compiler(config, worker_index, snapshot,
                                        compile_tbset, static_tbset,
-                                       base_native, base_module, native,
+                                       base_native, base_module, NULL, native,
                                        module, digest, compiler_tasks, &transient_reservation, error, sizeof(error));
     if (compiler_result) {
         if (task_roots_busy) goto out;
@@ -5285,7 +5327,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         full_compile_tbset = retained_tbset ? retained_tbset : complete_tbset;
         compiler_result = run_compiler(config, worker_index, snapshot,
                                        full_compile_tbset, static_tbset,
-                                       NULL, NULL, native, module, digest,
+                                       NULL, NULL, NULL, native, module, digest,
                                        compiler_tasks, &transient_reservation, error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
@@ -5322,7 +5364,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         full_compile_tbset = retained_tbset ? retained_tbset : complete_tbset;
         compiler_result = run_compiler(config, worker_index, snapshot,
                                        full_compile_tbset, static_tbset,
-                                       NULL, NULL, native, module, digest,
+                                       NULL, NULL, NULL, native, module, digest,
                                        compiler_tasks, &transient_reservation, error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
@@ -8248,6 +8290,14 @@ static int test_managed_compiler_run(const char *root, const char *delegation)
     config.worker_bwrap = getenv("LATCD_TEST_BWRAP");
     config.worker_toolroot = getenv("LATCD_TEST_TOOLROOT");
     config.worker_real_compile = getenv("LATCD_TEST_REAL_COMPILE") != NULL;
+    const char *test_config = getenv("LATCD_TEST_REPLAY_CONFIG");
+    if (test_config) {
+        config.compiler = getenv("LATCD_TEST_COMPILER");
+        config.runner = getenv("LATCD_TEST_RUNNER");
+        config.runtime_dir = getenv("LATCD_TEST_RUNTIME_DIR");
+        if (!config.compiler || !config.runner || !config.runtime_dir ||
+            !config.worker_real_compile) return 1;
+    }
     char error[512] = {0};
     char *source = g_build_filename(root, ".tmp", "input", NULL);
     char *native = g_build_filename(root, ".tmp", "output-native", NULL);
@@ -8275,7 +8325,7 @@ static int test_managed_compiler_run(const char *root, const char *delegation)
     if (worker_delegation_fd < 0 || latcd_worker_delegation_init(worker_delegation_fd, &manager)) goto out;
     test_managed_compiler = true;
     if (run_compiler(&config, 0, source, test_tbset, false, test_base_native,
-                     test_base_module, native, module,
+                     test_base_module, test_config, native, module,
                      digest, tasks, &reservation, error, sizeof(error))) goto out;
     if (tasks->len != 1) goto out;
     printf("%s\n", ((LatcdCompilerTask *)g_ptr_array_index(tasks, 0))->id);

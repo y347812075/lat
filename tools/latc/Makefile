@@ -244,6 +244,9 @@ $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
 	$(BUILD)/latcd/worker-seccomp.o $(BUILD)/latcd/worker-closure.o
 $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-journal-store \
 $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/worker-domain.o
+$(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-journal-store \
+$(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
+	$(BUILD)/native/format/replay-validate.o $(BUILD)/native/format/native-image.o
 
 $(BUILD)/tests/cache-capacity-testing.o: latcd/cache-capacity.c latcd/cache-capacity.h
 	@mkdir -p $(dir $@)
