@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <sys/types.h>
 
 int latcd_client_hello(const char *socket_path, const char *build_id,
                         const uint8_t cache_identity[32],
@@ -26,6 +27,12 @@ typedef struct LatcdClientFdProtection {
     int (*register_locked)(int fd);
     void (*close_fd)(int fd);
 } LatcdClientFdProtection;
+/* service_uid must come from trusted policy; success does not authorize code. */
+int latcd_client_broker_journal(const char *path, uid_t service_uid,
+    int source_fd, int config_fd, const uint8_t source_sha256[32],
+    uint32_t operation, uint64_t request_id, uint64_t sequence,
+    uint8_t epoch[16], const LatcdClientFdProtection *protection,
+    char *error, size_t error_size);
 /* Successful channel is registered and must be released with close_fd. */
 int latcd_client_open_channel_protected(const char *socket_path, const char *build_id,
     const uint8_t cache_identity[32], const LatcdClientFdProtection *protection,

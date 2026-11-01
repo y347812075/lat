@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -32,6 +33,57 @@ static int fd_count(void)
     }
     closedir(directory);
     return count;
+}
+
+static int test_broker_journal(int server, const char *path)
+{
+    int source = memfd_create("broker-client-test", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (source < 0 || write(source, "x", 1) != 1 || fcntl(source, F_ADD_SEALS,
+        F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) return fail("seal fixture");
+    for (unsigned variant = 0; variant < 4; variant++) {
+        pid_t child = fork();
+        if (child < 0) return fail("fork broker client");
+        if (!child) {
+            uint8_t digest[32] = {7}, epoch[16] = {0};
+            char error[256];
+            int result = latcd_client_broker_journal(path, geteuid() + (variant == 3),
+                source, source, digest, LATCD_OP_REGISTER_JOURNAL, 83, 8,
+                epoch, NULL, error, sizeof(error));
+            if (variant == 0) _exit(result || epoch[0] != 1 || epoch[15] != 0xef);
+            _exit(result >= 0);
+        }
+        int client = accept4(server, NULL, NULL, SOCK_CLOEXEC);
+        if (client < 0) return fail("accept broker client");
+        if (variant != 3) {
+            LatcdBrokerJournalRequest request;
+            union { struct cmsghdr align; char bytes[CMSG_SPACE(2 * sizeof(int))]; } control = {0};
+            struct iovec iov = {.iov_base = &request, .iov_len = sizeof(request)};
+            struct msghdr msg = {.msg_iov = &iov, .msg_iovlen = 1,
+                .msg_control = control.bytes, .msg_controllen = sizeof(control.bytes)};
+            if (recvmsg(client, &msg, MSG_CMSG_CLOEXEC) != sizeof(request)) return fail("broker request");
+            struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+            if (!c || c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS ||
+                c->cmsg_len != CMSG_LEN(2 * sizeof(int)) || request.request_id != 83 ||
+                request.operation != LATCD_OP_REGISTER_JOURNAL || request.sequence != 8)
+                return fail("broker request identity");
+            int received[2]; memcpy(received, CMSG_DATA(c), sizeof(received));
+            close(received[0]); close(received[1]);
+            LatcdResponseV2 response = {.magic = LATCD_RESPONSE_MAGIC,
+                .version = LATCD_PROTOCOL_VERSION, .size = sizeof(response),
+                .request_id = 83, .source_sha256 = {7}};
+            strcpy(response.message, "0123456789abcdef0123456789abcdef");
+            if (variant == 1) response.source_sha256[0]++;
+            if (variant == 2) response.message[31] = 'g';
+            if (send(client, &response, sizeof(response), MSG_NOSIGNAL) != sizeof(response))
+                return fail("broker response");
+        }
+        close(client);
+        int status;
+        if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status))
+            return fail("broker client validation");
+    }
+    close(source);
+    return 0;
 }
 
 static int test_registration(int server, const char *path, int source, const char *temporary)
@@ -499,6 +551,7 @@ int main(void)
             return fail("handshake identity validation failed");
     }
     if (test_channel(server, path, source)) return 1;
+    if (test_broker_journal(server, path)) return 1;
     if (test_registration(server, path, source, directory)) return 1;
     if (test_concurrent_registration(server, path, source)) return 1;
     close(source);

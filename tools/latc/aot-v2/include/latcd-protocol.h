@@ -11,6 +11,15 @@
 #define LATCD_PROTOCOL_VERSION 2u
 #define LATCD_RESPONSE_MESSAGE_SIZE 192u
 
+#define LATCD_BROKER_JOURNAL_VERSION 1u
+typedef struct LatcdBrokerJournalRequest {
+    uint32_t version;
+    uint32_t operation;
+    uint64_t request_id;
+    uint64_t sequence;
+    uint8_t epoch[16];
+} LatcdBrokerJournalRequest;
+
 enum LatcdPriority {
     LATCD_PRIORITY_BACKGROUND = 0,
     LATCD_PRIORITY_LIBRARY = 100,

@@ -61,6 +61,7 @@ static int latcd_client_operation_timeout(uint32_t operation)
 }
 
 static int connect_daemon_protected(const char *socket_path,
+                           uid_t expected_uid,
                            const LatcdClientFdProtection *protection,
                            char *error, size_t error_size)
 {
@@ -106,17 +107,17 @@ static int connect_daemon_protected(const char *socket_path,
     if (getsockopt(socket_fd, SOL_SOCKET, SO_PEERCRED, &credentials,
                    &credentials_size) ||
         credentials_size != sizeof(credentials) ||
-        credentials.uid != geteuid()) {
+        credentials.uid != expected_uid) {
         if (protection) protection->close_fd(socket_fd); else close(socket_fd);
         errno = EPERM;
-        return fail(error, error_size, "latcd peer is not the current user");
+        return fail(error, error_size, "latcd peer UID does not match");
     }
     return socket_fd;
 }
 
 static int connect_daemon(const char *socket_path, char *error, size_t error_size)
 {
-    return connect_daemon_protected(socket_path, NULL, error, error_size);
+    return connect_daemon_protected(socket_path, geteuid(), NULL, error, error_size);
 }
 
 static int receive_response(int socket_fd, uint32_t operation,
@@ -220,7 +221,7 @@ int latcd_client_open_channel_protected(const char *socket_path, const char *bui
         errno = EINVAL;
         return fail(error, error_size, "missing channel build identity");
     }
-    int channel = connect_daemon_protected(socket_path, protection, error, error_size);
+    int channel = connect_daemon_protected(socket_path, geteuid(), protection, error, error_size);
     if (channel < 0) {
         return -1;
     }
@@ -363,6 +364,69 @@ int latcd_client_channel_submit_keys_fd(int channel_fd, int source_fd,
     }
     int saved = errno;
     close(replies[0]);
+    errno = saved;
+    return result;
+}
+
+int latcd_client_broker_journal(const char *path, uid_t uid, int source, int config,
+    const uint8_t digest[32], uint32_t operation, uint64_t request_id,
+    uint64_t sequence, uint8_t epoch[16], const LatcdClientFdProtection *protection,
+    char *error, size_t error_size)
+{
+    const int seals_required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    int seals = source < 0 ? -1 : fcntl(source, F_GET_SEALS);
+    if (!digest || !epoch || config < 0 || seals < 0 ||
+        (seals & seals_required) != seals_required ||
+        (operation != LATCD_OP_REGISTER_JOURNAL && operation != LATCD_OP_APPEND_JOURNAL) ||
+        (operation == LATCD_OP_REGISTER_JOURNAL && (!sequence || sequence > LAT_KEY_JOURNAL_MAX_SLOTS))) {
+        errno = EINVAL;
+        return fail(error, error_size, "invalid broker journal arguments");
+    }
+    LatcdBrokerJournalRequest request = {.version = LATCD_BROKER_JOURNAL_VERSION,
+        .operation = operation, .request_id = request_id, .sequence = sequence};
+    if (operation == LATCD_OP_APPEND_JOURNAL) memcpy(request.epoch, epoch, 16);
+    int fd = connect_daemon_protected(path, uid, protection, error, error_size);
+    if (fd < 0) return -1;
+    int fds[2] = {source, config};
+    struct iovec iov = {.iov_base = &request, .iov_len = sizeof(request)};
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(fds))]; } control = {0};
+    struct msghdr msg = {.msg_iov = &iov, .msg_iovlen = 1,
+        .msg_control = control.bytes, .msg_controllen = sizeof(control.bytes)};
+    struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+    c->cmsg_level = SOL_SOCKET; c->cmsg_type = SCM_RIGHTS;
+    c->cmsg_len = CMSG_LEN(sizeof(fds));
+    memcpy(CMSG_DATA(c), fds, sizeof(fds));
+    ssize_t sent = sendmsg(fd, &msg, MSG_NOSIGNAL);
+    int result = 0;
+    if (sent != sizeof(request)) {
+        if (sent >= 0) errno = EIO;
+        result = fail(error, error_size, "cannot send broker journal: %s", strerror(errno));
+    }
+    LatcdResponseV2 response;
+    if (!result) result = receive_response(fd, operation, request_id, NULL, NULL,
+                                           &response, NULL, error, error_size);
+    uint8_t parsed[16];
+    if (!result && operation == LATCD_OP_REGISTER_JOURNAL) {
+        bool valid = strlen(response.message) == 32;
+        for (unsigned i = 0; valid && i < 16; i++) {
+            unsigned value = 0;
+            for (unsigned j = 0; j < 2; j++) {
+                char ch = response.message[2 * i + j];
+                if (ch >= '0' && ch <= '9') value = value * 16 + ch - '0';
+                else if (ch >= 'a' && ch <= 'f') value = value * 16 + ch - 'a' + 10;
+                else { valid = false; break; }
+            }
+            parsed[i] = value;
+        }
+        if (!valid) { errno = EPROTO; result = fail(error, error_size, "invalid broker epoch"); }
+    }
+    if (!result && (memcmp(response.source_sha256, digest, 32) ||
+                    response.accepted_sequence || response.published_sequence)) {
+        errno = EPROTO; result = fail(error, error_size, "invalid broker journal identity");
+    }
+    if (!result && operation == LATCD_OP_REGISTER_JOURNAL) memcpy(epoch, parsed, 16);
+    int saved = errno;
+    if (protection) protection->close_fd(fd); else close(fd);
     errno = saved;
     return result;
 }
