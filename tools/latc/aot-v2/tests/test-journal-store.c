@@ -660,7 +660,7 @@ int main(void)
     uint8_t digest[32] = {0};
     GPtrArray *tasks_for_compile = g_ptr_array_new_with_free_func(g_free);
     g_assert_cmpint(run_compiler(&managed, 0, NULL, NULL, false, NULL, NULL,
-                                 NULL, NULL, NULL, digest, tasks_for_compile,
+                                 NULL, NULL, NULL, NULL, digest, tasks_for_compile,
                                  &reservation, isolation_error,
                                  sizeof(isolation_error)), ==, -1);
     g_assert_cmpstr(isolation_error, ==, "managed compiler isolation unavailable");
@@ -915,6 +915,52 @@ int main(void)
     g_assert_cmpuint(managed_response.published_sequence, ==, 0);
     g_assert_cmpuint(managed_service.next_sequence, ==, 0);
     g_assert_cmpuint(managed_service.queued, ==, 0);
+    managed_service.config = &managed_config;
+    pthread_mutex_init(&managed_service.lock, NULL);
+    pthread_cond_init(&managed_service.ready, NULL);
+    managed_service.queue = g_ptr_array_new();
+    managed_service.active = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    managed_service.running_sources = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    managed_service.journal_receipts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    test_managed_compiler = true;
+    g_setenv("LATCD_TEST_JOURNAL_REPLAY", "1", TRUE);
+    g_assert_cmpint(journal_queue_receipts(&managed_config, &managed_service,
+        build, codegen, true, &managed_response), ==, 0);
+    g_assert_cmpuint(managed_service.queue->len, ==, 1);
+    g_assert_cmpuint(managed_response.accepted_sequence, ==, 0);
+    g_assert_cmpuint(managed_response.published_sequence, ==, 0);
+    g_assert_cmpuint(managed_service.next_sequence, ==, 0);
+    g_assert_cmpint(journal_queue_receipts(&managed_config, &managed_service,
+        build, codegen, true, &managed_response), ==, 0);
+    g_assert_cmpuint(managed_service.queue->len, ==, 1);
+    LatcdJob *queued_replay = g_ptr_array_index(managed_service.queue, 0);
+    g_assert_nonnull(queued_replay->journal_replay);
+    g_assert_cmpint(fcntl(queued_replay->journal_replay->config_fd, F_GETFD), >=, 0);
+    LatcdJournalReceiptState *newer_receipt = g_hash_table_lookup(
+        managed_service.journal_receipts, registered.message);
+    g_assert_nonnull(newer_receipt);
+    memset(newer_receipt->digest, 'a', 64);
+    newer_receipt->digest[64] = 0;
+    managed_service.stopping = 1;
+    LatcdWorker replay_worker = { .service = &managed_service, .index = 0 };
+    pthread_t replay_thread;
+    g_assert_cmpint(pthread_create(&replay_thread, NULL, compiler_worker, &replay_worker), ==, 0);
+    g_assert_cmpint(pthread_join(replay_thread, NULL), ==, 0);
+    g_assert_cmpuint(managed_service.queue->len, ==, 0);
+    g_assert_cmpuint(g_hash_table_size(managed_service.active), ==, 0);
+    g_assert_cmpuint(g_hash_table_size(managed_service.running_sources), ==, 0);
+    g_assert_cmpuint(g_hash_table_size(managed_service.journal_receipts), ==, 1);
+    g_assert_true(g_hash_table_lookup(managed_service.journal_receipts, registered.message) == newer_receipt);
+    g_assert_cmpuint(managed_service.next_sequence, ==, 0);
+    g_assert_cmpuint(managed_service.queued_bytes, ==, 0);
+    g_ptr_array_free(managed_service.queue, TRUE);
+    g_hash_table_destroy(managed_service.active);
+    g_hash_table_destroy(managed_service.running_sources);
+    g_hash_table_destroy(managed_service.journal_receipts);
+    pthread_cond_destroy(&managed_service.ready);
+    pthread_mutex_destroy(&managed_service.lock);
+    g_unsetenv("LATCD_TEST_JOURNAL_REPLAY");
+    test_managed_compiler = false;
     int receipt_after = openat(stream_fd, "received.tbset", O_RDONLY | O_CLOEXEC);
     g_assert_cmpint(receipt_after, >=, 0);
     g_assert_true(receipt_digest(receipt_after, managed_receipt_after));
@@ -931,7 +977,188 @@ int main(void)
         worker_inputs, error, sizeof(error)), ==, 0);
     g_assert_cmpint(latcd_journal_validate_frozen_input(&input, worker_inputs,
         config.max_cache_bytes, error, sizeof(error)), ==, 0);
+    LatcdJournalReplayIdentity replay_identity, repeated_identity;
+    g_assert_cmpint(latcd_journal_replay_identity(&input, worker_inputs,
+        config.max_cache_bytes, &replay_identity, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(latcd_journal_replay_identity(&input, worker_inputs,
+        config.max_cache_bytes, &repeated_identity, error, sizeof(error)), ==, 0);
+    g_assert_cmpmem(&replay_identity, sizeof(replay_identity),
+                    &repeated_identity, sizeof(repeated_identity));
+    g_assert_cmpmem(&replay_identity.journal, sizeof(input.identity),
+                    &input.identity, sizeof(input.identity));
+    g_assert_cmpmem(replay_identity.input_sha256[0], 32, input.identity.source_sha256, 32);
+    g_assert_cmpmem(replay_identity.input_sha256[1], 32, input.receipt_sha256, 32);
+    char *record_cache = g_build_filename(directory, "journal-record-cache", NULL);
+    char *record_tmp = g_build_filename(record_cache, ".tmp", NULL);
+    g_assert_cmpint(mkdir(record_cache, 0700), ==, 0);
+    g_assert_cmpint(mkdir(record_tmp, 0700), ==, 0);
+    g_assert_cmpint(prepare_metadata_directories(record_cache), ==, 0);
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, record_cache,
+                                             error, sizeof(error)), ==, 0);
+    latcd_cache_capacity_metadata_bind(&generation_capacity, UINT64_MAX);
+    LatcdConfig record_config = { .cache_dir = record_cache, .managed = true };
+    char *native_path = g_build_filename(record_tmp, "native", NULL);
+    char *module_path = g_build_filename(record_tmp, "module", NULL);
+    record_config.max_cache_bytes = UINT64_C(1) << 30;
+    record_config.compiler = "/bin/false";
+    record_config.runner = "/bin/false";
+    record_config.runtime_dir = record_cache;
+    record_config.worker_bootstrap = "/bin/false";
+    record_config.worker_real_compile = true;
+    GPtrArray *replay_tasks = g_ptr_array_new_with_free_func(compiler_task_free);
+    uint64_t replay_reservation = 0;
+    test_managed_compiler = true;
     input.receipt_sha256[0] ^= 1;
+    g_assert_cmpint(run_compiler(&record_config, 0, NULL, NULL, false, NULL, NULL,
+        NULL, &input, native_path, module_path, input.identity.source_sha256,
+        replay_tasks, &replay_reservation, error, sizeof(error)), ==, -1);
+    input.receipt_sha256[0] ^= 1;
+    test_managed_compiler = false;
+    g_assert_cmpuint(replay_tasks->len, ==, 0);
+    g_assert_cmpuint(replay_reservation, >, 0);
+    latcd_cache_capacity_finish_transient(&generation_capacity, replay_reservation, false);
+    g_assert_cmpuint(generation_capacity.transient_reserved, ==, 0);
+    replay_reservation = 0;
+    test_managed_compiler = true;
+    g_assert_cmpint(run_compiler(&record_config, 0, NULL, NULL, false, NULL, NULL,
+        NULL, &input, native_path, module_path, input.identity.source_sha256,
+        replay_tasks, &replay_reservation, error, sizeof(error)), ==, -1);
+    test_managed_compiler = false;
+    g_assert_cmpuint(replay_tasks->len, ==, 1);
+    LatcdCompilerTask *replay_task = g_ptr_array_index(replay_tasks, 0);
+    char *replay_name = g_strdup_printf("%s.ini", replay_task->id);
+    char *replay_record = g_build_filename(record_cache, ".gc", "tasks", replay_name, NULL);
+    GKeyFile *replay_persisted = g_key_file_new();
+    g_assert_true(g_key_file_load_from_file(replay_persisted, replay_record, 0, NULL));
+    char *replay_version = g_key_file_get_string(replay_persisted, "task", "version", NULL);
+    g_assert_cmpstr(replay_version, ==, "4");
+    g_free(replay_version);
+    g_key_file_unref(replay_persisted);
+    compiler_task_local(replay_task->id, false);
+    char replay_id[37];
+    g_strlcpy(replay_id, replay_task->id, sizeof(replay_id));
+    g_ptr_array_set_size(replay_tasks, 0);
+    int recovery_task = open(replay_record, O_RDONLY | O_CLOEXEC);
+    g_assert_cmpint(recovery_task, >=, 0);
+    g_assert_cmpint(flock(recovery_task, LOCK_EX | LOCK_NB), ==, 0);
+    LatcdManagedDomain invalid_direct = {0};
+    g_strlcpy(invalid_direct.boot, "12345678-1234-1234-1234-123456789abc", sizeof(invalid_direct.boot));
+    invalid_direct.delegation.st_ino = 2;
+    invalid_direct.domain.st_ino = 3;
+    g_assert_cmpint(latcd_managed_task_domain(record_cache, replay_id, recovery_task,
+        &invalid_direct, LATCD_MANAGED_BOUND, error, sizeof(error)), ==, -1);
+    worker_delegation_fd = open(record_cache, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    g_assert_cmpint(worker_delegation_fd, >=, 0);
+    g_assert_cmpint(recover_managed_domain(&record_config, replay_id, recovery_task, true, true), ==, 0);
+    LatcdManagedDomain recovered_domain = {0};
+    g_assert_cmpint(latcd_managed_task_domain(record_cache, replay_id, recovery_task,
+        &recovered_domain, LATCD_MANAGED_PREPARED, error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(recovered_domain.state, ==, LATCD_MANAGED_PREEXEC_CANCELLED);
+    g_assert_cmpint(recover_managed_domain(&record_config, replay_id, recovery_task, true, true), ==, 0);
+    close(worker_delegation_fd);
+    worker_delegation_fd = -1;
+    close(recovery_task);
+    latcd_cache_capacity_finish_transient(&generation_capacity, replay_reservation, true);
+    g_assert_cmpuint(generation_capacity.transient_reserved, ==, 0);
+    g_free(replay_record); g_free(replay_name);
+    g_ptr_array_free(replay_tasks, TRUE);
+    const char *record_paths[6] = {NULL, NULL, NULL, NULL, native_path, module_path};
+    const char *record_env[] = {"LANG=C", NULL};
+    int no_pins[4] = {-1, -1, -1, -1};
+    char *record_id = NULL;
+    LatcdJournalReplayIdentity wrong_build = replay_identity;
+    wrong_build.journal.build_sha256[0] ^= 1;
+    g_assert_cmpint(record_task(&record_config, false, true, record_paths, no_pins,
+        input.identity.source_sha256, &wrong_build, record_env, 4096,
+        &record_id, error, sizeof(error)), ==, -1);
+    g_assert_null(record_id);
+    int record_lease = record_task(&record_config, false, true, record_paths, no_pins,
+        input.identity.source_sha256, &replay_identity, record_env, 4096,
+        &record_id, error, sizeof(error));
+    g_assert_cmpint(record_lease, >=, 0);
+    char *record_name = g_strdup_printf("%s.ini", record_id);
+    char *record_path = g_build_filename(record_cache, ".gc", "tasks", record_name, NULL);
+    GKeyFile *persisted = g_key_file_new();
+    g_assert_true(g_key_file_load_from_file(persisted, record_path, 0, NULL));
+    char expected_hash[65];
+    digest_hex(input.receipt_sha256, expected_hash);
+    char *persisted_hash = g_key_file_get_string(persisted, "journal", "receipt_sha256", NULL);
+    g_assert_cmpstr(persisted_hash, ==, expected_hash);
+    g_assert_cmpuint(g_key_file_get_uint64(persisted, "journal", "config_size", NULL),
+                     ==, input.config_size);
+    char source_hex[65];
+    digest_hex(input.identity.source_sha256, source_hex);
+    char *object_name = g_strconcat(source_hex, ".native", NULL);
+    char *object_path = g_build_filename(record_cache, object_name, NULL);
+    g_assert_true(g_file_set_contents(object_path, "unrelated", -1, NULL));
+    g_assert_cmpint(chmod(object_path, 0400), ==, 0);
+    latcd_cache_capacity_close(&generation_capacity);
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, record_cache,
+                                             error, sizeof(error)), ==, 0);
+    latcd_cache_capacity_metadata_bind(&generation_capacity, UINT64_MAX);
+    const char *object_names[] = {object_name};
+    char *evidence = latcd_retirement_capture_objects(record_cache, source_hex, object_names, 1);
+    g_assert_nonnull(evidence);
+    int object = open(object_path, O_RDONLY | O_CLOEXEC);
+    g_assert_cmpint(object, >=, 0);
+    g_assert_cmpint(latcd_retirement_tombstone(record_cache, source_hex, object_name,
+        object, evidence, error, sizeof(error)), ==, 0);
+    close(object);
+    char *tombstone = g_build_filename(record_cache, ".gc", "tombstones", object_name, NULL);
+    g_assert_cmpint(unlink(tombstone), ==, 0);
+    g_key_file_set_string(persisted, "journal", "receipt_sha256", "bad");
+    gsize corrupted_size;
+    char *corrupted = g_key_file_to_data(persisted, &corrupted_size, NULL);
+    g_assert_cmpint(chmod(record_path, 0600), ==, 0);
+    int corrupt_fd = open(record_path, O_WRONLY | O_TRUNC | O_CLOEXEC);
+    g_assert_cmpint(corrupt_fd, >=, 0);
+    g_assert_cmpint(write(corrupt_fd, corrupted, corrupted_size), ==, corrupted_size);
+    close(corrupt_fd);
+    g_assert_cmpint(chmod(record_path, 0400), ==, 0);
+    char *state_path = g_build_filename(record_cache, ".gc", "managed-task-state", record_name, NULL);
+    GKeyFile *state = g_key_file_new();
+    g_assert_true(g_key_file_load_from_file(state, state_path, 0, NULL));
+    char *corrupt_hash = g_compute_checksum_for_data(G_CHECKSUM_SHA256,
+        (const guchar *)corrupted, corrupted_size);
+    g_key_file_set_string(state, "managed", "task_sha256", corrupt_hash);
+    gsize state_size;
+    char *state_data = g_key_file_to_data(state, &state_size, NULL);
+    g_assert_cmpint(chmod(state_path, 0600), ==, 0);
+    int state_fd = open(state_path, O_WRONLY | O_TRUNC | O_CLOEXEC);
+    g_assert_cmpint(state_fd, >=, 0);
+    g_assert_cmpint(write(state_fd, state_data, state_size), ==, state_size);
+    close(state_fd);
+    g_assert_cmpint(chmod(state_path, 0400), ==, 0);
+    latcd_cache_capacity_close(&generation_capacity);
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, record_cache,
+                                             error, sizeof(error)), ==, 0);
+    latcd_cache_capacity_metadata_bind(&generation_capacity, UINT64_MAX);
+    object = open(object_path, O_RDONLY | O_CLOEXEC);
+    g_assert_cmpint(object, >=, 0);
+    g_assert_cmpint(latcd_retirement_tombstone(record_cache, source_hex, object_name,
+        object, evidence, error, sizeof(error)), ==, -1);
+    close(object);
+    g_free(state_data); g_free(corrupt_hash); g_key_file_unref(state); g_free(state_path);
+    g_free(tombstone); g_free(corrupted); g_free(evidence); g_free(object_path); g_free(object_name);
+    g_free(persisted_hash);
+    g_key_file_unref(persisted);
+    close(record_lease);
+    latcd_cache_capacity_close(&generation_capacity);
+    remove_tree(record_cache);
+    g_free(record_path); g_free(record_name); g_free(record_id);
+    g_free(native_path); g_free(module_path); g_free(record_tmp); g_free(record_cache);
+    for (unsigned i = 0; i < 3; i++) {
+        struct stat st;
+        g_assert_cmpint(fstat(worker_inputs[i], &st), ==, 0);
+        g_assert_cmpuint(replay_identity.input_size[i], ==, (uint64_t)st.st_size);
+    }
+    input.receipt_sha256[0] ^= 1;
+    memset(&repeated_identity, 0xff, sizeof(repeated_identity));
+    g_assert_cmpint(latcd_journal_replay_identity(&input, worker_inputs,
+        config.max_cache_bytes, &repeated_identity, error, sizeof(error)), ==, -1);
+    LatcdJournalReplayIdentity empty_identity = {0};
+    g_assert_cmpmem(&repeated_identity, sizeof(repeated_identity),
+                    &empty_identity, sizeof(empty_identity));
     g_assert_cmpint(latcd_journal_validate_frozen_input(&input, worker_inputs,
         config.max_cache_bytes, error, sizeof(error)), ==, -1);
     input.receipt_sha256[0] ^= 1;

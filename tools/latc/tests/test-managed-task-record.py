@@ -13,6 +13,39 @@ import tempfile
 
 
 def run(binary):
+    with tempfile.TemporaryDirectory(prefix='latcd-journal-task-',
+                                     dir=Path.home() / 'tmp') as directory:
+        root = Path(directory)
+        (root / '.tmp').mkdir(mode=0o700)
+        for name in ('input', 'tbset', 'configuration'):
+            (root / '.tmp' / name).write_bytes(name.encode())
+        env = os.environ | {'LATCD_TEST_JOURNAL_RECORD': '1'}
+        result = subprocess.run([binary, '--test-managed-task', str(root)], input='x',
+                                capture_output=True, text=True, env=env, timeout=20)
+        assert result.returncode == 0, result.stderr
+        task_id = result.stdout.strip()
+        task, state = configparser.ConfigParser(), configparser.ConfigParser()
+        task.read(root / '.gc/tasks' / (task_id + '.ini'))
+        state.read(root / '.gc/managed-task-state' / (task_id + '.ini'))
+        assert task['task']['version'] == '4'
+        assert task['task']['kind'] == 'MANAGED_REPLAY'
+        assert not any(role in task for role in ('source', 'tbset', 'config'))
+        assert [int(task['journal'][name]) for name in
+                ('source_size', 'receipt_size', 'config_size')] == [1, 2, 3]
+        assert state['managed']['state'] == 'REPLAY_DISCARDED'
+    with tempfile.TemporaryDirectory(prefix='latcd-journal-task-crash-',
+                                     dir=Path.home() / 'tmp') as directory:
+        root = Path(directory)
+        (root / '.tmp').mkdir(mode=0o700)
+        for name in ('input', 'tbset', 'configuration'):
+            (root / '.tmp' / name).write_bytes(name.encode())
+        env = os.environ | {'LATCD_TEST_JOURNAL_RECORD': '1',
+                            'LATCD_TEST_MANAGED_AFTER_ROOT': '1'}
+        result = subprocess.run([binary, '--test-managed-task', str(root)],
+                                capture_output=True, env=env, timeout=20)
+        assert result.returncode == -signal.SIGKILL
+        subprocess.run([binary, '--test-managed-budget-unknown', str(root)],
+                       check=True, timeout=20)
     with tempfile.TemporaryDirectory(prefix='latcd-managed-replay-',
                                      dir=Path.home() / 'tmp') as directory:
         root = Path(directory)

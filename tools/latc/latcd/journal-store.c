@@ -404,6 +404,27 @@ int latcd_journal_validate_frozen_input(const LatcdJournalCompileInput *input,
     return ok ? 0 : fail(error, error_size, "frozen journal identity mismatch");
 }
 
+int latcd_journal_replay_identity(const LatcdJournalCompileInput *input,
+    const int fds[3], uint64_t max_bytes, LatcdJournalReplayIdentity *identity,
+    char *error, size_t error_size)
+{
+    if (!identity) return fail(error, error_size, "missing replay identity");
+    memset(identity, 0, sizeof(*identity));
+    if (latcd_journal_validate_frozen_input(input, fds, max_bytes, error, error_size))
+        return -1;
+    LatcdJournalReplayIdentity result = {0};
+    result.journal = input->identity;
+    for (unsigned i = 0; i < 3; i++) {
+        struct stat st;
+        if (fstat(fds[i], &st) || st.st_size <= 0 ||
+            !hash_fd(fds[i], result.input_sha256[i]))
+            return fail(error, error_size, "cannot identify frozen journal input");
+        result.input_size[i] = (uint64_t)st.st_size;
+    }
+    *identity = result;
+    return 0;
+}
+
 int latcd_journal_open_compile_input(const char *cache, const char *stream,
     const uint8_t build[32], const uint8_t codegen[32], uint64_t max_bytes,
     LatcdJournalCompileInput *input, char *error, size_t error_size)

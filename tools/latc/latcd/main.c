@@ -154,6 +154,10 @@ static uint32_t default_worker_count(void)
 }
 
 typedef struct LatcdJob {
+#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
+    LatcdJournalCompileInput *journal_replay;
+    char journal_stream[33];
+#endif
     char *snapshot;
     struct stat source_identity;
     char *tbset;
@@ -1445,7 +1449,6 @@ failed:
     }
 }
 
-#ifdef LATCD_JOURNAL_SNAPSHOT_TEST
 static int snapshot_journal_replay_input(const LatcdJournalCompileInput *input,
                                          uint64_t max_bytes, int copies[4],
                                          char *error, size_t error_size)
@@ -1469,7 +1472,6 @@ static int snapshot_journal_replay_input(const LatcdJournalCompileInput *input,
     }
     return 0;
 }
-#endif
 
 static int open_task_directory(int parent, const char *name)
 {
@@ -1654,12 +1656,19 @@ static _Thread_local bool task_roots_busy;
 static int record_task(const LatcdConfig *config, bool copying, bool replay,
                                 const char *const paths[6], const int pins[4],
                                 const uint8_t digest[32],
+                                const LatcdJournalReplayIdentity *journal,
                                 const char *const environment[],
                                 uint64_t managed_budget,
                                 char **task_id, char *error, size_t error_size)
 {
-    if (replay && (!config->managed || copying || !paths[0] || !paths[1] ||
-                   !paths[2] || paths[3] || !paths[4] || !paths[5]))
+    char journal_build[65];
+    if (journal) digest_hex(journal->journal.build_sha256, journal_build);
+    if ((journal && (!replay || memcmp(digest, journal->journal.source_sha256, 32) ||
+                     memcmp(digest, journal->input_sha256[0], 32) ||
+                     strcmp(journal_build, LATC_BUILD_ID))) ||
+        (replay && (!config->managed || copying ||
+                   (!journal && (!paths[0] || !paths[1] || !paths[2])) ||
+                   paths[3] || !paths[4] || !paths[5])))
         return fail(error, error_size, "invalid replay task mode");
     int root = -1, gc = -1, tasks = -1, temporary = -1, collected = -1, lease = -1;
     bool managed = config->managed && !copying;
@@ -1693,7 +1702,7 @@ static int record_task(const LatcdConfig *config, bool copying, bool replay,
         goto failed;
     }
     task_object_identity(record, "temporary", &st);
-    g_key_file_set_string(record, "task", "version", managed ? "3" : copying ? "2" : "1");
+    g_key_file_set_string(record, "task", "version", journal ? "4" : managed ? "3" : copying ? "2" : "1");
     if (copying) g_key_file_set_string(record, "task", "kind", "COPY");
     if (managed) g_key_file_set_string(record, "task", "kind", replay ? "MANAGED_REPLAY" : "MANAGED_COMPILER");
     g_key_file_set_string(record, "task", "id", id);
@@ -1710,9 +1719,31 @@ static int record_task(const LatcdConfig *config, bool copying, bool replay,
                                g_checksum_get_string(configuration));
         g_checksum_free(configuration);
     }
+    if (journal) {
+        char text[65];
+        char epoch[33];
+        for (unsigned i = 0; i < 16; i++)
+            snprintf(epoch + 2 * i, 3, "%02x", journal->journal.epoch[i]);
+        g_key_file_set_string(record, "journal", "epoch", epoch);
+        const uint8_t *hashes[] = {journal->journal.build_sha256,
+            journal->journal.codegen_sha256, journal->journal.config_sha256,
+            journal->input_sha256[0], journal->input_sha256[1], journal->input_sha256[2]};
+        const char *names[] = {"build_sha256", "codegen_sha256", "config_sha256",
+            "source_sha256", "receipt_sha256", "config_bytes_sha256"};
+        for (unsigned i = 0; i < G_N_ELEMENTS(hashes); i++) {
+            digest_hex(hashes[i], text);
+            g_key_file_set_string(record, "journal", names[i], text);
+        }
+        const char *sizes[] = {"source_size", "receipt_size", "config_size"};
+        for (unsigned i = 0; i < 3; i++) {
+            if (!journal->input_size[i]) { errno = EINVAL; goto failed; }
+            g_key_file_set_uint64(record, "journal", sizes[i], journal->input_size[i]);
+        }
+    }
     const char *roles[] = {copying ? "input" : "source", "tbset", replay ? "config" : "base_native",
                           "base_module", copying ? "output" : "output_native", "output_module"};
     for (unsigned i = 0; i < 6; i++) {
+        if (journal && i < 4) continue;
         if (!paths[i]) continue;
         char *parent = g_path_get_dirname(paths[i]);
         char *basename = g_path_get_basename(paths[i]);
@@ -1773,6 +1804,9 @@ static int record_task(const LatcdConfig *config, bool copying, bool replay,
 #endif
         if (latcd_managed_task_prepare(config->cache_dir, id, lease, error, error_size))
             goto failed;
+#ifdef LATCD_GC_TIMER_TEST
+        if (getenv("LATCD_TEST_MANAGED_AFTER_PREPARE")) raise(SIGKILL);
+#endif
     }
     if (task_id) *task_id = g_strdup(id);
     goto out;
@@ -1979,7 +2013,8 @@ static int restore_compiler_budgets_step(const LatcdConfig *config,
                 g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
             char *version = g_key_file_get_string(record, "task", "version", NULL);
             bool copying = version && !strcmp(version, "2");
-            bool managed = version && !strcmp(version, "3");
+            bool journal = version && !strcmp(version, "4");
+            bool managed = version && (!strcmp(version, "3") || journal);
             valid &= version && (!strcmp(version, "1") || copying || managed);
             g_free(version);
             const char *fields[] = {"id", "state"};
@@ -1991,7 +2026,8 @@ static int restore_compiler_budgets_step(const LatcdConfig *config,
             }
             if (valid && (copying || managed)) {
                 char *kind = g_key_file_get_string(record, "task", "kind", NULL);
-                valid = copying ? !g_strcmp0(kind, "COPY") :
+                valid = copying ? !g_strcmp0(kind, "COPY") : journal ?
+                    !g_strcmp0(kind, "MANAGED_REPLAY") :
                     (!g_strcmp0(kind, "MANAGED_COMPILER") ||
                      !g_strcmp0(kind, "MANAGED_REPLAY"));
                 g_free(kind);
@@ -2203,7 +2239,7 @@ static int release_copy_task(const LatcdConfig *config, int task_pin,
                               char *error, size_t error_size);
 
 /* Caller owns the daemon lease and the exclusive task lease. */
-static int recover_managed_domain(const LatcdConfig *config, const char *id, int task, bool replay)
+static int recover_managed_domain(const LatcdConfig *config, const char *id, int task, bool replay, bool journal)
 {
     LatcdManagedDomain domain = {0};
     char error[256], *boot = NULL;
@@ -2213,6 +2249,15 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
     if (worker_delegation_fd < 0 ||
         latcd_managed_task_domain(config->cache_dir, id, task, &domain,
                                   LATCD_MANAGED_PREPARED, error, sizeof(error))) goto out;
+    if (journal && domain.state == LATCD_MANAGED_PREPARED) {
+        if (fstat(worker_delegation_fd, &domain.delegation) ||
+            !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, &length, NULL)) goto out;
+        g_strchomp(boot);
+        g_strlcpy(domain.boot, boot, sizeof(domain.boot));
+        result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
+                                           LATCD_MANAGED_PREEXEC_CANCELLED, error, sizeof(error));
+        goto out;
+    }
     if (replay && (domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY)) {
         result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
                                             LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error));
@@ -2352,7 +2397,8 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
             g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
         char *version = g_key_file_get_string(record, "task", "version", NULL);
         bool copying = version && !strcmp(version, "2");
-        bool managed = version && !strcmp(version, "3");
+        bool journal = version && !strcmp(version, "4");
+        bool managed = version && (!strcmp(version, "3") || journal);
         bool known = version && (!strcmp(version, "1") || copying || managed);
         g_free(version);
         if (config->managed && (!valid || !known)) {
@@ -2363,7 +2409,8 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
         if (managed) {
             char *kind = g_key_file_get_string(record, "task", "kind", NULL);
             bool replay = !g_strcmp0(kind, "MANAGED_REPLAY");
-            bool unsafe = !valid || recover_managed_domain(config, id, task, replay);
+            bool unsafe = !valid || (journal && !replay) ||
+                recover_managed_domain(config, id, task, replay, journal);
             g_free(kind);
             LatcdManagedDomain terminal = {0};
             char state_error[256];
@@ -3003,7 +3050,7 @@ static void *compiler_input_recovery_worker(void *opaque)
     return NULL;
 }
 
-#ifdef LATCD_GC_TIMER_TEST
+#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
 static bool test_managed_compiler;
 #endif
 
@@ -3040,18 +3087,28 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         bool static_tbset,
                         const char *base_native, const char *base_module,
                         const char *replay_config,
+                        const LatcdJournalCompileInput *journal_input,
                         const char *output_native,
                         const char *output, const uint8_t digest[32], GPtrArray *compiler_tasks,
                         uint64_t *transient_reservation,
                         char *error, size_t error_size)
 {
-    bool replay = replay_config != NULL;
+    bool replay = replay_config != NULL || journal_input != NULL;
+    char journal_source[64], journal_receipt[64];
+    if (journal_input) {
+        if (source || tbset || replay_config)
+            return fail(error, error_size, "conflicting journal replay inputs");
+        snprintf(journal_source, sizeof(journal_source), "/proc/self/fd/%d", journal_input->source_fd);
+        snprintf(journal_receipt, sizeof(journal_receipt), "/proc/self/fd/%d", journal_input->receipt_fd);
+        source = journal_source;
+        tbset = journal_receipt;
+    }
     if (replay && (!config->managed || !tbset || static_tbset || base_native || base_module))
         return fail(error, error_size, "invalid managed replay inputs");
     /* A managed worker must not inherit access to the cache or task locks.
      * Until its isolated task domain is available, never run it unsandboxed. */
     if (config->managed) {
-#ifdef LATCD_GC_TIMER_TEST
+#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
         if (!test_managed_compiler)
 #endif
         return fail(error, error_size, "managed compiler isolation unavailable");
@@ -3162,13 +3219,19 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     environment[environment_count] = NULL;
     const char *inputs[4] = {source, tbset, replay ? replay_config : base_native, base_module};
     int input_pins[4] = {-1, -1, -1, -1};
-    int pin_result = pin_compiler_inputs(inputs, input_pins, error, error_size);
+    int pin_result = journal_input ? 0 : pin_compiler_inputs(inputs, input_pins, error, error_size);
     int input_copies[4] = {-1, -1, -1, -1};
+    LatcdJournalReplayIdentity journal_identity;
+    if (journal_input && (snapshot_journal_replay_input(journal_input, config->max_cache_bytes,
+            input_copies, error, error_size) ||
+        latcd_journal_replay_identity(journal_input, input_copies, config->max_cache_bytes,
+                                      &journal_identity, error, error_size))) pin_result = -1;
     const char *task_paths[6] = {source, tbset, replay ? replay_config : base_native, base_module,
                                 output_native, output};
     char *task_id = NULL;
     int task_lease = pin_result ? -1 : record_task(config, false, replay, task_paths,
-        input_pins, digest, environment, cache_peak, &task_id, error, error_size);
+        input_pins, digest, journal_input ? &journal_identity : NULL, environment, cache_peak,
+        &task_id, error, error_size);
     if (task_lease < 0) pin_result = -1;
     if (task_lease >= 0) {
         LatcdCompilerTask *task = g_new0(LatcdCompilerTask, 1);
@@ -3187,7 +3250,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             }
         }
     }
-    if (!pin_result && config->managed &&
+    if (!pin_result && config->managed && !journal_input &&
         snapshot_managed_inputs(input_pins, input_copies, digest, error, error_size))
         pin_result = -1;
     int gate[2] = {-1, -1}, domain_fd = -1;
@@ -3944,7 +4007,7 @@ static int snapshot_task_copy(const LatcdConfig *config, const char *source,
     char *output = g_build_filename(temporary, name, NULL);
     const char *paths[6] = {source, NULL, NULL, NULL, output, NULL};
     int inputs[4] = {input, -1, -1, -1};
-    *task_pin = record_task(config, true, false, paths, inputs, digest, NULL, 0,
+    *task_pin = record_task(config, true, false, paths, inputs, digest, NULL, NULL, 0,
                             task_id, error, error_size);
     if (*task_pin >= 0) copy_test_barrier("recorded");
     int result = *task_pin < 0 ? -1 : snapshot_cached_fd(input, temporary,
@@ -5345,7 +5408,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     unlink(native);
     int compiler_result = run_compiler(config, worker_index, snapshot,
                                        compile_tbset, static_tbset,
-                                       base_native, base_module, NULL, native,
+                                       base_native, base_module, NULL, NULL, native,
                                        module, digest, compiler_tasks, &transient_reservation, error, sizeof(error));
     if (compiler_result) {
         if (task_roots_busy) goto out;
@@ -5373,7 +5436,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         full_compile_tbset = retained_tbset ? retained_tbset : complete_tbset;
         compiler_result = run_compiler(config, worker_index, snapshot,
                                        full_compile_tbset, static_tbset,
-                                       NULL, NULL, NULL, native, module, digest,
+                                       NULL, NULL, NULL, NULL, native, module, digest,
                                        compiler_tasks, &transient_reservation, error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
@@ -5410,7 +5473,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         full_compile_tbset = retained_tbset ? retained_tbset : complete_tbset;
         compiler_result = run_compiler(config, worker_index, snapshot,
                                        full_compile_tbset, static_tbset,
-                                       NULL, NULL, NULL, native, module, digest,
+                                       NULL, NULL, NULL, NULL, native, module, digest,
                                        compiler_tasks, &transient_reservation, error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
@@ -5746,6 +5809,12 @@ static void job_free(LatcdJob *job)
     if (!job) {
         return;
     }
+#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
+    if (job->journal_replay) {
+        latcd_journal_close_compile_input(job->journal_replay);
+        g_free(job->journal_replay);
+    }
+#endif
     if (job->snapshot) {
         unlink(job->snapshot);
     }
@@ -6064,6 +6133,66 @@ static void *compiler_worker(void *opaque)
             .size = sizeof(response),
         };
         char error[sizeof(response.message)] = {0};
+#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
+        if (job->journal_replay) {
+            char *tmp = g_build_filename(service->config->cache_dir, ".tmp", NULL);
+            char *native = g_build_filename(tmp, "replay-native-XXXXXX", NULL);
+            char *module = g_build_filename(tmp, "replay-module-XXXXXX", NULL);
+            int n = g_mkstemp_full(native, O_RDWR | O_CLOEXEC, 0600);
+            int m = g_mkstemp_full(module, O_RDWR | O_CLOEXEC, 0600);
+            if (n >= 0) { close(n); unlink(native); }
+            if (m >= 0) { close(m); unlink(module); }
+            GPtrArray *tasks = g_ptr_array_new_with_free_func(compiler_task_free);
+            uint64_t reservation = 0;
+            int status = n < 0 || m < 0 ? -1 : run_compiler(service->config, worker->index,
+                NULL, NULL, false, NULL, NULL, NULL, job->journal_replay,
+                native, module, job->digest, tasks, &reservation, error, sizeof(error));
+            /* Registration may persist a root before returning an error. */
+            bool retained = status && !tasks->len;
+            for (guint i = 0; i < tasks->len; i++) {
+                LatcdCompilerTask *task = g_ptr_array_index(tasks, i);
+                if (task->publication_lease >= 0) {
+                    close(task->publication_lease);
+                    task->publication_lease = -1;
+                }
+                char *name = g_strdup_printf("%s.ini", task->id);
+                char *path = g_build_filename(service->config->cache_dir, ".gc", "tasks", name, NULL);
+                int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+                struct stat identity;
+                LatcdManagedDomain domain = {0};
+                char state_error[256];
+                bool terminal = fd >= 0 && !fstat(fd, &identity) &&
+                    identity.st_dev == task->identity.st_dev && identity.st_ino == task->identity.st_ino &&
+                    !flock(fd, LOCK_EX | LOCK_NB) &&
+                    !latcd_managed_task_domain(service->config->cache_dir, task->id, fd, &domain,
+                                               LATCD_MANAGED_PREPARED, state_error, sizeof(state_error)) &&
+                    (domain.state == LATCD_MANAGED_REPLAY_DISCARDED ||
+                     domain.state == LATCD_MANAGED_PREEXEC_CANCELLED);
+                if (fd >= 0) close(fd);
+                g_free(path); g_free(name);
+                retained |= !terminal;
+                compiler_task_local(task->id, false);
+            }
+            if (reservation) latcd_cache_capacity_finish_transient(&generation_capacity,
+                reservation, retained);
+            g_ptr_array_free(tasks, TRUE);
+            g_free(native); g_free(module); g_free(tmp);
+            pthread_mutex_lock(&service->lock);
+            g_hash_table_remove(service->running_sources, job->source_key);
+            g_hash_table_remove(service->active, job->key);
+            if (status) {
+                LatcdJournalReceiptState *receipt = g_hash_table_lookup(
+                    service->journal_receipts, job->journal_stream);
+                if (receipt && !strcmp(receipt->digest, job->key + 65))
+                    g_hash_table_remove(service->journal_receipts, job->journal_stream);
+                fprintf(stderr, "latcd: journal replay failed: %s\n", error);
+            }
+            pthread_cond_broadcast(&service->ready);
+            pthread_mutex_unlock(&service->lock);
+            job_free(job);
+            continue;
+        }
+#endif
         char *canonical = NULL;
         char *stable_tbset = NULL;
         char *compile_delta = NULL;
@@ -6398,6 +6527,9 @@ static char *reuse_active_source(LatcdService *service, int source_fd,
     g_hash_table_iter_init(&iterator, service->active);
     while (g_hash_table_iter_next(&iterator, NULL, &value)) {
         LatcdJob *job = value;
+#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
+        if (job->journal_replay) continue;
+#endif
         if (!metadata_equal(&before, &job->source_identity)) continue;
         path = g_build_filename(temporary_dir, "source-reuse-XXXXXX", NULL);
         int fd = g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
@@ -6828,6 +6960,59 @@ static int journal_queue_receipts(const LatcdConfig *config,
             source = input.source_fd;
             receipt = input.receipt_fd;
             if (config->managed) {
+#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
+                if (test_managed_compiler && getenv("LATCD_TEST_JOURNAL_REPLAY")) {
+                    char key[130];
+                    GChecksum *identity = g_checksum_new(G_CHECKSUM_SHA256);
+                    g_checksum_update(identity, input.identity.epoch, sizeof(input.identity.epoch));
+                    g_checksum_update(identity, input.identity.config_sha256, 32);
+                    g_checksum_update(identity, input.receipt_sha256, 32);
+                    char source_key[65];
+                    digest_hex(input.identity.source_sha256, source_key);
+                    snprintf(key, sizeof(key), "%s:%s", source_key, g_checksum_get_string(identity));
+                    g_checksum_free(identity);
+                    struct stat st;
+                    bool admitted = !fstat(source, &st) && st.st_size > 0;
+                    pthread_mutex_lock(&service->lock);
+                    bool duplicate = g_hash_table_contains(service->active, key);
+                    LatcdJournalReceiptState *previous = g_hash_table_lookup(service->journal_receipts, name);
+                    bool unchanged = previous && !strcmp(previous->digest, key + 65);
+                    if (skip_unchanged && unchanged) skipped++;
+                    else if (duplicate) skipped++;
+                    else if (!admitted || service->queue->len >= config->max_jobs ||
+                             (uint64_t)st.st_size > config->max_queue_bytes - MIN(service->queued_bytes, config->max_queue_bytes)) {
+                        failures++;
+                        g_strlcpy(error, "journal replay queue full", sizeof(error));
+                    } else {
+                        LatcdJob *job = g_new0(LatcdJob, 1);
+                        job->journal_replay = g_memdup2(&input, sizeof(input));
+                        g_strlcpy(job->journal_stream, name, sizeof(job->journal_stream));
+                        g_strlcpy(job->key, key, sizeof(job->key));
+                        g_strlcpy(job->source_key, source_key, sizeof(job->source_key));
+                        memcpy(job->digest, input.identity.source_sha256, 32);
+                        job->source_size = st.st_size;
+                        job->priority = LATCD_PRIORITY_STARTUP;
+                        g_ptr_array_add(service->queue, job);
+                        g_hash_table_insert(service->active, g_strdup(key), job);
+                        service->queued_bytes += job->source_size;
+                        LatcdJournalReceiptState *state = g_new0(LatcdJournalReceiptState, 1);
+                        g_strlcpy(state->digest, key + 65, sizeof(state->digest));
+                        memcpy(state->source_sha256, input.identity.source_sha256, 32);
+                        g_hash_table_replace(service->journal_receipts, g_strdup(name), state);
+                        queued++;
+                        source = receipt = -1;
+                        input.config_fd = -1;
+                        pthread_cond_signal(&service->ready);
+                    }
+                    pthread_mutex_unlock(&service->lock);
+                    if (input.config_fd >= 0) close(input.config_fd);
+                    if (source >= 0) close(source);
+                    if (receipt >= 0) close(receipt);
+                    if (directory >= 0) close(directory);
+                    if (failures) break;
+                    continue;
+                }
+#endif
                 failures++;
                 snprintf(error, sizeof(error),
                          "journal configuration replay is not admitted");
@@ -8194,6 +8379,8 @@ static int test_managed_task_record(const char *root)
     char *native = g_build_filename(root, ".tmp", "output-native", NULL);
     char *module = g_build_filename(root, ".tmp", "output-module", NULL);
     bool replay = getenv("LATCD_TEST_REPLAY_RECORD") != NULL;
+    bool journal_replay = getenv("LATCD_TEST_JOURNAL_RECORD") != NULL;
+    replay |= journal_replay;
     char *tbset = g_build_filename(root, ".tmp", "tbset", NULL);
     char *configuration = g_build_filename(root, ".tmp", "configuration", NULL);
     const char *paths[6] = {source, replay ? tbset : NULL,
@@ -8213,7 +8400,11 @@ static int test_managed_task_record(const char *root)
         pins[2] = open(configuration, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     }
     if (pins[0] < 0 || (replay && (pins[1] < 0 || pins[2] < 0))) goto out;
-    lease = record_task(&config, false, replay, paths, pins, digest, environment, 4096,
+    LatcdJournalReplayIdentity journal = {0};
+    if (journal_build_id(journal.journal.build_sha256)) goto out;
+    for (unsigned i = 0; i < 3; i++) journal.input_size[i] = i + 1;
+    lease = record_task(&config, false, replay, paths, pins, digest,
+                        journal_replay ? &journal : NULL, environment, 4096,
                         &id, error, sizeof(error));
     if (lease < 0) goto out;
     if (replay) {
@@ -8420,7 +8611,7 @@ static int test_managed_compiler_run(const char *root, const char *delegation)
     if (worker_delegation_fd < 0 || latcd_worker_delegation_init(worker_delegation_fd, &manager)) goto out;
     test_managed_compiler = true;
     if (run_compiler(&config, 0, source, test_tbset, false, test_base_native,
-                     test_base_module, test_config, native, module,
+                     test_base_module, test_config, NULL, native, module,
                      digest, tasks, &reservation, error, sizeof(error))) goto out;
     if (tasks->len != 1) goto out;
     printf("%s\n", ((LatcdCompilerTask *)g_ptr_array_index(tasks, 0))->id);

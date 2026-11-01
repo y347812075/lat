@@ -914,7 +914,7 @@ static void test_copy_root_recovery(void)
     uint8_t digest[32] = {1};
     LatcdConfig config = {.cache_dir = directory};
     char *id = NULL, error[256];
-    int lease = record_task(&config, true, false, paths, pins, digest, NULL, 0, &id,
+    int lease = record_task(&config, true, false, paths, pins, digest, NULL, NULL, 0, &id,
         error, sizeof(error));
     g_assert_cmpint(lease, >=, 0);
     char *name = g_strdup_printf("%s.ini", id);
@@ -991,7 +991,7 @@ static void test_compiler_input_recovery(void)
     uint8_t digest[32] = {1};
     LatcdConfig config = {.cache_dir = directory};
     char error[256], *id = NULL;
-    int task = record_task(&config, false, false, paths, pins, digest, environment, 0,
+    int task = record_task(&config, false, false, paths, pins, digest, NULL, environment, 0,
         &id, error, sizeof(error));
     g_assert_cmpint(task, >=, 0);
     g_assert_true(g_file_set_contents(native, "unfinished", -1, NULL));
@@ -1173,7 +1173,7 @@ static void test_compiler_input_recovery(void)
     g_free(task_directory);
     for (unsigned bad = 0; bad < 7; bad++) {
         char *bad_id = NULL;
-        int bad_task = record_task(&config, false, false, paths, pins, digest, environment, 0,
+        int bad_task = record_task(&config, false, false, paths, pins, digest, NULL, environment, 0,
             &bad_id, error, sizeof(error));
         g_assert_cmpint(bad_task, >=, 0);
         close(bad_task);

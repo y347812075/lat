@@ -16,6 +16,12 @@ typedef struct LatcdJournalCompileInput {
     size_t config_size;
 } LatcdJournalCompileInput;
 
+typedef struct LatcdJournalReplayIdentity {
+    LatKeyJournalIdentity journal;
+    uint64_t input_size[3];
+    uint8_t input_sha256[3][32];
+} LatcdJournalReplayIdentity;
+
 /* A verified request provenance snapshot, not compilation authorization.
  * receipt_fd and config_fd are sealed; caller owns all descriptors. */
 int latcd_journal_open_compile_input(const char *cache, const char *stream,
@@ -27,6 +33,11 @@ void latcd_journal_close_compile_input(LatcdJournalCompileInput *input);
  * already authenticated journal provenance. This does not admit a task. */
 int latcd_journal_validate_frozen_input(const LatcdJournalCompileInput *input,
     const int fds[3], uint64_t max_bytes, char *error, size_t error_size);
+
+/* Capture content identity only after validating all sealed worker inputs. */
+int latcd_journal_replay_identity(const LatcdJournalCompileInput *input,
+    const int fds[3], uint64_t max_bytes, LatcdJournalReplayIdentity *identity,
+    char *error, size_t error_size);
 
 /* Conservative stream quota includes source, config, journal and atomic receipt
  * replacement. Inventory validates persisted streams, not just file sizes. */

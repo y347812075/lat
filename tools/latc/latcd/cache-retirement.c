@@ -4661,7 +4661,9 @@ int latcd_managed_task_prepare(const char *root, const char *id, int task_fd,
         record_uint64(budget, "budget", "cache_inode", &cache_inode) && cache_inode == (uint64_t)cache.st_ino &&
         record_uint64(budget, "budget", "bytes", &bytes) && bytes > 0 &&
         g_key_file_load_from_data(task, raw, size, 0, NULL) &&
-        record_string_is(task, "task", "version", "3") &&
+        (record_string_is(task, "task", "version", "3") ||
+         (record_string_is(task, "task", "version", "4") &&
+          record_string_is(task, "task", "kind", "MANAGED_REPLAY"))) &&
         record_string_is(task, "task", "id", id) &&
         (record_string_is(task, "task", "kind", "MANAGED_COMPILER") ||
          record_string_is(task, "task", "kind", "MANAGED_REPLAY")) &&
@@ -4714,13 +4716,16 @@ int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
     GKeyFile *task_record = g_key_file_new();
     bool replay = valid && g_key_file_load_from_data(task_record, raw, size, 0, NULL) &&
         record_string_is(task_record, "task", "kind", "MANAGED_REPLAY");
+    bool journal = replay && record_string_is(task_record, "task", "version", "4");
     g_key_file_unref(task_record);
     int result = -1;
     if (valid && next == LATCD_MANAGED_PREPARED) {
         *domain = old;
         result = 0;
     } else if (valid && ((old.state == LATCD_MANAGED_PREPARED &&
-                          (next == LATCD_MANAGED_BOUND || next == LATCD_MANAGED_DELEGATION_BOUND)) ||
+                          (next == LATCD_MANAGED_DELEGATION_BOUND ||
+                           (next == LATCD_MANAGED_BOUND && !journal) ||
+                           (next == LATCD_MANAGED_PREEXEC_CANCELLED && journal))) ||
                (old.state == LATCD_MANAGED_DELEGATION_BOUND && next == LATCD_MANAGED_BOUND &&
                 !strcmp(old.boot, domain->boot) &&
                 old.delegation.st_dev == domain->delegation.st_dev &&
@@ -4811,7 +4816,8 @@ static int object_task_status(int root, const char *name, const struct stat *obj
         char id[37];
         memcpy(id, entry->d_name, 36); id[36] = 0;
         bool copying = record_string_is(record, "task", "version", "2");
-        bool managed = record_string_is(record, "task", "version", "3");
+        bool journal = record_string_is(record, "task", "version", "4");
+        bool managed = journal || record_string_is(record, "task", "version", "3");
         const char *task_keys[] = {"version", "id", "state", "source", "build_id",
                                   copying ? "kind" : "environment_sha256"};
         const char *managed_keys[] = {"version", "id", "state", "source", "build_id", "environment_sha256", "kind"};
@@ -4822,6 +4828,7 @@ static int object_task_status(int root, const char *name, const struct stat *obj
         if (copying) valid &= record_string_is(record, "task", "kind", "COPY");
         LatcdManagedDomain managed_domain = {0};
         bool replay = managed && record_string_is(record, "task", "kind", "MANAGED_REPLAY");
+        if (journal && !replay) valid = false;
         if (managed) valid &= (replay || record_string_is(record, "task", "kind", "MANAGED_COMPILER")) &&
             managed_task_state_read(gc, entry->d_name, id, &before, raw, size, &managed_domain);
         const char *digests[] = {"source", "build_id", "environment_sha256"};
@@ -4838,8 +4845,31 @@ static int object_task_status(int root, const char *name, const struct stat *obj
         char **groups = g_key_file_get_groups(record, &count);
         for (gsize i = 0; valid && i < count; i++) {
             const char *group = groups[i];
+            if (journal && !strcmp(group, "journal")) {
+                const char *fields[] = {"epoch", "build_sha256", "codegen_sha256",
+                    "config_sha256", "source_sha256", "receipt_sha256", "config_bytes_sha256",
+                    "source_size", "receipt_size", "config_size"};
+                valid = exact_keys(record, group, fields, G_N_ELEMENTS(fields));
+                char *epoch = g_key_file_get_string(record, group, "epoch", NULL);
+                valid = valid && epoch && strlen(epoch) == 32 &&
+                    strspn(epoch, "0123456789abcdef") == 32;
+                g_free(epoch);
+                for (unsigned j = 1; valid && j <= 6; j++) {
+                    char *hash = g_key_file_get_string(record, group, fields[j], NULL);
+                    valid = digest_valid(hash);
+                    if (valid && j == 1) valid = record_string_is(record, "task", "build_id", hash);
+                    if (valid && j == 4) valid = record_string_is(record, "task", "source", hash);
+                    g_free(hash);
+                }
+                for (unsigned j = 7; valid && j < G_N_ELEMENTS(fields); j++) {
+                    uint64_t length;
+                    valid = record_uint64(record, group, fields[j], &length) && length > 0;
+                }
+                continue;
+            }
             bool input = false;
             for (unsigned j = 0; j < G_N_ELEMENTS(roles); j++) input |= !strcmp(group, roles[j]);
+            if (journal && input) { valid = false; break; }
             if (!input) {
                 if (!strcmp(group, "task")) continue;
                 bool location = !strcmp(group, "cache") || !strcmp(group, "temporary") || !strcmp(group, "collected");
@@ -4871,11 +4901,12 @@ static int object_task_status(int root, const char *name, const struct stat *obj
                 (device == (uint64_t)object->st_dev && inode == (uint64_t)object->st_ino);
             g_free(input_name); g_free(location);
         }
-        valid = valid && g_key_file_has_group(record, copying ? "input" : "source") &&
+        valid = valid && (journal ? g_key_file_has_group(record, "journal") :
+            g_key_file_has_group(record, copying ? "input" : "source")) &&
             g_key_file_has_group(record, "temporary") &&
             g_key_file_has_group(record, copying ? "output" : "output_native") &&
             (copying || g_key_file_has_group(record, "output_module"));
-        if (replay) valid = valid && g_key_file_has_group(record, "tbset") &&
+        if (replay && !journal) valid = valid && g_key_file_has_group(record, "tbset") &&
             g_key_file_has_group(record, "config");
         g_strfreev(groups);
         if (!valid) result = -1;
