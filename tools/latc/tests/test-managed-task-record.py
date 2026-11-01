@@ -12,7 +12,48 @@ import sys
 import tempfile
 
 
-def run(binary):
+def run(binary, scanner):
+    with tempfile.TemporaryDirectory(prefix='latcd-journal-base-',
+                                     dir=Path.home() / 'tmp') as directory:
+        root = Path(directory)
+        (root / '.tmp').mkdir(mode=0o700)
+        for name in ('input', 'tbset', 'configuration', 'base-native'):
+            (root / '.tmp' / name).write_bytes(name.encode())
+        env = os.environ | {'LATCD_TEST_JOURNAL_RECORD': '1',
+                            'LATCD_TEST_JOURNAL_BASE': '1'}
+        process = subprocess.Popen([binary, '--test-managed-task', str(root)],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, env=env)
+        task_id = process.stdout.readline().strip()
+        assert task_id, process.stderr.read()
+        task = configparser.ConfigParser()
+        task.read(root / '.gc/tasks' / (task_id + '.ini'))
+        assert task['task']['version'] == '5'
+        assert task['base_native']['name'] == 'base-native'
+        assert int(task['base_native']['inode']) == (root / '.tmp/base-native').stat().st_ino
+        assert task['base_native']['directory'] == 'temporary'
+        def status():
+            return int(subprocess.check_output([scanner, '--task-status', str(root),
+                                                '.tmp/base-native'], text=True))
+        assert status() == 1
+        process.stdin.write('x')
+        process.stdin.flush()
+        assert process.wait(timeout=20) == 0, process.stderr.read()
+        assert status() == 0
+    with tempfile.TemporaryDirectory(prefix='latcd-journal-base-crash-',
+                                     dir=Path.home() / 'tmp') as directory:
+        root = Path(directory)
+        (root / '.tmp').mkdir(mode=0o700)
+        for name in ('input', 'tbset', 'configuration', 'base-native'):
+            (root / '.tmp' / name).write_bytes(name.encode())
+        env = os.environ | {'LATCD_TEST_JOURNAL_RECORD': '1',
+                            'LATCD_TEST_JOURNAL_BASE': '1',
+                            'LATCD_TEST_MANAGED_AFTER_ROOT': '1'}
+        result = subprocess.run([binary, '--test-managed-task', str(root)],
+                                capture_output=True, env=env, timeout=20)
+        assert result.returncode == -signal.SIGKILL
+        subprocess.run([binary, '--test-managed-budget-unknown', str(root)],
+                       check=True, timeout=20)
     with tempfile.TemporaryDirectory(prefix='latcd-journal-task-',
                                      dir=Path.home() / 'tmp') as directory:
         root = Path(directory)
@@ -193,4 +234,4 @@ def run(binary):
 
 
 if __name__ == '__main__':
-    run(os.path.abspath(sys.argv[1]))
+    run(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2]))

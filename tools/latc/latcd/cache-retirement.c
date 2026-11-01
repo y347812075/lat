@@ -4662,7 +4662,8 @@ int latcd_managed_task_prepare(const char *root, const char *id, int task_fd,
         record_uint64(budget, "budget", "bytes", &bytes) && bytes > 0 &&
         g_key_file_load_from_data(task, raw, size, 0, NULL) &&
         (record_string_is(task, "task", "version", "3") ||
-         (record_string_is(task, "task", "version", "4") &&
+         ((record_string_is(task, "task", "version", "4") ||
+           record_string_is(task, "task", "version", "5")) &&
           record_string_is(task, "task", "kind", "MANAGED_REPLAY"))) &&
         record_string_is(task, "task", "id", id) &&
         (record_string_is(task, "task", "kind", "MANAGED_COMPILER") ||
@@ -4716,7 +4717,8 @@ int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
     GKeyFile *task_record = g_key_file_new();
     bool replay = valid && g_key_file_load_from_data(task_record, raw, size, 0, NULL) &&
         record_string_is(task_record, "task", "kind", "MANAGED_REPLAY");
-    bool journal = replay && record_string_is(task_record, "task", "version", "4");
+    bool journal = replay && (record_string_is(task_record, "task", "version", "4") ||
+                              record_string_is(task_record, "task", "version", "5"));
     g_key_file_unref(task_record);
     int result = -1;
     if (valid && next == LATCD_MANAGED_PREPARED) {
@@ -4817,7 +4819,8 @@ static int object_task_status(int root, const char *name, const struct stat *obj
         char id[37];
         memcpy(id, entry->d_name, 36); id[36] = 0;
         bool copying = record_string_is(record, "task", "version", "2");
-        bool journal = record_string_is(record, "task", "version", "4");
+        bool journal_base = record_string_is(record, "task", "version", "5");
+        bool journal = journal_base || record_string_is(record, "task", "version", "4");
         bool managed = journal || record_string_is(record, "task", "version", "3");
         const char *task_keys[] = {"version", "id", "state", "source", "build_id",
                                   copying ? "kind" : "environment_sha256"};
@@ -4870,7 +4873,7 @@ static int object_task_status(int root, const char *name, const struct stat *obj
             }
             bool input = false;
             for (unsigned j = 0; j < G_N_ELEMENTS(roles); j++) input |= !strcmp(group, roles[j]);
-            if (journal && input) { valid = false; break; }
+            if (journal && input && !(journal_base && !strcmp(group, "base_native"))) { valid = false; break; }
             if (!input) {
                 if (!strcmp(group, "task")) continue;
                 bool location = !strcmp(group, "cache") || !strcmp(group, "temporary") || !strcmp(group, "collected");
@@ -4897,7 +4900,8 @@ static int object_task_status(int root, const char *name, const struct stat *obj
                 record_uint64(record, group, "device", &device) && record_uint64(record, group, "inode", &inode);
             valid &= copying ? !strcmp(group, "input") : strcmp(group, "input") != 0;
             if (valid && !strcmp(group, "config")) valid = replay;
-            if (valid && replay && (!strcmp(group, "base_native") || !strcmp(group, "base_module"))) valid = false;
+            if (valid && replay && (!strcmp(group, "base_module") ||
+                (!journal_base && !strcmp(group, "base_native")))) valid = false;
             if (valid) referenced |= (!strcmp(location, "cache") && !strcmp(input_name, name)) ||
                 (device == (uint64_t)object->st_dev && inode == (uint64_t)object->st_ino);
             g_free(input_name); g_free(location);
@@ -4907,6 +4911,7 @@ static int object_task_status(int root, const char *name, const struct stat *obj
             g_key_file_has_group(record, "temporary") &&
             g_key_file_has_group(record, copying ? "output" : "output_native") &&
             (copying || g_key_file_has_group(record, "output_module"));
+        if (journal_base) valid = valid && g_key_file_has_group(record, "base_native");
         if (replay && !journal) valid = valid && g_key_file_has_group(record, "tbset") &&
             g_key_file_has_group(record, "config");
         g_strfreev(groups);
@@ -4937,6 +4942,19 @@ static int object_task_status(int root, const char *name, const struct stat *obj
     closedir(directory); close(gc);
     return result;
 }
+
+#ifdef LATCD_RETIREMENT_TESTING
+int latcd_retirement_test_task_status(const char *root, const char *name)
+{
+    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat object;
+    if (directory < 0) return -1;
+    int result = fstatat(directory, name, &object, AT_SYMLINK_NOFOLLOW) ? -1 :
+        object_task_status(directory, name, &object);
+    close(directory);
+    return result;
+}
+#endif
 
 static int object_transaction_status(int root, const char *name, const struct stat *object,
                                       const uint64_t *grace_us)

@@ -9725,6 +9725,11 @@ static void test_queue_overflow_fixture(void)
 
 int main(int argc, char **argv)
 {
+    if (argc == 4 && !strcmp(argv[1], "--task-status")) {
+        int result = latcd_retirement_test_task_status(argv[2], argv[3]);
+        printf("%d\n", result);
+        return 0;
+    }
     if (argc == 2 && (!strcmp(argv[1], "build-id") || !strcmp(argv[1], "--latc-build-id"))) {
         puts(LATC_BUILD_ID);
         return 0;

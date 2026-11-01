@@ -1668,7 +1668,7 @@ static int record_task(const LatcdConfig *config, bool copying, bool replay,
                      strcmp(journal_build, LATC_BUILD_ID))) ||
         (replay && (!config->managed || copying ||
                    (!journal && (!paths[0] || !paths[1] || !paths[2])) ||
-                   paths[3] || !paths[4] || !paths[5])))
+                   (paths[3] && !journal) || !paths[4] || !paths[5])))
         return fail(error, error_size, "invalid replay task mode");
     int root = -1, gc = -1, tasks = -1, temporary = -1, collected = -1, lease = -1;
     bool managed = config->managed && !copying;
@@ -1702,7 +1702,7 @@ static int record_task(const LatcdConfig *config, bool copying, bool replay,
         goto failed;
     }
     task_object_identity(record, "temporary", &st);
-    g_key_file_set_string(record, "task", "version", journal ? "4" : managed ? "3" : copying ? "2" : "1");
+    g_key_file_set_string(record, "task", "version", journal ? (paths[3] ? "5" : "4") : managed ? "3" : copying ? "2" : "1");
     if (copying) g_key_file_set_string(record, "task", "kind", "COPY");
     if (managed) g_key_file_set_string(record, "task", "kind", replay ? "MANAGED_REPLAY" : "MANAGED_COMPILER");
     g_key_file_set_string(record, "task", "id", id);
@@ -1741,9 +1741,9 @@ static int record_task(const LatcdConfig *config, bool copying, bool replay,
         }
     }
     const char *roles[] = {copying ? "input" : "source", "tbset", replay ? "config" : "base_native",
-                          "base_module", copying ? "output" : "output_native", "output_module"};
+                          journal ? "base_native" : "base_module", copying ? "output" : "output_native", "output_module"};
     for (unsigned i = 0; i < 6; i++) {
-        if (journal && i < 4) continue;
+        if (journal && i < 3) continue;
         if (!paths[i]) continue;
         char *parent = g_path_get_dirname(paths[i]);
         char *basename = g_path_get_basename(paths[i]);
@@ -2017,7 +2017,7 @@ static int restore_compiler_budgets_step(const LatcdConfig *config,
                 g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
             char *version = g_key_file_get_string(record, "task", "version", NULL);
             bool copying = version && !strcmp(version, "2");
-            bool journal = version && !strcmp(version, "4");
+            bool journal = version && (!strcmp(version, "4") || !strcmp(version, "5"));
             bool managed = version && (!strcmp(version, "3") || journal);
             valid &= version && (!strcmp(version, "1") || copying || managed);
             g_free(version);
@@ -2409,7 +2409,7 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
             g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
         char *version = g_key_file_get_string(record, "task", "version", NULL);
         bool copying = version && !strcmp(version, "2");
-        bool journal = version && !strcmp(version, "4");
+        bool journal = version && (!strcmp(version, "4") || !strcmp(version, "5"));
         bool managed = version && (!strcmp(version, "3") || journal);
         bool known = version && (!strcmp(version, "1") || copying || managed);
         g_free(version);
@@ -8422,11 +8422,13 @@ static int test_managed_task_record(const char *root)
     char *module = g_build_filename(root, ".tmp", "output-module", NULL);
     bool replay = getenv("LATCD_TEST_REPLAY_RECORD") != NULL;
     bool journal_replay = getenv("LATCD_TEST_JOURNAL_RECORD") != NULL;
+    bool journal_base = journal_replay && getenv("LATCD_TEST_JOURNAL_BASE") != NULL;
     replay |= journal_replay;
     char *tbset = g_build_filename(root, ".tmp", "tbset", NULL);
     char *configuration = g_build_filename(root, ".tmp", "configuration", NULL);
+    char *base = g_build_filename(root, ".tmp", "base-native", NULL);
     const char *paths[6] = {source, replay ? tbset : NULL,
-                            replay ? configuration : NULL, NULL, native, module};
+                            replay ? configuration : NULL, journal_base ? base : NULL, native, module};
     const char *environment[] = {"LANG=C", NULL};
     uint8_t digest[32] = {0};
     int pins[4] = {-1, -1, -1, -1};
@@ -8441,7 +8443,9 @@ static int test_managed_task_record(const char *root)
         pins[1] = open(tbset, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
         pins[2] = open(configuration, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     }
-    if (pins[0] < 0 || (replay && (pins[1] < 0 || pins[2] < 0))) goto out;
+    if (journal_base) pins[3] = open(base, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (pins[0] < 0 || (replay && (pins[1] < 0 || pins[2] < 0)) ||
+        (journal_base && pins[3] < 0)) goto out;
     LatcdJournalReplayIdentity journal = {0};
     if (journal_build_id(journal.journal.build_sha256)) goto out;
     for (unsigned i = 0; i < 3; i++) journal.input_size[i] = i + 1;
@@ -8511,7 +8515,7 @@ out:
     if (lease >= 0) close(lease);
     close_compiler_inputs(pins);
     latcd_cache_capacity_close(&generation_capacity);
-    g_free(id); g_free(source); g_free(native); g_free(module); g_free(tbset); g_free(configuration);
+    g_free(id); g_free(source); g_free(native); g_free(module); g_free(tbset); g_free(configuration); g_free(base);
     return result;
 }
 

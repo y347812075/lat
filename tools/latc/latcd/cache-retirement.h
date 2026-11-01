@@ -179,6 +179,7 @@ int latcd_retirement_page_identity(const LatcdRetirementPageState *state,
 int latcd_retirement_page_budget_identity(const LatcdRetirementPageState *state,
                                           uint8_t digest[32]);
 #ifdef LATCD_RETIREMENT_TESTING
+int latcd_retirement_test_task_status(const char *root, const char *name);
 /* Unrestricted fixture writer, excluded from production builds. */
 int latcd_retirement_page_state_store(const char *root,
                                       const LatcdRetirementPageState *state,
