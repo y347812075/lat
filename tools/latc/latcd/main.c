@@ -1450,13 +1450,14 @@ failed:
 }
 
 static int snapshot_journal_replay_input(const LatcdJournalCompileInput *input,
-                                         uint64_t max_bytes, int copies[4],
+                                         int base, uint64_t max_bytes, int copies[4],
                                          char *error, size_t error_size)
 {
     for (unsigned i = 0; i < 4; i++) copies[i] = -1;
     if (!input) return fail(error, error_size, "missing journal replay input");
-    const int pins[4] = {input->source_fd, input->receipt_fd, input->config_fd, -1};
-    for (unsigned i = 0; i < 3; i++) {
+    const int pins[4] = {input->source_fd, input->receipt_fd, input->config_fd, base};
+    for (unsigned i = 0; i < 4; i++) {
+        if (i == 3 && base < 0) continue;
         struct stat st;
         if (fstat(pins[i], &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
             (uint64_t)st.st_size > max_bytes ||
@@ -3116,7 +3117,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         source = journal_source;
         tbset = journal_receipt;
     }
-    if (replay && (!config->managed || !tbset || static_tbset || base_native || base_module))
+    if (replay && (!config->managed || !tbset || static_tbset || base_module ||
+                   (base_native && !journal_input)))
         return fail(error, error_size, "invalid managed replay inputs");
     /* A managed worker must not inherit access to the cache or task locks.
      * Until its isolated task domain is available, never run it unsandboxed. */
@@ -3232,14 +3234,17 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     environment[environment_count] = NULL;
     const char *inputs[4] = {source, tbset, replay ? replay_config : base_native, base_module};
     int input_pins[4] = {-1, -1, -1, -1};
-    int pin_result = journal_input ? 0 : pin_compiler_inputs(inputs, input_pins, error, error_size);
+    const char *journal_pins[4] = {NULL, NULL, NULL, base_native};
+    int pin_result = pin_compiler_inputs(journal_input ? journal_pins : inputs,
+                                         input_pins, error, error_size);
     int input_copies[4] = {-1, -1, -1, -1};
     LatcdJournalReplayIdentity journal_identity;
-    if (journal_input && (snapshot_journal_replay_input(journal_input, config->max_cache_bytes,
+    if (journal_input && !pin_result && (snapshot_journal_replay_input(journal_input, input_pins[3], config->max_cache_bytes,
             input_copies, error, error_size) ||
         latcd_journal_replay_identity(journal_input, input_copies, config->max_cache_bytes,
                                       &journal_identity, error, error_size))) pin_result = -1;
-    const char *task_paths[6] = {source, tbset, replay ? replay_config : base_native, base_module,
+    const char *task_paths[6] = {source, tbset, replay ? replay_config : base_native,
+                                journal_input ? base_native : base_module,
                                 output_native, output};
     char *task_id = NULL;
     int task_lease = pin_result ? -1 : record_task(config, false, replay, task_paths,
@@ -3352,7 +3357,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         TEST_ARG("--ro-bind-fd"); TEST_ARG("11"); TEST_ARG("/usr/bin/latx-x86_64");
         TEST_ARG("--ro-bind-fd"); TEST_ARG("12"); TEST_ARG("/usr/lib/liblat-aot-runtime.so.2");
         const char *fds[] = {"4", "5", "6", "7"};
-        const char *paths[] = {"/input/source", "/input/tbset", replay ? "/input/config" : "/input/base.native", "/input/base.so"};
+        const char *paths[] = {"/input/source", "/input/tbset", replay ? "/input/config" : "/input/base.native", replay ? "/input/base.native" : "/input/base.so"};
         for (unsigned i = 0; i < 4; i++) if (input_copies[i] >= 0) {
             TEST_ARG("--ro-bind-data"); TEST_ARG(fds[i]); TEST_ARG(paths[i]);
         }
@@ -3370,7 +3375,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         if (compile_timing) { TEST_ARG("--setenv"); TEST_ARG("LATC_COMPILE_TIMING"); TEST_ARG("1"); }
         if (expand_functions) { TEST_ARG("--setenv"); TEST_ARG("LATC_TBSET_EXPAND_FUNCTIONS"); TEST_ARG("1"); }
         if (allow_zero_eflags_stub) { TEST_ARG("--setenv"); TEST_ARG("LATC_AOT_ALLOW_ZERO_EFLAGS_STUB"); TEST_ARG("1"); }
-        if (base_native) { TEST_ARG("--setenv"); TEST_ARG("LATC_NATIVE_BASE"); TEST_ARG(paths[2]); }
+        if (base_native) { TEST_ARG("--setenv"); TEST_ARG("LATC_NATIVE_BASE"); TEST_ARG(paths[replay ? 3 : 2]); }
         if (base_module) { TEST_ARG("--setenv"); TEST_ARG("LATC_NATIVE_BASE_MODULE"); TEST_ARG(paths[3]); }
         const char *command[] = {bwrap, "--args", "15", "--", "/bootstrap", "/usr/bin/latc",
             replay ? "compile-replay-native" : "compile-module", paths[0],

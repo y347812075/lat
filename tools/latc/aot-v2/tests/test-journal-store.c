@@ -995,7 +995,7 @@ int main(void)
     g_assert_cmpmem(&input.identity, sizeof(input.identity), &identity, sizeof(identity));
     int journal_pins[4] = {input.source_fd, input.receipt_fd, input.config_fd, -1};
     int worker_inputs[4] = {-1, -1, -1, -1};
-    g_assert_cmpint(snapshot_journal_replay_input(&input, config.max_cache_bytes,
+    g_assert_cmpint(snapshot_journal_replay_input(&input, -1, config.max_cache_bytes,
         worker_inputs, error, sizeof(error)), ==, 0);
     g_assert_cmpint(latcd_journal_validate_frozen_input(&input, worker_inputs,
         config.max_cache_bytes, error, sizeof(error)), ==, 0);
@@ -1041,8 +1041,13 @@ int main(void)
     latcd_cache_capacity_finish_transient(&generation_capacity, replay_reservation, false);
     g_assert_cmpuint(generation_capacity.transient_reserved, ==, 0);
     replay_reservation = 0;
+    char *replay_base = g_build_filename(record_tmp, "replay-base", NULL);
+    g_assert_true(g_file_set_contents(replay_base, "baseline", -1, NULL));
+    g_assert_cmpint(chmod(replay_base, 0400), ==, 0);
+    struct stat replay_base_identity;
+    g_assert_cmpint(stat(replay_base, &replay_base_identity), ==, 0);
     test_managed_compiler = true;
-    g_assert_cmpint(run_compiler(&record_config, 0, NULL, NULL, false, NULL, NULL,
+    g_assert_cmpint(run_compiler(&record_config, 0, NULL, NULL, false, replay_base, NULL,
         NULL, &input, native_path, module_path, input.identity.source_sha256,
         replay_tasks, &replay_reservation, &untracked_task, error, sizeof(error)), ==, -1);
     test_managed_compiler = false;
@@ -1053,7 +1058,9 @@ int main(void)
     GKeyFile *replay_persisted = g_key_file_new();
     g_assert_true(g_key_file_load_from_file(replay_persisted, replay_record, 0, NULL));
     char *replay_version = g_key_file_get_string(replay_persisted, "task", "version", NULL);
-    g_assert_cmpstr(replay_version, ==, "4");
+    g_assert_cmpstr(replay_version, ==, "5");
+    g_assert_cmpuint(g_key_file_get_uint64(replay_persisted, "base_native", "inode", NULL),
+                     ==, replay_base_identity.st_ino);
     g_free(replay_version);
     g_key_file_unref(replay_persisted);
     compiler_task_local(replay_task->id, false);
@@ -1082,6 +1089,8 @@ int main(void)
     close(recovery_task);
     latcd_cache_capacity_finish_transient(&generation_capacity, replay_reservation, true);
     g_assert_cmpuint(generation_capacity.transient_reserved, ==, 0);
+    g_assert_cmpint(unlink(replay_base), ==, 0);
+    g_free(replay_base);
     g_free(replay_record); g_free(replay_name);
     g_ptr_array_free(replay_tasks, TRUE);
     const char *record_paths[6] = {NULL, NULL, NULL, NULL, native_path, module_path};
@@ -1212,12 +1221,28 @@ int main(void)
         g_assert_cmpstr(original_digest, ==, copied_digest);
     }
     close_compiler_inputs(worker_inputs);
-    g_assert_cmpint(snapshot_journal_replay_input(&input, 1, worker_inputs,
+    g_assert_cmpint(snapshot_journal_replay_input(&input, input.source_fd,
+        config.max_cache_bytes, worker_inputs, error, sizeof(error)), ==, 0);
+    struct stat base_original, base_copy;
+    g_assert_cmpint(fstat(input.source_fd, &base_original), ==, 0);
+    g_assert_cmpint(fstat(worker_inputs[3], &base_copy), ==, 0);
+    g_assert_true(base_original.st_dev != base_copy.st_dev ||
+                  base_original.st_ino != base_copy.st_ino);
+    g_assert_cmpint(base_original.st_size, ==, base_copy.st_size);
+    g_assert_cmpint(fcntl(worker_inputs[3], F_GET_SEALS) &
+        (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL), ==,
+        F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);
+    char base_digest[65], copy_digest[65];
+    g_assert_true(receipt_digest(input.source_fd, base_digest));
+    g_assert_true(receipt_digest(worker_inputs[3], copy_digest));
+    g_assert_cmpstr(base_digest, ==, copy_digest);
+    close_compiler_inputs(worker_inputs);
+    g_assert_cmpint(snapshot_journal_replay_input(&input, -1, 1, worker_inputs,
         error, sizeof(error)), ==, -1);
     for (unsigned i = 0; i < G_N_ELEMENTS(worker_inputs); i++)
         g_assert_cmpint(worker_inputs[i], ==, -1);
     input.receipt_sha256[0] ^= 1;
-    g_assert_cmpint(snapshot_journal_replay_input(&input, config.max_cache_bytes,
+    g_assert_cmpint(snapshot_journal_replay_input(&input, -1, config.max_cache_bytes,
         worker_inputs, error, sizeof(error)), ==, -1);
     for (unsigned i = 0; i < G_N_ELEMENTS(worker_inputs); i++)
         g_assert_cmpint(worker_inputs[i], ==, -1);
