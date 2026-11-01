@@ -151,6 +151,28 @@ if setpriv --reuid=1235 --regid=1235 --clear-groups ls "$work/cache" >/dev/null 
    setpriv --reuid=1235 --regid=1235 --clear-groups ls "$work/admin" >/dev/null 2>&1; then
     echo 'client can access private directory' >&2; exit 1
 fi
+kill -KILL "$pid"
+wait "$pid" 2>/dev/null || :
+pid=
+setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
+    env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/config" \
+    >"$work/restart-basic.out" 2>"$work/restart-basic.err" &
+pid=$!
+n=0
+while ! setpriv --reuid=1236 --regid=1236 --clear-groups python3 - "$work/broker/broker.sock" <<'PY'
+import socket, sys
+try:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as s:
+        s.settimeout(1); s.connect(sys.argv[1]); assert s.recv(1) == b''
+except (OSError, AssertionError):
+    sys.exit(1)
+PY
+do
+    if ! kill -0 "$pid" 2>/dev/null; then cat "$work/restart-basic.err" >&2; exit 1; fi
+    n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+done
+submit_probe
+grep -q '^status=' "$work/probe.out"
 kill -TERM "$pid"
 wait "$pid"
 pid=
@@ -189,14 +211,21 @@ if [ "${LATCD_TEST_REAL_DELEGATION:-0}" = 1 ]; then
     wait "$pid" 2>/dev/null || :
     pid=
     test "$(awk '$1 == "populated" {print $2}' "$scope/worker/preserved-task/cgroup.events")" = 1
-    rm -f "$work/admin/admin.sock" "$work/broker/broker.sock"
     sh -c 'printf "%s\n" "$$" > "$1/cgroup.procs"; shift; exec "$@"' sh "$scope/worker/manager" \
         setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
         env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/delegated-config" \
         >"$work/restarted.out" 2>"$work/restarted.err" &
     pid=$!
     n=0
-    while [ ! -S "$work/broker/broker.sock" ]; do
+    while ! setpriv --reuid=1236 --regid=1236 --clear-groups python3 - "$work/broker/broker.sock" <<'PY'
+import socket, sys
+try:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as s:
+        s.settimeout(1); s.connect(sys.argv[1]); assert s.recv(1) == b''
+except (OSError, AssertionError):
+    sys.exit(1)
+PY
+    do
         if ! kill -0 "$pid" 2>/dev/null; then cat "$work/restarted.err" >&2; exit 1; fi
         n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
     done

@@ -9,6 +9,8 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <unistd.h>
 
 static int fd_count(void)
@@ -85,13 +87,30 @@ static void test_path_listener(void)
     close(accepted); close(client);
     assert(!latcd_broker_listener_close(&listener));
     assert(faccessat(directory, "broker.sock", F_OK, 0) < 0);
+    int ready[2]; assert(!pipe(ready));
+    pid_t child = fork(); assert(child >= 0);
+    if (!child) {
+        close(ready[0]);
+        assert(!latcd_broker_listener_open(&listener, directory, "broker.sock"));
+        assert(write(ready[1], "x", 1) == 1);
+        for (;;) pause();
+    }
+    close(ready[1]); char byte;
+    assert(read(ready[0], &byte, 1) == 1); close(ready[0]);
+    assert(latcd_broker_listener_open(&other, directory, "broker.sock") < 0);
+    assert(!kill(child, SIGKILL)); int status;
+    assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status));
+    assert(!latcd_broker_listener_open(&listener, directory, "broker.sock"));
+    assert(!latcd_broker_listener_close(&listener));
     assert(!latcd_broker_listener_open(&listener, directory, "broker.sock"));
     assert(!unlinkat(directory, "broker.sock", 0));
     int replacement = openat(directory, "broker.sock", O_CREAT | O_EXCL | O_WRONLY, 0600);
     assert(replacement >= 0); close(replacement);
     assert(latcd_broker_listener_close(&listener) < 0);
     assert(!faccessat(directory, "broker.sock", F_OK, 0));
+    assert(latcd_broker_listener_open(&other, directory, "broker.sock") < 0);
     assert(!unlinkat(directory, "broker.sock", 0));
+    assert(!unlinkat(directory, ".broker.sock.anchor", 0));
     assert(!fchmod(directory, 0777));
     assert(latcd_broker_listener_open(&listener, directory, "broker.sock") < 0);
     close(directory); assert(!rmdir(path));

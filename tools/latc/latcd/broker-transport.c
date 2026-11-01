@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/file.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -35,34 +36,56 @@ int latcd_broker_listener_open(LatcdBrokerListener *listener, int directory,
         parent.st_uid != geteuid() || (parent.st_mode & 0022)) {
         errno = EINVAL; return -1;
     }
-    *listener = (LatcdBrokerListener) {.fd = -1, .directory = -1};
-    if (!fstatat(directory, name, &path, AT_SYMLINK_NOFOLLOW) || errno != ENOENT) {
-        errno = EEXIST; return -1;
+    *listener = (LatcdBrokerListener) {.fd = -1, .directory = -1, .ownership = -1};
+    char anchor[96];
+    if (snprintf(anchor, sizeof(anchor), ".%s.anchor", name) >= (int)sizeof(anchor)) {
+        errno = ENAMETOOLONG; return -1;
     }
+    int ownership = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (ownership < 0 || flock(ownership, LOCK_EX | LOCK_NB)) {
+        int saved = errno; if (ownership >= 0) close(ownership); errno = saved; return -1;
+    }
+    struct stat marker, public;
+    bool have_marker = !fstatat(directory, anchor, &marker, AT_SYMLINK_NOFOLLOW);
+    if (!have_marker && errno != ENOENT) goto fail_ownership;
+    bool have_public = !fstatat(directory, name, &public, AT_SYMLINK_NOFOLLOW);
+    if (!have_public && errno != ENOENT) goto fail_ownership;
+    if (have_marker && (!S_ISSOCK(marker.st_mode) || marker.st_uid != geteuid() ||
+        (have_public && (public.st_dev != marker.st_dev || public.st_ino != marker.st_ino)))) {
+        errno = ESTALE; goto fail_ownership;
+    }
+    if (have_public && !have_marker) { errno = EEXIST; goto fail_ownership; }
+    if ((have_public && unlinkat(directory, name, 0)) ||
+        (have_marker && unlinkat(directory, anchor, 0)) ||
+        ((have_public || have_marker) && fsync(directory))) goto fail_ownership;
     int held = fcntl(directory, F_DUPFD_CLOEXEC, 3);
-    if (held < 0) return -1;
+    if (held < 0) goto fail_ownership;
     int fd = latcd_broker_listener_socket();
-    if (fd < 0) { close(held); return -1; }
+    if (fd < 0) { close(held); goto fail_ownership; }
     struct sockaddr_un address = {.sun_family = AF_UNIX};
     int length = snprintf(address.sun_path, sizeof(address.sun_path),
-                          "/proc/self/fd/%d/%s", held, name);
+                          "/proc/self/fd/%d/%s", held, anchor);
     if (length < 0 || (size_t)length >= sizeof(address.sun_path)) {
-        close(fd); close(held); errno = ENAMETOOLONG; return -1;
+        close(fd); close(held); errno = ENAMETOOLONG; goto fail_ownership;
     }
     if (bind(fd, (struct sockaddr *)&address, sizeof(address))) {
-        int saved = errno; close(fd); close(held); errno = saved; return -1;
+        int saved = errno; close(fd); close(held); errno = saved; goto fail_ownership;
     }
-    if (fstatat(held, name, &path, AT_SYMLINK_NOFOLLOW) || !S_ISSOCK(path.st_mode) ||
+    if (fstatat(held, anchor, &path, AT_SYMLINK_NOFOLLOW) || !S_ISSOCK(path.st_mode) ||
         path.st_uid != geteuid()) {
-        close(fd); close(held); errno = ESTALE; return -1;
+        close(fd); close(held); errno = ESTALE; goto fail_ownership;
     }
-    listener->fd = fd; listener->directory = held;
+    listener->fd = fd; listener->directory = held; listener->ownership = ownership;
     listener->device = path.st_dev; listener->inode = path.st_ino;
     strcpy(listener->name, name);
-    if (fchmodat(held, name, 0666, 0) || listen(fd, 16)) {
+    strcpy(listener->anchor, anchor);
+    if (fchmodat(held, anchor, 0666, 0) || listen(fd, 16) || fsync(held) ||
+        linkat(held, anchor, held, name, 0) || fsync(held)) {
         int saved = errno; latcd_broker_listener_close(listener); errno = saved; return -1;
     }
     return 0;
+fail_ownership:
+    { int saved = errno; close(ownership); errno = saved; return -1; }
 }
 
 int latcd_broker_listener_close(LatcdBrokerListener *listener)
@@ -77,9 +100,13 @@ int latcd_broker_listener_close(LatcdBrokerListener *listener)
         S_ISSOCK(path.st_mode) && path.st_dev == listener->device && path.st_ino == listener->inode)
         result = unlinkat(listener->directory, listener->name, 0);
     else errno = ESTALE;
+    if (!result && !fstatat(listener->directory, listener->anchor, &path, AT_SYMLINK_NOFOLLOW) &&
+        S_ISSOCK(path.st_mode) && path.st_dev == listener->device && path.st_ino == listener->inode)
+        unlinkat(listener->directory, listener->anchor, 0);
     int saved = errno;
     close(listener->directory);
-    listener->fd = listener->directory = -1;
+    close(listener->ownership);
+    listener->fd = listener->directory = listener->ownership = -1;
     errno = saved;
     return result;
 }

@@ -29,7 +29,9 @@ int latcd_broker_listener_socket(void);
 typedef struct LatcdBrokerListener {
     int fd;
     int directory;
+    int ownership;
     char name[80];
+    char anchor[96];
     dev_t device;
     ino_t inode;
 } LatcdBrokerListener;
