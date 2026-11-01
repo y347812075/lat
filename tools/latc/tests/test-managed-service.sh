@@ -18,6 +18,17 @@ mkdir -m 755 "$work" "$work/tools" "$work/runtime"
 mkdir -m 700 "$work/cache" "$work/admin"
 mkdir -m 755 "$work/broker"
 chown 1234:1234 "$work/cache" "$work/admin" "$work/broker"
+if [ -n "${LATCD_TEST_SEED_CACHE:-}" ]; then
+    : "${LATCD_TEST_SEED_GUEST:?seed guest required}"
+    : "${LATCD_TEST_BROKER_CLIENT:?broker client required}"
+    digest=$(sha256sum "$LATCD_TEST_SEED_GUEST" | cut -d' ' -f1)
+    cp "$LATCD_TEST_SEED_CACHE"/"$digest"* "$work/cache/"
+    mkdir -m 700 "$work/cache/.gc" "$work/cache/.gc/source-locks"
+    cp "$LATCD_TEST_SEED_CACHE/.gc/source-locks/$digest.lock" "$work/cache/.gc/source-locks/"
+    chown -R 1234:1234 "$work/cache"
+    mkdir -m 700 "$work/client"
+    chown 1235:1235 "$work/client"
+fi
 cp "$compiler" "$work/tools/latc"
 cp "$runner" "$work/tools/runner"
 cp "$static_launcher" "$work/tools/bwrap"
@@ -178,6 +189,13 @@ finally:
 PY
 }
 broker_missing_probe
+if [ -n "${LATCD_TEST_SEED_CACHE:-}" ]; then
+    setpriv --reuid=1235 --regid=1235 --clear-groups python3 "$LATCD_TEST_BROKER_CLIENT" \
+        --socket "$work/broker/broker.sock" --service-uid 1234 \
+        --output "$work/client/export.so" "$LATCD_TEST_SEED_GUEST"
+    expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["module_sha256"])' "$work/cache/$digest.current")
+    test "$(sha256sum "$work/client/export.so" | cut -d' ' -f1)" = "$expected"
+fi
 kill -KILL "$pid"
 wait "$pid" 2>/dev/null || :
 pid=
