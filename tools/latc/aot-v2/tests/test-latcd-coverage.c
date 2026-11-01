@@ -1700,6 +1700,16 @@ int main(int argc, char **argv)
      * must prevent the delayed publisher from rolling the manifest back. */
     gchar *selected_manifest = NULL;
     g_assert_true(g_file_get_contents(manifest, &selected_manifest, NULL, NULL));
+    g_assert_true(g_file_set_contents(manifest, "{\"version\":2}", -1, NULL));
+    g_assert_cmpint(current_manifest_read(&config, hex, &paired), ==, -1);
+    g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
+        tbset_name, &info, 2, true, NULL, error, sizeof(error)), ==, -1);
+    g_assert_nonnull(strstr(error, "cannot read current manifest"));
+    gchar *invalid_manifest = NULL;
+    g_assert_true(g_file_get_contents(manifest, &invalid_manifest, NULL, NULL));
+    g_assert_cmpstr(invalid_manifest, ==, "{\"version\":2}");
+    g_free(invalid_manifest);
+    g_assert_true(g_file_set_contents(manifest, selected_manifest, -1, NULL));
     hook_path = manifest;
     hook_read_path = native_path;
     hook_contents = "{\"concurrent\":true}\n";

@@ -4324,12 +4324,16 @@ static int validate_current_replacement(const LatcdConfig *config,
     /* cache_lock is held. Observed tbsets need not list every compiled TB. */
     LatcdCurrentManifest previous = {0};
     int result = 0;
-    if (!current_manifest_read(config, hex, &previous)) {
+    int status = current_manifest_read(config, hex, &previous);
+    if (status < 0) {
+        return fail(error, error_size, "cannot read current manifest");
+    }
+    if (!status) {
         char *old_path = g_build_filename(config->cache_dir,
                                           previous.module, NULL);
         LatAotModuleInfoV2 old_info;
-        if (cached_module_inspect(old_path,
-            info->note.source_sha256, &old_info) &&
+        if (cached_module_inspect(old_path, info->note.source_sha256,
+                                  &old_info) &&
             lat_aot_v2_module_validate_replacement_file(
                 old_path, candidate, error, error_size)) {
             result = -1;
@@ -4363,7 +4367,8 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     char *tbset_path = *tbset_name ?
         g_build_filename(config->cache_dir, tbset_name, NULL) : NULL;
     LatcdCurrentManifest selected = {0}, latest = {0};
-    bool selected_valid = !current_manifest_read(config, hex, &selected);
+    int selected_status = current_manifest_read(config, hex, &selected);
+    bool selected_valid = selected_status == 0;
     struct stat module_before, native_before, module_after, native_after;
     struct stat tbset_before, tbset_after;
     int module_fd = open_cached_file(module_path, UINT64_MAX, error, error_size);
@@ -4413,7 +4418,8 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     LatcdRetirementPublication *publication = source_lock_fd < 0 ? NULL :
         latcd_retirement_publication_open(config->cache_dir, error, error_size);
     pthread_mutex_lock(&cache_lock);
-    bool latest_valid = !current_manifest_read(config, hex, &latest);
+    int latest_status = current_manifest_read(config, hex, &latest);
+    bool latest_valid = latest_status == 0;
     bool unchanged = source_lock_fd >= 0 && publication && pinned && !lstat(module_path, &module_after) &&
         !lstat(native_path, &native_after) &&
         metadata_equal(&module_before, &module_after) &&
@@ -4423,6 +4429,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
         (!tbset_path || (!lstat(tbset_path, &tbset_after) &&
          metadata_equal(&tbset_before, &tbset_after) &&
          tbset_before.st_mode == tbset_after.st_mode)) &&
+        selected_status >= 0 && latest_status >= 0 &&
         selected_valid == latest_valid && (!selected_valid ||
         current_manifest_equal(&selected, &latest));
     if (module_fd >= 0) close(module_fd);
@@ -4656,7 +4663,7 @@ static int current_manifest_read(const LatcdConfig *config, const char *hex,
         current_manifest_clear(manifest);
         errno = ENOEXEC;
     }
-    return result;
+    return result ? -1 : 0;
 }
 
 /* The caller must authorize the source and effective configuration first. */
@@ -5318,9 +5325,12 @@ static int preserve_current_keys(const LatcdConfig *config, const char *hex,
     LatAotModuleInfoV2 info;
     int result = 0;
     pthread_mutex_lock(&cache_lock);
-    char *module = !current_manifest_read(config, hex, &previous) ?
+    int status = current_manifest_read(config, hex, &previous);
+    char *module = !status ?
         g_build_filename(config->cache_dir, previous.module, NULL) : NULL;
-    if (module && cached_module_inspect(module, digest, &info)) {
+    if (status < 0) {
+        result = fail(error, error_size, "cannot read current manifest");
+    } else if (module && cached_module_inspect(module, digest, &info)) {
         result = lat_aot_v2_module_read_tbset_file(module, &info, &old_keys,
                                                    error, error_size);
     }
