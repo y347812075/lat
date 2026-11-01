@@ -7094,6 +7094,12 @@ static int journal_queue_receipts(const LatcdConfig *config,
     uint64_t request_id = response->request_id;
 
     response_init(response, request_id);
+    if (config->managed && !retirement_recovery_ready(config)) {
+        response->status = LATCD_STATUS_QUEUE_FULL;
+        g_strlcpy(response->message, "managed recovery pending or unsafe",
+                  sizeof(response->message));
+        return -1;
+    }
     if (latcd_journal_collect(config->cache_dir, build, codegen,
             config->max_cache_bytes, &count, &received, error, sizeof(error))) {
         response->status = LATCD_STATUS_BAD_REQUEST;
@@ -8870,6 +8876,12 @@ int main(int argc, char **argv)
                 if (retirement_recovery_ready(&config) != (budget == 1)) return 1;
                 config.managed = true;
                 if (retirement_recovery_ready(&config) != (budget == 1 && managed == 1)) return 1;
+                if (budget != 1 || managed != 1) {
+                    LatcdResponseV2 response = {0};
+                    uint8_t digest[32] = {0};
+                    if (!journal_queue_receipts(&config, NULL, digest, digest, false, &response) ||
+                        response.status != LATCD_STATUS_QUEUE_FULL) return 1;
+                }
             }
         }
         return 0;

@@ -1037,6 +1037,12 @@ int main(void)
     g_assert_cmpstr(managed_receipt_before, ==, managed_receipt_after);
     LatcdService managed_service = {0};
     LatcdResponseV2 managed_response = { .request_id = 42 };
+    atomic_store(&compiler_budget_recovery_state, 1);
+    atomic_store(&managed_task_recovery_state, 0);
+    g_assert_cmpint(journal_queue_receipts(&managed_config, &managed_service,
+        build, codegen, false, &managed_response), ==, -1);
+    g_assert_cmpint(managed_response.status, ==, LATCD_STATUS_QUEUE_FULL);
+    atomic_store(&managed_task_recovery_state, 1);
     g_assert_cmpint(journal_queue_receipts(&managed_config, &managed_service,
         build, codegen, false, &managed_response), ==, -1);
     g_assert_cmpint(managed_response.status, ==, LATCD_STATUS_IO_ERROR);
