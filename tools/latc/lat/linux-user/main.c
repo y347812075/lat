@@ -785,16 +785,19 @@ static int load_translation_config(void)
             fprintf(stderr, "latc: unsupported native configuration replay mode\n");
             return -1;
         }
-        latx_translation_config_set_native_replay(&replay_config);
-        /* Relocation recording is internal to export, not a guest capability. */
-        replay_config.values[LAT_CONFIG_LEGACY_AOT] = 1;
     }
+    LatTranslationConfig target_config = replay_config;
+    /* Relocation recording is internal to export, not a guest capability. */
+    if (translation_config_native_worker)
+        replay_config.values[LAT_CONFIG_LEGACY_AOT] = 1;
     /* Domain provenance is retained in native metadata, not a translator option. */
     replay_config.native_replay_domain = false;
     if (latx_translation_config_apply(&replay_config, error, sizeof(error))) {
         fprintf(stderr, "latc: %s\n", error);
         return -1;
     }
+    if (translation_config_native_worker)
+        latx_translation_config_set_native_replay(&target_config);
     return 0;
 }
 

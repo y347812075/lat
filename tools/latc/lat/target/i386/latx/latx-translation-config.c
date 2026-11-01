@@ -320,6 +320,10 @@ GString *latx_translation_config_json(const LatTranslationConfig *snapshot)
 int latx_translation_config_apply(const LatTranslationConfig *config,
                                  char *error, size_t error_size)
 {
+    if (native_replay_config) {
+        snprintf(error, error_size, "native replay configuration is frozen");
+        return -1;
+    }
     /* Validate all assignable values before changing any option. */
 #define CHECK(id, variable) \
     if (config->values[LAT_CONFIG_##id] < INT_MIN || \
