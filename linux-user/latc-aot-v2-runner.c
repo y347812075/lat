@@ -199,6 +199,7 @@ static uid_t key_journal_broker_uid;
 static bool key_journal_broker_invalid;
 static int key_journal_config_fd = -1;
 static uint8_t key_journal_config_digest[32];
+static LatTranslationConfig key_journal_config;
 static pthread_mutex_t key_journal_lock = PTHREAD_MUTEX_INITIALIZER;
 #define LAT_AOT_V2_PROTECTED_OBJECT_LIMIT 1024
 typedef struct LatAotV2ProtectedObject {
@@ -3320,6 +3321,8 @@ static int prepare_key_journal_config(CPUArchState *env, bool native_replay_doma
         return -1;
     }
     key_journal_config_fd = fd;
+    config.native_replay_domain = false;
+    key_journal_config = config;
     return 0;
 }
 
@@ -3488,6 +3491,13 @@ bool latc_aot_v2_key_retry_service(CPUState *cpu)
 {
     if (!key_retry.pending) return false;
     g_assert(!have_mmap_lock() && !cpu->running && !cpu_in_exclusive_context(cpu));
+    char config_error[256];
+    if (latx_translation_config_verify(cpu->env_ptr, cpu->tcg_cflags,
+                                       &key_journal_config, config_error,
+                                       sizeof(config_error))) {
+        fprintf(stderr, "latx: journal configuration changed: %s\n", config_error);
+        _exit(125);
+    }
     drain_mappings();
     char error[256] = {0};
     /* Match fork/relocation ordering and pin source/channel fds through I/O. */
