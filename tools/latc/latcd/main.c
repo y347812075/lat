@@ -7916,7 +7916,7 @@ static int run_service(const LatcdConfig *config)
     write_stats_locked(&service);
     pthread_mutex_unlock(&service.lock);
     if (recovered_journals && journal_automatic_admission_available(config) &&
-        atomic_load(&compiler_budget_recovery_state) == 1) {
+        retirement_recovery_ready(config)) {
         LatcdResponseV2 recovered = {0};
         response_init(&recovered, 1);
         if (journal_queue_receipts(config, &service, journal_build,
@@ -8016,7 +8016,7 @@ static int run_service(const LatcdConfig *config)
             last_retirement_stats = g_get_monotonic_time();
         }
         finish_flush_requests(&service, pending_flushes, false);
-        if (budget_recovery == 1 && journal_automatic_admission_available(config)) admit_journal_receipts_periodically(
+        if (retirement_recovery_ready(config) && journal_automatic_admission_available(config)) admit_journal_receipts_periodically(
             config, &service, journal_build, journal_codegen,
             &last_journal_admission, &journal_admission_error);
         struct pollfd pollfds[LATCD_MAX_CHANNELS + 1 + LATCD_BROKER_CONNECTIONS + 2];
