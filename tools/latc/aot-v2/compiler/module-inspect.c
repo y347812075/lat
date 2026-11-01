@@ -52,11 +52,18 @@ static const Elf64_Shdr *find_section(const unsigned char *file,
 
 static int module_inspect_memory(const unsigned char *file, size_t size,
                                  LatAotModuleInfoV2 *info,
+                                 const LatAotExpectedV2 *expected,
+                                 const LatAotConfigIdentityV2 *config,
                                  char *error, size_t error_size)
 {
     memset(info, 0, sizeof(*info));
-    if (lat_aot_v2_elf_validate_memory(file, size, NULL, &info->note,
-                                      error, error_size)) {
+    if (config) {
+        LatAotConfigNoteV2 note;
+        if (lat_aot_v2_elf_validate_config_memory(file, size, expected, config,
+                                                  &note, error, error_size)) return -1;
+        info->note = note.base;
+    } else if (lat_aot_v2_elf_validate_memory(file, size, NULL, &info->note,
+                                               error, error_size)) {
         return -1;
     }
     const Elf64_Ehdr *header = (const void *)file;
@@ -168,7 +175,7 @@ int lat_aot_v2_module_inspect_fd(int fd, size_t max_size, LatAotModuleInfoV2 *in
         errno = ESTALE;
         return fail(error, error_size, "module changed while reading");
     }
-    int result = module_inspect_memory(data, size, info, error, error_size);
+    int result = module_inspect_memory(data, size, info, NULL, NULL, error, error_size);
     g_free(data);
     return result;
 }
@@ -186,7 +193,7 @@ int lat_aot_v2_module_inspect_file(const char *path,
     }
     int result = module_inspect_memory(
         (const void *)g_mapped_file_get_contents(mapping),
-        g_mapped_file_get_length(mapping), info, error, error_size);
+        g_mapped_file_get_length(mapping), info, NULL, NULL, error, error_size);
     g_mapped_file_unref(mapping);
     return result;
 }
@@ -225,6 +232,8 @@ static int module_tb_key_compare(const LatAotTbV2 *a, const LatAotTbV2 *b)
  * validated sorted table mapped instead of exporting every key to a TB set. */
 static int module_tb_view_open(const char *path, LatAotModuleInfoV2 *info,
                                ModuleTbView *view,
+                               const LatAotExpectedV2 *expected,
+                               const LatAotConfigIdentityV2 *config,
                                char *error, size_t error_size)
 {
     memset(view, 0, sizeof(*view));
@@ -235,7 +244,7 @@ static int module_tb_view_open(const char *path, LatAotModuleInfoV2 *info,
     const unsigned char *file =
         (const void *)g_mapped_file_get_contents(mapping);
     size_t size = g_mapped_file_get_length(mapping);
-    if (module_inspect_memory(file, size, info, error, error_size)) {
+    if (module_inspect_memory(file, size, info, expected, config, error, error_size)) {
         goto failed;
     }
     const Elf64_Ehdr *header = (const void *)file;
@@ -276,7 +285,7 @@ int lat_aot_v2_module_read_tbset_file(
     }
     memset(keys, 0, sizeof(*keys));
     ModuleTbView view;
-    if (module_tb_view_open(path, info, &view, error, error_size)) {
+    if (module_tb_view_open(path, info, &view, NULL, NULL, error, error_size)) {
         return -1;
     }
     if (view.count > LAT_AOT_V2_TBSET_RECORD_LIMIT) {
@@ -302,15 +311,17 @@ int lat_aot_v2_module_read_tbset_file(
     return 0;
 }
 
-int lat_aot_v2_module_validate_replacement_file(
+static int module_validate_replacement_file(
     const char *previous, const char *replacement,
+    const LatAotExpectedV2 *expected,
+    const LatAotConfigIdentityV2 *config,
     char *error, size_t error_size)
 {
     LatAotModuleInfoV2 old_info, new_info;
     ModuleTbView old = {0}, next = {0};
     int result = -1;
-    if (module_tb_view_open(previous, &old_info, &old, error, error_size) ||
-        module_tb_view_open(replacement, &new_info, &next, error, error_size)) {
+    if (module_tb_view_open(previous, &old_info, &old, expected, config, error, error_size) ||
+        module_tb_view_open(replacement, &new_info, &next, expected, config, error, error_size)) {
         goto out;
     }
     if (memcmp(old_info.note.source_sha256, new_info.note.source_sha256, 32) ||
@@ -347,6 +358,25 @@ out:
     return result;
 }
 
+int lat_aot_v2_module_validate_replacement_file(
+    const char *previous, const char *replacement,
+    char *error, size_t error_size)
+{
+    return module_validate_replacement_file(previous, replacement, NULL, NULL,
+                                            error, error_size);
+}
+
+int lat_aot_v2_module_validate_config_replacement_file(
+    const char *previous, const char *replacement,
+    const LatAotExpectedV2 *expected, const LatAotConfigIdentityV2 *config,
+    char *error, size_t error_size)
+{
+    if (!previous || !replacement || !expected || !config)
+        return fail(error, error_size, "missing configuration replacement identity");
+    return module_validate_replacement_file(previous, replacement, expected, config,
+                                            error, error_size);
+}
+
 static int module_missing_tbset_file(
     const char *path, const char *tbset_path, LatAotModuleInfoV2 *info,
     LatTbKeySet *missing, size_t *requested_count,
@@ -355,7 +385,7 @@ static int module_missing_tbset_file(
     memset(missing, 0, sizeof(*missing));
     LatTbKeySet tbset = {0};
     ModuleTbView actual;
-    if (module_tb_view_open(path, info, &actual, error, error_size)) {
+    if (module_tb_view_open(path, info, &actual, NULL, NULL, error, error_size)) {
         return -1;
     }
     if (lat_tb_key_set_read_file(tbset_path, info->note.source_sha256,

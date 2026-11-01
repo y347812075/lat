@@ -74,6 +74,29 @@ static void write_module(const char *path, const LatAotTbV2 *tbs, size_t count,
     g_assert_cmpint(g_chmod(path, 0444), ==, 0);
 }
 
+static void set_config_note(const char *path, const LatAotConfigIdentityV2 *config)
+{
+    g_assert_cmpint(g_chmod(path, 0600), ==, 0);
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    g_assert_cmpint(fd, >=, 0);
+    unsigned char file[4096];
+    g_assert_cmpint(pread(fd, file, sizeof(file), 0), ==, sizeof(file));
+    Elf64_Ehdr *header = (void *)file;
+    Elf64_Phdr *phdrs = (void *)(file + header->e_phoff);
+    Elf64_Nhdr *note = (void *)(file + LAT_AOT_TEST_NOTE_OFFSET);
+    LatAotConfigNoteV2 extended = {0};
+    memcpy(&extended.base, file + LAT_AOT_TEST_NOTE_OFFSET + 16,
+           sizeof(extended.base));
+    extended.base.struct_size = sizeof(extended);
+    extended.config = *config;
+    note->n_descsz = sizeof(extended);
+    memcpy(file + LAT_AOT_TEST_NOTE_OFFSET + 16, &extended, sizeof(extended));
+    phdrs[1].p_filesz = phdrs[1].p_memsz = 16 + sizeof(extended);
+    g_assert_cmpint(pwrite(fd, file, sizeof(file), 0), ==, sizeof(file));
+    close(fd);
+    g_assert_cmpint(g_chmod(path, 0444), ==, 0);
+}
+
 static void write_large_module(const char *path, size_t count)
 {
     LatAotTbV2 seed = {.guest_rva = 1, .flags = 3};
@@ -387,6 +410,34 @@ int main(int argc, char **argv)
     write_module(next, tbs, 3, 0);
     g_assert_cmpint(lat_aot_v2_module_validate_replacement_file(
         old, next, error, sizeof(error)), ==, 0);
+    LatAotConfigIdentityV2 config = {.revision = LAT_AOT_CONFIG_NOTE_REVISION,
+        .schema = LAT_AOT_CONFIG_SCHEMA_V1, .domain = LAT_AOT_CONFIG_DOMAIN_TRANSLATION_V1};
+    LatAotExpectedV2 expected = {.available_features = LAT_AOT_V2_REQUIRED_BASE_FEATURES};
+    memset(expected.source_sha256, 0x11, 32);
+    memset(expected.codegen_id, 0x22, 32);
+    memset(config.digest, 0x44, sizeof(config.digest));
+    set_config_note(old, &config);
+    set_config_note(next, &config);
+    if (lat_aot_v2_module_validate_config_replacement_file(
+            old, next, &expected, &config, error, sizeof(error)))
+        g_printerr("config coverage: %s\n", error);
+    g_assert_cmpint(lat_aot_v2_module_validate_config_replacement_file(
+        old, next, &expected, &config, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(lat_aot_v2_module_validate_replacement_file(
+        old, next, error, sizeof(error)), ==, -1);
+    config.digest[0] ^= 1;
+    g_assert_cmpint(lat_aot_v2_module_validate_config_replacement_file(
+        old, next, &expected, &config, error, sizeof(error)), ==, -1);
+    config.digest[0] ^= 1;
+    write_module(next, tbs + 1, 2, 0);
+    set_config_note(next, &config);
+    g_assert_cmpint(lat_aot_v2_module_validate_config_replacement_file(
+        old, next, &expected, &config, error, sizeof(error)), ==, -1);
+    g_assert_nonnull(strstr(error, "replacement loses module coverage"));
+    write_module(next, tbs, 3, 0);
+    g_assert_cmpint(lat_aot_v2_module_validate_config_replacement_file(
+        old, next, &expected, &config, error, sizeof(error)), ==, -1);
+    write_module(old, tbs, 2, 0);
     g_assert_cmpint(lat_aot_v2_module_validate_replacement_file(
         old, old, error, sizeof(error)), ==, 0);
     write_module(next, tbs + 1, 2, 0);
