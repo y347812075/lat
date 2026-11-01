@@ -924,6 +924,34 @@ int main(void)
     g_assert_cmpint(latcd_journal_open_compile_input(cache, registered.message,
         build, codegen, config.max_cache_bytes, &input, error, sizeof(error)), ==, 0);
     g_assert_cmpmem(&input.identity, sizeof(input.identity), &identity, sizeof(identity));
+    int journal_pins[4] = {input.source_fd, input.receipt_fd, input.config_fd, -1};
+    int worker_inputs[4] = {-1, -1, -1, -1};
+    g_assert_cmpint(snapshot_managed_inputs(journal_pins, worker_inputs,
+        input.identity.source_sha256, error, sizeof(error)), ==, 0);
+    for (unsigned i = 0; i < 3; i++) {
+        struct stat original, copy;
+        g_assert_cmpint(fstat(journal_pins[i], &original), ==, 0);
+        g_assert_cmpint(fstat(worker_inputs[i], &copy), ==, 0);
+        g_assert_true(original.st_dev != copy.st_dev || original.st_ino != copy.st_ino);
+        g_assert_cmpint(original.st_size, ==, copy.st_size);
+        g_assert_cmpint(fcntl(worker_inputs[i], F_GET_SEALS) &
+            (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL), ==,
+            F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);
+        g_assert_cmpint(pwrite(worker_inputs[i], "x", 1, 0), ==, -1);
+        g_assert_cmpint(errno, ==, EPERM);
+        char original_digest[65], copied_digest[65];
+        g_assert_true(receipt_digest(journal_pins[i], original_digest));
+        g_assert_true(receipt_digest(worker_inputs[i], copied_digest));
+        g_assert_cmpstr(original_digest, ==, copied_digest);
+    }
+    close_compiler_inputs(worker_inputs);
+    uint8_t wrong_source[32];
+    memcpy(wrong_source, input.identity.source_sha256, sizeof(wrong_source));
+    wrong_source[0] ^= 1;
+    g_assert_cmpint(snapshot_managed_inputs(journal_pins, worker_inputs,
+        wrong_source, error, sizeof(error)), ==, -1);
+    for (unsigned i = 0; i < G_N_ELEMENTS(worker_inputs); i++)
+        g_assert_cmpint(worker_inputs[i], ==, -1);
     gsize captured_size;
     const void *captured_data = g_bytes_get_data(bytes, &captured_size);
     g_assert_cmpmem(input.config, input.config_size, captured_data, captured_size);
