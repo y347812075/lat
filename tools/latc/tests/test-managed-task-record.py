@@ -13,6 +13,40 @@ import tempfile
 
 
 def run(binary, scanner):
+    for with_base in (False, True):
+        with tempfile.TemporaryDirectory(prefix='latcd-publish-prepared-',
+                                         dir=Path.home() / 'tmp') as directory:
+            root = Path(directory)
+            (root / '.tmp').mkdir(mode=0o700)
+            for name in ('input', 'tbset', 'configuration', 'base-native'):
+                (root / '.tmp' / name).write_bytes(name.encode())
+            env = os.environ | {'LATCD_TEST_JOURNAL_RECORD': '1',
+                                'LATCD_TEST_JOURNAL_PUBLISH_RECORD': '1',
+                                'LATCD_TEST_MANAGED_AFTER_PREPARE': '1'}
+            if with_base:
+                env['LATCD_TEST_JOURNAL_BASE'] = '1'
+            result = subprocess.run([binary, '--test-managed-task', str(root)],
+                                    capture_output=True, env=env, timeout=20)
+            assert result.returncode == -signal.SIGKILL
+            task_path, = (root / '.gc/tasks').glob('*.ini')
+            task_id = task_path.stem
+            task, state = configparser.ConfigParser(), configparser.ConfigParser()
+            task.read(task_path)
+            state_path = root / '.gc/managed-task-state' / (task_id + '.ini')
+            state.read(state_path)
+            assert task['task']['version'] == ('7' if with_base else '6')
+            assert state['managed']['state'] == 'PREPARED'
+            if with_base:
+                status = [scanner, '--task-status', str(root), '.tmp/base-native']
+                assert int(subprocess.check_output(status, text=True)) == 1
+            command = [binary, '--test-managed-adoption-recovery', str(root), task_id]
+            subprocess.run(command, check=True, timeout=20)
+            state.read(state_path)
+            assert state['managed']['state'] == 'PREEXEC_CANCELLED'
+            subprocess.run(command, check=True, timeout=20)
+            if with_base:
+                assert int(subprocess.check_output(status, text=True)) == 0
+                assert (root / '.tmp/base-native').read_bytes() == b'base-native'
     with tempfile.TemporaryDirectory(prefix='latcd-journal-publish-',
                                      dir=Path.home() / 'tmp') as directory:
         root = Path(directory)
