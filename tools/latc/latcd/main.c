@@ -7759,14 +7759,16 @@ static int run_service(const LatcdConfig *config)
     bool test_broker_started = false;
     const char *test_broker_directory = config->broker_dir;
     uid_t broker_uid = config->broker_uid;
+    bool trusted_broker = config->managed;
 #ifdef LATCD_GC_TIMER_TEST
     if (!test_broker_directory) {
         test_broker_directory = getenv("LATCD_TEST_BROKER_DIRECTORY");
         broker_uid = geteuid();
+        trusted_broker = false;
     }
 #endif
     if (test_broker_directory) {
-        int directory = config->managed ?
+        int directory = trusted_broker ?
             latcd_managed_directory(test_broker_directory, geteuid(), 0755) :
             open(test_broker_directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (directory < 0 || broker_server_start(&test_broker, config, directory,
