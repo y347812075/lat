@@ -3696,8 +3696,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         if (image < 0 || fstat(image, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
             st.st_size <= 0 || st.st_size > 64 * 1024 * 1024 ||
             (uint64_t)st.st_size > *transient_reservation ||
-            lat_replay_native_validate_fd(image, input_copies[2], input_copies[1], digest,
-                                          error, error_size)) {
+            lat_replay_native_validate_incremental_fd(image, input_copies[2], input_copies[1],
+                journal_input ? input_copies[3] : -1, digest, error, error_size)) {
             waited = -1;
             errno = EINVAL;
         }

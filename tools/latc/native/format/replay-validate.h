@@ -10,6 +10,10 @@
 int lat_replay_native_validate_fd(int image_fd, int config_fd, int tbset_fd,
                                   const uint8_t expected_source[32],
                                   char *error, size_t error_size);
+/* Also require every key in an optional frozen same-configuration baseline. */
+int lat_replay_native_validate_incremental_fd(int image_fd, int config_fd,
+    int tbset_fd, int base_fd, const uint8_t expected_source[32],
+    char *error, size_t error_size);
 int lat_replay_native_missing_fd(int image_fd, int config_fd, int tbset_fd,
                                  const uint8_t expected_source[32],
                                  LatTbKeySet *missing,

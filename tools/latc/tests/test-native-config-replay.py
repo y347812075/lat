@@ -131,6 +131,13 @@ def main():
          '--runner', runner, '--tbset', expanded, '--config', work / 'config-0'],
         {'LATC_NATIVE_BASE': str(isolated)})
     run([latc, 'validate-replay-native', expanded_native, work / 'config-0', expanded])
+    run([latc, 'validate-replay-native', expanded_native, work / 'config-0',
+         keys, isolated])
+    rejected = run([latc, 'validate-replay-native', isolated, work / 'config-0',
+                    keys, expanded_native], success=False)
+    assert 'missing baseline TB' in rejected.stderr
+    run([latc, 'validate-replay-native', expanded_native, work / 'config-0',
+         keys, work / '1-True.native'], success=False)
     assert json.loads(run([latc, 'inspect-native', '--json', expanded_native]).stdout)['tbs'] > \
         json.loads(run([latc, 'inspect-native', '--json', isolated]).stdout)['tbs']
     assert incremental.read_bytes().endswith((work / 'config-0').read_bytes())

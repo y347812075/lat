@@ -37,7 +37,7 @@ static void usage(const char *name)
             " [--tbset-ignore-outside-exec] [--aot FILE]\n"
             "  %s inspect [--json] BUNDLE\n", name, name, name, name);
     fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
-    fprintf(stderr, "  %s validate-replay-native IMAGE CONFIG TBSET\n", name);
+    fprintf(stderr, "  %s validate-replay-native IMAGE CONFIG TBSET [BASE]\n", name);
     fprintf(stderr, "  %s missing-replay-tbset IMAGE CONFIG TBSET GUEST -o DELTA\n", name);
     fprintf(stderr, "  %s compile-replay-native X86_ELF -o IMAGE --runner RUNNER --tbset TBSET --config CONFIG\n", name);
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
@@ -783,15 +783,18 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "validate-replay-native") == 0) {
         char error[256] = {0};
-        if (argc != 5) { usage(argv[0]); return 2; }
+        if (argc != 5 && argc != 6) { usage(argv[0]); return 2; }
         int image = open(argv[2], O_RDONLY | O_CLOEXEC);
         int config = open(argv[3], O_RDONLY | O_CLOEXEC);
         int tbset = open(argv[4], O_RDONLY | O_CLOEXEC);
-        bool valid = image >= 0 && config >= 0 && tbset >= 0 &&
-            !lat_replay_native_validate_fd(image, config, tbset, NULL, error, sizeof(error));
+        int base = argc == 6 ? open(argv[5], O_RDONLY | O_CLOEXEC) : -1;
+        bool valid = image >= 0 && config >= 0 && tbset >= 0 && (argc != 6 || base >= 0) &&
+            !lat_replay_native_validate_incremental_fd(image, config, tbset, base,
+                                                        NULL, error, sizeof(error));
         if (image >= 0) close(image);
         if (config >= 0) close(config);
         if (tbset >= 0) close(tbset);
+        if (base >= 0) close(base);
         if (!valid) {
             fprintf(stderr, "latc: invalid or mismatched replay native%s%s\n",
                     error[0] ? ": " : "", error);
