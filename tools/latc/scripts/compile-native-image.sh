@@ -50,6 +50,11 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/latc-native.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
 missing="$work/missing.tbset"
+if [ "$config_replay" -eq 1 ] && [ -n "${LATC_NATIVE_BASE:-}" ] &&
+   [ -e "$output" ] && [ "$output" -ef "$LATC_NATIVE_BASE" ]; then
+    echo 'latc: output must differ from native base' >&2
+    exit 1
+fi
 rm -f "$output"
 if [ "$module" -eq 1 ] || [ "$config_replay" -eq 1 ]; then
     export LATC_NATIVE_ALLOW_MISSING=1
@@ -181,9 +186,21 @@ if [ "$planned" -eq 1 ]; then
         fi
     fi
 else
-    compile_part "$tbset" "$output" "$work/root" || status=$?
+    if [ "$config_replay" -eq 1 ] && [ -n "${LATC_NATIVE_BASE:-}" ]; then
+        "$latc" missing-replay-tbset "$LATC_NATIVE_BASE" "$LATC_TRANSLATION_CONFIG_FROM" \
+            "$tbset" "$guest" -o "$work/delta.tbset" >"$work/delta-count" || exit $?
+        count=$(sed -n 's/^missing_tb_keys=//p' "$work/delta-count")
+        case "$count" in ''|*[!0-9]*) exit 1 ;; esac
+        if [ "$count" -eq 0 ]; then
+            cp "$LATC_NATIVE_BASE" "$output" || status=$?
+        else
+            compile_part "$work/delta.tbset" "$output" "$work/root" || status=$?
+        fi
+    else
+        compile_part "$tbset" "$output" "$work/root" || status=$?
+    fi
 fi
-if [ "$status" -eq 0 ] && [ "$config_replay" -eq 1 ] && [ -n "${LATC_NATIVE_BASE:-}" ]; then
+if [ "$status" -eq 0 ] && [ "$config_replay" -eq 1 ] && [ -n "${LATC_NATIVE_BASE:-}" ] && [ "$count" -ne 0 ]; then
     "$latc" merge-native "$LATC_NATIVE_BASE" "$output" -o "$work/replay-merged.native" || status=$?
     if [ "$status" -eq 0 ]; then
         mv "$work/replay-merged.native" "$output"

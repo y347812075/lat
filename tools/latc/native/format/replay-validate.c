@@ -13,8 +13,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-int lat_replay_native_validate_fd(int image_fd, int config_fd, int tbset_fd,
+int lat_replay_native_missing_fd(int image_fd, int config_fd, int tbset_fd,
                                   const uint8_t expected_source[32],
+                                  LatTbKeySet *delta,
                                   char *error, size_t error_size)
 {
     struct stat image_stat, config_stat;
@@ -61,17 +62,31 @@ int lat_replay_native_validate_fd(int image_fd, int config_fd, int tbset_fd,
         lat_tb_key_set_read_fd(tbset_fd, header->guest_sha256, &requested, error, error_size) ||
         lat_tb_key_set_difference(&requested, &available, &missing, error, error_size))
         goto out;
-    if (missing.count) {
-        if (error && error_size)
-            snprintf(error, error_size, "missing requested TB rva=0x%" PRIx64 " flags=0x%x",
-                     missing.keys[0].guest_rva, missing.keys[0].flags);
-        goto out;
-    }
+    *delta = missing;
+    memset(&missing, 0, sizeof(missing));
     result = 0;
 out:
     g_free(image);
     lat_tb_key_set_destroy(&requested);
     lat_tb_key_set_destroy(&available);
+    lat_tb_key_set_destroy(&missing);
+    return result;
+}
+
+int lat_replay_native_validate_fd(int image_fd, int config_fd, int tbset_fd,
+                                  const uint8_t expected_source[32],
+                                  char *error, size_t error_size)
+{
+    LatTbKeySet missing = {0};
+    int result = lat_replay_native_missing_fd(image_fd, config_fd, tbset_fd,
+                                               expected_source, &missing,
+                                               error, error_size);
+    if (!result && missing.count) {
+        if (error && error_size)
+            snprintf(error, error_size, "missing requested TB rva=0x%" PRIx64 " flags=0x%x",
+                     missing.keys[0].guest_rva, missing.keys[0].flags);
+        result = -1;
+    }
     lat_tb_key_set_destroy(&missing);
     return result;
 }

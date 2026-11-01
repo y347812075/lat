@@ -96,6 +96,29 @@ def main():
          '--runner', runner, '--tbset', keys, '--config', work / 'config-0'],
         {'LATC_NATIVE_BASE': str(isolated)})
     run([latc, 'validate-replay-native', incremental, work / 'config-0', keys])
+    no_compile = work / 'no-compile.native'
+    run([native_script, '--config-replay', latc, work / 'nonexistent-runner', guest,
+         no_compile, keys],
+        {'LATC_NATIVE_BASE': str(isolated),
+         'LATC_TRANSLATION_CONFIG_FROM': str(work / 'config-0')})
+    assert no_compile.read_bytes() == isolated.read_bytes()
+    run([native_script, '--config-replay', latc, runner, guest, isolated, keys],
+        {'LATC_NATIVE_BASE': str(isolated),
+         'LATC_TRANSLATION_CONFIG_FROM': str(work / 'config-0')}, success=False)
+    assert isolated.read_bytes() == no_compile.read_bytes()
+    static_keys = work / 'static.tbset'
+    run([latc, 'emit-static-tbset', guest, '-o', static_keys])
+    source_hash, _, requested = read_key_set(keys)
+    extra_key = next(key for key in read_key_set(static_keys)[2] if key not in requested)
+    expanded = work / 'expanded.tbset'
+    write_key_set_digest(source_hash, expanded, requested + [extra_key])
+    expanded_native = work / 'expanded.native'
+    run([latc, 'compile-replay-native', guest, '-o', expanded_native,
+         '--runner', runner, '--tbset', expanded, '--config', work / 'config-0'],
+        {'LATC_NATIVE_BASE': str(isolated)})
+    run([latc, 'validate-replay-native', expanded_native, work / 'config-0', expanded])
+    assert json.loads(run([latc, 'inspect-native', '--json', expanded_native]).stdout)['tbs'] > \
+        json.loads(run([latc, 'inspect-native', '--json', isolated]).stdout)['tbs']
     assert incremental.read_bytes().endswith((work / 'config-0').read_bytes())
     run([latc, 'emit-aot-v2', incremental, work / 'incremental-forbidden'], success=False)
     run([latc, 'compile-replay-native', guest, '-o', work / 'incompatible-base.native',
@@ -108,6 +131,17 @@ def main():
     source_hash, _, requested = read_key_set(keys)
     missing_keys = work / 'missing-keys.tbset'
     write_key_set_digest(source_hash, missing_keys, requested + [(0xfffffffffffffff0, 3)])
+    delta = work / 'delta.tbset'
+    result = run([latc, 'missing-replay-tbset', isolated, work / 'config-0',
+                  missing_keys, guest, '-o', delta])
+    assert 'missing_tb_keys=1' in result.stdout
+    assert read_key_set(delta)[2] == [(0xfffffffffffffff0, 3)]
+    run([latc, 'missing-replay-tbset', isolated, work / 'config-1', keys,
+         guest, '-o', work / 'wrong-config-delta'], success=False)
+    assert not (work / 'wrong-config-delta').exists()
+    run([latc, 'missing-replay-tbset', isolated, work / 'config-0', keys,
+         latc, '-o', work / 'wrong-guest-delta'], success=False)
+    assert not (work / 'wrong-guest-delta').exists()
     missing_check = run([latc, 'validate-replay-native', isolated,
                          work / 'config-0', missing_keys], success=False)
     assert 'missing requested TB' in missing_check.stderr

@@ -38,6 +38,7 @@ static void usage(const char *name)
             "  %s inspect [--json] BUNDLE\n", name, name, name, name);
     fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
     fprintf(stderr, "  %s validate-replay-native IMAGE CONFIG TBSET\n", name);
+    fprintf(stderr, "  %s missing-replay-tbset IMAGE CONFIG TBSET GUEST -o DELTA\n", name);
     fprintf(stderr, "  %s compile-replay-native X86_ELF -o IMAGE --runner RUNNER --tbset TBSET --config CONFIG\n", name);
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
     fprintf(stderr, "  %s merge-native BASE DELTA -o OUTPUT\n", name);
@@ -746,6 +747,39 @@ int main(int argc, char **argv)
         }
         if (!path) { usage(argv[0]); return 2; }
         return inspect_native(path, json);
+    }
+    if (strcmp(argv[1], "missing-replay-tbset") == 0) {
+        char error[256] = {0};
+        uint8_t source[32];
+        LatNativeImageHeaderV2 header;
+        LatTbKeySet missing = {0};
+        if (argc != 8 || strcmp(argv[6], "-o")) { usage(argv[0]); return 2; }
+        int image = open(argv[2], O_RDONLY | O_CLOEXEC);
+        int config = open(argv[3], O_RDONLY | O_CLOEXEC);
+        int tbset = open(argv[4], O_RDONLY | O_CLOEXEC);
+        int result = image < 0 || config < 0 || tbset < 0 ||
+            file_digest(argv[5], source, error, sizeof(error)) ||
+            lat_replay_native_missing_fd(image, config, tbset, source, &missing,
+                                         error, sizeof(error)) ||
+            pread(image, &header, sizeof(header), 0) != sizeof(header) ||
+            strcmp(header.lat_build_id, LATC_BUILD_ID);
+        if (image >= 0) close(image);
+        if (config >= 0) close(config);
+        if (tbset >= 0) close(tbset);
+        int fd = -1;
+        if (!result) {
+            fd = open(argv[7], O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            result = fd < 0 || lat_tb_key_set_write_fd(fd, &missing, error, sizeof(error));
+            if (fd >= 0 && close(fd)) result = 1;
+        }
+        if (result) {
+            if (fd >= 0) unlink(argv[7]);
+            fprintf(stderr, "latc: invalid replay base or delta: %s\n", error);
+        } else {
+            printf("missing_tb_keys=%zu\n", missing.count);
+        }
+        lat_tb_key_set_destroy(&missing);
+        return result ? 1 : 0;
     }
     if (strcmp(argv[1], "validate-replay-native") == 0) {
         char error[256] = {0};
