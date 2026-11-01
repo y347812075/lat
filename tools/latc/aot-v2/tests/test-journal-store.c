@@ -667,6 +667,14 @@ int main(void)
     g_assert_cmpstr(isolation_error, ==, "managed compiler isolation unavailable");
     g_assert_cmpuint(tasks_for_compile->len, ==, 0);
     g_assert_cmpuint(reservation, ==, 0);
+    LatcdService rejected_service = { .config = &managed };
+    LatcdRequestV2 rejected_request = { .request_id = 42, .operation = LATCD_OP_SUBMIT_KEYS };
+    LatcdResponseV2 rejected_response;
+    g_assert_cmpint(service_queue_request(&rejected_service, -1, -1,
+                                        &rejected_request, &rejected_response), ==, -1);
+    g_assert_cmpuint(rejected_response.status, ==, LATCD_STATUS_BAD_REQUEST);
+    g_assert_nonnull(strstr(rejected_response.message, "authenticated translation configuration"));
+    g_assert_cmpuint(rejected_service.queued, ==, 0);
     g_assert_false(managed_replay_sandbox_ready(&managed));
     managed.worker_bootstrap = "/bootstrap";
     g_assert_false(managed_replay_sandbox_ready(&managed));

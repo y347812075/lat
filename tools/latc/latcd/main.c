@@ -6605,6 +6605,19 @@ static int service_queue_request(LatcdService *service, int source_fd,
     char *snapshot = NULL;
     char *tbset = NULL;
     response_init(response, request->request_id);
+    if (service->config->managed) {
+#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
+        if (!test_managed_compiler)
+#endif
+        {
+            response->status = LATCD_STATUS_BAD_REQUEST;
+            g_strlcpy(response->message,
+                      "managed compilation requires an authenticated translation configuration",
+                      sizeof(response->message));
+            g_free(temporary_dir);
+            return -1;
+        }
+    }
     if (atomic_load(&compiler_budget_recovery_state) != 1) {
         response->status = LATCD_STATUS_QUEUE_FULL;
         g_strlcpy(response->message, "capacity: compiler budget recovery pending or unsafe",
