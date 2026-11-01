@@ -102,6 +102,20 @@ static void test_path_listener(void)
     assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status));
     assert(!latcd_broker_listener_open(&listener, directory, "broker.sock"));
     assert(!latcd_broker_listener_close(&listener));
+    /* A crash after durable removal of the public name leaves only the anchor. */
+    assert(!pipe(ready)); child = fork(); assert(child >= 0);
+    if (!child) {
+        close(ready[0]);
+        assert(!latcd_broker_listener_open(&listener, directory, "broker.sock"));
+        assert(!unlinkat(directory, "broker.sock", 0) && !fsync(directory));
+        assert(write(ready[1], "x", 1) == 1);
+        for (;;) pause();
+    }
+    close(ready[1]); assert(read(ready[0], &byte, 1) == 1); close(ready[0]);
+    assert(!kill(child, SIGKILL));
+    assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status));
+    assert(!latcd_broker_listener_open(&listener, directory, "broker.sock"));
+    assert(!latcd_broker_listener_close(&listener));
     assert(!latcd_broker_listener_open(&listener, directory, "broker.sock"));
     assert(!unlinkat(directory, "broker.sock", 0));
     int replacement = openat(directory, "broker.sock", O_CREAT | O_EXCL | O_WRONLY, 0600);

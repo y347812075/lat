@@ -55,9 +55,9 @@ int latcd_broker_listener_open(LatcdBrokerListener *listener, int directory,
         errno = ESTALE; goto fail_ownership;
     }
     if (have_public && !have_marker) { errno = EEXIST; goto fail_ownership; }
-    if ((have_public && unlinkat(directory, name, 0)) ||
-        (have_marker && unlinkat(directory, anchor, 0)) ||
-        ((have_public || have_marker) && fsync(directory))) goto fail_ownership;
+    if ((have_public && (unlinkat(directory, name, 0) || fsync(directory))) ||
+        (have_marker && (unlinkat(directory, anchor, 0) || fsync(directory))))
+        goto fail_ownership;
     int held = fcntl(directory, F_DUPFD_CLOEXEC, 3);
     if (held < 0) goto fail_ownership;
     int fd = latcd_broker_listener_socket();
@@ -100,9 +100,15 @@ int latcd_broker_listener_close(LatcdBrokerListener *listener)
         S_ISSOCK(path.st_mode) && path.st_dev == listener->device && path.st_ino == listener->inode)
         result = unlinkat(listener->directory, listener->name, 0);
     else errno = ESTALE;
-    if (!result && !fstatat(listener->directory, listener->anchor, &path, AT_SYMLINK_NOFOLLOW) &&
-        S_ISSOCK(path.st_mode) && path.st_dev == listener->device && path.st_ino == listener->inode)
-        unlinkat(listener->directory, listener->anchor, 0);
+    if (!result && fsync(listener->directory)) result = -1;
+    if (!result) {
+        if (fstatat(listener->directory, listener->anchor, &path, AT_SYMLINK_NOFOLLOW) ||
+            !S_ISSOCK(path.st_mode) || path.st_dev != listener->device || path.st_ino != listener->inode) {
+            errno = ESTALE; result = -1;
+        } else if (unlinkat(listener->directory, listener->anchor, 0) || fsync(listener->directory)) {
+            result = -1;
+        }
+    }
     int saved = errno;
     close(listener->directory);
     close(listener->ownership);
