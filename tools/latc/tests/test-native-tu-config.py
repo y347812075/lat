@@ -103,6 +103,7 @@ def main():
     assert 'option_softfpu' not in (root / 'target/i386/latx/include/translate.h').read_text()
     assert 'option_softfpu' not in (root / 'target/i386/latx/convert.py').read_text()
     assert 'option_softfpu' not in (root / 'target/i386/latx/ir2/la-append.c').read_text()
+    assert 'option_aot' not in (root / 'target/i386/latx/include/macro-inst.h').read_text()
     print('real TU configuration dependency export passed')
 
 

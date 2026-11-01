@@ -84,6 +84,7 @@ uint64_t deal_seg(wine_sec_info *wine_sec, bool is_pread, uint64_t aot_offset,
 void segment_tree_insert(char *name, target_ulong offset, target_ulong begin,
         target_ulong end);
 seg_info *segment_tree_lookup(target_ulong pc);
+seg_info *segment_tree_lookup_translation(target_ulong pc);
 seg_info *segment_tree_lookup2(target_ulong begin, target_ulong end);
 void segment_tree_remove(seg_info *val);
 void segment_tree_remove_range(target_ulong begin, target_ulong end);

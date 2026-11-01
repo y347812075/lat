@@ -2359,7 +2359,8 @@ target_ulong aot_get_call_offset(ADDRX addr)
 {
     TranslationBlock *tb = lsenv->tr_data->curr_tb;
     target_ulong call_offset = 0;
-    seg_info *curr_tb_seg = segment_tree_lookup(tb->pc);
+    seg_info *curr_tb_seg = latx_translation_legacy_aot() ?
+        segment_tree_lookup_translation(tb->pc) : NULL;
     if (curr_tb_seg) {
         call_offset = addr - curr_tb_seg->seg_begin;
     }

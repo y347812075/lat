@@ -7,6 +7,7 @@
 #ifndef _MACRO_INST_H_
 #define _MACRO_INST_H_
 #include "aot.h"
+int latx_translation_legacy_aot(void);
 
 /* Load immediate */
 void li_d(IR2_OPND opnd2, int64_t value);
@@ -74,7 +75,7 @@ la_jump_epilogue(target, base);
     } while (0)
 #define aot_load_host_addr(opnd2, value, aot_rel_kind, addend)          \
     do {                                                                \
-        if (option_aot && in_pre_translate) {                           \
+        if (latx_translation_legacy_aot() && in_pre_translate) {        \
             aot_load_addr(opnd2, value, aot_rel_kind, addend);          \
         } else {                                                        \
             li_d(opnd2, (ADDR)value);                                   \
@@ -82,7 +83,7 @@ la_jump_epilogue(target, base);
     } while (0)
 #define aot_load_guest_addr(opnd2, value, aot_rel_kind, addend)         \
     do {                                                                \
-        if (option_aot && in_pre_translate) {                           \
+        if (latx_translation_legacy_aot() && in_pre_translate) {        \
             do_aot_load_guest_addr(opnd2, value, aot_rel_kind, addend); \
         } else {                                                        \
             li_guest_addr(opnd2, (ADDR)value);                          \
@@ -91,7 +92,7 @@ la_jump_epilogue(target, base);
 #define aot_la_append_ir2_jmp_far(target, base, aot_rel_kind, addend)          \
     do {                                                                       \
         TranslationBlock *tb = lsenv->tr_data->curr_tb;                        \
-        if (option_aot && in_pre_translate) {                                  \
+        if (latx_translation_legacy_aot() && in_pre_translate) {               \
             uint32_t *prev_off, *diff_off;                                     \
             IR2_OPND pre_label = ra_alloc_label();                             \
             IR2_OPND cur_label = ra_alloc_label();                             \
@@ -115,7 +116,7 @@ la_jump_epilogue(target, base);
 #define aot_la_append_ir2_jmp_epilogue(target, base, aot_rel_kind, addend)     \
     do {                                                                       \
         TranslationBlock *tb = lsenv->tr_data->curr_tb;                        \
-        if (option_aot && in_pre_translate) {                                  \
+        if (latx_translation_legacy_aot() && in_pre_translate) {               \
             uint32_t *prev_off, *diff_off;                                     \
             IR2_OPND pre_label = ra_alloc_label();                             \
             IR2_OPND cur_label = ra_alloc_label();                             \

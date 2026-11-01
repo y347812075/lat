@@ -360,14 +360,16 @@ bool wine_dll_track_sections(abi_ulong map_start, abi_ulong map_len,
                            map_offset, map_fd);
 }
 
+seg_info *segment_tree_lookup_translation(target_ulong pc)
+{
+    seg_info key = {.file_name = NULL, .file_offset = 0,
+                    .seg_begin = pc, .seg_end = 0};
+    return (seg_info *)g_tree_lookup(segment_tree, &key);
+}
+
 seg_info *segment_tree_lookup(target_ulong pc)
 {
-    if (option_aot) {
-        seg_info key = {.file_name = NULL, .file_offset = 0,
-                        .seg_begin = pc, .seg_end = 0};
-        return (seg_info *)g_tree_lookup(segment_tree, &key);
-    }
-    return NULL;
+    return option_aot ? segment_tree_lookup_translation(pc) : NULL;
 }
 
 seg_info *segment_tree_lookup2(target_ulong begin, target_ulong end)

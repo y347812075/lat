@@ -123,6 +123,7 @@ IMM_ACCESSOR(enable_fcsr_exc, ENABLE_FCSR_EXC, option_enable_fcsr_exc)
 IMM_ACCESSOR(lative, LATIVE, option_lative)
 IMM_ACCESSOR(close_parallel, CLOSE_PARALLEL, close_latx_parallel)
 IMM_ACCESSOR(monitor_shared_mem, MONITOR_SHARED_MEM, option_monitor_shared_mem)
+IMM_ACCESSOR(legacy_aot, LEGACY_AOT, option_aot)
 IMM_ACCESSOR(softfpu_fast, SOFTFPU_FAST, option_softfpu_fast)
 IMM_ACCESSOR(softfpu, SOFTFPU, option_softfpu)
 #ifdef CONFIG_LATX_INSTS_PATTERN
