@@ -296,6 +296,43 @@ test -f "$old.native"
 grep -q 'test retirement hash yielded' "$work/server.err"
 kill "$pin_pid"; wait "$pin_pid" 2>/dev/null || :; pin_pid=
 stop
+cache=$work/idle-pinned-cache
+socket=$work/idle-pinned.sock
+stats=$work/idle-pinned-stats.json
+mkdir -m 700 "$cache"
+start
+stop
+"$fixture" --timer-fixture "$cache"
+old=$cache/$(printf '%064x' 7)
+python3 - "$old" "$work/idle-pin-ready" <<'PY' &
+import fcntl, pathlib, signal, sys
+files = [open(sys.argv[1] + suffix, 'rb') for suffix in ('.so', '.native', '.tbset')]
+for f in files: fcntl.flock(f, fcntl.LOCK_SH)
+pathlib.Path(sys.argv[2]).touch()
+signal.pause()
+PY
+pin_pid=$!
+n=0
+while [ ! -f "$work/idle-pin-ready" ]; do
+    kill -0 "$pin_pid"; n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+done
+LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
+    "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" \
+    --latc "$compiler" --runner "$daemon" --runtime-dir "$runtime" \
+    --stats "$stats" --workers 1 --idle-seconds 1 >"$work/server.out" 2>"$work/server.err" &
+pid=$!
+n=0
+while ! grep -q 'test page busy retry=' "$work/server.err"; do
+    if ! kill -0 "$pid" 2>/dev/null; then cat "$work/server.err" >&2; exit 1; fi
+    n=$((n + 1)); [ "$n" -lt 400 ]; sleep 0.05
+done
+sleep 2
+kill -0 "$pid"
+test -f "$old.so" && test -f "$old.native" && test -f "$old.tbset"
+kill "$pin_pid"; wait "$pin_pid" 2>/dev/null || :; pin_pid=
+wait_page_consumed 2400
+test ! -e "$old.so" && test ! -e "$old.native" && test ! -e "$old.tbset"
+stop
 cache=$work/busy-timer-cache
 socket=$work/busy-timer.sock
 stats=$work/busy-timer-stats.json
