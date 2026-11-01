@@ -9,8 +9,12 @@ import pathlib
 import socket
 import struct
 import sys
+import time
 
-sockpath, cache, guest = sys.argv[1:]
+sockpath, cache, guest = sys.argv[1:4]
+hold = len(sys.argv) == 6
+if len(sys.argv) not in (4, 6):
+    raise ValueError('expected socket cache guest [ready release]')
 cache = pathlib.Path(cache)
 data = pathlib.Path(guest).read_bytes()
 digest = hashlib.sha256(data).digest()
@@ -56,6 +60,15 @@ try:
         os.lseek(fd, 0, os.SEEK_SET)
         with os.fdopen(os.dup(fd), 'rb') as snapshot:
             assert hashlib.file_digest(snapshot, 'sha256').digest() == module_hash
+        if hold:
+            pathlib.Path(sys.argv[4]).touch()
+            deadline = time.monotonic() + 180
+            while not pathlib.Path(sys.argv[5]).exists():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('snapshot release not signalled')
+                time.sleep(0.05)
+            assert not module.exists()
+            assert hashlib.sha256(os.pread(fd, size, 0)).digest() == module_hash
 finally:
     for fd in fds:
         os.close(fd)

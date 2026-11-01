@@ -8,16 +8,18 @@ runtime=$5
 guest=$6
 work=$7
 mode=${8:-pin}
-case "$mode" in pin|pin-restart|unreferenced|capture|capture-restart) ;; *) exit 2 ;; esac
+case "$mode" in pin|pin-restart|unreferenced|capture|capture-restart|broker-copy) ;; *) exit 2 ;; esac
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 mkdir -m 700 "$work" "$work/cache" "$work/broker"
 cache=$work/cache
 socket=$work/latcd.sock
 pid=
 pin_pid=
+broker_pid=
 closure_replaced=0
 cleanup() {
     if [ -n "$pin_pid" ]; then kill "$pin_pid" 2>/dev/null || :; wait "$pin_pid" 2>/dev/null || :; fi
+    if [ -n "$broker_pid" ]; then kill "$broker_pid" 2>/dev/null || :; wait "$broker_pid" 2>/dev/null || :; fi
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || :; wait "$pid" 2>/dev/null || :; fi
     if [ "$closure_replaced" = 1 ]; then
         python3 - "$LATCD_TEST_WORKER_CLOSURE" <<'PY'
@@ -33,7 +35,7 @@ PY
 }
 trap cleanup EXIT
 unset LATCD_TEST_BROKER_DIRECTORY
-if [ "$mode" = pin ]; then export LATCD_TEST_BROKER_DIRECTORY="$work/broker"; fi
+if [ "$mode" = pin ] || [ "$mode" = broker-copy ]; then export LATCD_TEST_BROKER_DIRECTORY="$work/broker"; fi
 LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
     "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" --latc "$latc" \
     --runner "$runner" --runtime-dir "$runtime" --stats "$work/stats.json" \
@@ -92,6 +94,16 @@ if [ "$mode" = pin ]; then
     if "$broker_client" --socket "$work/broker/broker.sock" --service-uid 4294967294 --output "$work/invalid.so" "$guest"; then exit 1; fi
     test ! -e "$work/invalid.so"
 fi
+if [ "$mode" = broker-copy ]; then
+    python3 "$script_dir/test-broker-publication.py" "$work/broker/broker.sock" "$cache" "$guest" \
+        "$work/broker-ready" "$work/broker-release" >"$work/broker.out" 2>"$work/broker.err" &
+    broker_pid=$!
+    n=0
+    while [ ! -f "$work/broker-ready" ]; do
+        kill -0 "$broker_pid" || { cat "$work/broker.err" >&2; exit 1; }
+        n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
+    done
+fi
 python3 - "$cache" "$guest" "$work" "$script_dir" <<'PY'
 import hashlib, json, pathlib, struct, sys
 cache, guest, work = map(pathlib.Path, sys.argv[1:4])
@@ -133,7 +145,7 @@ with (cache / old['module']).open('rb') as module:
     else:
         raise AssertionError('runner did not pin the old module')
 PY
-elif [ "$mode" != unreferenced ]; then
+elif [ "$mode" != unreferenced ] && [ "$mode" != broker-copy ]; then
 python3 - "$cache" "$work/old.json" "$work/pins-ready" <<'PY' &
 import fcntl, json, pathlib, signal, sys
 cache = pathlib.Path(sys.argv[1]); m = json.loads(pathlib.Path(sys.argv[2]).read_text())
@@ -184,7 +196,7 @@ assert retired
 (work / 'new.json').write_text(json.dumps(new))
 (work / 'retired.json').write_text(json.dumps(sorted(retired)))
 PY
-if [ "$mode" = unreferenced ]; then
+if [ "$mode" = unreferenced ] || [ "$mode" = broker-copy ]; then
 python3 - "$cache" "$work/old.json" "$work/retired.json" <<'PY'
 import base64, configparser, json, pathlib, sys, time
 cache = pathlib.Path(sys.argv[1]); old = json.loads(pathlib.Path(sys.argv[2]).read_text())
@@ -204,7 +216,7 @@ assert time.clock_gettime(time.CLOCK_BOOTTIME) < deadline
 assert all((cache / name).is_file() for name in retired)
 PY
 fi
-if [ "$mode" != unreferenced ]; then
+if [ "$mode" != unreferenced ] && [ "$mode" != broker-copy ]; then
 n=0
 while ! grep -q 'test page busy retry=' "$work/server.err"; do
     if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$work/server.err"; then cat "$work/server.err" >&2; exit 1; fi
@@ -271,7 +283,7 @@ while ! grep -q 'test waiting page consumed' "$log"; do
     if ! kill -0 "$pid" 2>/dev/null || grep -q 'test waiting page failed' "$log"; then cat "$log" >&2; exit 1; fi
     n=$((n + 1)); [ "$n" -lt 1000 ]; sleep 0.1
 done
-if [ "$mode" != unreferenced ]; then
+if [ "$mode" != unreferenced ] && [ "$mode" != broker-copy ]; then
     grep -q 'test waiting timer woke' "$log"
 else
     python3 - "$work/stats.json" <<'PY'
@@ -307,6 +319,11 @@ new = json.loads((work / 'new.json').read_text())
 assert json.loads((cache / (source + '.current')).read_text()) == new
 assert all((cache / new[k]).is_file() for k in ('module', 'native', 'tbset'))
 PY
+if [ "$mode" = broker-copy ]; then
+    touch "$work/broker-release"
+    wait "$broker_pid" || { cat "$work/broker.err" >&2; exit 1; }
+    broker_pid=
+fi
 module=$(python3 - "$cache" "$guest" <<'PY'
 import hashlib, json, pathlib, sys
 root, guest = map(pathlib.Path, sys.argv[1:])
