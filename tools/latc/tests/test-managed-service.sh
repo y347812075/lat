@@ -117,8 +117,8 @@ sleep 2
 kill -0 "$pid"
 test -S "$work/admin/admin.sock"
 test -S "$work/broker/broker.sock"
-# Exercise the real service admission path while the periodic recovery scan
-# encounters an unrecognized task, and after the obstruction is removed.
+# An unauthenticated request must fail closed both while recovery encounters an
+# unrecognized task and after the obstruction is removed.
 setpriv --reuid=1234 --regid=1234 --clear-groups \
     sh -c 'printf invalid > "$1/.gc/tasks/not-a-task"' sh "$work/cache"
 n=0
@@ -131,13 +131,12 @@ submit_probe() {
         --tbset /etc/hosts /etc/hosts >"$work/probe.out" 2>"$work/probe.err" || :
 }
 submit_probe
-grep -q 'managed task recovery pending or unsafe' "$work/probe.out"
+grep -q 'managed compilation requires an authenticated translation configuration' "$work/probe.out"
 rm "$work/cache/.gc/tasks/not-a-task"
 n=0
 while :; do
     submit_probe
-    if ! grep -q 'managed task recovery pending or unsafe' "$work/probe.out" &&
-       grep -q '^status=' "$work/probe.out"; then break; fi
+    if grep -q 'managed compilation requires an authenticated translation configuration' "$work/probe.out"; then break; fi
     kill -0 "$pid"; n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
 done
 setpriv --reuid=1236 --regid=1236 --clear-groups python3 - "$work/broker/broker.sock" <<'PY'
@@ -151,6 +150,34 @@ if setpriv --reuid=1235 --regid=1235 --clear-groups ls "$work/cache" >/dev/null 
    setpriv --reuid=1235 --regid=1235 --clear-groups ls "$work/admin" >/dev/null 2>&1; then
     echo 'client can access private directory' >&2; exit 1
 fi
+broker_missing_probe() {
+    setpriv --reuid=1235 --regid=1235 --clear-groups python3 - "$work/broker/broker.sock" <<'PY'
+import array, fcntl, hashlib, os, socket, struct, sys
+
+data = b'managed broker absent source'
+digest = hashlib.sha256(data).digest()
+fd = os.memfd_create('source', os.MFD_ALLOW_SEALING)
+try:
+    os.write(fd, data)
+    seals = fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE
+    fcntl.fcntl(fd, fcntl.F_ADD_SEALS, seals)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as s:
+        s.settimeout(10)
+        s.connect(sys.argv[1])
+        assert struct.unpack('3i', s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[1] == 1234
+        request = struct.pack('=IIQ32s', 2, 0, len(data), digest)
+        assert s.sendmsg([request], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', [fd]))]) == len(request)
+        packet, ancillary, flags, _ = s.recvmsg(88, socket.CMSG_SPACE(4))
+        assert not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
+        assert not ancillary
+        version, status, purpose, authorized, size, source_hash, module_hash = struct.unpack('=IIIIQ32s32s', packet)
+        assert (version, status, purpose, authorized, size) == (2, 1, 1, 0, 0)
+        assert source_hash == bytes(32) and module_hash == bytes(32)
+finally:
+    os.close(fd)
+PY
+}
+broker_missing_probe
 kill -KILL "$pid"
 wait "$pid" 2>/dev/null || :
 pid=
@@ -173,6 +200,7 @@ do
 done
 submit_probe
 grep -q '^status=' "$work/probe.out"
+broker_missing_probe
 kill -TERM "$pid"
 wait "$pid"
 pid=
