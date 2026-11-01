@@ -189,6 +189,32 @@ finally:
 PY
 }
 broker_missing_probe
+setpriv --reuid=1235 --regid=1235 --clear-groups python3 - "$work/broker/broker.sock" <<'PY'
+import array, fcntl, os, socket, struct, sys
+
+fds = [os.memfd_create('journal-source', os.MFD_ALLOW_SEALING),
+       os.memfd_create('journal-config', os.MFD_ALLOW_SEALING)]
+try:
+    for fd in fds:
+        os.write(fd, b'not admitted')
+        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK |
+                    fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as s:
+        s.settimeout(10)
+        s.connect(sys.argv[1])
+        assert struct.unpack('3i', s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[1] == 1234
+        request = struct.pack('=IIQQ16s', 1, 8, 1, 4, bytes(16))
+        assert s.sendmsg([request], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                     array.array('i', fds))]) == len(request)
+        try:
+            assert s.recv(1) == b''
+        except ConnectionResetError:
+            pass
+finally:
+    for fd in fds:
+        os.close(fd)
+PY
+test ! -d "$work/cache/.journals" || test -z "$(ls -A "$work/cache/.journals")"
 if [ -n "${LATCD_TEST_SEED_CACHE:-}" ]; then
     setpriv --reuid=1235 --regid=1235 --clear-groups python3 "$LATCD_TEST_BROKER_CLIENT" \
         --socket "$work/broker/broker.sock" --service-uid 1234 \
