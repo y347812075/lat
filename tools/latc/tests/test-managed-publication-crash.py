@@ -50,6 +50,66 @@ def run(test_daemon, prefix, guest, work):
                     '-o', str(full)], check=True)
     digest = hashlib.sha256(guest.read_bytes()).hexdigest()
     env = dict(os.environ, LD_LIBRARY_PATH=str(prefix / 'lib'))
+    interrupted = work / 'worker-interrupted'
+    interrupted.mkdir(mode=0o700)
+    cache, socket = interrupted / 'cache', interrupted / 'd.sock'
+    stats = interrupted / 'stats.json'
+    args = [test_daemon, '--serve', '--socket', str(socket), '--cache-dir', str(cache),
+            '--latc', str(prefix / 'bin/latc'), '--runner', str(prefix / 'bin/latx-x86_64'),
+            '--runtime-dir', str(prefix / 'lib'), '--workers', '1', '--flush-only',
+            '--idle-seconds', '0', '--stats', str(stats)]
+    flush = None
+    with (interrupted / 'crash.log').open('wb') as log:
+        daemon = start(args, env, log, socket)
+        try:
+            submit(client, socket, tbset, guest, env)
+            flush = subprocess.Popen([str(client), '--flush-source', '--socket',
+                                      str(socket), str(guest)], env=env,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = time.monotonic() + 120
+            state = None
+            while time.monotonic() < deadline:
+                for path in (cache / '.gc/managed-task-state').glob('*.ini'):
+                    record = configparser.ConfigParser(); record.read(path)
+                    if (record['managed']['state'] == 'WORKSPACE_READY' and
+                            'discovery plan complete' in (interrupted / 'crash.log').read_text()):
+                        state = path
+                        break
+                if state:
+                    break
+                assert daemon.poll() is None and flush.poll() is None
+                time.sleep(0.005)
+            assert state is not None, 'compiler did not reach the running workspace'
+            daemon.kill(); daemon.wait(timeout=30)
+        finally:
+            if daemon.poll() is None:
+                daemon.kill(); daemon.wait()
+            if flush is not None:
+                try:
+                    flush.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    flush.kill(); flush.wait()
+    socket.unlink(missing_ok=True)
+    with (interrupted / 'restart.log').open('wb') as log:
+        daemon = start(args, env, log, socket)
+        try:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                record = configparser.ConfigParser(); record.read(state)
+                if record['managed']['state'] == 'CANCELLED_DOMAIN_EMPTY':
+                    break
+                assert daemon.poll() is None
+                time.sleep(0.05)
+            assert record['managed']['state'] == 'CANCELLED_DOMAIN_EMPTY'
+            submit(client, socket, tbset, guest, env)
+            subprocess.run([str(client), '--flush-source', '--socket', str(socket), str(guest)],
+                           env=env, check=True, stdout=subprocess.DEVNULL, timeout=120)
+            manifest = json.loads((cache / (digest + '.current')).read_bytes())
+            assert all((cache / manifest[k]).is_file() for k in ('module', 'native', 'tbset'))
+        finally:
+            daemon.terminate(); daemon.wait(timeout=30)
+    counters = json.loads(stats.read_text())
+    assert counters['active_jobs'] == counters['queue_depth'] == counters['compiler_peak_reserved_bytes'] == 0
     invalid = work / 'invalid-selection'
     invalid.mkdir(mode=0o700)
     invalid_cache, invalid_socket = invalid / 'cache', invalid / 'd.sock'
