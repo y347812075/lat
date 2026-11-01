@@ -92,13 +92,13 @@ if LATCD_TEST_RECOVERY_ONCE=1 sh -c '
 fi
 grep -qx 'state=DELEGATION_BOUND' "$state"
 cp /work/unbound-original-state "$state"
-LATCD_TEST_RECOVERY_ONCE=1 sh -c '
+LATCD_TEST_RECOVERY_BUDGET=1 LATCD_TEST_RECOVERY_ONCE=1 sh -c '
     printf "%s\n" "$$" > "$1/cgroup.procs"; shift
     exec "$@"
 ' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/unbound-cache "$scope/worker"
 grep -qx 'state=PREEXEC_CANCELLED' "$state"
 test -d "$scope/worker/$id"
-LATCD_TEST_RECOVERY_ONCE=1 sh -c '
+LATCD_TEST_RECOVERY_BUDGET=1 LATCD_TEST_RECOVERY_ONCE=1 sh -c '
     printf "%s\n" "$$" > "$1/cgroup.procs"; shift
     exec "$@"
 ' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/unbound-cache "$scope/worker"

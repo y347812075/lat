@@ -8287,6 +8287,21 @@ static int test_managed_task_recovery(const char *root, const char *delegation)
     LatcdConfig config = { .cache_dir = root, .managed = true };
     char error[256] = {0};
     int manager = -1, result = 1;
+    bool check_budget = getenv("LATCD_TEST_RECOVERY_BUDGET") != NULL;
+    LatcdBudgetRecovery recovery = {0};
+    if (check_budget) {
+        unsigned visited;
+        int status;
+        if (latcd_cache_capacity_scan(&generation_capacity, root, error, sizeof(error)) ||
+            latcd_cache_capacity_recovery_begin(&generation_capacity)) goto out;
+        latcd_cache_capacity_metadata_bind(&generation_capacity, LATCD_DEFAULT_MAX_CACHE_BYTES);
+        do {
+            status = restore_compiler_budgets_step(&config, &recovery, 32, &visited,
+                                                    error, sizeof(error));
+        } while (status == 1);
+        if (status || latcd_cache_capacity_recovery_finish(&generation_capacity) ||
+            !generation_capacity.recovered_reserved) goto out;
+    }
     worker_delegation_fd = latcd_worker_delegation_open(delegation);
     if (worker_delegation_fd < 0 || latcd_worker_delegation_init(worker_delegation_fd, &manager)) goto out;
     unsigned attempts = getenv("LATCD_TEST_RECOVERY_ONCE") ? 1 : 100;
@@ -8294,12 +8309,16 @@ static int test_managed_task_recovery(const char *root, const char *delegation)
         if (recover_compiler_inputs(&config, error, sizeof(error))) goto out;
         usleep(50000);
     }
+    if (check_budget && generation_capacity.recovered_reserved) goto out;
     result = 0;
 out:
     if (result) fprintf(stderr, "managed recovery test: %s: %s\n", error, strerror(errno));
     if (manager >= 0) close(manager);
     if (worker_delegation_fd >= 0) close(worker_delegation_fd);
     worker_delegation_fd = -1;
+    if (recovery.cursor) closedir(recovery.cursor);
+    if (recovery.snapshots) g_hash_table_unref(recovery.snapshots);
+    if (check_budget) latcd_cache_capacity_close(&generation_capacity);
     return result;
 }
 
