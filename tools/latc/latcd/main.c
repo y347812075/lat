@@ -5696,7 +5696,6 @@ out:
         } else {
             released = record_compiler_release(config, task->id, &task->identity, true);
         }
-        if (config->managed) transient_retained = true;
         if (released) {
             transient_retained = true;
             fprintf(stderr, "latcd: compiler output release not durable; retaining task root\n");

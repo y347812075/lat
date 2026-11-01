@@ -50,6 +50,26 @@ def run(test_daemon, prefix, guest, work):
                     '-o', str(full)], check=True)
     digest = hashlib.sha256(guest.read_bytes()).hexdigest()
     env = dict(os.environ, LD_LIBRARY_PATH=str(prefix / 'lib'))
+    normal = work / 'normal-accounting'
+    normal.mkdir(mode=0o700)
+    normal_cache, normal_socket = normal / 'cache', normal / 'd.sock'
+    normal_stats = normal / 'stats.json'
+    normal_args = [test_daemon, '--serve', '--socket', str(normal_socket),
+                   '--cache-dir', str(normal_cache), '--latc', str(prefix / 'bin/latc'),
+                   '--runner', str(prefix / 'bin/latx-x86_64'), '--runtime-dir', str(prefix / 'lib'),
+                   '--workers', '1', '--flush-only', '--idle-seconds', '0', '--stats', str(normal_stats)]
+    with (normal / 'daemon.log').open('wb') as log:
+        daemon = start(normal_args, env, log, normal_socket)
+        try:
+            submit(client, normal_socket, tbset, guest, env)
+            subprocess.run([str(client), '--flush-source', '--socket', str(normal_socket), str(guest)],
+                           env=env, check=True, stdout=subprocess.DEVNULL, timeout=120)
+        finally:
+            daemon.terminate(); daemon.wait(timeout=30)
+    counters = json.loads(normal_stats.read_text())
+    generated = [p for p in normal_cache.iterdir() if p.suffix in {'.so', '.native', '.tbset'}]
+    unique = {(p.stat().st_dev, p.stat().st_ino): p.stat().st_size for p in generated}
+    assert unique and counters['generation_logical_bytes'] == sum(unique.values()), counters
     interrupted = work / 'worker-interrupted'
     interrupted.mkdir(mode=0o700)
     cache, socket = interrupted / 'cache', interrupted / 'd.sock'
@@ -110,6 +130,9 @@ def run(test_daemon, prefix, guest, work):
             daemon.terminate(); daemon.wait(timeout=30)
     counters = json.loads(stats.read_text())
     assert counters['active_jobs'] == counters['queue_depth'] == counters['compiler_peak_reserved_bytes'] == 0
+    generated = [p for p in cache.iterdir() if p.suffix in {'.so', '.native', '.tbset'}]
+    unique = {(p.stat().st_dev, p.stat().st_ino): p.stat().st_size for p in generated}
+    assert counters['generation_logical_bytes'] == sum(unique.values()), counters
     invalid = work / 'invalid-selection'
     invalid.mkdir(mode=0o700)
     invalid_cache, invalid_socket = invalid / 'cache', invalid / 'd.sock'
