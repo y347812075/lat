@@ -1279,7 +1279,7 @@ IR2_OPND set_fpu_fcsr_rounding_field_by_x86(void)
         return zero_ir2_opnd;
     }
 
-    if (option_set_rounding_opt) return zero_ir2_opnd;
+    if (latx_translation_rounding_opt()) return zero_ir2_opnd;
 
     IR2_OPND fcsr_opnd = ra_alloc_itemp_internal();
     la_movfcsr2gr(fcsr_opnd, fcsr3_ir2_opnd);
@@ -1310,7 +1310,7 @@ void set_fpu_rounding_mode(IR2_OPND rm)
 {
     /* Softfpu paths keep the SSE RM and sticky flags live in FCSR0. */
     if (latx_softfpu_sse_sync_enabled()) return;
-    if (option_set_rounding_opt) return;
+    if (latx_translation_rounding_opt()) return;
     la_movgr2fcsr(fcsr3_ir2_opnd, rm);
 }
 

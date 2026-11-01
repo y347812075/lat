@@ -1583,7 +1583,7 @@ bool translate_xchg(IR1_INST *pir1)
 #ifndef CONFIG_LATX_LLSC
     return translate_xchg_spinlock(pir1);
 #else
-    if (option_fast_atomic) {
+    if (latx_translation_fast_atomic()) {
         return translate_lock_xchg_fast_atomic(pir1);
     }
 

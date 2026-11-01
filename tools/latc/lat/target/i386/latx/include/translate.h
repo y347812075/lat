@@ -1512,6 +1512,9 @@ void tr_provenance_move_stub(TranslationBlock *tb, uint32_t old_offset,
                              uint32_t new_offset);
 void tr_fini(bool check_the_extension); /* default TRUE */
 int latx_translation_cvt_opt(void);
+int latx_translation_rounding_opt(void);
+int latx_translation_vpaes(void);
+int latx_translation_fast_atomic(void);
 
 void tr_disasm(struct TranslationBlock *tb, int max_insns);
 void etb_add_succ(void* etb,int depth);

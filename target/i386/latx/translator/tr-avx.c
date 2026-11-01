@@ -5836,7 +5836,7 @@ bool translate_vaesdec(IR1_INST *pir1)
         return translate_vaesdec_lsx(pir1);
     }
 
-    if (option_vpaes) {
+    if (latx_translation_vpaes()) {
         return latx_translate_vaesdec_vpaes(pir1);
     }
 
@@ -5894,7 +5894,7 @@ bool translate_vaesdeclast(IR1_INST *pir1)
         return translate_vaesdeclast_lsx(pir1);
     }
 
-    if (option_vpaes) {
+    if (latx_translation_vpaes()) {
         return latx_translate_vaesdeclast_vpaes(pir1);
     }
 
@@ -5998,7 +5998,7 @@ bool translate_vaesenc(IR1_INST *pir1)
         return translate_vaesenc_lsx(pir1);
     }
 
-    if (option_vpaes) {
+    if (latx_translation_vpaes()) {
         return latx_translate_vaesenc_vpaes(pir1);
     }
 
@@ -6045,7 +6045,7 @@ bool translate_vaesenclast(IR1_INST *pir1)
         return translate_vaesenclast_lsx(pir1);
     }
 
-    if (option_vpaes) {
+    if (latx_translation_vpaes()) {
         return latx_translate_vaesenclast_vpaes(pir1);
     }
 
@@ -6092,7 +6092,7 @@ bool translate_vaesimc(IR1_INST *pir1)
         return translate_vaesimc_lsx(pir1);
     }
 
-    if (option_vpaes) {
+    if (latx_translation_vpaes()) {
         return latx_translate_vaesimc_vpaes(pir1);
     }
 
@@ -6123,7 +6123,7 @@ bool translate_vaeskeygenassist(IR1_INST *pir1)
         return translate_vaeskeygenassist_lsx(pir1);
     }
 
-    if (option_vpaes) {
+    if (latx_translation_vpaes()) {
         return latx_translate_vaeskeygenassist_vpaes(pir1);
     }
 

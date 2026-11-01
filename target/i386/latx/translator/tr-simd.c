@@ -4122,7 +4122,7 @@ void gen_vaesenc_lasx_ir2(IR2_OPND dest, IR2_OPND key, bool is_last)
 
 bool translate_aesdec(IR1_INST *pir1)
 {
-    if (option_vpaes) {
+    if (latx_translation_vpaes()) {
         return latx_translate_aesdec_vpaes(pir1);
     }
 
@@ -4159,7 +4159,7 @@ bool translate_aesdec(IR1_INST *pir1)
 
 bool translate_aesdeclast(IR1_INST *pir1)
 {
-    if (option_vpaes) {
+    if (latx_translation_vpaes()) {
         return latx_translate_aesdeclast_vpaes(pir1);
     }
 
@@ -4212,7 +4212,7 @@ void load_aes_key_from_mem(IR2_OPND key, IR1_OPND *mem)
 
 bool translate_aesenc(IR1_INST *pir1)
 {
-    if (option_vpaes) {
+    if (latx_translation_vpaes()) {
         return latx_translate_aesenc_vpaes(pir1);
     }
 
@@ -4248,7 +4248,7 @@ bool translate_aesenc(IR1_INST *pir1)
 
 bool translate_aesenclast(IR1_INST *pir1)
 {
-    if (option_vpaes) {
+    if (latx_translation_vpaes()) {
         return latx_translate_aesenclast_vpaes(pir1);
     }
 
@@ -4284,7 +4284,7 @@ bool translate_aesenclast(IR1_INST *pir1)
 
 bool translate_aesimc(IR1_INST *pir1)
 {
-    if (option_vpaes) {
+    if (latx_translation_vpaes()) {
         return latx_translate_aesimc_vpaes(pir1);
     }
 
@@ -4318,7 +4318,7 @@ bool translate_aesimc(IR1_INST *pir1)
 
 bool translate_aeskeygenassist(IR1_INST *pir1)
 {
-    if (option_vpaes) {
+    if (latx_translation_vpaes()) {
         return latx_translate_aeskeygenassist_vpaes(pir1);
     }
 

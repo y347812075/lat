@@ -83,6 +83,10 @@ def main():
         if source.suffix in ('.c', '.h') and source.name not in (
                 'latx-options.h', 'latx-options.c', 'latx-translation-config.c'):
             assert 'option_cvt_opt' not in source.read_text(), source
+    for source in (root / 'target/i386/latx/translator').rglob('*.c'):
+        text = source.read_text()
+        for option in ('option_set_rounding_opt', 'option_vpaes', 'option_fast_atomic'):
+            assert option not in text, (source, option)
     print('real TU configuration dependency export passed')
 
 

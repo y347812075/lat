@@ -63,9 +63,12 @@ def main():
         snapshot = work / f'config-{option}'
         result = run([runner, '--latc-translation-config-native',
                       '--latc-translation-config-out', snapshot, guest],
-                     {'LATX_AOT_V2': '1', 'LATX_CVT_OPT': str(option)})
+                     {'LATX_AOT_V2': '1', 'LATX_CVT_OPT': str(option),
+                      'LATX_ROUNDING_OPT': str(option), 'LATX_VPAES': str(option)})
         info[option] = json.loads(result.stdout)
         assert info[option]['values']['cvt_opt'] == option
+        assert info[option]['values']['rounding_opt'] == option
+        assert info[option]['values']['vpaes'] == option
         raw = snapshot.read_bytes()
         assert struct.unpack_from('<I', raw, 16)[0] == 2
         assert info[option]['native_replay_domain'] is True
@@ -73,6 +76,8 @@ def main():
         for replay in (False, True):
             output = work / f'{option}-{replay}.native'
             extra = {'LATX_CVT_OPT': str(1 - option if replay else option),
+                     'LATX_ROUNDING_OPT': str(1 - option if replay else option),
+                     'LATX_VPAES': str(1 - option if replay else option),
                      'LATC_NATIVE_IMAGE_OUT': str(output)}
             if replay:
                 extra['LATC_TRANSLATION_CONFIG_FROM'] = str(snapshot)

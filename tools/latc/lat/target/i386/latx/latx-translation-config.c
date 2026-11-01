@@ -42,7 +42,7 @@ bool latx_translation_config_native_domain(void)
 static bool native_replay;
 static uint8_t native_replay_digest[32];
 static GBytes *native_replay_bytes;
-static int native_replay_cvt_opt;
+static LatTranslationConfig native_replay_config;
 
 int latx_translation_cvt_opt(void)
 {
@@ -50,7 +50,22 @@ int latx_translation_cvt_opt(void)
     if (tb) {
         tb->translation_config_dependencies |= UINT64_C(1) << LAT_CONFIG_CVT_OPT;
     }
-    return native_replay ? native_replay_cvt_opt : option_cvt_opt;
+    return native_replay ? native_replay_config.values[LAT_CONFIG_CVT_OPT] : option_cvt_opt;
+}
+
+int latx_translation_rounding_opt(void)
+{
+    return native_replay ? native_replay_config.values[LAT_CONFIG_ROUNDING_OPT] : option_set_rounding_opt;
+}
+
+int latx_translation_vpaes(void)
+{
+    return native_replay ? native_replay_config.values[LAT_CONFIG_VPAES] : option_vpaes;
+}
+
+int latx_translation_fast_atomic(void)
+{
+    return native_replay ? native_replay_config.values[LAT_CONFIG_FAST_ATOMIC] : option_fast_atomic;
 }
 
 void latx_translation_config_set_native_replay(const LatTranslationConfig *config)
@@ -65,7 +80,7 @@ void latx_translation_config_set_native_replay(const LatTranslationConfig *confi
                                       error, sizeof(error))) {
         g_error("cannot encode native replay configuration: %s", error);
     }
-    native_replay_cvt_opt = config->values[LAT_CONFIG_CVT_OPT];
+    native_replay_config = *config;
     native_replay = true;
 }
 
