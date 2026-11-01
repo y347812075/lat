@@ -4726,12 +4726,23 @@ typedef struct LatcdBrokerWorker {
     pthread_t thread;
     _Atomic bool stopping;
     bool occupied, pending, complete;
-    int source, output, event;
+    int source, configuration, output, event;
     int64_t deadline;
     uint64_t generation;
     LatcdBrokerExportRequest request;
     LatcdBrokerExportResponse response;
+    LatcdBrokerJournalRequest journal_request;
+    LatcdResponseV2 journal_response;
+    uid_t journal_uid;
+    bool journal;
 } LatcdBrokerWorker;
+
+static void register_journal(const LatcdConfig *, int, int,
+                             const LatcdRequestV2 *, LatcdResponseV2 *, int *, const uid_t *);
+static void append_journal(const LatcdConfig *, int, int,
+                            const LatcdRequestV2 *, LatcdResponseV2 *);
+static void response_init(LatcdResponseV2 *, uint64_t);
+static int journal_build_id(uint8_t build[32]);
 
 static bool broker_worker_cancelled(void *opaque)
 {
@@ -4748,18 +4759,63 @@ static void *broker_worker_run(void *opaque)
             pthread_cond_wait(&worker->ready, &worker->lock);
         if (!worker->pending && atomic_load(&worker->stopping)) break;
         int source = worker->source;
+        int configuration = worker->configuration;
         LatcdBrokerExportRequest request = worker->request;
+        LatcdBrokerJournalRequest journal_request = worker->journal_request;
+        uid_t journal_uid = worker->journal_uid;
+        bool journal = worker->journal;
         int64_t deadline = worker->deadline;
         worker->pending = false;
         pthread_mutex_unlock(&worker->lock);
-        LatcdBrokerExportResponse response;
-        int output = broker_export_job(worker->config, source, &request, deadline,
+        LatcdBrokerExportResponse response = {0};
+        LatcdResponseV2 journal_response = {0};
+        int output = -1;
+        if (journal) {
+            struct stat source_stat;
+            int seals = fcntl(source, F_GET_SEALS);
+            int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+            if (seals < 0 || (seals & required) != required ||
+                fstat(source, &source_stat) || !S_ISREG(source_stat.st_mode) ||
+                source_stat.st_size <= 0 || (uint64_t)source_stat.st_size > worker->config->max_input) {
+                response_init(&journal_response, journal_request.request_id);
+                journal_response.status = LATCD_STATUS_BAD_SOURCE;
+                g_strlcpy(journal_response.message, "invalid broker journal source",
+                          sizeof(journal_response.message));
+            } else if (journal_request.operation == LATCD_OP_REGISTER_JOURNAL) {
+                int directory = -1;
+                LatcdRequestV2 legacy = {.operation = journal_request.operation,
+                    .request_id = journal_request.request_id, .sequence = journal_request.sequence};
+                register_journal(worker->config, source, configuration, &legacy,
+                                 &journal_response, &directory, &journal_uid);
+                if (directory >= 0) close(directory);
+            } else {
+                uint8_t build[32], codegen[32], digest[32];
+                char error[sizeof(journal_response.message)] = {0};
+                LatTbKey key = {.guest_rva = journal_request.sequence, .flags = 3};
+                response_init(&journal_response, journal_request.request_id);
+                expected_codegen_id(codegen);
+                if (journal_build_id(build) || latcd_journal_append_bound(worker->config->cache_dir,
+                    journal_request.epoch, journal_uid, source, configuration, build, codegen, &key, digest,
+                    NULL, error, sizeof(error))) {
+                    journal_response.status = LATCD_STATUS_BAD_REQUEST;
+                    g_strlcpy(journal_response.message, error[0] ? error : "journal append failed",
+                              sizeof(journal_response.message));
+                } else {
+                    memcpy(journal_response.source_sha256, digest, 32);
+                }
+            }
+        } else {
+            output = broker_export_job(worker->config, source, &request, deadline,
                                        broker_worker_cancelled, worker, &response);
+        }
         close(source);
+        if (configuration >= 0) close(configuration);
         pthread_mutex_lock(&worker->lock);
         worker->source = -1;
+        worker->configuration = -1;
         worker->output = output;
         worker->response = response;
+        worker->journal_response = journal_response;
         worker->complete = true;
         uint64_t one = 1;
         ssize_t ignored = write(worker->event, &one, sizeof(one));
@@ -4771,7 +4827,7 @@ static void *broker_worker_run(void *opaque)
 
 static int G_GNUC_UNUSED broker_worker_start(LatcdBrokerWorker *worker, const LatcdConfig *config)
 {
-    *worker = (LatcdBrokerWorker) {.config = config, .source = -1, .output = -1, .event = -1};
+    *worker = (LatcdBrokerWorker) {.config = config, .source = -1, .configuration = -1, .output = -1, .event = -1};
     if (pthread_mutex_init(&worker->lock, NULL)) return -1;
     if (pthread_cond_init(&worker->ready, NULL)) { pthread_mutex_destroy(&worker->lock); return -1; }
     worker->event = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
@@ -4794,6 +4850,24 @@ static int G_GNUC_UNUSED broker_worker_submit(LatcdBrokerWorker *worker, int sou
     worker->occupied = worker->pending = true;
     *generation = ++worker->generation;
     worker->source = source; worker->request = *request; worker->deadline = deadline;
+    worker->journal = false;
+    pthread_cond_signal(&worker->ready);
+    pthread_mutex_unlock(&worker->lock);
+    return 0;
+}
+
+static int G_GNUC_UNUSED broker_worker_submit_journal(LatcdBrokerWorker *worker, int fds[2],
+    const LatcdBrokerJournalRequest *request, uid_t uid, int64_t deadline, uint64_t *generation)
+{
+    pthread_mutex_lock(&worker->lock);
+    if (fds[0] < 0 || fds[1] < 0 || worker->generation == UINT64_MAX ||
+        worker->occupied || atomic_load(&worker->stopping)) {
+        pthread_mutex_unlock(&worker->lock); errno = EBUSY; return -1;
+    }
+    worker->occupied = worker->pending = worker->journal = true;
+    *generation = ++worker->generation;
+    worker->source = fds[0]; worker->configuration = fds[1];
+    worker->journal_request = *request; worker->journal_uid = uid; worker->deadline = deadline;
     pthread_cond_signal(&worker->ready);
     pthread_mutex_unlock(&worker->lock);
     return 0;
@@ -4801,12 +4875,14 @@ static int G_GNUC_UNUSED broker_worker_submit(LatcdBrokerWorker *worker, int sou
 
 static int G_GNUC_UNUSED broker_worker_take(LatcdBrokerWorker *worker,
                                              uint64_t generation,
-                                             LatcdBrokerExportResponse *response, int *output)
+                                             LatcdBrokerExportResponse *response,
+                                             LatcdResponseV2 *journal_response, int *output)
 {
     pthread_mutex_lock(&worker->lock);
     if (!worker->complete) { pthread_mutex_unlock(&worker->lock); errno = EAGAIN; return -1; }
     if (worker->generation != generation) { pthread_mutex_unlock(&worker->lock); errno = ESTALE; return -1; }
     *response = worker->response; *output = worker->output;
+    if (journal_response) *journal_response = worker->journal_response;
     worker->output = -1; worker->complete = worker->occupied = false;
     uint64_t count;
     ssize_t ignored = read(worker->event, &count, sizeof(count));
@@ -4835,6 +4911,8 @@ typedef struct LatcdBrokerConnection {
     int64_t deadline;
     uint64_t generation;
     LatcdBrokerExportResponse response;
+    LatcdResponseV2 journal_response;
+    bool journal;
 } LatcdBrokerConnection;
 
 static int G_GNUC_UNUSED broker_connection_open(LatcdBrokerConnection *connection,
@@ -4854,31 +4932,65 @@ static int G_GNUC_UNUSED broker_connection_step(LatcdBrokerConnection *connectio
 {
     if (g_get_monotonic_time() >= connection->deadline) { errno = ETIMEDOUT; return -1; }
     if (!connection->submitted) {
-        LatcdBrokerExportRequest request;
-        int source = -1;
-        if (latcd_broker_receive(connection->fd, connection->uid, connection->gid,
-                                 &request, sizeof(request), &source)) {
+        char first;
+        ssize_t length = recv(connection->fd, &first, sizeof(first),
+                              MSG_PEEK | MSG_TRUNC | MSG_DONTWAIT);
+        if (length < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 1;
             return -1;
         }
-        if (source < 0 || request.version != LATCD_BROKER_EXPORT_VERSION || request.reserved ||
-            broker_worker_submit(worker, source, &request, connection->deadline,
-                                 &connection->generation)) {
-            if (source >= 0) close(source);
+        if (length == sizeof(LatcdBrokerJournalRequest)) {
+#if !defined(LATCD_GC_TIMER_TEST) && !defined(LATCD_JOURNAL_SNAPSHOT_TEST)
+            errno = EOPNOTSUPP;
             return -1;
+#else
+            LatcdBrokerJournalRequest request;
+            int fds[2] = {-1, -1};
+            if (latcd_broker_receive_pair(connection->fd, connection->uid, connection->gid,
+                                          &request, sizeof(request), fds)) return -1;
+            const uint8_t empty_epoch[16] = {0};
+            if (request.version != LATCD_BROKER_JOURNAL_VERSION ||
+                (request.operation != LATCD_OP_REGISTER_JOURNAL &&
+                 request.operation != LATCD_OP_APPEND_JOURNAL) ||
+                (request.operation == LATCD_OP_REGISTER_JOURNAL &&
+                 memcmp(request.epoch, empty_epoch, sizeof(empty_epoch))) ||
+                broker_worker_submit_journal(worker, fds, &request, connection->uid, connection->deadline,
+                                             &connection->generation)) {
+                close(fds[0]); close(fds[1]); return -1;
+            }
+            connection->journal = connection->submitted = true;
+#endif
+        } else {
+            LatcdBrokerExportRequest request;
+            int source = -1;
+            if (latcd_broker_receive(connection->fd, connection->uid, connection->gid,
+                                     &request, sizeof(request), &source)) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 1;
+                return -1;
+            }
+            if (source < 0 || request.version != LATCD_BROKER_EXPORT_VERSION || request.reserved ||
+                broker_worker_submit(worker, source, &request, connection->deadline,
+                                     &connection->generation)) {
+                if (source >= 0) close(source);
+                return -1;
+            }
+            connection->submitted = true;
         }
-        connection->submitted = true;
     }
     if (!connection->response_ready) {
         if (broker_worker_take(worker, connection->generation,
-                               &connection->response, &connection->output)) {
+                               &connection->response, &connection->journal_response,
+                               &connection->output)) {
             if (errno == EAGAIN) return 1;
             return -1;
         }
         connection->response_ready = true;
     }
-    if (latcd_broker_send(connection->fd, &connection->response,
-                          sizeof(connection->response), connection->output)) {
+    const void *response = connection->journal ? (const void *)&connection->journal_response :
+                                                  (const void *)&connection->response;
+    size_t response_size = connection->journal ? sizeof(connection->journal_response) :
+                                                 sizeof(connection->response);
+    if (latcd_broker_send(connection->fd, response, response_size, connection->output)) {
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 1;
         return -1;
     }
@@ -4899,7 +5011,7 @@ static int G_GNUC_UNUSED broker_connection_reap(LatcdBrokerConnection *connectio
     if (!connection->submitted || connection->response_ready) return 0;
     LatcdBrokerExportResponse discarded;
     int output = -1;
-    if (broker_worker_take(worker, connection->generation, &discarded, &output)) {
+    if (broker_worker_take(worker, connection->generation, &discarded, NULL, &output)) {
         if (errno == EAGAIN) return 1;
         return -1;
     }
@@ -7544,7 +7656,7 @@ static int journal_build_id(uint8_t build[32])
 
 static void register_journal(const LatcdConfig *config, int source, int config_fd,
                               const LatcdRequestV2 *request, LatcdResponseV2 *response,
-                              int *directory_fd)
+                              int *directory_fd, const uid_t *client_uid)
 {
     *directory_fd = -1;
     response_init(response, request->request_id);
@@ -7580,7 +7692,10 @@ static void register_journal(const LatcdConfig *config, int source, int config_f
     } else {
         char stream[33];
         int result;
-        result = latcd_journal_register_fd(config->cache_dir, snapshot,
+        result = client_uid ? latcd_journal_register_bound_fd(config->cache_dir, snapshot,
+            response->source_sha256, build, codegen, config_fd, request->sequence,
+            config->max_cache_bytes, *client_uid, stream, error, sizeof(error)) :
+            latcd_journal_register_fd(config->cache_dir, snapshot,
             response->source_sha256, build, codegen, config_fd, request->sequence,
             config->max_cache_bytes, stream,
             request->operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY ? directory_fd : NULL,
@@ -7922,7 +8037,7 @@ static int run_service(const LatcdConfig *config)
                 prepare_source_lock_request(config, source, tbset, &response);
             } else if (request.operation == LATCD_OP_REGISTER_JOURNAL ||
                 request.operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY) {
-                register_journal(config, source, tbset, &request, &response, &directory);
+                register_journal(config, source, tbset, &request, &response, &directory, NULL);
             } else if (request.operation == LATCD_OP_APPEND_JOURNAL) {
                 append_journal(config, source, tbset, &request, &response);
             } else if (request.operation == LATCD_OP_COLLECT_JOURNALS) {
@@ -8014,7 +8129,7 @@ static int run_service(const LatcdConfig *config)
                                   &response);
         } else if (request.operation == LATCD_OP_REGISTER_JOURNAL ||
                    request.operation == LATCD_OP_REGISTER_JOURNAL_CAPABILITY) {
-            register_journal(config, source, tbset, &request, &response, &directory);
+            register_journal(config, source, tbset, &request, &response, &directory, NULL);
         } else if (request.operation == LATCD_OP_APPEND_JOURNAL) {
             append_journal(config, source, tbset, &request, &response);
         } else if (request.operation == LATCD_OP_COLLECT_JOURNALS) {

@@ -158,6 +158,24 @@ int main(void)
     assert(!latcd_broker_send(s[1], &sent, 1, file));
     assert(latcd_broker_receive(s[0], uid + 1, gid, &got, 1, &received) < 0 && received == -1);
     assert(fd_count() == before);
+    int pair[2] = {file, file}, received_pair[2];
+    assert(!latcd_broker_send_pair(s[1], &sent, 1, pair));
+    assert(!latcd_broker_receive_pair(s[0], uid, gid, &got, 1, received_pair));
+    assert(got == sent && received_pair[0] >= 0 && received_pair[1] >= 0);
+    assert((fcntl(received_pair[0], F_GETFD) & FD_CLOEXEC) &&
+           (fcntl(received_pair[1], F_GETFD) & FD_CLOEXEC));
+    close(received_pair[0]); close(received_pair[1]);
+    assert(fd_count() == before);
+    assert(!latcd_broker_send(s[1], &sent, 1, file));
+    assert(latcd_broker_receive_pair(s[0], uid, gid, &got, 1, received_pair) < 0 &&
+           received_pair[0] == -1 && received_pair[1] == -1);
+    send_many(s[1], file, 16);
+    assert(latcd_broker_receive_pair(s[0], uid, gid, &got, 1, received_pair) < 0 &&
+           received_pair[0] == -1 && received_pair[1] == -1);
+    assert(!latcd_broker_send_pair(s[1], &sent, 1, pair));
+    assert(latcd_broker_receive_pair(s[0], uid + 1, gid, &got, 1, received_pair) < 0 &&
+           received_pair[0] == -1 && received_pair[1] == -1);
+    assert(fd_count() == before);
     close(file); close(s[0]); close(s[1]);
     assert(!socketpair(AF_UNIX, SOCK_SEQPACKET, 0, s));
     int buffer = 4096;

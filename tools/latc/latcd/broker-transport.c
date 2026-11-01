@@ -135,17 +135,18 @@ fail:
     return -1;
 }
 
-int latcd_broker_send(int fd, const void *packet, size_t size, int passed)
+static int broker_send_fds(int fd, const void *packet, size_t size,
+                           const int *passed, size_t count)
 {
-    if (!packet || !size) { errno = EINVAL; return -1; }
+    if (!packet || !size || count > 2 || (count && !passed)) { errno = EINVAL; return -1; }
     struct iovec iov = {.iov_base = (void *)packet, .iov_len = size};
-    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } control = {0};
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int) * 2)]; } control = {0};
     struct msghdr msg = {.msg_iov = &iov, .msg_iovlen = 1};
-    if (passed >= 0) {
-        msg.msg_control = control.bytes; msg.msg_controllen = sizeof(control.bytes);
+    if (count) {
+        msg.msg_control = control.bytes; msg.msg_controllen = CMSG_SPACE(sizeof(int) * count);
         struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
-        c->cmsg_level = SOL_SOCKET; c->cmsg_type = SCM_RIGHTS; c->cmsg_len = CMSG_LEN(sizeof(int));
-        memcpy(CMSG_DATA(c), &passed, sizeof(passed));
+        c->cmsg_level = SOL_SOCKET; c->cmsg_type = SCM_RIGHTS; c->cmsg_len = CMSG_LEN(sizeof(int) * count);
+        memcpy(CMSG_DATA(c), passed, sizeof(int) * count);
     }
     ssize_t result = sendmsg(fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
     if (result == (ssize_t)size) return 0;
@@ -153,10 +154,23 @@ int latcd_broker_send(int fd, const void *packet, size_t size, int passed)
     return -1;
 }
 
-int latcd_broker_receive(int fd, uid_t uid, gid_t gid, void *packet, size_t size, int *received_fd)
+int latcd_broker_send(int fd, const void *packet, size_t size, int passed)
 {
-    if (!packet || !size || !received_fd) { errno = EINVAL; return -1; }
-    *received_fd = -1;
+    return broker_send_fds(fd, packet, size, &passed, passed >= 0 ? 1 : 0);
+}
+
+int latcd_broker_send_pair(int fd, const void *packet, size_t size, const int fds[2])
+{
+    if (!fds || fds[0] < 0 || fds[1] < 0) { errno = EINVAL; return -1; }
+    return broker_send_fds(fd, packet, size, fds, 2);
+}
+
+static int broker_receive_fds(int fd, uid_t uid, gid_t gid, void *packet,
+                               size_t size, int *received, unsigned limit,
+                               bool exact)
+{
+    if (!packet || !size || !received) { errno = EINVAL; return -1; }
+    for (unsigned i = 0; i < limit; i++) received[i] = -1;
     struct iovec iov = {.iov_base = packet, .iov_len = size};
     union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(struct ucred)) + CMSG_SPACE(sizeof(int) * 8)]; } control = {0};
     struct msghdr msg = {.msg_iov = &iov, .msg_iovlen = 1,
@@ -173,12 +187,26 @@ int latcd_broker_receive(int fd, uid_t uid, gid_t gid, void *packet, size_t size
             credentials = true; valid &= peer.uid == uid && peer.gid == gid;
         } else if (c->cmsg_type == SCM_RIGHTS && payload % sizeof(int) == 0) {
             for (size_t i = 0; i < payload / sizeof(int); i++) {
-                int received; memcpy(&received, (char *)CMSG_DATA(c) + i * sizeof(int), sizeof(received));
-                if (++fds == 1) *received_fd = received; else close(received);
+                int item; memcpy(&item, (char *)CMSG_DATA(c) + i * sizeof(int), sizeof(item));
+                if (fds < limit) received[fds] = item; else close(item);
+                fds++;
             }
         } else valid = false;
     }
-    if (valid && credentials && fds <= 1) return 0;
-    if (*received_fd >= 0) close(*received_fd);
-    *received_fd = -1; errno = EPROTO; return -1;
+    if (valid && credentials && (exact ? fds == limit : fds <= limit)) return 0;
+    for (unsigned i = 0; i < limit; i++) {
+        if (received[i] >= 0) close(received[i]);
+        received[i] = -1;
+    }
+    errno = EPROTO; return -1;
+}
+
+int latcd_broker_receive(int fd, uid_t uid, gid_t gid, void *packet, size_t size, int *received_fd)
+{
+    return broker_receive_fds(fd, uid, gid, packet, size, received_fd, 1, false);
+}
+
+int latcd_broker_receive_pair(int fd, uid_t uid, gid_t gid, void *packet, size_t size, int received_fds[2])
+{
+    return broker_receive_fds(fd, uid, gid, packet, size, received_fds, 2, true);
 }

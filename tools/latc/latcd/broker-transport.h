@@ -7,6 +7,14 @@
 
 #define LATCD_BROKER_EXPORT_VERSION 2u
 #define LATCD_BROKER_PURPOSE_OFFLINE_SNAPSHOT 1u
+#define LATCD_BROKER_JOURNAL_VERSION 1u
+typedef struct LatcdBrokerJournalRequest {
+    uint32_t version;
+    uint32_t operation;
+    uint64_t request_id;
+    uint64_t sequence;
+    uint8_t epoch[16];
+} LatcdBrokerJournalRequest;
 typedef struct LatcdBrokerExportRequest {
     uint32_t version;
     uint32_t reserved;
@@ -48,4 +56,9 @@ int latcd_broker_peer(int socket_fd, uid_t expected_uid, uid_t *uid, gid_t *gid)
 int latcd_broker_receive(int socket_fd, uid_t uid, gid_t gid,
                          void *packet, size_t size, int *received_fd);
 int latcd_broker_send(int socket_fd, const void *packet, size_t size, int fd);
+/* Exactly two descriptors are required; both are closed on invalid packets. */
+int latcd_broker_receive_pair(int socket_fd, uid_t uid, gid_t gid,
+                              void *packet, size_t size, int received_fds[2]);
+int latcd_broker_send_pair(int socket_fd, const void *packet, size_t size,
+                           const int fds[2]);
 #endif

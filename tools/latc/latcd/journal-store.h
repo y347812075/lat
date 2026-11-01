@@ -2,6 +2,7 @@
 #define LATCD_JOURNAL_STORE_H
 
 #include "lat-key-journal.h"
+#include <sys/types.h>
 
 #define LATCD_JOURNAL_MAX_STREAMS 128u
 #define LATCD_JOURNAL_CONFIG_LIMIT 4096u
@@ -60,6 +61,10 @@ int latcd_journal_register_fd(const char *cache, int snapshot_fd,
     const uint8_t source_sha[32], const uint8_t build[32], const uint8_t codegen[32],
     int config_fd, uint64_t capacity, uint64_t max_bytes,
     char stream[33], int *directory_fd, char *error, size_t error_size);
+int latcd_journal_register_bound_fd(const char *cache, int snapshot_fd,
+    const uint8_t source_sha[32], const uint8_t build[32], const uint8_t codegen[32],
+    int config_fd, uint64_t capacity, uint64_t max_bytes, uid_t client_uid,
+    char stream[33], char *error, size_t error_size);
 /* Returns ownership of a CLOEXEC stream directory, not the cache/root directory.
  * Fork children close inherited writers and open a fresh OFD via this directory.
  */
@@ -81,6 +86,14 @@ int latcd_journal_collect(const char *cache, const uint8_t build[32],
  * source_fd and sealed config_fd must match the persisted registration.
  */
 int latcd_journal_append(const char *cache, uint64_t journal_id,
+    int source_fd, int config_fd, const uint8_t build[32],
+    const uint8_t codegen[32], const LatTbKey *key, uint8_t source_sha[32],
+    uint64_t *slot, char *error, size_t error_size);
+int latcd_journal_append_epoch(const char *cache, const uint8_t epoch[16],
+    int source_fd, int config_fd, const uint8_t build[32],
+    const uint8_t codegen[32], const LatTbKey *key, uint8_t source_sha[32],
+    uint64_t *slot, char *error, size_t error_size);
+int latcd_journal_append_bound(const char *cache, const uint8_t epoch[16], uid_t client_uid,
     int source_fd, int config_fd, const uint8_t build[32],
     const uint8_t codegen[32], const LatTbKey *key, uint8_t source_sha[32],
     uint64_t *slot, char *error, size_t error_size);

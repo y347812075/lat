@@ -26,6 +26,33 @@ static void wait_ok(pid_t child)
     g_assert_cmpint(WEXITSTATUS(status), ==, 0);
 }
 
+static LatcdResponseV2 broker_journal_request(LatcdBrokerWorker *worker,
+    int source, int configuration, uint32_t operation, uint64_t id, uint64_t sequence,
+    const uint8_t *epoch)
+{
+    int sockets[2], fds[2] = {source, configuration};
+    g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets), ==, 0);
+    LatcdBrokerConnection connection;
+    g_assert_cmpint(broker_connection_open(&connection, sockets[0], getuid(),
+        g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND), ==, 0);
+    LatcdBrokerJournalRequest request = {.version = LATCD_BROKER_JOURNAL_VERSION,
+        .operation = operation, .request_id = id, .sequence = sequence};
+    if (epoch) memcpy(request.epoch, epoch, sizeof(request.epoch));
+    g_assert_cmpint(latcd_broker_send_pair(sockets[1], &request, sizeof(request), fds), ==, 0);
+    int result = broker_connection_step(&connection, worker);
+    if (result == 1) {
+        struct pollfd event = {.fd = worker->event, .events = POLLIN};
+        g_assert_cmpint(poll(&event, 1, 10000), ==, 1);
+        result = broker_connection_step(&connection, worker);
+    }
+    g_assert_cmpint(result, ==, 0);
+    LatcdResponseV2 response;
+    g_assert_cmpint(recv(sockets[1], &response, sizeof(response), 0), ==, sizeof(response));
+    broker_connection_close(&connection);
+    close(sockets[1]);
+    return response;
+}
+
 static pid_t start_service(const LatcdConfig *config)
 {
     pid_t child = fork();
@@ -812,6 +839,83 @@ int main(void)
     g_assert_cmpint(request(&config, source, configuration, 2).status, !=, LATCD_STATUS_OK);
     g_assert_cmpint(fcntl(configuration, F_ADD_SEALS,
         F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL), ==, 0);
+    char *broker_cache = g_build_filename(directory, "broker-journal-cache", NULL);
+    char *broker_tmp = g_build_filename(broker_cache, ".tmp", NULL);
+    g_assert_cmpint(mkdir(broker_cache, 0700), ==, 0);
+    g_assert_cmpint(mkdir(broker_tmp, 0700), ==, 0);
+    g_assert_cmpint(prepare_metadata_directories(broker_cache), ==, 0);
+    g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, broker_cache,
+                                             error, sizeof(error)), ==, 0);
+    latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
+    LatcdConfig broker_config = config;
+    broker_config.cache_dir = broker_cache;
+    LatcdBrokerWorker broker_worker;
+    g_assert_cmpint(broker_worker_start(&broker_worker, &broker_config), ==, 0);
+    LatcdResponseV2 unsealed = broker_journal_request(&broker_worker, source,
+        configuration, LATCD_OP_REGISTER_JOURNAL, 17, 4, NULL);
+    g_assert_cmpint(unsealed.status, ==, LATCD_STATUS_BAD_SOURCE);
+    int broker_source = memfd_create("broker-journal-source", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    g_assert_cmpint(broker_source, >=, 0);
+    g_assert_cmpint(write(broker_source, &elf, sizeof(elf)), ==, sizeof(elf));
+    g_assert_cmpint(fcntl(broker_source, F_ADD_SEALS,
+        F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL), ==, 0);
+    char broker_source_path[64];
+    g_snprintf(broker_source_path, sizeof(broker_source_path), "/proc/self/fd/%d", broker_source);
+    int broker_readonly = open(broker_source_path, O_RDONLY | O_CLOEXEC);
+    g_assert_cmpint(broker_readonly, >=, 0);
+    close(broker_source);
+    broker_source = broker_readonly;
+    LatcdResponseV2 broker_registered = broker_journal_request(&broker_worker, broker_source,
+        configuration, LATCD_OP_REGISTER_JOURNAL, 17, 4, NULL);
+    g_assert_cmpint(broker_registered.status, ==, LATCD_STATUS_OK);
+    g_assert_cmpuint(broker_registered.accepted_sequence, ==, 0);
+    g_assert_cmpuint(broker_registered.published_sequence, ==, 0);
+    g_assert_cmpuint(strlen(broker_registered.message), ==, 32);
+    uint8_t full_epoch[16], wrong_epoch[16], broker_build[32], broker_codegen[32], broker_sha[32];
+    for (unsigned i = 0; i < 16; i++)
+        full_epoch[i] = (g_ascii_xdigit_value(broker_registered.message[2*i]) << 4) |
+                        g_ascii_xdigit_value(broker_registered.message[2*i+1]);
+    memcpy(wrong_epoch, full_epoch, sizeof(full_epoch));
+    wrong_epoch[15] ^= 1;
+    LatcdResponseV2 broker_wrong = broker_journal_request(&broker_worker, broker_source,
+        configuration, LATCD_OP_APPEND_JOURNAL, 19, 16, wrong_epoch);
+    g_assert_cmpint(broker_wrong.status, ==, LATCD_STATUS_BAD_REQUEST);
+    LatcdResponseV2 broker_appended = broker_journal_request(&broker_worker, broker_source,
+        configuration, LATCD_OP_APPEND_JOURNAL, 18, 16, full_epoch);
+    g_assert_cmpint(broker_appended.status, ==, LATCD_STATUS_OK);
+    g_assert_cmpmem(broker_appended.source_sha256, 32, broker_registered.source_sha256, 32);
+    g_assert_cmpuint(broker_appended.accepted_sequence, ==, 0);
+    g_assert_cmpuint(broker_appended.published_sequence, ==, 0);
+    broker_worker_stop(&broker_worker);
+    g_assert_cmpint(journal_build_id(broker_build), ==, 0);
+    expected_codegen_id(broker_codegen);
+    LatTbKey broker_key = {.guest_rva = 32, .flags = 3};
+    unsigned broker_count = 0;
+    g_assert_cmpint(latcd_journal_recover(broker_cache, broker_build, broker_codegen,
+        config.max_cache_bytes, &broker_count, error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(broker_count, ==, 1);
+    g_assert_cmpint(broker_worker_start(&broker_worker, &broker_config), ==, 0);
+    LatcdResponseV2 after_restart = broker_journal_request(&broker_worker, broker_source,
+        configuration, LATCD_OP_APPEND_JOURNAL, 20, 32, full_epoch);
+    g_assert_cmpint(after_restart.status, ==, LATCD_STATUS_OK);
+    broker_worker_stop(&broker_worker);
+    g_assert_cmpint(latcd_journal_append_bound(broker_cache, full_epoch, getuid() + 1,
+        broker_source, configuration, broker_build, broker_codegen, &broker_key, broker_sha,
+        NULL, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(latcd_journal_append_bound(broker_cache, full_epoch, getuid(),
+        broker_source, configuration, broker_build, broker_codegen, &broker_key, broker_sha,
+        NULL, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(latcd_journal_append_epoch(broker_cache, wrong_epoch, broker_source,
+        configuration, broker_build, broker_codegen, &broker_key, broker_sha,
+        NULL, error, sizeof(error)), ==, -1);
+    g_assert_cmpint(latcd_journal_append_epoch(broker_cache, full_epoch, broker_source,
+        configuration, broker_build, broker_codegen, &broker_key, broker_sha,
+        NULL, error, sizeof(error)), ==, 0);
+    g_assert_cmpmem(broker_sha, 32, broker_registered.source_sha256, 32);
+    close(broker_source);
+    latcd_cache_capacity_close(&generation_capacity);
+    remove_tree(broker_cache);
+    g_free(broker_tmp); g_free(broker_cache);
     check_shared_capacity(&config, source, configuration);
     check_anonymous_snapshot(directory, source, configuration);
     g_assert_cmpint(request(&config, source, configuration, 0).status, !=, LATCD_STATUS_OK);
@@ -832,6 +936,11 @@ int main(void)
     for (size_t i = 0; i < 16; i++)
         identity.epoch[i] = (g_ascii_xdigit_value(registered.message[2 * i]) << 4) |
                             g_ascii_xdigit_value(registered.message[2 * i + 1]);
+    LatTbKey legacy_key = {.guest_rva = 16, .flags = 3};
+    uint8_t legacy_sha[32];
+    g_assert_cmpint(latcd_journal_append_bound(cache, identity.epoch, getuid(), source,
+        configuration, identity.build_sha256, identity.codegen_sha256, &legacy_key,
+        legacy_sha, NULL, error, sizeof(error)), ==, -1);
     check_registration_clients(&config, source, configuration, &identity);
     check_directory_capability(&config, source, configuration, &identity);
     int ready[2];

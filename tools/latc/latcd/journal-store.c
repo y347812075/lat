@@ -26,6 +26,35 @@ typedef struct Registration {
 
 _Static_assert(sizeof(Registration) == 160, "registration layout");
 
+typedef struct RegistrationV2 {
+    Registration base;
+    uint64_t client_uid;
+} RegistrationV2;
+
+static bool read_exact(int fd, void *bytes, size_t size);
+static int readonly_file(int directory, const char *name, uint64_t limit,
+                         bool single_link, struct stat *st);
+
+static bool registration_read(int directory, Registration *record, bool *bound,
+                              uint64_t *uid, size_t *record_size)
+{
+    struct stat st;
+    int fd = readonly_file(directory, "registration", sizeof(RegistrationV2), true, &st);
+    RegistrationV2 disk = {0};
+    bool ok = fd >= 0 && (st.st_size == sizeof(Registration) ||
+                           st.st_size == sizeof(RegistrationV2)) &&
+              read_exact(fd, &disk, st.st_size);
+    if (fd >= 0) close(fd);
+    if (!ok) return false;
+    bool v2 = st.st_size == sizeof(RegistrationV2);
+    if (memcmp(disk.base.magic, v2 ? "LATJREG2" : "LATJREG1", 8)) return false;
+    *record = disk.base;
+    if (bound) *bound = v2;
+    if (uid) *uid = disk.client_uid;
+    if (record_size) *record_size = st.st_size;
+    return true;
+}
+
 static int fail(char *error, size_t size, const char *format, ...)
 {
     if (error && size) {
@@ -195,7 +224,7 @@ int latcd_journal_budget(int snapshot_fd, int config_fd, uint64_t capacity, uint
         fstat(snapshot_fd, &source) || !S_ISREG(source.st_mode) || source.st_size < 0 ||
         fstat(config_fd, &config) || config.st_size <= 0 || config.st_size > LATCD_JOURNAL_CONFIG_LIMIT)
         return -1;
-    uint64_t overhead = sizeof(Registration) + config.st_size + stream_storage(capacity);
+    uint64_t overhead = sizeof(RegistrationV2) + config.st_size + stream_storage(capacity);
     if ((uint64_t)source.st_size > UINT64_MAX - overhead) return -1;
     *bytes = source.st_size + overhead;
     return 0;
@@ -318,12 +347,11 @@ static int recover_stream(int root, const char *name, const uint8_t build[32],
     Registration record;
     struct stat st;
     bool ok = directory >= 0;
-    if (ok) fd = readonly_file(directory, "registration", sizeof(record), true, &st);
-    ok = ok && fd >= 0 && st.st_size == sizeof(record) && read_exact(fd, &record, sizeof(record));
-    if (fd >= 0) close(fd);
+    size_t registration_size = 0;
+    ok = ok && registration_read(directory, &record, NULL, NULL, &registration_size);
     char epoch[33];
     if (ok) hex(record.identity.epoch, 16, epoch);
-    ok = ok && !memcmp(record.magic, "LATJREG1", 8) && !strcmp(epoch, name) &&
+    ok = ok && !strcmp(epoch, name) &&
         !memcmp(record.identity.build_sha256, build, 32) &&
         !memcmp(record.identity.codegen_sha256, codegen, 32) &&
         record.capacity && record.capacity <= LAT_KEY_JOURNAL_MAX_SLOTS;
@@ -336,7 +364,7 @@ static int recover_stream(int root, const char *name, const uint8_t build[32],
                                                 error, error_size) &&
         !lat_translation_config_digest(&decoded, digest, error, error_size) &&
         !memcmp(digest, record.identity.config_sha256, 32);
-    uint64_t size = ok ? sizeof(record) + st.st_size + stream_storage(record.capacity) : 0;
+    uint64_t size = ok ? registration_size + st.st_size + stream_storage(record.capacity) : 0;
     fd = ok ? readonly_file(directory, "source", max_bytes, false, &st) : -1;
     ok = ok && fd >= 0 && hash_fd(fd, digest) &&
         !memcmp(digest, record.identity.source_sha256, 32);
@@ -442,12 +470,9 @@ int latcd_journal_open_compile_input(const char *cache, const char *stream,
     uint8_t digest[32];
     char epoch[33];
     bool ok = directory >= 0;
-    if (ok) fd = readonly_file(directory, "registration", sizeof(record), true, &st);
-    ok = ok && fd >= 0 && st.st_size == sizeof(record) &&
-        read_exact(fd, &record, sizeof(record));
-    if (fd >= 0) close(fd);
+    ok = ok && registration_read(directory, &record, NULL, NULL, NULL);
     if (ok) hex(record.identity.epoch, 16, epoch);
-    ok = ok && !memcmp(record.magic, "LATJREG1", 8) && !strcmp(epoch, stream) &&
+    ok = ok && !strcmp(epoch, stream) &&
         !memcmp(record.identity.build_sha256, build, 32) &&
         !memcmp(record.identity.codegen_sha256, codegen, 32) &&
         record.capacity && record.capacity <= LAT_KEY_JOURNAL_MAX_SLOTS;
@@ -568,7 +593,8 @@ static bool journal_id_matches_name(uint64_t journal_id, const char *name)
     return value == journal_id;
 }
 
-int latcd_journal_append(const char *cache, uint64_t journal_id,
+static int journal_append(const char *cache, uint64_t journal_id, const uint8_t *epoch,
+    const uid_t *client_uid,
     int source_fd, int config_fd, const uint8_t build[32],
     const uint8_t codegen[32], const LatTbKey *key, uint8_t source_sha[32],
     uint64_t *slot, char *error, size_t error_size)
@@ -593,22 +619,22 @@ int latcd_journal_append(const char *cache, uint64_t journal_id,
     Registration selected = {0};
     struct dirent *entry;
     while ((entry = readdir(directory_list))) {
-        if (!journal_id_matches_name(journal_id, entry->d_name)) continue;
+        char expected[33];
+        if (epoch) hex(epoch, 16, expected);
+        if (epoch ? strcmp(expected, entry->d_name) :
+                    !journal_id_matches_name(journal_id, entry->d_name)) continue;
         if (found) {
             fail(error, error_size, "ambiguous journal epoch");
             goto out;
         }
         int directory = directory_at(root, entry->d_name, false);
-        struct stat st;
-        int registration = directory >= 0 ?
-            readonly_file(directory, "registration", sizeof(Registration), true,
-                          &st) : -1;
-        bool valid = registration >= 0 && st.st_size == sizeof(selected) &&
-            read_exact(registration, &selected, sizeof(selected));
-        if (registration >= 0) close(registration);
+        bool bound = false;
+        uint64_t owner = 0;
+        bool valid = directory >= 0 && registration_read(directory, &selected, &bound, &owner, NULL);
         if (directory >= 0) close(directory);
-        valid = valid && !memcmp(selected.magic, "LATJREG1", 8) &&
-            !memcmp(selected.identity.epoch, &journal_id, sizeof(journal_id)) &&
+        valid = valid && (!client_uid || (bound && owner == (uint64_t)*client_uid)) &&
+            (epoch ? !memcmp(selected.identity.epoch, epoch, 16) :
+                     !memcmp(selected.identity.epoch, &journal_id, sizeof(journal_id))) &&
             !memcmp(selected.identity.build_sha256, build, 32) &&
             !memcmp(selected.identity.codegen_sha256, codegen, 32);
         if (!valid) {
@@ -671,10 +697,39 @@ out:
     return result;
 }
 
+int latcd_journal_append(const char *cache, uint64_t journal_id,
+    int source_fd, int config_fd, const uint8_t build[32],
+    const uint8_t codegen[32], const LatTbKey *key, uint8_t source_sha[32],
+    uint64_t *slot, char *error, size_t error_size)
+{
+    return journal_append(cache, journal_id, NULL, NULL, source_fd, config_fd, build,
+                          codegen, key, source_sha, slot, error, error_size);
+}
+
+int latcd_journal_append_epoch(const char *cache, const uint8_t epoch[16],
+    int source_fd, int config_fd, const uint8_t build[32],
+    const uint8_t codegen[32], const LatTbKey *key, uint8_t source_sha[32],
+    uint64_t *slot, char *error, size_t error_size)
+{
+    if (!epoch) return fail(error, error_size, "missing journal epoch");
+    return journal_append(cache, 0, epoch, NULL, source_fd, config_fd, build, codegen,
+                          key, source_sha, slot, error, error_size);
+}
+
+int latcd_journal_append_bound(const char *cache, const uint8_t epoch[16], uid_t client_uid,
+    int source_fd, int config_fd, const uint8_t build[32],
+    const uint8_t codegen[32], const LatTbKey *key, uint8_t source_sha[32],
+    uint64_t *slot, char *error, size_t error_size)
+{
+    if (!epoch) return fail(error, error_size, "missing journal epoch");
+    return journal_append(cache, 0, epoch, &client_uid, source_fd, config_fd,
+                          build, codegen, key, source_sha, slot, error, error_size);
+}
+
 static int register_stream(const char *cache, const char *snapshot, int snapshot_fd,
     const uint8_t source_sha[32], const uint8_t build[32], const uint8_t codegen[32],
     int config_fd, uint64_t capacity, uint64_t max_bytes,
-    char stream[33], int *directory_fd, char *error, size_t error_size)
+    char stream[33], int *directory_fd, const uid_t *client_uid, char *error, size_t error_size)
 {
     stream[0] = 0;
     if (directory_fd) *directory_fd = -1;
@@ -689,12 +744,14 @@ static int register_stream(const char *cache, const char *snapshot, int snapshot
         return fail(error, error_size, "invalid journal capacity or unsealed configuration");
     size_t config_size = st.st_size;
     LatTranslationConfig decoded;
-    Registration record = { .magic = "LATJREG1", .capacity = capacity };
-    memcpy(record.identity.build_sha256, build, 32);
-    memcpy(record.identity.codegen_sha256, codegen, 32);
-    memcpy(record.identity.source_sha256, source_sha, 32);
+    RegistrationV2 disk = {.base = {.magic = "LATJREG1", .capacity = capacity}};
+    Registration *record = &disk.base;
+    if (client_uid) { memcpy(record->magic, "LATJREG2", 8); disk.client_uid = *client_uid; }
+    memcpy(record->identity.build_sha256, build, 32);
+    memcpy(record->identity.codegen_sha256, codegen, 32);
+    memcpy(record->identity.source_sha256, source_sha, 32);
     if (lat_translation_config_decode(config, config_size, build, &decoded, error, error_size) ||
-        lat_translation_config_digest(&decoded, record.identity.config_sha256, error, error_size))
+        lat_translation_config_digest(&decoded, record->identity.config_sha256, error, error_size))
         return -1;
     if (decoded.guest_abi != LAT_CONFIG_ABI_X86_64)
         return fail(error, error_size, "journal source requires x86-64 configuration");
@@ -708,17 +765,18 @@ static int register_stream(const char *cache, const char *snapshot, int snapshot
         close(root);
         return fail(error, error_size, "journal store invalid or full");
     }
-    uint64_t needed = sizeof(record) + config_size + stream_storage(capacity);
+    size_t record_size = client_uid ? sizeof(disk) : sizeof(*record);
+    uint64_t needed = record_size + config_size + stream_storage(capacity);
     if ((uint64_t)st.st_size > max_bytes || needed > max_bytes - st.st_size ||
         bytes > max_bytes - st.st_size - needed) {
         close(root);
         return fail(error, error_size, "journal byte quota exceeded");
     }
     ssize_t random;
-    do { random = getrandom(record.identity.epoch, 16, 0); } while (random < 0 && errno == EINTR);
+    do { random = getrandom(record->identity.epoch, 16, 0); } while (random < 0 && errno == EINTR);
     if (random != 16) { close(root); return fail(error, error_size, "cannot allocate journal epoch"); }
     char name[33];
-    hex(record.identity.epoch, 16, name);
+    hex(record->identity.epoch, 16, name);
     /* Incomplete directories are not registered: recovery fails visibly rather
      * than discarding possibly acknowledged data. No restart GC is attempted.
      */
@@ -733,12 +791,12 @@ static int register_stream(const char *cache, const char *snapshot, int snapshot
         !fchmodat(directory, "source", 0400, 0) &&
         write_file(directory, "config", config, config_size);
     LatKeyJournal journal;
-    if (ok && !lat_key_journal_create_at(directory, "keys", capacity, &record.identity,
+    if (ok && !lat_key_journal_create_at(directory, "keys", capacity, &record->identity,
                                         &journal, error, error_size)) {
         ok = !fsync(journal.fd);
         lat_key_journal_close(&journal);
     } else ok = false;
-    ok = ok && write_file(directory, "registration", &record, sizeof(record)) &&
+    ok = ok && write_file(directory, "registration", &disk, record_size) &&
         !fsync(directory) && !fsync(root);
     if (!ok && directory >= 0) {
         unlinkat(directory, "registration", 0); unlinkat(directory, "keys", 0);
@@ -759,7 +817,7 @@ int latcd_journal_register(const char *cache, const char *snapshot,
     char stream[33], char *error, size_t error_size)
 {
     return register_stream(cache, snapshot, -1, source_sha, build, codegen, config_fd,
-                           capacity, max_bytes, stream, NULL, error, error_size);
+                           capacity, max_bytes, stream, NULL, NULL, error, error_size);
 }
 
 int latcd_journal_register_capability(const char *cache, const char *snapshot,
@@ -772,13 +830,13 @@ int latcd_journal_register_capability(const char *cache, const char *snapshot,
         return fail(error, error_size, "missing journal directory output");
     }
     return register_stream(cache, snapshot, -1, source_sha, build, codegen, config_fd,
-                           capacity, max_bytes, stream, directory_fd, error, error_size);
+                           capacity, max_bytes, stream, directory_fd, NULL, error, error_size);
 }
 
-int latcd_journal_register_fd(const char *cache, int snapshot_fd,
+static int journal_register_fd(const char *cache, int snapshot_fd,
     const uint8_t source_sha[32], const uint8_t build[32], const uint8_t codegen[32],
     int config_fd, uint64_t capacity, uint64_t max_bytes,
-    char stream[33], int *directory_fd, char *error, size_t error_size)
+    char stream[33], int *directory_fd, const uid_t *client_uid, char *error, size_t error_size)
 {
     struct stat st;
     int flags = fcntl(snapshot_fd, F_GETFL);
@@ -786,5 +844,23 @@ int latcd_journal_register_fd(const char *cache, int snapshot_fd,
         fstat(snapshot_fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() || st.st_nlink)
         return fail(error, error_size, "journal requires an anonymous source snapshot");
     return register_stream(cache, NULL, snapshot_fd, source_sha, build, codegen,
-        config_fd, capacity, max_bytes, stream, directory_fd, error, error_size);
+        config_fd, capacity, max_bytes, stream, directory_fd, client_uid, error, error_size);
+}
+
+int latcd_journal_register_fd(const char *cache, int snapshot_fd,
+    const uint8_t source_sha[32], const uint8_t build[32], const uint8_t codegen[32],
+    int config_fd, uint64_t capacity, uint64_t max_bytes,
+    char stream[33], int *directory_fd, char *error, size_t error_size)
+{
+    return journal_register_fd(cache, snapshot_fd, source_sha, build, codegen, config_fd,
+        capacity, max_bytes, stream, directory_fd, NULL, error, error_size);
+}
+
+int latcd_journal_register_bound_fd(const char *cache, int snapshot_fd,
+    const uint8_t source_sha[32], const uint8_t build[32], const uint8_t codegen[32],
+    int config_fd, uint64_t capacity, uint64_t max_bytes, uid_t client_uid,
+    char stream[33], char *error, size_t error_size)
+{
+    return journal_register_fd(cache, snapshot_fd, source_sha, build, codegen, config_fd,
+        capacity, max_bytes, stream, NULL, &client_uid, error, error_size);
 }
