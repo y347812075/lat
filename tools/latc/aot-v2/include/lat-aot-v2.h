@@ -68,6 +68,8 @@ typedef struct LatAotNoteV2 {
 
 /* Extended format is deliberately rejected by legacy readers. */
 #define LAT_AOT_CONFIG_NOTE_REVISION 1u
+#define LAT_AOT_CONFIG_SCHEMA_V1 1u
+#define LAT_AOT_CONFIG_DOMAIN_TRANSLATION_V1 1u
 typedef struct LatAotConfigIdentityV2 {
     uint32_t revision;
     uint32_t schema;

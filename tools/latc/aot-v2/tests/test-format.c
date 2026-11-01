@@ -254,6 +254,20 @@ int main(void)
                                                     &identity, NULL, error, sizeof(error)))
             return 1;
         identity.digest[0] ^= 1;
+        identity.schema++;
+        ((LatAotConfigNoteV2 *)&note->description)->config.schema = identity.schema;
+        if (!lat_aot_v2_elf_validate_config_memory(file, sizeof(file), &expected,
+                                                    &identity, NULL, error, sizeof(error)))
+            return 1;
+        identity.schema--;
+        ((LatAotConfigNoteV2 *)&note->description)->config.schema = identity.schema;
+        identity.domain++;
+        ((LatAotConfigNoteV2 *)&note->description)->config.domain = identity.domain;
+        if (!lat_aot_v2_elf_validate_config_memory(file, sizeof(file), &expected,
+                                                    &identity, NULL, error, sizeof(error)))
+            return 1;
+        identity.domain--;
+        ((LatAotConfigNoteV2 *)&note->description)->config.domain = identity.domain;
         phdrs[1].p_filesz--;
         if (!lat_aot_v2_elf_validate_config_memory(file, sizeof(file), &expected,
                                                     &identity, NULL, error, sizeof(error)))

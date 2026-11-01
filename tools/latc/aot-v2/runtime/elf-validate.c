@@ -219,7 +219,8 @@ static int validate_note(const unsigned char *file, size_t file_size,
     if (config) {
         uint8_t zero[32] = {0};
         if (config->revision != LAT_AOT_CONFIG_NOTE_REVISION ||
-            !config->schema || !config->domain || config->reserved ||
+            config->schema != LAT_AOT_CONFIG_SCHEMA_V1 ||
+            config->domain != LAT_AOT_CONFIG_DOMAIN_TRANSLATION_V1 || config->reserved ||
             !memcmp(config->digest, zero, sizeof(zero)) ||
             memcmp(&extended.config, config, sizeof(*config)))
             return reject(error, error_size, "AOT configuration identity mismatch");
