@@ -2263,6 +2263,11 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
                                             LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error));
         goto out;
     }
+    if (!replay && (domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY)) {
+        result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
+                                            LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error));
+        goto out;
+    }
     if (domain.state == LATCD_MANAGED_PREEXEC_CANCELLED || domain.state == LATCD_MANAGED_REPLAY_DISCARDED ||
         domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY ||
         domain.state == LATCD_MANAGED_OUTPUTS_REMOVED) {
@@ -2314,6 +2319,9 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
     if (!result && replay)
         result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
                                            LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error));
+    else if (!result)
+        result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
+                                           LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error));
 out:
     g_free(boot);
     return result;

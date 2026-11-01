@@ -8218,6 +8218,20 @@ static void test_unknown_task_release(bool executor, bool managed)
         latcd_retirement_tombstone(root, source, name, fd, evidence, error, sizeof(error));
     assert((managed && !executor ? !result : result) && !access(path, F_OK));
     close(fd);
+    if (managed && executor) {
+        int task_fd = open(task_path, O_RDONLY | O_CLOEXEC);
+        assert(task_fd >= 0);
+        LatcdManagedDomain domain = {0};
+        char *native = g_build_filename(temporary, "task-output", NULL);
+        put(native, "unidentified partial output\n");
+        assert(latcd_managed_task_domain(root, id, task_fd, &domain,
+                                         LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error)));
+        assert(!unlink(native));
+        assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
+                                          LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error)));
+        close(task_fd);
+        g_free(native);
+    }
     if (managed) {
         assert(!unlink(state_path));
         fd = open(path, O_RDONLY | O_CLOEXEC);

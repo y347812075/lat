@@ -42,7 +42,7 @@ LATCD_TEST_RECOVERY_ONCE=1 sh -c '
     printf "%s\n" "$$" > "$1/cgroup.procs"; shift
     exec "$@"
 ' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/cache "$scope/worker"
-grep -qx 'state=CANCELLED_DOMAIN_EMPTY' "$state"
+grep -qx 'state=OUTPUTS_REMOVED' "$state"
 test "$(awk '$1 == "populated" {print $2}' "$scope/worker/$id/cgroup.events")" = 0
 test -f "/work/cache/.gc/tasks/$id.ini"
 test -f "/work/cache/.gc/compiler-budgets/$id.ini"
@@ -148,7 +148,7 @@ sh -c '
     printf "%s\n" "$$" > "$1/cgroup.procs"; shift
     exec "$@"
 ' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/crash-cache "$scope/worker"
-grep -qx 'state=CANCELLED_DOMAIN_EMPTY' "$state"
+grep -qx 'state=OUTPUTS_REMOVED' "$state"
 test "$(awk '$1 == "populated" {print $2}' "$scope/worker/$id/cgroup.events")" = 0
 rmdir "$scope/worker/$id" "$scope/worker/manager" "$scope/worker"
 echo 'test-managed-domain-recovery: PASS'

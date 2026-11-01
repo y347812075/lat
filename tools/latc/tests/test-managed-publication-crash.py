@@ -96,11 +96,11 @@ def run(test_daemon, prefix, guest, work):
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 record = configparser.ConfigParser(); record.read(state)
-                if record['managed']['state'] == 'CANCELLED_DOMAIN_EMPTY':
+                if record['managed']['state'] == 'OUTPUTS_REMOVED':
                     break
                 assert daemon.poll() is None
                 time.sleep(0.05)
-            assert record['managed']['state'] == 'CANCELLED_DOMAIN_EMPTY'
+            assert record['managed']['state'] == 'OUTPUTS_REMOVED'
             submit(client, socket, tbset, guest, env)
             subprocess.run([str(client), '--flush-source', '--socket', str(socket), str(guest)],
                            env=env, check=True, stdout=subprocess.DEVNULL, timeout=120)
