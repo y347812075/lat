@@ -4661,13 +4661,19 @@ int latcd_managed_task_prepare(const char *root, const char *id, int task_fd,
         record_uint64(budget, "budget", "cache_inode", &cache_inode) && cache_inode == (uint64_t)cache.st_ino &&
         record_uint64(budget, "budget", "bytes", &bytes) && bytes > 0 &&
         g_key_file_load_from_data(task, raw, size, 0, NULL) &&
-        (record_string_is(task, "task", "version", "3") ||
+        ((record_string_is(task, "task", "version", "3") &&
+          (record_string_is(task, "task", "kind", "MANAGED_COMPILER") ||
+           record_string_is(task, "task", "kind", "MANAGED_REPLAY"))) ||
          ((record_string_is(task, "task", "version", "4") ||
            record_string_is(task, "task", "version", "5")) &&
-          record_string_is(task, "task", "kind", "MANAGED_REPLAY"))) &&
+          record_string_is(task, "task", "kind", "MANAGED_REPLAY")) ||
+         ((record_string_is(task, "task", "version", "6") ||
+           record_string_is(task, "task", "version", "7")) &&
+          record_string_is(task, "task", "kind", "MANAGED_JOURNAL_COMPILER"))) &&
         record_string_is(task, "task", "id", id) &&
         (record_string_is(task, "task", "kind", "MANAGED_COMPILER") ||
-         record_string_is(task, "task", "kind", "MANAGED_REPLAY")) &&
+         record_string_is(task, "task", "kind", "MANAGED_REPLAY") ||
+         record_string_is(task, "task", "kind", "MANAGED_JOURNAL_COMPILER")) &&
         record_string_is(task, "task", "state", "PREPARED") &&
         fstatat(states, name, &existing, AT_SYMLINK_NOFOLLOW) && errno == ENOENT;
     int result = -1;
@@ -4717,8 +4723,10 @@ int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
     GKeyFile *task_record = g_key_file_new();
     bool replay = valid && g_key_file_load_from_data(task_record, raw, size, 0, NULL) &&
         record_string_is(task_record, "task", "kind", "MANAGED_REPLAY");
-    bool journal = replay && (record_string_is(task_record, "task", "version", "4") ||
-                              record_string_is(task_record, "task", "version", "5"));
+    bool journal = record_string_is(task_record, "task", "version", "4") ||
+        record_string_is(task_record, "task", "version", "5") ||
+        record_string_is(task_record, "task", "version", "6") ||
+        record_string_is(task_record, "task", "version", "7");
     g_key_file_unref(task_record);
     int result = -1;
     if (valid && next == LATCD_MANAGED_PREPARED) {
@@ -4819,8 +4827,11 @@ static int object_task_status(int root, const char *name, const struct stat *obj
         char id[37];
         memcpy(id, entry->d_name, 36); id[36] = 0;
         bool copying = record_string_is(record, "task", "version", "2");
-        bool journal_base = record_string_is(record, "task", "version", "5");
-        bool journal = journal_base || record_string_is(record, "task", "version", "4");
+        bool production = record_string_is(record, "task", "version", "6") ||
+                          record_string_is(record, "task", "version", "7");
+        bool journal_base = record_string_is(record, "task", "version", "5") ||
+                            record_string_is(record, "task", "version", "7");
+        bool journal = production || journal_base || record_string_is(record, "task", "version", "4");
         bool managed = journal || record_string_is(record, "task", "version", "3");
         const char *task_keys[] = {"version", "id", "state", "source", "build_id",
                                   copying ? "kind" : "environment_sha256"};
@@ -4832,8 +4843,9 @@ static int object_task_status(int root, const char *name, const struct stat *obj
         if (copying) valid &= record_string_is(record, "task", "kind", "COPY");
         LatcdManagedDomain managed_domain = {0};
         bool replay = managed && record_string_is(record, "task", "kind", "MANAGED_REPLAY");
-        if (journal && !replay) valid = false;
-        if (managed) valid &= (replay || record_string_is(record, "task", "kind", "MANAGED_COMPILER")) &&
+        bool journal_compiler = production && record_string_is(record, "task", "kind", "MANAGED_JOURNAL_COMPILER");
+        if (journal && !(production ? journal_compiler : replay)) valid = false;
+        if (managed) valid &= (replay || journal_compiler || record_string_is(record, "task", "kind", "MANAGED_COMPILER")) &&
             managed_task_state_read(gc, entry->d_name, id, &before, raw, size, &managed_domain);
         const char *digests[] = {"source", "build_id", "environment_sha256"};
         for (unsigned i = 0; valid && i < (copying ? 2u : 3u); i++) {

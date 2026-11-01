@@ -1208,11 +1208,11 @@ int main(void)
     char *record_id = NULL;
     LatcdJournalReplayIdentity wrong_build = replay_identity;
     wrong_build.journal.build_sha256[0] ^= 1;
-    g_assert_cmpint(record_task(&record_config, false, true, record_paths, no_pins,
+    g_assert_cmpint(record_task(&record_config, false, true, false, record_paths, no_pins,
         input.identity.source_sha256, &wrong_build, record_env, 4096,
         &record_id, error, sizeof(error)), ==, -1);
     g_assert_null(record_id);
-    int record_lease = record_task(&record_config, false, true, record_paths, no_pins,
+    int record_lease = record_task(&record_config, false, true, false, record_paths, no_pins,
         input.identity.source_sha256, &replay_identity, record_env, 4096,
         &record_id, error, sizeof(error));
     g_assert_cmpint(record_lease, >=, 0);

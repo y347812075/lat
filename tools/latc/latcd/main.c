@@ -1654,7 +1654,7 @@ static int record_compiler_budget(const LatcdConfig *config, const char *id,
 static _Thread_local bool task_roots_busy;
 
 /* The immutable record is also the lease inode. No completion or deletion claim. */
-static int record_task(const LatcdConfig *config, bool copying, bool replay,
+static int record_task(const LatcdConfig *config, bool copying, bool replay, bool publish,
                                 const char *const paths[6], const int pins[4],
                                 const uint8_t digest[32],
                                 const LatcdJournalReplayIdentity *journal,
@@ -1664,7 +1664,8 @@ static int record_task(const LatcdConfig *config, bool copying, bool replay,
 {
     char journal_build[65];
     if (journal) digest_hex(journal->journal.build_sha256, journal_build);
-    if ((journal && (!replay || memcmp(digest, journal->journal.source_sha256, 32) ||
+    if ((publish && (!journal || !replay || copying || !config->managed)) ||
+        (journal && (!replay || memcmp(digest, journal->journal.source_sha256, 32) ||
                      memcmp(digest, journal->input_sha256[0], 32) ||
                      strcmp(journal_build, LATC_BUILD_ID))) ||
         (replay && (!config->managed || copying ||
@@ -1703,9 +1704,9 @@ static int record_task(const LatcdConfig *config, bool copying, bool replay,
         goto failed;
     }
     task_object_identity(record, "temporary", &st);
-    g_key_file_set_string(record, "task", "version", journal ? (paths[3] ? "5" : "4") : managed ? "3" : copying ? "2" : "1");
+    g_key_file_set_string(record, "task", "version", journal ? (publish ? (paths[3] ? "7" : "6") : (paths[3] ? "5" : "4")) : managed ? "3" : copying ? "2" : "1");
     if (copying) g_key_file_set_string(record, "task", "kind", "COPY");
-    if (managed) g_key_file_set_string(record, "task", "kind", replay ? "MANAGED_REPLAY" : "MANAGED_COMPILER");
+    if (managed) g_key_file_set_string(record, "task", "kind", publish ? "MANAGED_JOURNAL_COMPILER" : replay ? "MANAGED_REPLAY" : "MANAGED_COMPILER");
     g_key_file_set_string(record, "task", "id", id);
     g_key_file_set_string(record, "task", "state", managed ? "PREPARED" : "BOUND");
     g_key_file_set_string(record, "task", "source", source_hex);
@@ -2018,7 +2019,8 @@ static int restore_compiler_budgets_step(const LatcdConfig *config,
                 g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
             char *version = g_key_file_get_string(record, "task", "version", NULL);
             bool copying = version && !strcmp(version, "2");
-            bool journal = version && (!strcmp(version, "4") || !strcmp(version, "5"));
+            bool production = version && (!strcmp(version, "6") || !strcmp(version, "7"));
+            bool journal = version && (!strcmp(version, "4") || !strcmp(version, "5") || production);
             bool managed = version && (!strcmp(version, "3") || journal);
             valid &= version && (!strcmp(version, "1") || copying || managed);
             g_free(version);
@@ -2031,7 +2033,8 @@ static int restore_compiler_budgets_step(const LatcdConfig *config,
             }
             if (valid && (copying || managed)) {
                 char *kind = g_key_file_get_string(record, "task", "kind", NULL);
-                valid = copying ? !g_strcmp0(kind, "COPY") : journal ?
+                valid = copying ? !g_strcmp0(kind, "COPY") : production ?
+                    !g_strcmp0(kind, "MANAGED_JOURNAL_COMPILER") : journal ?
                     !g_strcmp0(kind, "MANAGED_REPLAY") :
                     (!g_strcmp0(kind, "MANAGED_COMPILER") ||
                      !g_strcmp0(kind, "MANAGED_REPLAY"));
@@ -2410,7 +2413,8 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
             g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL);
         char *version = g_key_file_get_string(record, "task", "version", NULL);
         bool copying = version && !strcmp(version, "2");
-        bool journal = version && (!strcmp(version, "4") || !strcmp(version, "5"));
+        bool production = version && (!strcmp(version, "6") || !strcmp(version, "7"));
+        bool journal = version && (!strcmp(version, "4") || !strcmp(version, "5") || production);
         bool managed = version && (!strcmp(version, "3") || journal);
         bool known = version && (!strcmp(version, "1") || copying || managed);
         g_free(version);
@@ -2422,7 +2426,7 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
         if (managed) {
             char *kind = g_key_file_get_string(record, "task", "kind", NULL);
             bool replay = !g_strcmp0(kind, "MANAGED_REPLAY");
-            bool unsafe = !valid || (journal && !replay) ||
+            bool unsafe = !valid || (production ? g_strcmp0(kind, "MANAGED_JOURNAL_COMPILER") != 0 : (journal && !replay)) ||
                 recover_managed_domain(config, id, task, replay, journal);
             g_free(kind);
             LatcdManagedDomain terminal = {0};
@@ -3247,7 +3251,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                                 journal_input ? base_native : base_module,
                                 output_native, output};
     char *task_id = NULL;
-    int task_lease = pin_result ? -1 : record_task(config, false, replay, task_paths,
+    int task_lease = pin_result ? -1 : record_task(config, false, replay, false, task_paths,
         input_pins, digest, journal_input ? &journal_identity : NULL, environment, cache_peak,
         &task_id, error, error_size);
     if (!pin_result && task_lease < 0) *untracked_task = true;
@@ -4027,7 +4031,7 @@ static int snapshot_task_copy(const LatcdConfig *config, const char *source,
     char *output = g_build_filename(temporary, name, NULL);
     const char *paths[6] = {source, NULL, NULL, NULL, output, NULL};
     int inputs[4] = {input, -1, -1, -1};
-    *task_pin = record_task(config, true, false, paths, inputs, digest, NULL, NULL, 0,
+    *task_pin = record_task(config, true, false, false, paths, inputs, digest, NULL, NULL, 0,
                             task_id, error, error_size);
     if (*task_pin >= 0) copy_test_barrier("recorded");
     int result = *task_pin < 0 ? -1 : snapshot_cached_fd(input, temporary,
@@ -8569,7 +8573,8 @@ static int test_managed_task_record(const char *root)
     LatcdJournalReplayIdentity journal = {0};
     if (journal_build_id(journal.journal.build_sha256)) goto out;
     for (unsigned i = 0; i < 3; i++) journal.input_size[i] = i + 1;
-    lease = record_task(&config, false, replay, paths, pins, digest,
+    bool publish = getenv("LATCD_TEST_JOURNAL_PUBLISH_RECORD") != NULL;
+    lease = record_task(&config, false, replay, publish, paths, pins, digest,
                         journal_replay ? &journal : NULL, environment, 4096,
                         &id, error, sizeof(error));
     if (lease < 0) goto out;
@@ -8585,10 +8590,13 @@ static int test_managed_task_record(const char *root)
         domain.delegation.st_ino = 2;
         if (latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_BOUND, error, sizeof(error)) ||
             latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_AUTHORIZED, error, sizeof(error)) ||
-            latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_DOMAIN_EMPTY, error, sizeof(error)) ||
-            !latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_ADOPTING, error, sizeof(error)) ||
-            latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error)))
+            latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_DOMAIN_EMPTY, error, sizeof(error)))
             goto out;
+        if (publish) {
+            if (!latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error)) ||
+                latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_ADOPTING, error, sizeof(error))) goto out;
+        } else if (!latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_ADOPTING, error, sizeof(error)) ||
+                   latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error))) goto out;
     }
     const char *delegation_path = getenv("LATCD_TEST_DELEGATION");
     if (delegation_path) {
