@@ -937,6 +937,49 @@ static void test_metadata_lock(void)
     g_free(gc); g_free(root);
 }
 
+static void *create_metadata_lock_thread(void *opaque)
+{
+    int directory = *(int *)opaque;
+    int fd = latcd_cache_capacity_open_metadata_lock(directory, "lock");
+    return (void *)(intptr_t)fd;
+}
+
+static void test_metadata_lock_concurrent_create(void)
+{
+    char *root = g_dir_make_tmp("capacity-lock-concurrent-XXXXXX", NULL);
+    char *gc = g_build_filename(root, ".gc", NULL);
+    assert(root && !mkdir(gc, 0700));
+    int directory = open(gc, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(directory >= 0);
+    LatcdCacheCapacity capacity = LATCD_CACHE_CAPACITY_INIT;
+    assert(!latcd_cache_capacity_scan(&capacity, root, NULL, 0));
+    latcd_cache_capacity_metadata_bind(&capacity, UINT64_MAX);
+    int notify[2], resume[2];
+    assert(!pipe(notify) && !pipe(resume));
+    race_notify = notify[1]; race_resume = resume[0];
+    latcd_capacity_test_before_lock_finish = lock_create_pause;
+    pthread_t thread;
+    assert(!pthread_create(&thread, NULL, create_metadata_lock_thread, &directory));
+    char byte;
+    assert(read(notify[0], &byte, 1) == 1);
+    assert(latcd_cache_capacity_open_metadata_lock(directory, "lock") < 0 && errno == EAGAIN);
+    assert(write(resume[1], "x", 1) == 1);
+    void *result;
+    assert(!pthread_join(thread, &result));
+    latcd_capacity_test_before_lock_finish = NULL;
+    int fd = (int)(intptr_t)result;
+    assert(fd >= 0 && !close(fd));
+    assert(latcd_cache_capacity_poll(&capacity));
+    fd = latcd_cache_capacity_open_metadata_lock(directory, "lock");
+    assert(fd >= 0 && !close(fd));
+    close(notify[0]); close(notify[1]); close(resume[0]); close(resume[1]);
+    latcd_cache_capacity_close(&capacity);
+    assert(!pthread_mutex_destroy(&capacity.lock));
+    assert(!unlinkat(directory, "lock", 0) && !close(directory));
+    assert(!rmdir(gc) && !rmdir(root));
+    g_free(gc); g_free(root);
+}
+
 static void test_metadata_lock_external_race(void)
 {
     char *root = g_dir_make_tmp("capacity-lock-race-XXXXXX", NULL);
@@ -1188,6 +1231,7 @@ int main(void)
     test_untracked_metadata_file(1);
     test_anonymous_metadata_file();
     test_metadata_lock();
+    test_metadata_lock_concurrent_create();
     test_metadata_lock_external_race();
     test_metadata_lock_replaced_before_watch();
     for (unsigned mutation = 0; mutation < 9; mutation++)

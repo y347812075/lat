@@ -884,6 +884,13 @@ static int record_begin(int directory, const char *name, uint64_t bytes,
     if (owned_directory < 0) { g_free(key); return -1; }
     pthread_mutex_lock(&capacity->lock);
     check_changes(capacity);
+    if (g_hash_table_contains(capacity->state_expected, key)) {
+        pthread_mutex_unlock(&capacity->lock);
+        close(owned_directory);
+        g_free(key);
+        errno = EAGAIN;
+        return -1;
+    }
     StateFileWatch *tracked = NULL;
     GHashTableIter tracked_iterator;
     gpointer tracked_value;
@@ -962,6 +969,12 @@ int latcd_cache_capacity_open_metadata_lock(int directory, const char *name)
         if (!key) return -1;
         pthread_mutex_lock(&capacity->lock);
         check_changes(capacity);
+        if (g_hash_table_contains(capacity->state_expected, key)) {
+            pthread_mutex_unlock(&capacity->lock);
+            g_free(key);
+            errno = EAGAIN;
+            return -1;
+        }
         int fd = openat(directory, name, O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
         int saved = errno;
         if (fd >= 0) {
