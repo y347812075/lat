@@ -51,6 +51,14 @@ def main():
         return bytes(normalized), relocations, data[table:table + count * 56]
 
     info = {}
+    has_kzt = 'LATX_KZT' in run([runner, '--help']).stdout
+    if has_kzt:
+        rejected_kzt = work / 'kzt.config'
+        rejected = run([runner, '--latc-translation-config-native',
+             '--latc-translation-config-out', rejected_kzt, guest],
+            {'LATX_AOT_V2': '1', 'LATX_KZT': '1'}, success=False)
+        assert 'unsupported native configuration export domain' in rejected.stderr
+        assert not rejected_kzt.exists()
     for option in (0, 1):
         snapshot = work / f'config-{option}'
         result = run([runner, '--latc-translation-config-native',
@@ -82,6 +90,12 @@ def main():
                 run([latc, 'mark-native-x86', output], success=False)
     assert content(work / '0-True.native')[0] != content(work / '1-True.native')[0]
     isolated = work / 'isolated.native'
+    if has_kzt:
+        run([native_script, '--config-replay', latc, runner, guest,
+             work / 'kzt.native', keys],
+            {'LATX_KZT': '2', 'LATC_TRANSLATION_CONFIG_FROM': str(work / 'config-0')},
+            success=False)
+        assert not (work / 'kzt.native').exists()
     run([native_script, '--config-replay', latc, runner, guest, isolated, keys],
         {'LATX_CVT_OPT': '1', 'LATC_TRANSLATION_CONFIG_FROM': str(work / 'config-0')})
     assert content(isolated) == content(work / '0-True.native')

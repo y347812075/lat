@@ -84,6 +84,7 @@ int mydebug = 1;
 #if defined(CONFIG_LATX_KZT)
 #include "kzt-groups.h"
 #include "wrappertbbridge.h"
+extern int wine_option_kzt;
 box64context_t* my_context = NULL;
 elfheader_t* elf_header = NULL;
 int relocation_log = 0; //LOG_NONE;
@@ -679,6 +680,10 @@ static bool native_translation_config_domain(void)
 #if defined(CONFIG_LATX_DEBUG) || defined(CONFIG_DEBUG_TCG)
     return false;
 #else
+#if defined(CONFIG_LATX_KZT)
+    /* Bridge registrations can alter translation independently of the snapshot. */
+    if (option_kzt || wine_option_kzt) return false;
+#endif
     return !option_real_maps && !option_begin_trace_addr &&
            !option_end_trace_addr && !imm_skip_pc && !option_softfpu &&
            !option_jr_ra && !option_anonym && !option_mem_test &&
