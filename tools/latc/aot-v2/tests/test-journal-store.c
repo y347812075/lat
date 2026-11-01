@@ -904,6 +904,19 @@ int main(void)
     close(receipt_before);
     LatcdConfig managed_config = config;
     managed_config.managed = true;
+    g_assert_false(journal_automatic_admission_available(&managed_config));
+    daemon = start_service(&managed_config);
+    g_usleep(1200000);
+    g_assert_cmpint(kill(daemon, 0), ==, 0);
+    LatcdResponseV2 hello = operation(&managed_config, -1, -1, 0, LATCD_OP_HELLO);
+    g_assert_cmpint(hello.status, ==, LATCD_STATUS_OK);
+    g_assert_cmpint(kill(daemon, SIGTERM), ==, 0);
+    wait_ok(daemon);
+    receipt_before = openat(stream_fd, "received.tbset", O_RDONLY | O_CLOEXEC);
+    g_assert_cmpint(receipt_before, >=, 0);
+    g_assert_true(receipt_digest(receipt_before, managed_receipt_after));
+    close(receipt_before);
+    g_assert_cmpstr(managed_receipt_before, ==, managed_receipt_after);
     LatcdService managed_service = {0};
     LatcdResponseV2 managed_response = { .request_id = 42 };
     g_assert_cmpint(journal_queue_receipts(&managed_config, &managed_service,
