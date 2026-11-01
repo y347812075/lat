@@ -36,4 +36,21 @@ setpriv --no-new-privs --reuid=1235 --regid=1235 --clear-groups \
 [ "$status" -eq 42 ] || { cat "$work/run.err" >&2; exit 1; }
 set -- "$work"/cache/.journals/*
 [ "$#" -eq 1 ] && [ -f "$1/registration" ] && [ -f "$1/source" ] && [ -f "$1/keys" ]
+python3 - "$1/keys" <<'PY'
+import struct
+import sys
+
+with open(sys.argv[1], 'rb') as journal:
+    header = journal.read(192)
+    assert len(header) == 192
+    capacity, slot_size = struct.unpack_from('<QI', header, 16)
+    assert capacity == 65536 and slot_size == 32
+    slots = journal.read()
+    assert len(slots) == capacity * slot_size
+    committed = [struct.unpack_from('<QQQQ', slots, offset)
+                 for offset in range(0, len(slots), slot_size)
+                 if struct.unpack_from('<Q', slots, offset)[0] == 3]
+    assert committed and all(flags == 3 and reserved == 0
+                             for _, _, flags, reserved in committed)
+PY
 echo 'test-broker-runner-crossuid: PASS'
