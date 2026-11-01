@@ -486,7 +486,8 @@ IMM_CACHE_RES imm_cache_allocate(IMM_CACHE *cache, int base, int index,
     // skip imm opt if pc == 0x...
     static __thread bool stop_opt;
 
-    if (unlikely(imm_skip_pc != 0)) {
+    bool replay = latx_translation_native_replay();
+    if (unlikely(!replay && imm_skip_pc != 0)) {
         if (!stop_opt && cache->curr_pc == imm_skip_pc) {
             stop_opt = true;
         }
@@ -506,7 +507,7 @@ IMM_CACHE_RES imm_cache_allocate(IMM_CACHE *cache, int base, int index,
     res.pre_cache = false;
     int cache_id = -1;
 
-    if (likely(!stop_opt)) {
+    if (likely(replay || !stop_opt)) {
         cache_id = imm_cache_get(cache, base, index, scale, offset);
     }
     if (cache_id == -1) {

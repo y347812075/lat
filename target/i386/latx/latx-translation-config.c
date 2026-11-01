@@ -45,6 +45,11 @@ static uint8_t native_replay_digest[32];
 static GBytes *native_replay_bytes;
 static const LatTranslationConfig *native_replay_config;
 
+bool latx_translation_native_replay(void)
+{
+    return native_replay;
+}
+
 int latx_translation_cvt_opt(void)
 {
     TranslationBlock *tb = lsenv->tr_data->curr_tb;
