@@ -2327,6 +2327,18 @@ int main(int argc, char **argv, char **envp)
     }
     if (getenv("LATC_EMIT_AOT")) {
         aot_generate(cpu);
+        if (translation_config_native_worker) {
+            char error[256];
+            if (latx_translation_config_verify(env, cpu->tcg_cflags,
+                                               &replay_config, error,
+                                               sizeof(error)) ||
+                !latx_translation_config_native_domain()) {
+                const char *output = getenv("LATC_NATIVE_IMAGE_OUT");
+                if (output && *output) unlink(output);
+                fprintf(stderr, "latc: native replay changed during export\n");
+                exit(EXIT_FAILURE);
+            }
+        }
         _exit(EXIT_SUCCESS);
     }
 #endif
