@@ -1982,13 +1982,19 @@ static int restore_compiler_budgets_step(const LatcdConfig *config,
             bool managed = version && !strcmp(version, "3");
             valid &= version && (!strcmp(version, "1") || copying || managed);
             g_free(version);
-            const char *fields[] = {"id", "state", "kind"};
-            const char *values[] = {id, managed ? "PREPARED" : "BOUND",
-                                    managed ? "MANAGED_COMPILER" : "COPY"};
-            for (unsigned i = 0; valid && i < ((copying || managed) ? 3u : 2u); i++) {
+            const char *fields[] = {"id", "state"};
+            const char *values[] = {id, managed ? "PREPARED" : "BOUND"};
+            for (unsigned i = 0; valid && i < G_N_ELEMENTS(fields); i++) {
                 char *value = g_key_file_get_string(record, "task", fields[i], NULL);
                 valid = value && !strcmp(value, values[i]);
                 g_free(value);
+            }
+            if (valid && (copying || managed)) {
+                char *kind = g_key_file_get_string(record, "task", "kind", NULL);
+                valid = copying ? !g_strcmp0(kind, "COPY") :
+                    (!g_strcmp0(kind, "MANAGED_COMPILER") ||
+                     !g_strcmp0(kind, "MANAGED_REPLAY"));
+                g_free(kind);
             }
             const char *identities[] = {"device", "inode"};
             uint64_t expected[] = {cache.st_dev, cache.st_ino};
@@ -8307,6 +8313,30 @@ static int test_managed_scan_busy(const char *root)
     return result ? 1 : 0;
 }
 
+static int test_managed_budget_unknown(const char *root)
+{
+    LatcdConfig config = { .cache_dir = root, .managed = true };
+    LatcdBudgetRecovery recovery = {0};
+    unsigned visited;
+    char error[256] = {0};
+    int result = -1;
+    if (latcd_cache_capacity_scan(&generation_capacity, root, error, sizeof(error)))
+        goto out;
+    do {
+        result = restore_compiler_budgets_step(&config, &recovery, 32, &visited,
+                                               error, sizeof(error));
+    } while (result == 1);
+    if (!result && (!generation_capacity.unknown_tasks ||
+        g_hash_table_size(generation_capacity.unknown_tasks) != 1 ||
+        !latcd_cache_capacity_reserve_transient(&generation_capacity, 1,
+            LATCD_DEFAULT_MAX_CACHE_BYTES, error, sizeof(error)))) result = -1;
+out:
+    if (recovery.cursor) closedir(recovery.cursor);
+    if (recovery.snapshots) g_hash_table_unref(recovery.snapshots);
+    latcd_cache_capacity_close(&generation_capacity);
+    return result ? 1 : 0;
+}
+
 static int test_managed_compiler_run(const char *root, const char *delegation)
 {
     LatcdConfig config = { .cache_dir = root, .managed = true, .compiler = "/bin/false",
@@ -8394,6 +8424,8 @@ int main(int argc, char **argv)
         return test_managed_scan_identity(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "--test-managed-scan-busy"))
         return test_managed_scan_busy(argv[2]);
+    if (argc == 3 && !strcmp(argv[1], "--test-managed-budget-unknown"))
+        return test_managed_budget_unknown(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "--test-managed-compiler"))
         return test_managed_compiler_run(argv[2], argv[3]);
 #endif

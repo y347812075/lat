@@ -136,6 +136,26 @@ def run(binary):
                 assert int(budget['budget']['task_inode']) == tasks[0].stat().st_ino
             with tasks[0].open('rb') as probe:
                 fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with tempfile.TemporaryDirectory(prefix='latcd-replay-budget-crash-',
+                                     dir=Path.home() / 'tmp') as directory:
+        root = Path(directory)
+        (root / '.tmp').mkdir(mode=0o700)
+        for name in ('input', 'tbset', 'configuration'):
+            (root / '.tmp' / name).write_bytes(name.encode())
+        env = os.environ | {'LATCD_TEST_REPLAY_RECORD': '1',
+                            'LATCD_TEST_MANAGED_AFTER_ROOT': '1'}
+        process = subprocess.run([binary, '--test-managed-task', str(root)],
+                                 env=env, capture_output=True, timeout=10)
+        assert process.returncode == -signal.SIGKILL, process.stderr
+        subprocess.run([binary, '--test-managed-budget-unknown', str(root)],
+                       check=True, timeout=20)
+        task = next((root / '.gc/tasks').iterdir())
+        raw = task.read_text()
+        task.chmod(0o600)
+        task.write_text(raw.replace('kind=MANAGED_REPLAY', 'kind=UNKNOWN'))
+        task.chmod(0o400)
+        assert subprocess.run([binary, '--test-managed-budget-unknown', str(root)],
+                              timeout=20).returncode != 0
     print('test-managed-task-record: PASS')
 
 
