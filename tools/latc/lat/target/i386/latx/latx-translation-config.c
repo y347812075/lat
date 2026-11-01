@@ -15,6 +15,7 @@
 #include "qapi/qmp/qjson.h"
 #include "qapi/qmp/qlist.h"
 #include <sys/auxv.h>
+#include <sys/mman.h>
 #include "translate.h"
 #include "lsenv.h"
 
@@ -42,7 +43,7 @@ bool latx_translation_config_native_domain(void)
 static bool native_replay;
 static uint8_t native_replay_digest[32];
 static GBytes *native_replay_bytes;
-static LatTranslationConfig native_replay_config;
+static const LatTranslationConfig *native_replay_config;
 
 int latx_translation_cvt_opt(void)
 {
@@ -50,37 +51,42 @@ int latx_translation_cvt_opt(void)
     if (tb) {
         tb->translation_config_dependencies |= UINT64_C(1) << LAT_CONFIG_CVT_OPT;
     }
-    return native_replay ? native_replay_config.values[LAT_CONFIG_CVT_OPT] : option_cvt_opt;
+    return native_replay ? native_replay_config->values[LAT_CONFIG_CVT_OPT] : option_cvt_opt;
 }
 
 int latx_translation_rounding_opt(void)
 {
-    return native_replay ? native_replay_config.values[LAT_CONFIG_ROUNDING_OPT] : option_set_rounding_opt;
+    return native_replay ? native_replay_config->values[LAT_CONFIG_ROUNDING_OPT] : option_set_rounding_opt;
 }
 
 int latx_translation_vpaes(void)
 {
-    return native_replay ? native_replay_config.values[LAT_CONFIG_VPAES] : option_vpaes;
+    return native_replay ? native_replay_config->values[LAT_CONFIG_VPAES] : option_vpaes;
 }
 
 int latx_translation_fast_atomic(void)
 {
-    return native_replay ? native_replay_config.values[LAT_CONFIG_FAST_ATOMIC] : option_fast_atomic;
+    return native_replay ? native_replay_config->values[LAT_CONFIG_FAST_ATOMIC] : option_fast_atomic;
 }
 
 int latx_translation_enable_lasx(void)
 {
-    return native_replay ? native_replay_config.values[LAT_CONFIG_ENABLE_LASX] : option_enable_lasx;
+    return native_replay ? native_replay_config->values[LAT_CONFIG_ENABLE_LASX] : option_enable_lasx;
 }
 
 int latx_translation_host_scq(void)
 {
-    return native_replay ? native_replay_config.values[LAT_CONFIG_HOST_SCQ] : !!have_scq();
+    return native_replay ? native_replay_config->values[LAT_CONFIG_HOST_SCQ] : !!have_scq();
 }
 
 void latx_translation_config_set_native_replay(const LatTranslationConfig *config)
 {
     char error[128];
+    LatTranslationConfig *frozen;
+
+    if (native_replay_config) {
+        g_error("native replay configuration already frozen");
+    }
 
     if (lat_translation_config_digest(config, native_replay_digest,
                                       error, sizeof(error))) {
@@ -90,7 +96,16 @@ void latx_translation_config_set_native_replay(const LatTranslationConfig *confi
                                       error, sizeof(error))) {
         g_error("cannot encode native replay configuration: %s", error);
     }
-    native_replay_config = *config;
+    frozen = mmap(NULL, sizeof(*frozen), PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (frozen == MAP_FAILED) {
+        g_error("cannot allocate native replay configuration: %s", strerror(errno));
+    }
+    *frozen = *config;
+    if (mprotect(frozen, sizeof(*frozen), PROT_READ)) {
+        g_error("cannot freeze native replay configuration: %s", strerror(errno));
+    }
+    native_replay_config = frozen;
     native_replay = true;
 }
 
