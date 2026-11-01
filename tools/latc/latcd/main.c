@@ -1801,6 +1801,10 @@ static int record_task(const LatcdConfig *config, bool copying, bool replay,
         roots = -1;
 #ifdef LATCD_GC_TIMER_TEST
         if (getenv("LATCD_TEST_MANAGED_AFTER_BUDGET")) raise(SIGKILL);
+        if (getenv("LATCD_TEST_MANAGED_FAIL_AFTER_BUDGET")) {
+            errno = EIO;
+            goto failed;
+        }
 #endif
         if (latcd_managed_task_prepare(config->cache_dir, id, lease, error, error_size))
             goto failed;
@@ -3099,6 +3103,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *output_native,
                         const char *output, const uint8_t digest[32], GPtrArray *compiler_tasks,
                         uint64_t *transient_reservation,
+                        bool *untracked_task,
                         char *error, size_t error_size)
 {
     bool replay = replay_config != NULL || journal_input != NULL;
@@ -3240,6 +3245,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     int task_lease = pin_result ? -1 : record_task(config, false, replay, task_paths,
         input_pins, digest, journal_input ? &journal_identity : NULL, environment, cache_peak,
         &task_id, error, error_size);
+    if (!pin_result && task_lease < 0) *untracked_task = true;
     if (task_lease < 0) pin_result = -1;
     if (task_lease >= 0) {
         LatcdCompilerTask *task = g_new0(LatcdCompilerTask, 1);
@@ -3249,6 +3255,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             (config->managed && (task->publication_lease = fcntl(task_lease, F_DUPFD_CLOEXEC, 3)) < 0)) {
             g_free(task);
             pin_result = -1;
+            *untracked_task = true;
         } else {
             compiler_task_local(task_id, true);
             g_ptr_array_add(compiler_tasks, task);
@@ -5256,6 +5263,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     int baseline_pins[4] = {-1, -1, -1, -1};
     GPtrArray *compiler_tasks = g_ptr_array_new_with_free_func(compiler_task_free);
     uint64_t transient_reservation = 0;
+    bool untracked_task = false;
     char *retained_tbset = NULL;
     char *module_name = NULL;
     char *native_name = NULL;
@@ -5417,7 +5425,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     int compiler_result = run_compiler(config, worker_index, snapshot,
                                        compile_tbset, static_tbset,
                                        base_native, base_module, NULL, NULL, native,
-                                       module, digest, compiler_tasks, &transient_reservation, error, sizeof(error));
+                                       module, digest, compiler_tasks, &transient_reservation, &untracked_task, error, sizeof(error));
     if (compiler_result) {
         if (task_roots_busy) goto out;
         if (!base_native) {
@@ -5445,7 +5453,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         compiler_result = run_compiler(config, worker_index, snapshot,
                                        full_compile_tbset, static_tbset,
                                        NULL, NULL, NULL, NULL, native, module, digest,
-                                       compiler_tasks, &transient_reservation, error, sizeof(error));
+                                       compiler_tasks, &transient_reservation, &untracked_task, error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
             goto out;
@@ -5482,7 +5490,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         compiler_result = run_compiler(config, worker_index, snapshot,
                                        full_compile_tbset, static_tbset,
                                        NULL, NULL, NULL, NULL, native, module, digest,
-                                       compiler_tasks, &transient_reservation, error, sizeof(error));
+                                       compiler_tasks, &transient_reservation, &untracked_task, error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
             goto out;
@@ -5665,7 +5673,7 @@ out:
     response->status = status;
     g_strlcpy(response->message, error[0] ? error : "unknown error",
               sizeof(response->message));
-    bool transient_retained = false;
+    bool transient_retained = untracked_task;
     if (module && *module && unlink(module) && errno != ENOENT) transient_retained = true;
     if (native && *native && unlink(native) && errno != ENOENT) transient_retained = true;
     for (guint i = 0; i < compiler_tasks->len; i++) {
@@ -6151,11 +6159,12 @@ static void *compiler_worker(void *opaque)
             if (m >= 0) { close(m); unlink(module); }
             GPtrArray *tasks = g_ptr_array_new_with_free_func(compiler_task_free);
             uint64_t reservation = 0;
+            bool untracked_task = false;
             int status = n < 0 || m < 0 ? -1 : run_compiler(service->config, worker->index,
                 NULL, NULL, false, NULL, NULL, NULL, job->journal_replay,
-                native, module, job->digest, tasks, &reservation, error, sizeof(error));
+                native, module, job->digest, tasks, &reservation, &untracked_task, error, sizeof(error));
             /* Registration may persist a root before returning an error. */
-            bool retained = status && !tasks->len;
+            bool retained = untracked_task || (status && !tasks->len);
             for (guint i = 0; i < tasks->len; i++) {
                 LatcdCompilerTask *task = g_ptr_array_index(tasks, i);
                 if (task->publication_lease >= 0) {
@@ -8623,6 +8632,7 @@ static int test_managed_compiler_run(const char *root, const char *delegation)
     g_checksum_get_digest(checksum, digest, &digest_length);
     g_checksum_free(checksum);
     uint64_t reservation = 0;
+    bool untracked_task = false;
     int manager = -1, result = 1;
     if (prepare_metadata_directories(root) ||
         latcd_cache_capacity_scan(&generation_capacity, root, error, sizeof(error))) goto out;
@@ -8632,7 +8642,7 @@ static int test_managed_compiler_run(const char *root, const char *delegation)
     test_managed_compiler = true;
     if (run_compiler(&config, 0, source, test_tbset, false, test_base_native,
                      test_base_module, test_config, NULL, native, module,
-                     digest, tasks, &reservation, error, sizeof(error))) goto out;
+                     digest, tasks, &reservation, &untracked_task, error, sizeof(error))) goto out;
     if (tasks->len != 1) goto out;
     printf("%s\n", ((LatcdCompilerTask *)g_ptr_array_index(tasks, 0))->id);
     result = 0;

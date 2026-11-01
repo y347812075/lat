@@ -70,6 +70,26 @@ def run(test_daemon, prefix, guest, work):
     generated = [p for p in normal_cache.iterdir() if p.suffix in {'.so', '.native', '.tbset'}]
     unique = {(p.stat().st_dev, p.stat().st_ino): p.stat().st_size for p in generated}
     assert unique and counters['generation_logical_bytes'] == sum(unique.values()), counters
+    failed = work / 'untracked-accounting'
+    failed.mkdir(mode=0o700)
+    failed_cache, failed_socket = failed / 'cache', failed / 'd.sock'
+    failed_stats = failed / 'stats.json'
+    failed_args = [test_daemon, '--serve', '--socket', str(failed_socket),
+                   '--cache-dir', str(failed_cache), '--latc', str(prefix / 'bin/latc'),
+                   '--runner', str(prefix / 'bin/latx-x86_64'), '--runtime-dir', str(prefix / 'lib'),
+                   '--workers', '1', '--flush-only', '--idle-seconds', '0', '--stats', str(failed_stats)]
+    with (failed / 'daemon.log').open('wb') as log:
+        daemon = start(failed_args, dict(env, LATCD_TEST_MANAGED_FAIL_AFTER_BUDGET='1'), log, failed_socket)
+        try:
+            submit(client, failed_socket, tbset, guest, env)
+            result = subprocess.run([str(client), '--flush-source', '--socket', str(failed_socket), str(guest)],
+                                    env=env, capture_output=True, timeout=120)
+            assert result.returncode != 0
+        finally:
+            daemon.terminate(); daemon.wait(timeout=30)
+    counters = json.loads(failed_stats.read_text())
+    assert list((failed_cache / '.gc/tasks').glob('*.ini'))
+    assert counters['generation_logical_bytes'] > 0, counters
     interrupted = work / 'worker-interrupted'
     interrupted.mkdir(mode=0o700)
     cache, socket = interrupted / 'cache', interrupted / 'd.sock'

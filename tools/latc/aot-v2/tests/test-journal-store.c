@@ -657,11 +657,12 @@ int main(void)
     LatcdConfig managed = { .managed = true };
     char isolation_error[128] = {0};
     uint64_t reservation = 0;
+    bool untracked_task = false;
     uint8_t digest[32] = {0};
     GPtrArray *tasks_for_compile = g_ptr_array_new_with_free_func(g_free);
     g_assert_cmpint(run_compiler(&managed, 0, NULL, NULL, false, NULL, NULL,
                                  NULL, NULL, NULL, NULL, digest, tasks_for_compile,
-                                 &reservation, isolation_error,
+                                 &reservation, &untracked_task, isolation_error,
                                  sizeof(isolation_error)), ==, -1);
     g_assert_cmpstr(isolation_error, ==, "managed compiler isolation unavailable");
     g_assert_cmpuint(tasks_for_compile->len, ==, 0);
@@ -1024,7 +1025,7 @@ int main(void)
     input.receipt_sha256[0] ^= 1;
     g_assert_cmpint(run_compiler(&record_config, 0, NULL, NULL, false, NULL, NULL,
         NULL, &input, native_path, module_path, input.identity.source_sha256,
-        replay_tasks, &replay_reservation, error, sizeof(error)), ==, -1);
+        replay_tasks, &replay_reservation, &untracked_task, error, sizeof(error)), ==, -1);
     input.receipt_sha256[0] ^= 1;
     test_managed_compiler = false;
     g_assert_cmpuint(replay_tasks->len, ==, 0);
@@ -1035,7 +1036,7 @@ int main(void)
     test_managed_compiler = true;
     g_assert_cmpint(run_compiler(&record_config, 0, NULL, NULL, false, NULL, NULL,
         NULL, &input, native_path, module_path, input.identity.source_sha256,
-        replay_tasks, &replay_reservation, error, sizeof(error)), ==, -1);
+        replay_tasks, &replay_reservation, &untracked_task, error, sizeof(error)), ==, -1);
     test_managed_compiler = false;
     g_assert_cmpuint(replay_tasks->len, ==, 1);
     LatcdCompilerTask *replay_task = g_ptr_array_index(replay_tasks, 0);
