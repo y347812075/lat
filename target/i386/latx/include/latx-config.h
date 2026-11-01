@@ -53,6 +53,8 @@ int latx_translation_config_apply(const LatTranslationConfig *config,
 int latx_translation_config_verify(CPUX86State *env, uint32_t cflags,
     const LatTranslationConfig *expected, char *error, size_t error_size);
 void latx_translation_config_set_native_replay(const LatTranslationConfig *config);
+void latx_translation_config_bind_thread(void);
+void latx_translation_config_unbind_thread(void);
 bool latx_translation_config_native_replay_digest(uint8_t digest[32]);
 GBytes *latx_translation_config_native_replay_bytes(void);
 

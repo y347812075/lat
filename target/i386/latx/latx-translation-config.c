@@ -44,6 +44,28 @@ static bool native_replay;
 static uint8_t native_replay_digest[32];
 static GBytes *native_replay_bytes;
 static const LatTranslationConfig *native_replay_config;
+static __thread const LatTranslationConfig *thread_replay_config;
+
+void latx_translation_config_bind_thread(void)
+{
+    if (thread_replay_config && thread_replay_config != native_replay_config) {
+        g_error("translation thread configuration changed");
+    }
+    thread_replay_config = native_replay_config;
+}
+
+void latx_translation_config_unbind_thread(void)
+{
+    thread_replay_config = NULL;
+}
+
+static const LatTranslationConfig *replay_thread_config(void)
+{
+    if (!thread_replay_config || thread_replay_config != native_replay_config) {
+        g_error("native replay translation thread has no bound configuration");
+    }
+    return thread_replay_config;
+}
 
 bool latx_translation_native_replay(void)
 {
@@ -56,38 +78,38 @@ int latx_translation_cvt_opt(void)
     if (tb) {
         tb->translation_config_dependencies |= UINT64_C(1) << LAT_CONFIG_CVT_OPT;
     }
-    return native_replay ? native_replay_config->values[LAT_CONFIG_CVT_OPT] : option_cvt_opt;
+    return native_replay ? replay_thread_config()->values[LAT_CONFIG_CVT_OPT] : option_cvt_opt;
 }
 
 int latx_translation_rounding_opt(void)
 {
-    return native_replay ? native_replay_config->values[LAT_CONFIG_ROUNDING_OPT] : option_set_rounding_opt;
+    return native_replay ? replay_thread_config()->values[LAT_CONFIG_ROUNDING_OPT] : option_set_rounding_opt;
 }
 
 int latx_translation_vpaes(void)
 {
-    return native_replay ? native_replay_config->values[LAT_CONFIG_VPAES] : option_vpaes;
+    return native_replay ? replay_thread_config()->values[LAT_CONFIG_VPAES] : option_vpaes;
 }
 
 int latx_translation_fast_atomic(void)
 {
-    return native_replay ? native_replay_config->values[LAT_CONFIG_FAST_ATOMIC] : option_fast_atomic;
+    return native_replay ? replay_thread_config()->values[LAT_CONFIG_FAST_ATOMIC] : option_fast_atomic;
 }
 
 int latx_translation_enable_lasx(void)
 {
-    return native_replay ? native_replay_config->values[LAT_CONFIG_ENABLE_LASX] : option_enable_lasx;
+    return native_replay ? replay_thread_config()->values[LAT_CONFIG_ENABLE_LASX] : option_enable_lasx;
 }
 
 int latx_translation_host_scq(void)
 {
-    return native_replay ? native_replay_config->values[LAT_CONFIG_HOST_SCQ] : !!have_scq();
+    return native_replay ? replay_thread_config()->values[LAT_CONFIG_HOST_SCQ] : !!have_scq();
 }
 
 #define IMM_ACCESSOR(name, field, option) \
     int latx_translation_##name(void) \
     { \
-        return native_replay ? native_replay_config->values[LAT_CONFIG_##field] : option; \
+        return native_replay ? replay_thread_config()->values[LAT_CONFIG_##field] : option; \
     }
 IMM_ACCESSOR(imm_reg, IMM_REG, option_imm_reg)
 IMM_ACCESSOR(imm_rip, IMM_RIP, option_imm_rip)

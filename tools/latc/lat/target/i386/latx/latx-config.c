@@ -702,10 +702,12 @@ void latx_lsenv_destroy(void)
 #endif
     memset(&lsenv_real, 0, sizeof(lsenv_real));
     lsenv = NULL;
+    latx_translation_config_unbind_thread();
 }
 
 void latx_lsenv_init_translation_thread(CPUArchState *env)
 {
+    latx_translation_config_bind_thread();
     ht_pc_thunk_init();
     lsenv = &lsenv_real;
     lsenv->cpu_state = env;
