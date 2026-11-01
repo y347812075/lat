@@ -183,6 +183,12 @@ if [ "$planned" -eq 1 ]; then
 else
     compile_part "$tbset" "$output" "$work/root" || status=$?
 fi
+if [ "$status" -eq 0 ] && [ "$config_replay" -eq 1 ] && [ -n "${LATC_NATIVE_BASE:-}" ]; then
+    "$latc" merge-native "$LATC_NATIVE_BASE" "$output" -o "$work/replay-merged.native" || status=$?
+    if [ "$status" -eq 0 ]; then
+        mv "$work/replay-merged.native" "$output"
+    fi
+fi
 if [ "$status" -ne 0 ]; then
     rm -f "$output"
     exit "$status"

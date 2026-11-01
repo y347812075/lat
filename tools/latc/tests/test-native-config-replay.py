@@ -91,6 +91,17 @@ def main():
         {'LATX_CVT_OPT': '1', 'LATC_TRANSLATION_CONFIG_FROM': str(work / 'config-1')})
     assert content(cli_isolated) == content(isolated)
     assert cli_isolated.read_bytes().endswith((work / 'config-0').read_bytes())
+    incremental = work / 'incremental.native'
+    run([latc, 'compile-replay-native', guest, '-o', incremental,
+         '--runner', runner, '--tbset', keys, '--config', work / 'config-0'],
+        {'LATC_NATIVE_BASE': str(isolated)})
+    run([latc, 'validate-replay-native', incremental, work / 'config-0', keys])
+    assert incremental.read_bytes().endswith((work / 'config-0').read_bytes())
+    run([latc, 'emit-aot-v2', incremental, work / 'incremental-forbidden'], success=False)
+    run([latc, 'compile-replay-native', guest, '-o', work / 'incompatible-base.native',
+         '--runner', runner, '--tbset', keys, '--config', work / 'config-1'],
+        {'LATC_NATIVE_BASE': str(isolated)}, success=False)
+    assert not (work / 'incompatible-base.native').exists()
     run([latc, 'compile-replay-native', guest, '-o', work / 'no-config.native',
          '--runner', runner, '--tbset', keys], success=False)
     assert not (work / 'no-config.native').exists()
