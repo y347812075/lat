@@ -4281,6 +4281,7 @@ static bool managed_task_state_read(int gc, const char *name, const char *id,
         "module_device", "module_inode", "module_size", "module_sha256"};
     bool prepared = record_string_is(record, "managed", "state", "PREPARED");
     bool delegated = record_string_is(record, "managed", "state", "DELEGATION_BOUND");
+    bool preexec = record_string_is(record, "managed", "state", "PREEXEC_CANCELLED");
     bool bound = record_string_is(record, "managed", "state", "DOMAIN_BOUND");
     bool authorized = record_string_is(record, "managed", "state", "EXEC_AUTHORIZED");
     bool cancelled = record_string_is(record, "managed", "state", "CANCELLED_DOMAIN_EMPTY");
@@ -4290,13 +4291,13 @@ static bool managed_task_state_read(int gc, const char *name, const char *id,
     bool adopted = record_string_is(record, "managed", "state", "OUTPUT_ADOPTED");
     bool removed = record_string_is(record, "managed", "state", "OUTPUTS_REMOVED");
     bool discarded = record_string_is(record, "managed", "state", "REPLAY_DISCARDED");
-    valid = valid && groups == 1 && (prepared ? exact_keys(record, "managed", keys, G_N_ELEMENTS(keys)) : delegated ?
+    valid = valid && groups == 1 && (prepared ? exact_keys(record, "managed", keys, G_N_ELEMENTS(keys)) : (delegated || preexec) ?
         exact_keys(record, "managed", delegation_keys, G_N_ELEMENTS(delegation_keys)) : adopted ?
         exact_keys(record, "managed", adopted_keys, G_N_ELEMENTS(adopted_keys)) :
         exact_keys(record, "managed", bound_keys, G_N_ELEMENTS(bound_keys))) &&
         record_string_is(record, "managed", "version", "1") &&
         record_string_is(record, "managed", "task_id", id) &&
-        (prepared || delegated || bound || authorized || cancelled || empty || workspace || adopting || adopted || removed || discarded);
+        (prepared || delegated || preexec || bound || authorized || cancelled || empty || workspace || adopting || adopted || removed || discarded);
     if (valid && discarded) {
         GKeyFile *task_record = g_key_file_new();
         valid = g_key_file_load_from_data(task_record, raw, size, 0, NULL) &&
@@ -4323,7 +4324,7 @@ static bool managed_task_state_read(int gc, const char *name, const char *id,
             g_free(hash);
         }
     }
-    LatcdManagedDomain parsed = { .state = prepared ? LATCD_MANAGED_PREPARED : delegated ? LATCD_MANAGED_DELEGATION_BOUND :
+    LatcdManagedDomain parsed = { .state = prepared ? LATCD_MANAGED_PREPARED : delegated ? LATCD_MANAGED_DELEGATION_BOUND : preexec ? LATCD_MANAGED_PREEXEC_CANCELLED :
         bound ? LATCD_MANAGED_BOUND : authorized ? LATCD_MANAGED_AUTHORIZED :
         cancelled ? LATCD_MANAGED_CANCELLED : empty ? LATCD_MANAGED_DOMAIN_EMPTY :
         workspace ? LATCD_MANAGED_WORKSPACE_READY : adopting ? LATCD_MANAGED_ADOPTING :
@@ -4340,7 +4341,7 @@ static bool managed_task_state_read(int gc, const char *name, const char *id,
             record_uint64(record, "managed", "delegation_device", &dd) &&
             record_uint64(record, "managed", "delegation_inode", &di) && di;
         wd = wi = 0;
-        if (valid && !delegated)
+        if (valid && !delegated && !preexec)
             valid = record_uint64(record, "managed", "domain_device", &wd) &&
                 record_uint64(record, "managed", "domain_inode", &wi) && wi;
         if (valid) {
@@ -4694,7 +4695,7 @@ int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
                               char *error, size_t error_size)
 {
     if (!root || !id || !g_uuid_string_is_valid(id) || task_fd < 0 || !domain ||
-        next > LATCD_MANAGED_DELEGATION_BOUND)
+        next > LATCD_MANAGED_PREEXEC_CANCELLED)
         return fail(error, error_size, "invalid managed domain request");
     int roots = latcd_retirement_roots_lock(root, LOCK_EX | LOCK_NB, error, error_size);
     if (roots < 0) return -1;
@@ -4724,6 +4725,7 @@ int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
                 !strcmp(old.boot, domain->boot) &&
                 old.delegation.st_dev == domain->delegation.st_dev &&
                 old.delegation.st_ino == domain->delegation.st_ino) ||
+               (old.state == LATCD_MANAGED_DELEGATION_BOUND && next == LATCD_MANAGED_PREEXEC_CANCELLED) ||
                (old.state == LATCD_MANAGED_BOUND && (next == LATCD_MANAGED_AUTHORIZED || next == LATCD_MANAGED_CANCELLED)) ||
                (old.state == LATCD_MANAGED_AUTHORIZED &&
                 (next == LATCD_MANAGED_CANCELLED || next == LATCD_MANAGED_DOMAIN_EMPTY || next == LATCD_MANAGED_WORKSPACE_READY)) ||
@@ -4737,13 +4739,13 @@ int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
                 next == LATCD_MANAGED_OUTPUTS_REMOVED &&
                 managed_outputs_removed(directory, raw, size)))) {
         LatcdManagedDomain value = old.state == LATCD_MANAGED_PREPARED ||
-            old.state == LATCD_MANAGED_DELEGATION_BOUND ? *domain : old;
+            (old.state == LATCD_MANAGED_DELEGATION_BOUND && next == LATCD_MANAGED_BOUND) ? *domain : old;
         if (g_uuid_string_is_valid(value.boot) && value.delegation.st_ino &&
-            (next == LATCD_MANAGED_DELEGATION_BOUND || value.domain.st_ino)) {
+            (next == LATCD_MANAGED_DELEGATION_BOUND || next == LATCD_MANAGED_PREEXEC_CANCELLED || value.domain.st_ino)) {
             const char *names[] = {"PREPARED", "DOMAIN_BOUND", "EXEC_AUTHORIZED",
                                    "CANCELLED_DOMAIN_EMPTY", "DOMAIN_EMPTY", "WORKSPACE_READY",
                                    "ADOPTING", "OUTPUT_ADOPTED", "OUTPUTS_REMOVED", "REPLAY_DISCARDED",
-                                   "DELEGATION_BOUND"};
+                                   "DELEGATION_BOUND", "PREEXEC_CANCELLED"};
             GKeyFile *record = g_key_file_new();
             char *digest = g_compute_checksum_for_data(G_CHECKSUM_SHA256, (const guchar *)raw, size);
             g_key_file_set_string(record, "managed", "version", "1");
@@ -4757,7 +4759,7 @@ int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
             g_key_file_set_string(record, "managed", "boot", value.boot);
             g_key_file_set_uint64(record, "managed", "delegation_device", value.delegation.st_dev);
             g_key_file_set_uint64(record, "managed", "delegation_inode", value.delegation.st_ino);
-            if (next != LATCD_MANAGED_DELEGATION_BOUND) {
+            if (next != LATCD_MANAGED_DELEGATION_BOUND && next != LATCD_MANAGED_PREEXEC_CANCELLED) {
                 g_key_file_set_uint64(record, "managed", "domain_device", value.domain.st_dev);
                 g_key_file_set_uint64(record, "managed", "domain_inode", value.domain.st_ino);
             }
@@ -4879,7 +4881,8 @@ static int object_task_status(int root, const char *name, const struct stat *obj
         if (!valid) result = -1;
         else if (referenced) {
             int released = managed ? 0 : task_inputs_released(gc, entry->d_name, copying, task, &before);
-            if (managed && (managed_domain.state == LATCD_MANAGED_OUTPUTS_REMOVED ||
+            if (managed && (managed_domain.state == LATCD_MANAGED_PREEXEC_CANCELLED ||
+                            managed_domain.state == LATCD_MANAGED_OUTPUTS_REMOVED ||
                             managed_domain.state == LATCD_MANAGED_REPLAY_DISCARDED)) {
                 if (!flock(task, LOCK_EX | LOCK_NB)) released = 1;
                 else if (errno != EWOULDBLOCK) released = -1;

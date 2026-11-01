@@ -2218,7 +2218,7 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
                                             LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error));
         goto out;
     }
-    if (domain.state == LATCD_MANAGED_REPLAY_DISCARDED ||
+    if (domain.state == LATCD_MANAGED_PREEXEC_CANCELLED || domain.state == LATCD_MANAGED_REPLAY_DISCARDED ||
         domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY ||
         domain.state == LATCD_MANAGED_OUTPUTS_REMOVED) {
         result = 0;
@@ -2238,13 +2238,20 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
             result = 0;
         goto out;
     }
-    if ((domain.state != LATCD_MANAGED_BOUND && domain.state != LATCD_MANAGED_AUTHORIZED &&
+    if ((domain.state != LATCD_MANAGED_DELEGATION_BOUND && domain.state != LATCD_MANAGED_BOUND && domain.state != LATCD_MANAGED_AUTHORIZED &&
          domain.state != LATCD_MANAGED_WORKSPACE_READY) ||
         fstat(worker_delegation_fd, &delegation) ||
         delegation.st_dev != domain.delegation.st_dev || delegation.st_ino != domain.delegation.st_ino ||
         !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, &length, NULL)) goto out;
     g_strchomp(boot);
     if (strcmp(boot, domain.boot)) goto out;
+    if (domain.state == LATCD_MANAGED_DELEGATION_BOUND) {
+        /* No worker is cloned until DOMAIN_BOUND is durable. Do not touch a
+         * same-named cgroup whose identity was never recorded. */
+        result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
+                                           LATCD_MANAGED_PREEXEC_CANCELLED, error, sizeof(error));
+        goto out;
+    }
     int populated;
     if (latcd_worker_domain_populated(worker_delegation_fd, id, &domain.domain, &populated)) goto out;
     if (populated) {
@@ -2362,7 +2369,7 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
             char state_error[256];
             if (!unsafe && !latcd_managed_task_domain(config->cache_dir, id, task, &terminal,
                     LATCD_MANAGED_PREPARED, state_error, sizeof(state_error)) &&
-                (terminal.state == LATCD_MANAGED_OUTPUTS_REMOVED ||
+                (terminal.state == LATCD_MANAGED_PREEXEC_CANCELLED || terminal.state == LATCD_MANAGED_OUTPUTS_REMOVED ||
                  terminal.state == LATCD_MANAGED_REPLAY_DISCARDED))
                 latcd_cache_capacity_release_task(&generation_capacity, id);
             g_key_file_free(record);

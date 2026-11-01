@@ -82,13 +82,27 @@ grep -qx "delegation_device=$(stat -c %d "$scope/worker")" "$state"
 grep -qx "delegation_inode=$(stat -c %i "$scope/worker")" "$state"
 id=$(basename "$state" .ini)
 test -d "$scope/worker/$id"
+cp "$state" /work/unbound-original-state
+sed -i 's/^boot=.*/boot=00000000-0000-0000-0000-000000000000/' "$state"
 if LATCD_TEST_RECOVERY_ONCE=1 sh -c '
     printf "%s\n" "$$" > "$1/cgroup.procs"; shift
     exec "$@"
 ' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/unbound-cache "$scope/worker"; then
-    echo 'unbound domain was accepted during recovery' >&2; exit 1
+    echo 'unbound domain with mismatched boot accepted' >&2; exit 1
 fi
 grep -qx 'state=DELEGATION_BOUND' "$state"
+cp /work/unbound-original-state "$state"
+LATCD_TEST_RECOVERY_ONCE=1 sh -c '
+    printf "%s\n" "$$" > "$1/cgroup.procs"; shift
+    exec "$@"
+' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/unbound-cache "$scope/worker"
+grep -qx 'state=PREEXEC_CANCELLED' "$state"
+test -d "$scope/worker/$id"
+LATCD_TEST_RECOVERY_ONCE=1 sh -c '
+    printf "%s\n" "$$" > "$1/cgroup.procs"; shift
+    exec "$@"
+' sh "$scope/worker/manager" "$binary" --test-managed-recovery /work/unbound-cache "$scope/worker"
+grep -qx 'state=PREEXEC_CANCELLED' "$state"
 test -f "/work/unbound-cache/.gc/compiler-budgets/$id.ini"
 test ! -e "/work/unbound-cache/.gc/compiler-releases/$id.ini"
 rmdir "$scope/worker/$id" "$scope/worker/manager" "$scope/worker"
