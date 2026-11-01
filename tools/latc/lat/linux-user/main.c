@@ -236,8 +236,8 @@ void fork_start(void)
     latx_syscall_fs_fork_start();
 #endif
     start_exclusive();
-    latc_aot_v2_fork_start();
     mmap_fork_start();
+    latc_aot_v2_fork_start();
     sigact_fork_start();
     path_fork_start();
     fd_trans_fork_start();
@@ -246,7 +246,6 @@ void fork_start(void)
 
 void fork_end(int child)
 {
-    mmap_fork_end(child);
     sigact_fork_end(child);
     path_fork_end(child);
     fd_trans_fork_end();
@@ -254,6 +253,7 @@ void fork_end(int child)
     latx_syscall_fs_fork_end(child);
 #endif
     latc_aot_v2_fork_end(thread_cpu, child != 0);
+    mmap_fork_end(child);
     if (child) {
         CPUState *cpu, *next_cpu;
         /* Child processes created by fork() only have a single thread.

@@ -27,7 +27,9 @@ LAT_LD_PREFIX="$rootfs" \
   "$latc" "$runner" "$guest" "$runtime_dir" "$work/fork.so" \
   "$work/fork.tbset" >"$work/compile.stdout"
 cp "$work/fork.so" "$work/cache/$source_sha.so"
-printf '{"version":2,"module":"%s.so"}\n' "$source_sha" \
+codegen_id=$($latc build-id)
+printf '{"version":2,"module":"%s.so","native":"","tbset":"","source_sha256":"%s","codegen_id":"%s","published_sequence":1}\n' \
+  "$source_sha" "$source_sha" "$codegen_id" \
   >"$work/cache/$source_sha.current"
 chmod 444 "$work/cache/$source_sha.current"
 
