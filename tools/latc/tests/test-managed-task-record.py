@@ -41,6 +41,16 @@ def run(binary, scanner):
         process.stdin.flush()
         assert process.wait(timeout=20) == 0, process.stderr.read()
         assert status() == 1
+        output = root / '.tmp/output-native'
+        output.write_bytes(b'unidentified output')
+        command = [binary, '--test-managed-adoption-recovery', str(root), task_id]
+        assert subprocess.run(command, timeout=20).returncode != 0
+        assert status() == 1
+        output.unlink()
+        subprocess.run(command, check=True, timeout=20)
+        state.read(root / '.gc/managed-task-state' / (task_id + '.ini'))
+        assert state['managed']['state'] == 'OUTPUTS_REMOVED'
+        assert status() == 0
     with tempfile.TemporaryDirectory(prefix='latcd-journal-base-',
                                      dir=Path.home() / 'tmp') as directory:
         root = Path(directory)

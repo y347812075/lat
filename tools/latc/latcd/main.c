@@ -8687,6 +8687,23 @@ out:
     return result;
 }
 
+static int test_managed_adoption_recovery(const char *root, const char *id)
+{
+    LatcdConfig config = { .cache_dir = root, .managed = true };
+    char *path = g_strdup_printf("%s/.gc/tasks/%s.ini", root, id);
+    int task = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int result = 1;
+    worker_delegation_fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (task >= 0 && worker_delegation_fd >= 0 &&
+        !flock(task, LOCK_EX | LOCK_NB) &&
+        !recover_managed_domain(&config, id, task, false, true)) result = 0;
+    if (worker_delegation_fd >= 0) close(worker_delegation_fd);
+    worker_delegation_fd = -1;
+    if (task >= 0) close(task);
+    g_free(path);
+    return result;
+}
+
 static int test_managed_scan_identity(const char *root)
 {
     LatcdConfig config = { .cache_dir = root, .managed = true };
@@ -8825,6 +8842,8 @@ int main(int argc, char **argv)
         return test_managed_task_record(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "--test-managed-recovery"))
         return test_managed_task_recovery(argv[2], argv[3]);
+    if (argc == 4 && !strcmp(argv[1], "--test-managed-adoption-recovery"))
+        return test_managed_adoption_recovery(argv[2], argv[3]);
     if (argc == 3 && !strcmp(argv[1], "--test-managed-scan-identity"))
         return test_managed_scan_identity(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "--test-managed-scan-busy"))
