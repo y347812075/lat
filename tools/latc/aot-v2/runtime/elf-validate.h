@@ -10,6 +10,11 @@ int lat_aot_v2_elf_validate_memory(const void *data, size_t size,
                                    LatAotNoteV2 *note, char *error,
                                    size_t error_size);
 
+/* Structural identity matching only; the caller must authenticate expected. */
+int lat_aot_v2_elf_validate_config_memory(const void *data, size_t size,
+    const LatAotExpectedV2 *expected, const LatAotConfigIdentityV2 *config,
+    LatAotConfigNoteV2 *note, char *error, size_t error_size);
+
 int lat_aot_v2_elf_validate_fd(int fd, const LatAotExpectedV2 *expected,
                                LatAotNoteV2 *note, char *error,
                                size_t error_size);

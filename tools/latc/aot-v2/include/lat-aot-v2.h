@@ -66,6 +66,21 @@ typedef struct LatAotNoteV2 {
     uint8_t tbset_digest[32];
 } LatAotNoteV2;
 
+/* Extended format is deliberately rejected by legacy readers. */
+#define LAT_AOT_CONFIG_NOTE_REVISION 1u
+typedef struct LatAotConfigIdentityV2 {
+    uint32_t revision;
+    uint32_t schema;
+    uint32_t domain;
+    uint32_t reserved;
+    uint8_t digest[32];
+} LatAotConfigIdentityV2;
+
+typedef struct LatAotConfigNoteV2 {
+    LatAotNoteV2 base;
+    LatAotConfigIdentityV2 config;
+} LatAotConfigNoteV2;
+
 typedef struct LatAotTbV2 {
     uint64_t guest_rva;
     uint64_t host_offset;
@@ -208,6 +223,10 @@ static inline int lat_aot_v2_magic_valid(const uint8_t magic[8])
 
 _Static_assert(sizeof(LatAotNoteV2) == 128,
                "AOT v2 note ABI size changed");
+_Static_assert(sizeof(LatAotConfigIdentityV2) == 48,
+               "AOT configuration identity size changed");
+_Static_assert(sizeof(LatAotConfigNoteV2) == 176,
+               "AOT configuration note size changed");
 _Static_assert(sizeof(LatAotTbV2) == 24,
                "AOT v2 TB ABI size changed");
 _Static_assert(sizeof(LatAotPcMapV2) == 32,

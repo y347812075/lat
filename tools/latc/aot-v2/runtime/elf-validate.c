@@ -156,11 +156,13 @@ static const void *vaddr_to_file(const unsigned char *file, size_t file_size,
 static int validate_note(const unsigned char *file, size_t file_size,
                          const Elf64_Phdr *phdrs, size_t phnum,
                          const LatAotExpectedV2 *expected,
-                         LatAotNoteV2 *result, char *error,
+                         const LatAotConfigIdentityV2 *config,
+                         LatAotNoteV2 *result, LatAotConfigNoteV2 *config_result, char *error,
                          size_t error_size)
 {
     int found = 0;
     LatAotNoteV2 selected = {0};
+    LatAotConfigNoteV2 extended = {0};
 
     for (size_t i = 0; i < phnum; i++) {
         const Elf64_Phdr *phdr = &phdrs[i];
@@ -193,11 +195,14 @@ static int validate_note(const unsigned char *file, size_t file_size,
                 header->n_namesz == sizeof(LAT_AOT_V2_NOTE_NAME) &&
                 !memcmp(name, LAT_AOT_V2_NOTE_NAME,
                         sizeof(LAT_AOT_V2_NOTE_NAME))) {
-                if (found || header->n_descsz != sizeof(selected)) {
+                if (found || header->n_descsz != (config ? sizeof(extended) : sizeof(selected))) {
                     return reject(error, error_size,
                                   "AOT v2 note count or size is invalid");
                 }
-                memcpy(&selected, description, sizeof(selected));
+                if (config) {
+                    memcpy(&extended, description, sizeof(extended));
+                    selected = extended.base;
+                } else memcpy(&selected, description, sizeof(selected));
                 found = 1;
             }
             cursor += name_size + desc_size;
@@ -208,8 +213,17 @@ static int validate_note(const unsigned char *file, size_t file_size,
     }
     if (!lat_aot_v2_magic_valid(selected.magic) ||
         selected.abi_version != LAT_AOT_V2_ABI_VERSION ||
-        selected.struct_size != sizeof(selected)) {
+        selected.struct_size != (config ? sizeof(extended) : sizeof(selected))) {
         return reject(error, error_size, "AOT v2 note ABI is invalid");
+    }
+    if (config) {
+        uint8_t zero[32] = {0};
+        if (config->revision != LAT_AOT_CONFIG_NOTE_REVISION ||
+            !config->schema || !config->domain || config->reserved ||
+            !memcmp(config->digest, zero, sizeof(zero)) ||
+            memcmp(&extended.config, config, sizeof(*config)))
+            return reject(error, error_size, "AOT configuration identity mismatch");
+        if (config_result) *config_result = extended;
     }
     if ((selected.module_flags & LAT_AOT_MODULE_READONLY_TEXT) == 0) {
         return reject(error, error_size, "AOT module does not require read-only text");
@@ -526,13 +540,16 @@ static int validate_relocations(const unsigned char *file, size_t file_size,
     return 0;
 }
 
-int lat_aot_v2_elf_validate_memory(const void *data, size_t file_size,
-                                   const LatAotExpectedV2 *expected,
-                                   LatAotNoteV2 *note, char *error,
-                                   size_t error_size)
+static int validate_memory(const void *data, size_t file_size,
+                           const LatAotExpectedV2 *expected,
+                           const LatAotConfigIdentityV2 *config,
+                           LatAotNoteV2 *note, LatAotConfigNoteV2 *config_note,
+                           char *error, size_t error_size)
 {
     const unsigned char *file = data;
     int result = -1;
+    LatAotNoteV2 validated_note;
+    LatAotConfigNoteV2 validated_config_note;
 
     if (!file || file_size < sizeof(Elf64_Ehdr) ||
         (uintptr_t)file % _Alignof(Elf64_Ehdr)) {
@@ -573,7 +590,7 @@ int lat_aot_v2_elf_validate_memory(const void *data, size_t file_size,
         }
     }
     if (validate_note(file, file_size, phdrs, header->e_phnum, expected,
-                      note, error, error_size) ||
+                      config, &validated_note, &validated_config_note, error, error_size) ||
         validate_dynamic(file, file_size, phdrs, header->e_phnum,
                          error, error_size) ||
         validate_dynamic_symbols(file, file_size, header,
@@ -582,8 +599,26 @@ int lat_aot_v2_elf_validate_memory(const void *data, size_t file_size,
                              header->e_phnum, error, error_size)) {
         return -1;
     }
+    if (note) *note = validated_note;
+    if (config_note) *config_note = validated_config_note;
     result = 0;
     return result;
+}
+
+int lat_aot_v2_elf_validate_memory(const void *data, size_t size,
+                                   const LatAotExpectedV2 *expected,
+                                   LatAotNoteV2 *note, char *error, size_t error_size)
+{
+    return validate_memory(data, size, expected, NULL, note, NULL, error, error_size);
+}
+
+int lat_aot_v2_elf_validate_config_memory(const void *data, size_t size,
+    const LatAotExpectedV2 *expected, const LatAotConfigIdentityV2 *config,
+    LatAotConfigNoteV2 *note, char *error, size_t error_size)
+{
+    if (!expected || !config)
+        return reject(error, error_size, "AOT configuration expectation is missing");
+    return validate_memory(data, size, expected, config, NULL, note, error, error_size);
 }
 
 int lat_aot_v2_elf_validate_fd(int fd, const LatAotExpectedV2 *expected,

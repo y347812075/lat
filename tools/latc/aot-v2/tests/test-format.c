@@ -226,6 +226,40 @@ int main(void)
     };
     memset(expected.source_sha256, 0x11, 32);
     memset(expected.codegen_id, 0x22, 32);
+    {
+        char error[256] = {0};
+        LatAotConfigIdentityV2 identity = {
+            .revision = LAT_AOT_CONFIG_NOTE_REVISION, .schema = 1, .domain = 1,
+        };
+        memset(identity.digest, 0x44, sizeof(identity.digest));
+        LatAotConfigNoteV2 output;
+        if (!lat_aot_v2_elf_validate_config_memory(file, sizeof(file), &expected,
+                                                    &identity, &output, error, sizeof(error)))
+            return 1;
+        Elf64_Ehdr *header = (void *)file;
+        Elf64_Phdr *phdrs = (void *)(file + header->e_phoff);
+        TestNote *note = (void *)(file + NOTE_OFFSET);
+        LatAotConfigNoteV2 extended = { .base = note->description, .config = identity };
+        extended.base.struct_size = sizeof(extended);
+        note->header.n_descsz = sizeof(extended);
+        memcpy(&note->description, &extended, sizeof(extended));
+        phdrs[1].p_filesz = phdrs[1].p_memsz = sizeof(Elf64_Nhdr) + 4 + sizeof(extended);
+        if (lat_aot_v2_elf_validate_config_memory(file, sizeof(file), &expected,
+                                                   &identity, &output, error, sizeof(error)) ||
+            memcmp(&output, &extended, sizeof(output)) ||
+            !lat_aot_v2_elf_validate_memory(file, sizeof(file), &expected, NULL, error, sizeof(error)))
+            return 1;
+        identity.digest[0] ^= 1;
+        if (!lat_aot_v2_elf_validate_config_memory(file, sizeof(file), &expected,
+                                                    &identity, NULL, error, sizeof(error)))
+            return 1;
+        identity.digest[0] ^= 1;
+        phdrs[1].p_filesz--;
+        if (!lat_aot_v2_elf_validate_config_memory(file, sizeof(file), &expected,
+                                                    &identity, NULL, error, sizeof(error)))
+            return 1;
+        build_elf(file);
+    }
     char memory_error[256] = {0};
     LatAotNoteV2 memory_note;
     if (lat_aot_v2_elf_validate_memory(file, sizeof(file), &expected,
