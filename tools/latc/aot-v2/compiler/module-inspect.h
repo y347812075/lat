@@ -44,6 +44,10 @@ int lat_aot_v2_module_read_tbset_file(
 int lat_aot_v2_module_validate_replacement_file(
     const char *previous, const char *replacement,
     char *error, size_t error_size);
+/* Compare source and TB keys across codegen identities, not code compatibility. */
+int lat_aot_v2_module_validate_rebuild_file(
+    const char *previous, const char *replacement,
+    char *error, size_t error_size);
 /* Structural matching only; caller must authenticate the expected identity. */
 int lat_aot_v2_module_validate_config_replacement_file(
     const char *previous, const char *replacement,

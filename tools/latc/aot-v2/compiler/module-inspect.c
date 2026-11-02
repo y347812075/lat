@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <stdbool.h>
 #include <unistd.h>
 
 static int fail(char *error, size_t error_size, const char *format, ...)
@@ -315,6 +316,7 @@ static int module_validate_replacement_file(
     const char *previous, const char *replacement,
     const LatAotExpectedV2 *expected,
     const LatAotConfigIdentityV2 *config,
+    bool allow_codegen_change,
     char *error, size_t error_size)
 {
     LatAotModuleInfoV2 old_info, new_info;
@@ -325,7 +327,8 @@ static int module_validate_replacement_file(
         goto out;
     }
     if (memcmp(old_info.note.source_sha256, new_info.note.source_sha256, 32) ||
-        memcmp(old_info.note.codegen_id, new_info.note.codegen_id, 32)) {
+        (!allow_codegen_change &&
+         memcmp(old_info.note.codegen_id, new_info.note.codegen_id, 32))) {
         fail(error, error_size,
              "replacement source or codegen identity mismatch");
         goto out;
@@ -362,7 +365,14 @@ int lat_aot_v2_module_validate_replacement_file(
     const char *previous, const char *replacement,
     char *error, size_t error_size)
 {
-    return module_validate_replacement_file(previous, replacement, NULL, NULL,
+    return module_validate_replacement_file(previous, replacement, NULL, NULL, false,
+                                            error, error_size);
+}
+
+int lat_aot_v2_module_validate_rebuild_file(
+    const char *previous, const char *replacement, char *error, size_t error_size)
+{
+    return module_validate_replacement_file(previous, replacement, NULL, NULL, true,
                                             error, error_size);
 }
 
@@ -373,7 +383,7 @@ int lat_aot_v2_module_validate_config_replacement_file(
 {
     if (!previous || !replacement || !expected || !config)
         return fail(error, error_size, "missing configuration replacement identity");
-    return module_validate_replacement_file(previous, replacement, expected, config,
+    return module_validate_replacement_file(previous, replacement, expected, config, false,
                                             error, error_size);
 }
 

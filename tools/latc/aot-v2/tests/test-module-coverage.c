@@ -470,7 +470,13 @@ int main(int argc, char **argv)
         g_assert_cmpint(lat_aot_v2_module_validate_replacement_file(
             old, next, error, sizeof(error)), ==, -1);
         g_assert_nonnull(strstr(error, "identity mismatch"));
+        g_assert_cmpint(lat_aot_v2_module_validate_rebuild_file(
+            old, next, error, sizeof(error)), ==, identity == 2 ? 0 : -1);
     }
+    write_module(next, tbs + 1, 2, 2);
+    g_assert_cmpint(lat_aot_v2_module_validate_rebuild_file(
+        old, next, error, sizeof(error)), ==, -1);
+    g_assert_nonnull(strstr(error, "replacement loses module coverage"));
     tbs[0].flags = 1;
     write_module(next, tbs, 3, 0);
     g_assert_cmpint(lat_aot_v2_module_validate_replacement_file(

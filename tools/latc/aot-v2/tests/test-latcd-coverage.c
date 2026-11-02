@@ -1837,6 +1837,20 @@ int main(int argc, char **argv)
     g_free(manifest_b);
     g_free(saved_manifest);
     g_free(input_fixture);
+    g_assert_cmpint(chmod(old_path, 0600), ==, 0);
+    int stale_fd = open(old_path, O_RDWR | O_CLOEXEC);
+    g_assert_cmpint(stale_fd, >=, 0);
+    uint8_t stale_id[32] = {0};
+    g_assert_cmpint(pwrite(stale_fd, stale_id, sizeof(stale_id),
+        LAT_AOT_TEST_NOTE_OFFSET + 16 + offsetof(LatAotNoteV2, codegen_id)), ==,
+        sizeof(stale_id));
+    close(stale_fd);
+    g_assert_cmpint(chmod(old_path, 0444), ==, 0);
+    pthread_mutex_lock(&cache_lock);
+    g_assert_cmpint(publish_current_index(&config, hex, new_name, native_name,
+        tbset_name, &info, 2, true, NULL, error, sizeof(error)), ==, -1);
+    g_assert_nonnull(strstr(error, "replacement loses module coverage"));
+    pthread_mutex_unlock(&cache_lock);
     char *retained = NULL;
     g_assert_cmpint(preserve_current_keys(&config, hex, digest, input, temporary,
         &retained, error, sizeof(error)), ==, 0);
@@ -1849,6 +1863,7 @@ int main(int argc, char **argv)
         g_assert_cmpuint(complete.keys[i].guest_rva, ==, (i + 1) * 0x100);
     }
     lat_tb_key_set_destroy(&complete);
+    daemon_fixture(old_path, keys, 2);
     /* A cached candidate covers the request but omits an unobserved old TB. */
     gchar *input_data = NULL;
     gsize input_size = 0;

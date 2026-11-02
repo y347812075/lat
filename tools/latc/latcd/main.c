@@ -4444,14 +4444,11 @@ static int validate_current_replacement(const LatcdConfig *config,
         char *old_path = g_build_filename(config->cache_dir,
                                           previous.module, NULL);
         LatAotModuleInfoV2 old_info;
-        uint8_t codegen_id[32];
-        expected_codegen_id(codegen_id);
         if (!owned_module_inspect(old_path, &old_info) ||
             memcmp(old_info.note.source_sha256, info->note.source_sha256, 32)) {
             result = fail(error, error_size,
                           "cannot validate current module coverage");
-        } else if (!memcmp(old_info.note.codegen_id, codegen_id, 32) &&
-                   lat_aot_v2_module_validate_replacement_file(
+        } else if (lat_aot_v2_module_validate_rebuild_file(
                        old_path, candidate, error, error_size)) {
             result = -1;
         }
@@ -5572,9 +5569,14 @@ static int preserve_current_keys(const LatcdConfig *config, const char *hex,
         g_build_filename(config->cache_dir, previous.module, NULL) : NULL;
     if (status < 0) {
         result = fail(error, error_size, "cannot read current manifest");
-    } else if (module && cached_module_inspect(module, digest, &info)) {
-        result = lat_aot_v2_module_read_tbset_file(module, &info, &old_keys,
-                                                   error, error_size);
+    } else if (module) {
+        if (!owned_module_inspect(module, &info) ||
+            memcmp(info.note.source_sha256, digest, 32)) {
+            result = fail(error, error_size, "cannot validate current module coverage");
+        } else {
+            result = lat_aot_v2_module_read_tbset_file(module, &info, &old_keys,
+                                                       error, error_size);
+        }
     }
     g_free(module);
     current_manifest_clear(&previous);
