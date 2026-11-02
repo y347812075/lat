@@ -224,6 +224,12 @@ test-latcd-gc-publication: $(BUILD)/tests/latcd-gc-timer
 	  "$(GC_INSTALL_PREFIX)/bin/latx-x86_64" "$(GC_INSTALL_PREFIX)/lib" \
 	  "$(GC_X86_GUEST)" "$(GC_TEST_WORK)" "$(if $(GC_TEST_MODE),$(GC_TEST_MODE),pin)"
 
+.PHONY: test-managed-replay-integration
+test-managed-replay-integration: $(BUILD)/tests/latcd-gc-timer
+	@test -n "$(GC_INSTALL_PREFIX)" -a -n "$(GC_X86_GUEST)" -a -n "$(GC_TEST_TBSET)" -a -n "$(GC_TEST_WORK)"
+	sh tests/test-managed-replay-integration.sh "$(abspath $(BUILD)/tests/latcd-gc-timer)" \
+	  "$(GC_INSTALL_PREFIX)" "$(GC_X86_GUEST)" "$(GC_TEST_TBSET)" "$(GC_TEST_WORK)"
+
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
