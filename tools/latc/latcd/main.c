@@ -4796,11 +4796,13 @@ static int current_manifest_read(const LatcdConfig *config, const char *hex,
 }
 
 /* The caller must authorize the source and effective configuration first. */
-static int G_GNUC_UNUSED broker_export_current(const LatcdConfig *config,
+static int broker_export_current_config(const LatcdConfig *config,
                                 const uint8_t digest[32],
                                 char *error, size_t error_size, int64_t deadline,
                                 LatcdBrokerCancelled cancelled, void *opaque,
-                                LatcdBrokerExportResponse *response)
+                                LatcdBrokerExportResponse *response,
+                                const LatAotExpectedV2 *expected,
+                                const LatAotConfigIdentityV2 *identity)
 {
     char hex[65];
     digest_hex(digest, hex);
@@ -4820,7 +4822,9 @@ static int G_GNUC_UNUSED broker_export_current(const LatcdConfig *config,
     int saved = errno;
     close(gate);
     errno = saved;
-    int output = input < 0 ? -1 : latcd_cache_export_copy_bounded(
+    int output = input < 0 ? -1 : expected ? latcd_cache_export_config_bounded(
+        input, manifest.module_sha256, config->file_size_limit, expected, identity,
+        deadline, cancelled, opaque, error, error_size) : latcd_cache_export_copy_bounded(
         input, manifest.module_sha256, config->file_size_limit, deadline, cancelled, opaque);
     struct stat st;
     if (output >= 0 && (fstat(output, &st) || st.st_size <= 0)) {
@@ -4838,6 +4842,16 @@ static int G_GNUC_UNUSED broker_export_current(const LatcdConfig *config,
     current_manifest_clear(&manifest);
     errno = saved;
     return output;
+}
+
+static int G_GNUC_UNUSED broker_export_current(const LatcdConfig *config,
+                                const uint8_t digest[32],
+                                char *error, size_t error_size, int64_t deadline,
+                                LatcdBrokerCancelled cancelled, void *opaque,
+                                LatcdBrokerExportResponse *response)
+{
+    return broker_export_current_config(config, digest, error, error_size, deadline,
+                                         cancelled, opaque, response, NULL, NULL);
 }
 
 /* A successful export is an offline snapshot, not execution authorization. */

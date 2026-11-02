@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "cache-export.h"
+#include "elf-validate.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -56,10 +57,31 @@ int latcd_cache_export_copy_bounded(int source, const char *sha256, uint64_t max
         before.st_mode == after.st_mode && before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
         before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
         !strcmp(g_checksum_get_string(checksum), sha256) &&
+        !fchmod(output, 0500) &&
         !fcntl(output, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);
     if (checksum) g_checksum_free(checksum);
     if (!valid) { int saved = errno ? errno : EIO; close(output); errno = saved; return -1; }
     return output;
+}
+
+int latcd_cache_export_config_bounded(int source, const char *sha256,
+    uint64_t max_bytes, const LatAotExpectedV2 *expected,
+    const LatAotConfigIdentityV2 *config, int64_t deadline_us,
+    LatcdBrokerCancelled cancelled, void *opaque, char *error, size_t error_size)
+{
+    if (!expected || !config) { errno = EINVAL; return -1; }
+    int fd = latcd_cache_export_copy_bounded(source, sha256, max_bytes,
+                                              deadline_us, cancelled, opaque);
+    if (fd < 0) return -1;
+    LatAotConfigNoteV2 note;
+    if (lat_aot_v2_elf_validate_config_fd(fd, expected, config, &note,
+                                           error, error_size)) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    return fd;
 }
 
 int latcd_cache_export_copy(int source, const char *sha256, uint64_t max_bytes)

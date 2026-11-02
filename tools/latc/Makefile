@@ -56,13 +56,18 @@ FORMAT_OBJ := $(BUILD)/format/bundle.o
 
 all: $(BUILD)/latc $(BUILD)/latcd/latcd $(BUILD)/liblatc_cfg.a
 
-$(BUILD)/tests/test-cache-export: tests/test-cache-export.c latcd/cache-export.c latcd/cache-export.h
+$(BUILD)/tests/test-cache-export: tests/test-cache-export.c latcd/cache-export.c latcd/cache-export.h $(BUILD)/aot-v2/runtime/elf-validate.o
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test-cache-export.c latcd/cache-export.c $(LDLIBS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test-cache-export.c latcd/cache-export.c $(BUILD)/aot-v2/runtime/elf-validate.o $(LDLIBS)
 
 .PHONY: test-cache-export
 test-cache-export: $(BUILD)/tests/test-cache-export
+ifeq ($(HOST_ARCH),loongarch64)
+test-cache-export: $(BUILD)/aot-v2/fixture-config.so
+	$(BUILD)/tests/test-cache-export $(BUILD)/aot-v2/fixture-config.so
+else
 	$(BUILD)/tests/test-cache-export
+endif
 test: test-cache-export
 
 $(BUILD)/tests/test-broker-transport: tests/test-broker-transport.c latcd/broker-transport.c latcd/broker-transport.h
