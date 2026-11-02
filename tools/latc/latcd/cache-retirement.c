@@ -4776,7 +4776,14 @@ int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
                 old.delegation.st_dev == domain->delegation.st_dev &&
                 old.delegation.st_ino == domain->delegation.st_ino) ||
                (old.state == LATCD_MANAGED_DELEGATION_BOUND && next == LATCD_MANAGED_PREEXEC_CANCELLED) ||
-               (old.state == LATCD_MANAGED_BOUND && (next == LATCD_MANAGED_AUTHORIZED || next == LATCD_MANAGED_CANCELLED)) ||
+               (old.state == LATCD_MANAGED_BOUND &&
+                (next == LATCD_MANAGED_CANCELLED ||
+                 (next == LATCD_MANAGED_AUTHORIZED &&
+                  !strcmp(old.boot, domain->boot) &&
+                  old.delegation.st_dev == domain->delegation.st_dev &&
+                  old.delegation.st_ino == domain->delegation.st_ino &&
+                  old.domain.st_dev == domain->domain.st_dev &&
+                  old.domain.st_ino == domain->domain.st_ino))) ||
                (old.state == LATCD_MANAGED_AUTHORIZED &&
                 (next == LATCD_MANAGED_CANCELLED || next == LATCD_MANAGED_DOMAIN_EMPTY || next == LATCD_MANAGED_WORKSPACE_READY)) ||
                (old.state == LATCD_MANAGED_WORKSPACE_READY &&

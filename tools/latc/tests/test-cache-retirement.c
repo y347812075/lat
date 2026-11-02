@@ -8134,6 +8134,14 @@ static void test_unknown_task_release(bool executor, bool managed)
         domain.domain.st_dev = 3; domain.domain.st_ino = 4;
         assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
                                           LATCD_MANAGED_BOUND, error, sizeof(error)));
+        domain.domain.st_ino++;
+        assert(latcd_managed_task_domain(root, id, task_fd, &domain,
+                                         LATCD_MANAGED_AUTHORIZED, error, sizeof(error)));
+        domain.domain.st_ino--;
+        domain.delegation.st_ino++;
+        assert(latcd_managed_task_domain(root, id, task_fd, &domain,
+                                         LATCD_MANAGED_AUTHORIZED, error, sizeof(error)));
+        domain.delegation.st_ino--;
         assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
                                           LATCD_MANAGED_AUTHORIZED, error, sizeof(error)));
         assert(!latcd_managed_task_domain(root, id, task_fd, &domain,
