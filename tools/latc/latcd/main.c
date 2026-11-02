@@ -22,6 +22,7 @@
 #include "worker-seccomp.h"
 #include "managed-path.h"
 #include "worker-closure.h"
+#include "launch-options.h"
 #include "replay-validate.h"
 #include "parson/parson.h"
 
@@ -3139,6 +3140,12 @@ static bool managed_replay_sandbox_ready(const LatcdConfig *config)
     return config->worker_bootstrap && config->worker_real_compile;
 }
 
+typedef struct {
+    GPtrArray *options;
+    GPtrArray *exec;
+    const char *const *environment;
+} LatcdLaunchPlan;
+
 static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *source, const char *tbset,
                         bool static_tbset,
@@ -3371,8 +3378,11 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         "--clearenv", "--setenv", "PATH", "/usr/bin:/bin", "--", "/bootstrap",
         "/usr/bin/true", NULL};
     const char *sandbox_env[] = {"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", NULL};
-    GPtrArray *compile_options = g_ptr_array_new();
-    GPtrArray *compile_exec = g_ptr_array_new();
+    LatcdLaunchPlan launch = {
+        .options = g_ptr_array_new(),
+        .exec = g_ptr_array_new(),
+        .environment = sandbox_env,
+    };
     GPtrArray *closure_strings = g_ptr_array_new_with_free_func(g_free);
     GArray *closure_fds = g_array_new(FALSE, FALSE, sizeof(int));
     int tool_fds[3] = {-1, -1, -1};
@@ -3393,7 +3403,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             }
         }
     }
-#define TEST_ARG(value) g_ptr_array_add(compile_options, (gpointer)(value))
+#define TEST_ARG(value) g_ptr_array_add(launch.options, (gpointer)(value))
     if (real_managed_compile) {
         const char *initial[] = {"--unshare-all", "--die-with-parent",
             "--symlink", "usr/bin", "/bin",
@@ -3456,21 +3466,24 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             replay ? "compile-replay-native" : "compile-module", paths[0],
             "-o", replay ? "/work/output.native" : "/work/output.so", "--runner", "/usr/bin/latx-x86_64"};
         for (size_t i = 0; i < G_N_ELEMENTS(command); i++)
-            g_ptr_array_add(compile_exec, (gpointer)command[i]);
-        if (replay) { g_ptr_array_add(compile_exec, (gpointer)"--config"); g_ptr_array_add(compile_exec, (gpointer)paths[2]); }
-        else { g_ptr_array_add(compile_exec, (gpointer)"--runtime-dir"); g_ptr_array_add(compile_exec, (gpointer)"/usr/lib"); }
-        if (tbset) { g_ptr_array_add(compile_exec, (gpointer)"--tbset"); g_ptr_array_add(compile_exec, (gpointer)paths[1]); }
-        if (static_tbset) g_ptr_array_add(compile_exec, (gpointer)"--static-tbset");
+            g_ptr_array_add(launch.exec, (gpointer)command[i]);
+        if (replay) { g_ptr_array_add(launch.exec, (gpointer)"--config"); g_ptr_array_add(launch.exec, (gpointer)paths[2]); }
+        else { g_ptr_array_add(launch.exec, (gpointer)"--runtime-dir"); g_ptr_array_add(launch.exec, (gpointer)"/usr/lib"); }
+        if (tbset) { g_ptr_array_add(launch.exec, (gpointer)"--tbset"); g_ptr_array_add(launch.exec, (gpointer)paths[1]); }
+        if (static_tbset) g_ptr_array_add(launch.exec, (gpointer)"--static-tbset");
+    } else {
+        for (size_t i = 0; sandbox_args[i]; i++)
+            g_ptr_array_add(launch.exec, (gpointer)sandbox_args[i]);
     }
-    g_ptr_array_add(compile_exec, NULL);
+    g_ptr_array_add(launch.exec, NULL);
 #undef TEST_ARG
     int args_fd = -1, args_child = -1;
     if (real_managed_compile && !pin_result) {
         args_fd = syscall(SYS_memfd_create, "latcd-bwrap-args",
                           MFD_CLOEXEC | MFD_ALLOW_SEALING);
         if (args_fd < 0) pin_result = -1;
-        for (size_t i = 0; !pin_result && i < compile_options->len; i++) {
-            const char *option = g_ptr_array_index(compile_options, i);
+        for (size_t i = 0; !pin_result && i < launch.options->len; i++) {
+            const char *option = g_ptr_array_index(launch.options, i);
             size_t length = strlen(option) + 1;
             if (write(args_fd, option, length) != (ssize_t)length)
                 pin_result = -1;
@@ -3562,8 +3575,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             if (use_bootstrap) {
                 if (n != 1 || permit != '1' || dup2(8, 3) < 0) _exit(126);
                 close(8);
-                syscall(SYS_execveat, 13, "", (char *const *)(real_managed_compile ? compile_exec->pdata : (gpointer)sandbox_args),
-                        (char *const *)sandbox_env, AT_EMPTY_PATH);
+                syscall(SYS_execveat, 13, "", (char *const *)launch.exec->pdata,
+                        (char *const *)launch.environment, AT_EMPTY_PATH);
                 _exit(127);
             }
 #ifdef LATCD_GC_TIMER_TEST
@@ -3623,7 +3636,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
 #ifdef LATCD_GC_TIMER_TEST
         if (getenv("LATCD_TEST_KILL_BEFORE_AUTH")) raise(SIGKILL);
 #endif
-        if (latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
+        if ((real_managed_compile && !latcd_launch_options_match(args_fd, launch.options)) ||
+            latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
                                        LATCD_MANAGED_AUTHORIZED, error, error_size) ||
             send(gate[1], "1", 1, MSG_NOSIGNAL) != 1) {
             close(gate[1]); gate[1] = -1;
@@ -3647,8 +3661,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     }
     g_array_free(closure_fds, TRUE);
     if (args_fd >= 0) close(args_fd);
-    g_ptr_array_free(compile_options, TRUE);
-    g_ptr_array_free(compile_exec, TRUE);
+    g_ptr_array_free(launch.options, TRUE);
+    g_ptr_array_free(launch.exec, TRUE);
     g_ptr_array_free(closure_strings, TRUE);
     for (unsigned i = 0; i < 3; i++) {
         if (tool_child[i] >= 0) close(tool_child[i]);

@@ -259,7 +259,15 @@ $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/managed-config.o $(BUILD)/lat
 
 $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-journal-store \
 $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
-	$(BUILD)/latcd/worker-seccomp.o $(BUILD)/latcd/worker-closure.o
+	$(BUILD)/latcd/worker-seccomp.o $(BUILD)/latcd/worker-closure.o $(BUILD)/latcd/launch-options.o
+
+$(BUILD)/tests/test-launch-options: tests/test-launch-options.c $(BUILD)/latcd/launch-options.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
+.PHONY: test-launch-options
+test-launch-options: $(BUILD)/tests/test-launch-options
+	$(BUILD)/tests/test-launch-options
+test: test-launch-options
 $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-journal-store \
 $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/worker-domain.o
 $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-journal-store \
