@@ -4,7 +4,27 @@ daemon=$1 prefix=$2 guest=$3 work=$4
 : "${LATCD_TEST_SERVICE_DELEGATION:?}" "${LATCD_TEST_BOOTSTRAP:?}" \
   "${LATCD_TEST_BWRAP:?}" "${LATCD_TEST_WORKER_CLOSURE:?}"
 mkdir -m 700 "$work" "$work/cache" "$work/broker" "$work/home"
+mkdir -m 700 "$work/cache/.tmp"
+LD_LIBRARY_PATH="$prefix/lib" LATX_AOT_V2=1 "$prefix/bin/latx-x86_64" \
+    --latc-translation-config-native --latc-translation-config-out "$work/config" \
+    "$guest" > "$work/config.json"
+"$prefix/bin/latc" emit-static-tbset "$guest" -o "$work/base.tbset"
+PYTHONPATH="$(dirname "$0")" python3 - "$work/base.tbset" <<'PY'
+import sys
+from pathlib import Path
+from tb_key_set import read_key_set, write_key_set_digest
+path = Path(sys.argv[1])
+digest, _, keys = read_key_set(path)
+assert len(keys) > 1
+write_key_set_digest(digest, path, [keys[-1]])
+PY
+LD_LIBRARY_PATH="$prefix/lib" LATC_TRANSLATION_CONFIG_FROM="$work/config" \
+    "$prefix/libexec/latc/scripts/compile-native-image.sh" --config-replay \
+    "$prefix/bin/latc" "$prefix/bin/latx-x86_64" "$guest" \
+    "$work/cache/.tmp/base.native" "$work/base.tbset"
+chmod 400 "$work/cache/.tmp/base.native"
 export LATCD_TEST_REAL_COMPILE=1 LATCD_TEST_JOURNAL_REPLAY=1
+export LATCD_TEST_JOURNAL_REPLAY_BASE="$work/cache/.tmp/base.native"
 export LATCD_TEST_BROKER_DIRECTORY="$work/broker"
 "$daemon" --serve --socket "$work/admin.sock" --cache-dir "$work/cache" \
     --latc "$prefix/bin/latc" --runner "$prefix/bin/latx-x86_64" \
@@ -28,6 +48,17 @@ done
 id=$(sed -n 's/^latcd: test journal replay succeeded task=//p' "$work/daemon.log" | head -1)
 grep -qx 'state=REPLAY_DISCARDED' "$work/cache/.gc/managed-task-state/$id.ini"
 grep -qx 'kind=MANAGED_REPLAY' "$work/cache/.gc/tasks/$id.ini"
-grep -qx 'version=4' "$work/cache/.gc/tasks/$id.ini"
+grep -qx 'version=5' "$work/cache/.gc/tasks/$id.ini"
+grep -qx 'name=base.native' "$work/cache/.gc/tasks/$id.ini"
+PYTHONPATH="$(dirname "$0")" python3 - "$work/base.tbset" "$work/cache/.journals" <<'PY'
+import sys
+from pathlib import Path
+from tb_key_set import read_key_set
+base = set(read_key_set(Path(sys.argv[1]))[2])
+receipts = list(Path(sys.argv[2]).glob('*/received.tbset'))
+assert len(receipts) == 1
+requested = set(read_key_set(receipts[0])[2])
+assert requested and requested - base
+PY
 test -z "$(find "$work/cache" -maxdepth 1 -name '*.so' -print -quit)"
 echo 'test-managed-journal-replay-integration: PASS'

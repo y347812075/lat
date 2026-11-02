@@ -6393,8 +6393,12 @@ static void *compiler_worker(void *opaque)
             GPtrArray *tasks = g_ptr_array_new_with_free_func(compiler_task_free);
             uint64_t reservation = 0;
             bool untracked_task = false;
+            const char *test_base = NULL;
+#ifdef LATCD_GC_TIMER_TEST
+            test_base = getenv("LATCD_TEST_JOURNAL_REPLAY_BASE");
+#endif
             int status = n < 0 || m < 0 ? -1 : run_compiler(service->config, worker->index,
-                NULL, NULL, false, NULL, NULL, NULL, job->journal_replay,
+                NULL, NULL, false, test_base, NULL, NULL, job->journal_replay,
                 native, module, job->digest, tasks, &reservation, &untracked_task, error, sizeof(error));
 #ifdef LATCD_GC_TIMER_TEST
             if (!status && tasks->len == 1)
