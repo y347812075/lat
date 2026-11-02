@@ -7,6 +7,9 @@
 #include "lat-key-journal.h"
 
 #include <errno.h>
+#ifdef LATCD_BROKER_LOAD_TEST_CLIENT
+#include <glib.h>
+#endif
 #include <fcntl.h>
 #include <poll.h>
 #include <stdarg.h>
@@ -430,6 +433,108 @@ int latcd_client_broker_journal(const char *path, uid_t uid, int source, int con
     errno = saved;
     return result;
 }
+
+#ifdef LATCD_BROKER_LOAD_TEST_CLIENT
+int latcd_client_broker_load_test(const char *path, uid_t uid, int source, int config,
+    uint64_t source_size, const uint8_t source_hash[32], const uint8_t config_hash[32],
+    uint64_t request_id, const LatcdClientFdProtection *protection,
+    char *error, size_t error_size)
+{
+    const int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    int source_seals = source < 0 ? -1 : fcntl(source, F_GET_SEALS);
+    int config_seals = config < 0 ? -1 : fcntl(config, F_GET_SEALS);
+    if (!source_hash || !config_hash || !source_size || source_seals < 0 ||
+        config_seals < 0 || (source_seals & required) != required ||
+        (config_seals & required) != required || !protection ||
+        !protection->allocation_lock || !protection->unlock ||
+        !protection->register_locked || !protection->close_fd) {
+        errno = EINVAL; return fail(error, error_size, "invalid broker load arguments");
+    }
+    int socket_fd = connect_daemon_protected(path, uid, protection, error, error_size);
+    if (socket_fd < 0) return -1;
+    LatcdBrokerLoadRequest request = {.version = LATCD_BROKER_LOAD_VERSION,
+        .request_id = request_id, .source_size = source_size};
+    memcpy(request.source_sha256, source_hash, 32);
+    memcpy(request.config_sha256, config_hash, 32);
+    int passed[2] = {source, config};
+    struct iovec iov = {.iov_base = &request, .iov_len = sizeof(request)};
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(passed))]; } control = {0};
+    struct msghdr msg = {.msg_iov = &iov, .msg_iovlen = 1,
+        .msg_control = control.bytes, .msg_controllen = sizeof(control.bytes)};
+    struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+    c->cmsg_level = SOL_SOCKET; c->cmsg_type = SCM_RIGHTS;
+    c->cmsg_len = CMSG_LEN(sizeof(passed));
+    memcpy(CMSG_DATA(c), passed, sizeof(passed));
+    int output = -1;
+    if (sendmsg(socket_fd, &msg, MSG_NOSIGNAL) != sizeof(request)) goto failed;
+    struct pollfd event = {.fd = socket_fd, .events = POLLIN};
+    int ready;
+    do { ready = poll(&event, 1, 10000); } while (ready < 0 && errno == EINTR);
+    if (ready <= 0 || !(event.revents & POLLIN)) { errno = ETIMEDOUT; goto failed; }
+    LatcdBrokerLoadResponse response;
+    struct iovec received = {.iov_base = &response, .iov_len = sizeof(response)};
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int) * 8)]; } ancillary = {0};
+    struct msghdr reply = {.msg_iov = &received, .msg_iovlen = 1,
+        .msg_control = ancillary.bytes, .msg_controllen = sizeof(ancillary.bytes)};
+    protection->allocation_lock();
+    ssize_t count = recvmsg(socket_fd, &reply, MSG_CMSG_CLOEXEC);
+    unsigned fds = 0;
+    bool valid = count == sizeof(response) && !(reply.msg_flags & (MSG_TRUNC | MSG_CTRUNC));
+    for (c = CMSG_FIRSTHDR(&reply); c; c = CMSG_NXTHDR(&reply, c)) {
+        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS ||
+            c->cmsg_len < CMSG_LEN(0) || (c->cmsg_len - CMSG_LEN(0)) % sizeof(int)) {
+            valid = false; continue;
+        }
+        size_t n = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        for (size_t i = 0; i < n; i++) {
+            int fd; memcpy(&fd, (char *)CMSG_DATA(c) + i * sizeof(int), sizeof(fd));
+            if (!fds++) output = fd; else close(fd);
+        }
+    }
+    valid = valid && fds == 1 && response.version == LATCD_BROKER_LOAD_VERSION &&
+        !response.status && response.purpose == LATCD_BROKER_LOAD_TEST_PURPOSE &&
+        !response.reserved && response.request_id == request_id &&
+        !memcmp(response.source_sha256, source_hash, 32) &&
+        !memcmp(response.config_sha256, config_hash, 32);
+    if (valid && protection->register_locked(output)) valid = false;
+    if (!valid && output >= 0) { close(output); output = -1; }
+    protection->unlock();
+    if (!valid) { errno = EPROTO; goto failed; }
+    struct stat st;
+    int seals = fcntl(output, F_GET_SEALS);
+    if (seals < 0 || (seals & required) != required || fstat(output, &st) ||
+        !S_ISREG(st.st_mode) || (st.st_mode & 0777) != 0500 || st.st_size <= 0 ||
+        (uint64_t)st.st_size != response.module_size || response.module_size > (UINT64_C(1) << 30)) {
+        errno = EPROTO; goto failed;
+    }
+    GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
+    if (!sum) { errno = ENOMEM; goto failed; }
+    unsigned char buffer[65536], digest[32];
+    off_t offset = 0;
+    while (offset < st.st_size) {
+        size_t wanted = MIN(sizeof(buffer), (uint64_t)(st.st_size - offset));
+        ssize_t n = pread(output, buffer, wanted, offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        g_checksum_update(sum, buffer, n); offset += n;
+    }
+    gsize digest_size = sizeof(digest);
+    g_checksum_get_digest(sum, digest, &digest_size);
+    g_checksum_free(sum);
+    if (offset != st.st_size || memcmp(digest, response.module_sha256, 32)) {
+        errno = EPROTO; goto failed;
+    }
+    protection->close_fd(socket_fd);
+    return output;
+failed: {
+    int saved = errno ? errno : EIO;
+    if (output >= 0) protection->close_fd(output);
+    protection->close_fd(socket_fd);
+    errno = saved;
+    return fail(error, error_size, "broker load failed: %s", strerror(saved));
+}
+}
+#endif
 
 static int register_journal(const char *path, int channel, int source, int config,
                               const uint8_t digest[32], uint64_t capacity,

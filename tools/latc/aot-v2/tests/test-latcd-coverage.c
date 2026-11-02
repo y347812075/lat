@@ -450,12 +450,12 @@ static void test_broker_export_request(void)
             struct pollfd event = {.fd = worker.event, .events = POLLIN};
             g_assert_cmpint(poll(&event, 1, 10000), ==, 1);
             LatcdBrokerExportResponse done = {0}; int output = -1;
-            g_assert_cmpint(broker_worker_take(&worker, generation + 1, &done, NULL, &output), ==, -1);
-            g_assert_cmpint(broker_worker_take(&worker, generation, &done, NULL, &output), ==, 0);
+            g_assert_cmpint(broker_worker_take(&worker, generation + 1, &done, NULL, NULL, &output), ==, -1);
+            g_assert_cmpint(broker_worker_take(&worker, generation, &done, NULL, NULL, &output), ==, 0);
             g_assert_cmpint(done.status, ==, 0);
             g_assert_cmpint(done.execution_authorized, ==, 0);
             g_assert_cmpint(output, >=, 0); close(output);
-            g_assert_cmpint(broker_worker_take(&worker, generation, &done, NULL, &output), ==, -1);
+            g_assert_cmpint(broker_worker_take(&worker, generation, &done, NULL, NULL, &output), ==, -1);
             owned = dup(source); g_assert_cmpint(owned, >=, 0);
             g_assert_cmpint(broker_worker_submit(&worker, owned, &request,
                 g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND, &generation), ==, 0);
@@ -479,6 +479,31 @@ static void test_broker_export_request(void)
             g_assert_cmpint(done.status, ==, 0);
             g_assert_cmpint(done.execution_authorized, ==, 0);
             g_assert_cmpint(output, >=, 0); close(output);
+            broker_connection_close(&connection); close(pair[1]);
+            broker_worker_stop(&worker);
+            g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair), ==, 0);
+            g_assert_cmpint(latcd_broker_peer(pair[1], getuid(), &peer_uid, &peer_gid), ==, 0);
+            g_assert_cmpint(broker_worker_start(&worker, &config), ==, 0);
+            g_assert_cmpint(broker_connection_open(&connection, pair[0], getuid(),
+                g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND), ==, 0);
+            LatcdBrokerLoadRequest load = {.version = LATCD_BROKER_LOAD_VERSION,
+                .request_id = 42, .source_size = request.source_size};
+            memcpy(load.source_sha256, request.source_sha256, 32);
+            int load_fds[2] = {source, source};
+            g_assert_cmpint(latcd_broker_send_pair(pair[1], &load, sizeof(load), load_fds), ==, 0);
+            g_assert_cmpint(broker_connection_step(&connection, &worker), ==, 1);
+            event = (struct pollfd) {.fd = worker.event, .events = POLLIN};
+            g_assert_cmpint(poll(&event, 1, 10000), ==, 1);
+            g_assert_cmpint(broker_connection_step(&connection, &worker), ==, 0);
+            LatcdBrokerLoadResponse load_result;
+            output = -1;
+            g_assert_cmpint(latcd_broker_receive(pair[1], peer_uid, peer_gid, &load_result,
+                                                sizeof(load_result), &output), ==, 0);
+            g_assert_cmpuint(load_result.version, ==, LATCD_BROKER_LOAD_VERSION);
+            g_assert_cmpuint(load_result.request_id, ==, 42);
+            g_assert_cmpuint(load_result.status, !=, 0);
+            g_assert_cmpuint(load_result.purpose, ==, 0);
+            g_assert_cmpint(output, ==, -1);
             broker_connection_close(&connection); close(pair[1]);
             broker_worker_stop(&worker);
             g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair), ==, 0);

@@ -4,6 +4,7 @@
 
 #include "latcd-protocol.h"
 #include "lat-aot-v2.h"
+#include "lat-translation-config.h"
 #include "lat-tb-key-set.h"
 #include "cache-lifecycle.h"
 #include "latc-build-id.h"
@@ -4886,9 +4887,11 @@ typedef struct LatcdBrokerWorker {
     LatcdBrokerExportRequest request;
     LatcdBrokerExportResponse response;
     LatcdBrokerJournalRequest journal_request;
+    LatcdBrokerLoadRequest load_request;
+    LatcdBrokerLoadResponse load_response;
     LatcdResponseV2 journal_response;
     uid_t journal_uid;
-    bool journal;
+    bool journal, load;
 } LatcdBrokerWorker;
 
 static void register_journal(const LatcdConfig *, int, int,
@@ -4897,6 +4900,56 @@ static void append_journal(const LatcdConfig *, int, int,
                             const LatcdRequestV2 *, LatcdResponseV2 *);
 static void response_init(LatcdResponseV2 *, uint64_t);
 static int journal_build_id(uint8_t build[32]);
+
+static int broker_load_job(const LatcdConfig *config, int source, int config_fd,
+    const LatcdBrokerLoadRequest *request, int64_t deadline,
+    LatcdBrokerCancelled cancelled, void *opaque, LatcdBrokerLoadResponse *response)
+{
+    *response = (LatcdBrokerLoadResponse) {.version = LATCD_BROKER_LOAD_VERSION,
+        .status = 1, .request_id = request->request_id};
+#ifdef LATCD_GC_TIMER_TEST
+    if (getenv("LATCD_TEST_BROKER_LOAD")) {
+        uint8_t source_hash[32], build[32], bytes[LATCD_JOURNAL_CONFIG_LIMIT], hash[32];
+        struct stat st;
+        int seals = fcntl(config_fd, F_GET_SEALS);
+        int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+        char error[256] = {0};
+        LatTranslationConfig decoded;
+        LatAotExpectedV2 expected = {.available_features = UINT64_MAX};
+        LatAotConfigIdentityV2 identity = {.revision = LAT_AOT_CONFIG_NOTE_REVISION,
+            .schema = LAT_AOT_CONFIG_SCHEMA_V1, .domain = LAT_AOT_CONFIG_DOMAIN_TRANSLATION_V1};
+        if (request->version != LATCD_BROKER_LOAD_VERSION || request->reserved ||
+            latcd_broker_source_validate_bounded(source, request->source_size,
+                config->max_input, request->source_sha256, source_hash, error, sizeof(error),
+                deadline, cancelled, opaque) || journal_build_id(build) || seals < 0 ||
+            (seals & required) != required || fstat(config_fd, &st) || !S_ISREG(st.st_mode) ||
+            st.st_size <= 0 || (uint64_t)st.st_size > sizeof(bytes) ||
+            pread(config_fd, bytes, st.st_size, 0) != st.st_size ||
+            lat_translation_config_decode(bytes, st.st_size, build, &decoded, error, sizeof(error)) ||
+            lat_translation_config_digest(&decoded, hash, error, sizeof(error)) ||
+            memcmp(hash, request->config_sha256, 32)) return -1;
+        memcpy(expected.source_sha256, source_hash, 32);
+        expected_codegen_id(expected.codegen_id);
+        memcpy(identity.digest, hash, 32);
+        LatcdBrokerExportResponse exported = {0};
+        int fd = broker_export_current_config(config, source_hash, error, sizeof(error),
+            deadline, cancelled, opaque, &exported, &expected, &identity);
+        if (fd < 0) return -1;
+        response->status = 0;
+        response->purpose = LATCD_BROKER_LOAD_TEST_PURPOSE;
+        response->module_size = exported.module_size;
+        memcpy(response->source_sha256, source_hash, 32);
+        memcpy(response->config_sha256, hash, 32);
+        memcpy(response->module_sha256, exported.module_sha256, 32);
+        return fd;
+    }
+#else
+    (void)config; (void)source; (void)config_fd; (void)deadline;
+    (void)cancelled; (void)opaque;
+#endif
+    errno = EACCES;
+    return -1;
+}
 
 static bool broker_worker_cancelled(void *opaque)
 {
@@ -4916,15 +4969,20 @@ static void *broker_worker_run(void *opaque)
         int configuration = worker->configuration;
         LatcdBrokerExportRequest request = worker->request;
         LatcdBrokerJournalRequest journal_request = worker->journal_request;
+        LatcdBrokerLoadRequest load_request = worker->load_request;
         uid_t journal_uid = worker->journal_uid;
-        bool journal = worker->journal;
+        bool journal = worker->journal, load = worker->load;
         int64_t deadline = worker->deadline;
         worker->pending = false;
         pthread_mutex_unlock(&worker->lock);
         LatcdBrokerExportResponse response = {0};
         LatcdResponseV2 journal_response = {0};
+        LatcdBrokerLoadResponse load_response = {0};
         int output = -1;
-        if (journal) {
+        if (load) {
+            output = broker_load_job(worker->config, source, configuration, &load_request,
+                                     deadline, broker_worker_cancelled, worker, &load_response);
+        } else if (journal) {
             struct stat source_stat;
             int seals = fcntl(source, F_GET_SEALS);
             int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
@@ -4970,6 +5028,7 @@ static void *broker_worker_run(void *opaque)
         worker->output = output;
         worker->response = response;
         worker->journal_response = journal_response;
+        worker->load_response = load_response;
         worker->complete = true;
         uint64_t one = 1;
         ssize_t ignored = write(worker->event, &one, sizeof(one));
@@ -5004,7 +5063,7 @@ static int G_GNUC_UNUSED broker_worker_submit(LatcdBrokerWorker *worker, int sou
     worker->occupied = worker->pending = true;
     *generation = ++worker->generation;
     worker->source = source; worker->request = *request; worker->deadline = deadline;
-    worker->journal = false;
+    worker->journal = worker->load = false;
     pthread_cond_signal(&worker->ready);
     pthread_mutex_unlock(&worker->lock);
     return 0;
@@ -5019,6 +5078,7 @@ static int G_GNUC_UNUSED broker_worker_submit_journal(LatcdBrokerWorker *worker,
         pthread_mutex_unlock(&worker->lock); errno = EBUSY; return -1;
     }
     worker->occupied = worker->pending = worker->journal = true;
+    worker->load = false;
     *generation = ++worker->generation;
     worker->source = fds[0]; worker->configuration = fds[1];
     worker->journal_request = *request; worker->journal_uid = uid; worker->deadline = deadline;
@@ -5027,16 +5087,36 @@ static int G_GNUC_UNUSED broker_worker_submit_journal(LatcdBrokerWorker *worker,
     return 0;
 }
 
+static int broker_worker_submit_load(LatcdBrokerWorker *worker, int fds[2],
+    const LatcdBrokerLoadRequest *request, int64_t deadline, uint64_t *generation)
+{
+    pthread_mutex_lock(&worker->lock);
+    if (fds[0] < 0 || fds[1] < 0 || worker->generation == UINT64_MAX ||
+        worker->occupied || atomic_load(&worker->stopping)) {
+        pthread_mutex_unlock(&worker->lock); errno = EBUSY; return -1;
+    }
+    worker->occupied = worker->pending = worker->load = true;
+    worker->journal = false;
+    *generation = ++worker->generation;
+    worker->source = fds[0]; worker->configuration = fds[1];
+    worker->load_request = *request; worker->deadline = deadline;
+    pthread_cond_signal(&worker->ready);
+    pthread_mutex_unlock(&worker->lock);
+    return 0;
+}
+
 static int G_GNUC_UNUSED broker_worker_take(LatcdBrokerWorker *worker,
                                              uint64_t generation,
                                              LatcdBrokerExportResponse *response,
-                                             LatcdResponseV2 *journal_response, int *output)
+                                             LatcdResponseV2 *journal_response,
+                                             LatcdBrokerLoadResponse *load_response, int *output)
 {
     pthread_mutex_lock(&worker->lock);
     if (!worker->complete) { pthread_mutex_unlock(&worker->lock); errno = EAGAIN; return -1; }
     if (worker->generation != generation) { pthread_mutex_unlock(&worker->lock); errno = ESTALE; return -1; }
     *response = worker->response; *output = worker->output;
     if (journal_response) *journal_response = worker->journal_response;
+    if (load_response) *load_response = worker->load_response;
     worker->output = -1; worker->complete = worker->occupied = false;
     uint64_t count;
     ssize_t ignored = read(worker->event, &count, sizeof(count));
@@ -5066,7 +5146,8 @@ typedef struct LatcdBrokerConnection {
     uint64_t generation;
     LatcdBrokerExportResponse response;
     LatcdResponseV2 journal_response;
-    bool journal;
+    bool journal, load;
+    LatcdBrokerLoadResponse load_response;
 } LatcdBrokerConnection;
 
 static int G_GNUC_UNUSED broker_connection_open(LatcdBrokerConnection *connection,
@@ -5093,7 +5174,17 @@ static int G_GNUC_UNUSED broker_connection_step(LatcdBrokerConnection *connectio
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 1;
             return -1;
         }
-        if (length == sizeof(LatcdBrokerJournalRequest)) {
+        if (length == sizeof(LatcdBrokerLoadRequest)) {
+            LatcdBrokerLoadRequest request;
+            int fds[2] = {-1, -1};
+            if (latcd_broker_receive_pair(connection->fd, connection->uid, connection->gid,
+                                          &request, sizeof(request), fds)) return -1;
+            if (broker_worker_submit_load(worker, fds, &request, connection->deadline,
+                                          &connection->generation)) {
+                close(fds[0]); close(fds[1]); return -1;
+            }
+            connection->load = connection->submitted = true;
+        } else if (length == sizeof(LatcdBrokerJournalRequest)) {
 #if !defined(LATCD_GC_TIMER_TEST) && !defined(LATCD_JOURNAL_SNAPSHOT_TEST)
             errno = EOPNOTSUPP;
             return -1;
@@ -5134,15 +5225,18 @@ static int G_GNUC_UNUSED broker_connection_step(LatcdBrokerConnection *connectio
     if (!connection->response_ready) {
         if (broker_worker_take(worker, connection->generation,
                                &connection->response, &connection->journal_response,
+                               &connection->load_response,
                                &connection->output)) {
             if (errno == EAGAIN) return 1;
             return -1;
         }
         connection->response_ready = true;
     }
-    const void *response = connection->journal ? (const void *)&connection->journal_response :
+    const void *response = connection->load ? (const void *)&connection->load_response :
+                           connection->journal ? (const void *)&connection->journal_response :
                                                   (const void *)&connection->response;
-    size_t response_size = connection->journal ? sizeof(connection->journal_response) :
+    size_t response_size = connection->load ? sizeof(connection->load_response) :
+                           connection->journal ? sizeof(connection->journal_response) :
                                                  sizeof(connection->response);
     if (latcd_broker_send(connection->fd, response, response_size, connection->output)) {
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 1;
@@ -5165,7 +5259,7 @@ static int G_GNUC_UNUSED broker_connection_reap(LatcdBrokerConnection *connectio
     if (!connection->submitted || connection->response_ready) return 0;
     LatcdBrokerExportResponse discarded;
     int output = -1;
-    if (broker_worker_take(worker, connection->generation, &discarded, NULL, &output)) {
+    if (broker_worker_take(worker, connection->generation, &discarded, NULL, NULL, &output)) {
         if (errno == EAGAIN) return 1;
         return -1;
     }

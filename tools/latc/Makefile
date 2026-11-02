@@ -914,7 +914,7 @@ $(BUILD)/tests/test-aot-recover-tu: tests/test-aot-recover-tu.c \
 $(BUILD)/tests/test-latcd-client: aot-v2/tests/test-latcd-client.c \
 		aot-v2/runtime/latcd-client.c $(BUILD)/latcd/protocol.o
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DLATCD_BROKER_LOAD_TEST_CLIENT -o $@ $^ $(LDLIBS)
 
 $(BUILD)/tests/test-precompile: tests/test-precompile.c \
 		$(BUILD)/latcd/precompile.o $(BUILD)/latcd/protocol.o

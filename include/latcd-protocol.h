@@ -12,6 +12,29 @@
 #define LATCD_RESPONSE_MESSAGE_SIZE 192u
 
 #define LATCD_BROKER_JOURNAL_VERSION 1u
+#define LATCD_BROKER_LOAD_VERSION 1u
+#define LATCD_BROKER_LOAD_TEST_PURPOSE 1u
+typedef struct LatcdBrokerLoadRequest {
+    uint32_t version;
+    uint32_t reserved;
+    uint64_t request_id;
+    uint64_t source_size;
+    uint8_t source_sha256[32];
+    uint8_t config_sha256[32];
+} LatcdBrokerLoadRequest;
+
+typedef struct LatcdBrokerLoadResponse {
+    uint32_t version;
+    uint32_t status;
+    uint32_t purpose;
+    uint32_t reserved;
+    uint64_t request_id;
+    uint64_t module_size;
+    uint8_t source_sha256[32];
+    uint8_t config_sha256[32];
+    uint8_t module_sha256[32];
+} LatcdBrokerLoadResponse;
+
 typedef struct LatcdBrokerJournalRequest {
     uint32_t version;
     uint32_t operation;

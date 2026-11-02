@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <glib.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +34,72 @@ static int fd_count(void)
     }
     closedir(directory);
     return count;
+}
+
+static void test_lock(void) { }
+static int test_register(int fd) { return fd < 0 ? -1 : 0; }
+static void test_close(int fd) { close(fd); }
+
+static int test_broker_load(int server, const char *path)
+{
+    int input = memfd_create("load-input", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    int module = memfd_create("load-module", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    int seals = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    if (input < 0 || module < 0 || write(input, "x", 1) != 1 ||
+        write(module, "module", 6) != 6 || fchmod(module, 0500) ||
+        fcntl(input, F_ADD_SEALS, seals) || fcntl(module, F_ADD_SEALS, seals))
+        return fail("load fixture");
+    for (unsigned variant = 0; variant < 4; variant++) {
+        pid_t child = fork();
+        if (child < 0) return fail("fork load client");
+        if (!child) {
+            uint8_t source_hash[32] = {7}, config_hash[32] = {8};
+            LatcdClientFdProtection protection = {test_lock, test_lock, test_register, test_close};
+            char error[256];
+            int before = fd_count();
+            int fd = latcd_client_broker_load_test(path, geteuid(), input, input, 1,
+                source_hash, config_hash, 71, &protection, error, sizeof(error));
+            if (fd >= 0) close(fd);
+            _exit(fd_count() != before || (variant == 0 ? fd < 0 : fd >= 0));
+        }
+        int client = accept4(server, NULL, NULL, SOCK_CLOEXEC);
+        LatcdBrokerLoadRequest request;
+        union { struct cmsghdr align; char bytes[CMSG_SPACE(2 * sizeof(int))]; } control = {0};
+        struct iovec iov = {.iov_base = &request, .iov_len = sizeof(request)};
+        struct msghdr msg = {.msg_iov = &iov, .msg_iovlen = 1,
+            .msg_control = control.bytes, .msg_controllen = sizeof(control.bytes)};
+        if (client < 0 || recvmsg(client, &msg, MSG_CMSG_CLOEXEC) != sizeof(request))
+            return fail("load request");
+        struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+        if (!c || c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS ||
+            c->cmsg_len != CMSG_LEN(2 * sizeof(int)) || request.request_id != 71)
+            return fail("load request identity");
+        int received[2]; memcpy(received, CMSG_DATA(c), sizeof(received));
+        close(received[0]); close(received[1]);
+        LatcdBrokerLoadResponse response = {.version = LATCD_BROKER_LOAD_VERSION,
+            .purpose = LATCD_BROKER_LOAD_TEST_PURPOSE, .request_id = 71,
+            .module_size = 6, .source_sha256 = {7}, .config_sha256 = {8}};
+        GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
+        g_checksum_update(sum, (const guchar *)"module", 6);
+        gsize size = 32; g_checksum_get_digest(sum, response.module_sha256, &size);
+        g_checksum_free(sum);
+        if (variant == 1) response.purpose = 0;
+        if (variant == 2) response.module_sha256[0] ^= 1;
+        if (variant == 3) response.config_sha256[0] ^= 1;
+        iov = (struct iovec) {.iov_base = &response, .iov_len = sizeof(response)};
+        memset(&control, 0, sizeof(control));
+        msg = (struct msghdr) {.msg_iov = &iov, .msg_iovlen = 1,
+            .msg_control = control.bytes, .msg_controllen = CMSG_SPACE(sizeof(int))};
+        c = CMSG_FIRSTHDR(&msg); c->cmsg_level = SOL_SOCKET; c->cmsg_type = SCM_RIGHTS;
+        c->cmsg_len = CMSG_LEN(sizeof(int)); memcpy(CMSG_DATA(c), &module, sizeof(module));
+        if (sendmsg(client, &msg, MSG_NOSIGNAL) != sizeof(response)) return fail("load response");
+        close(client);
+        int status;
+        if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status))
+            return fail("load validation");
+    }
+    close(input); close(module);
+    return 0;
 }
 
 static int test_broker_journal(int server, const char *path)
@@ -551,7 +618,7 @@ int main(void)
             return fail("handshake identity validation failed");
     }
     if (test_channel(server, path, source)) return 1;
-    if (test_broker_journal(server, path)) return 1;
+    if (test_broker_journal(server, path) || test_broker_load(server, path)) return 1;
     if (test_registration(server, path, source, directory)) return 1;
     if (test_concurrent_registration(server, path, source)) return 1;
     close(source);

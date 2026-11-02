@@ -27,6 +27,15 @@ typedef struct LatcdClientFdProtection {
     int (*register_locked)(int fd);
     void (*close_fd)(int fd);
 } LatcdClientFdProtection;
+#ifdef LATCD_BROKER_LOAD_TEST_CLIENT
+/* TEST purpose is for isolated test binaries only, never production authority.
+ * On success the returned descriptor is registered with protection. */
+int latcd_client_broker_load_test(const char *path, uid_t service_uid,
+    int source_fd, int config_fd, uint64_t source_size,
+    const uint8_t source_sha256[32], const uint8_t config_sha256[32],
+    uint64_t request_id, const LatcdClientFdProtection *protection,
+    char *error, size_t error_size);
+#endif
 /* service_uid must come from trusted policy; success does not authorize code. */
 int latcd_client_broker_journal(const char *path, uid_t service_uid,
     int source_fd, int config_fd, const uint8_t source_sha256[32],
