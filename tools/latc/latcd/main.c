@@ -3102,6 +3102,32 @@ static int managed_output_open_pair(int workspace, uint64_t reservation,
     return 0;
 }
 
+static int managed_output_copy(int temporary, int input, off_t size)
+{
+    int output = openat(temporary, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
+    char bytes[65536];
+    off_t offset = 0;
+    while (output >= 0 && offset < size) {
+        size_t wanted = MIN((uint64_t)sizeof(bytes), (uint64_t)(size - offset));
+        ssize_t n = pread(input, bytes, wanted, offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        ssize_t done = 0;
+        while (done < n) {
+            ssize_t w = write(output, bytes + done, n - done);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) goto failed;
+            done += w;
+        }
+        offset += n;
+    }
+    if (output >= 0 && offset == size && !fsync(output)) return output;
+failed:
+    if (output >= 0) close(output);
+    errno = EIO;
+    return -1;
+}
+
 static bool managed_replay_sandbox_ready(const LatcdConfig *config)
 {
     return config->worker_bootstrap && config->worker_real_compile;
@@ -3735,15 +3761,22 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (replay && real_managed_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&
         !WEXITSTATUS(status) && domain.state == LATCD_MANAGED_DOMAIN_EMPTY) {
         int image = openat(workspace, "output.native", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        char *parent = g_path_get_dirname(output_native);
+        int temporary = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int copy = -1;
         struct stat st;
-        if (image < 0 || fstat(image, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+        if (temporary < 0 || image < 0 || fstat(image, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
             st.st_size <= 0 || st.st_size > 64 * 1024 * 1024 ||
             (uint64_t)st.st_size > *transient_reservation ||
-            lat_replay_native_validate_incremental_fd(image, input_copies[2], input_copies[1],
+            (copy = managed_output_copy(temporary, image, st.st_size)) < 0 ||
+            lat_replay_native_validate_incremental_fd(copy, input_copies[2], input_copies[1],
                 journal_input ? input_copies[3] : -1, digest, error, error_size)) {
             waited = -1;
             errno = EINVAL;
         }
+        if (copy >= 0) close(copy);
+        if (temporary >= 0) close(temporary);
+        g_free(parent);
         if (image >= 0) close(image);
     }
     if (!replay && real_managed_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&
@@ -3764,27 +3797,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         if (waited == child && managed_output_open_pair(workspace, *transient_reservation,
                                                         files, sizes)) waited = -1;
         for (unsigned i = 0; waited == child && i < 2; i++) {
-            int out = openat(temporary, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
-            outputs[i] = out;
-            char bytes[65536];
-            off_t offset = 0;
-            bool copied = out >= 0;
-            while (copied && offset < sizes[i]) {
-                size_t wanted = MIN((uint64_t)sizeof(bytes), (uint64_t)(sizes[i] - offset));
-                ssize_t n = pread(files[i], bytes, wanted, offset);
-                if (n < 0 && errno == EINTR) continue;
-                if (n <= 0) { copied = false; break; }
-                ssize_t done = 0;
-                while (done < n) {
-                    ssize_t w = write(out, bytes + done, n - done);
-                    if (w < 0 && errno == EINTR) continue;
-                    if (w <= 0) { copied = false; break; }
-                    done += w;
-                }
-                offset += n;
-            }
-            if (copied && fsync(out)) copied = false;
-            if (!copied) { waited = -1; errno = EIO; break; }
+            outputs[i] = managed_output_copy(temporary, files[i], sizes[i]);
+            if (outputs[i] < 0) waited = -1;
         }
         for (unsigned i = 0; i < 2; i++) if (files[i] >= 0) close(files[i]);
         if (waited == child && latcd_managed_outputs_prepare(config->cache_dir, task_id,
@@ -8840,6 +8854,9 @@ static int test_managed_compiler_run(const char *root, const char *delegation)
     config.worker_bwrap = getenv("LATCD_TEST_BWRAP");
     config.worker_toolroot = getenv("LATCD_TEST_TOOLROOT");
     config.worker_real_compile = getenv("LATCD_TEST_REAL_COMPILE") != NULL;
+    const char *closure = getenv("LATCD_TEST_WORKER_CLOSURE");
+    if (closure && latcd_worker_closure_load(closure, LATC_BUILD_ID, FALSE,
+                                             &worker_closure)) return 1;
     const char *test_config = getenv("LATCD_TEST_REPLAY_CONFIG");
     if (test_config) {
         config.compiler = getenv("LATCD_TEST_COMPILER");
