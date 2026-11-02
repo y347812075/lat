@@ -36,6 +36,30 @@ setpriv --no-new-privs --reuid=1235 --regid=1235 --clear-groups \
 [ "$status" -eq 42 ] || { cat "$work/run.err" >&2; exit 1; }
 set -- "$work"/cache/.journals/*
 [ "$#" -eq 1 ] && [ -f "$1/registration" ] && [ -f "$1/source" ] && [ -f "$1/keys" ]
+test -S "$work/admin/admin.sock"
+setpriv --no-new-privs --reuid=1235 --regid=1235 --clear-groups \
+    python3 - "$work/cache" "$work/admin/admin.sock" "$1/registration" <<'PY'
+import errno
+import os
+import sys
+
+cache, admin, registration = sys.argv[1:]
+checks = (
+    lambda: os.listdir(cache),
+    lambda: os.stat(admin),
+    lambda: os.open(registration, os.O_RDONLY),
+    lambda: os.open(os.path.join(cache, 'client-probe'), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
+)
+for check in checks:
+    try:
+        result = check()
+    except OSError as error:
+        assert error.errno == errno.EACCES, error
+    else:
+        if isinstance(result, int):
+            os.close(result)
+        raise AssertionError('client unexpectedly accessed private service state')
+PY
 python3 - "$1/keys" <<'PY'
 import struct
 import sys
