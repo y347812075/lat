@@ -916,6 +916,27 @@ $(BUILD)/tests/test-latcd-client: aot-v2/tests/test-latcd-client.c \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DLATCD_BROKER_LOAD_TEST_CLIENT -o $@ $^ $(LDLIBS)
 
+$(BUILD)/tests/test-broker-load-consumer: tests/test-broker-load-consumer.c \
+		aot-v2/runtime/latcd-client.c $(BUILD)/latcd/protocol.o \
+		$(BUILD)/aot-v2/common/translation-config.o \
+		$(BUILD)/aot-v2/runtime/module-loader.o $(BUILD)/aot-v2/runtime/cache-lifecycle.o \
+		$(BUILD)/aot-v2/runtime/internal-fd-registry.o $(BUILD)/aot-v2/runtime/elf-validate.o \
+		$(BUILD)/aot-v2/runtime/registry.o $(BUILD)/aot-v2/liblat-aot-runtime.so.2
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DLATCD_BROKER_LOAD_TEST_CLIENT -o $@ \
+	  $(filter %.c %.o,$^) -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
+	  -l:liblat-aot-runtime.so.2 $(LDLIBS) -ldl -pthread
+
+.PHONY: test-broker-load-integration
+test-broker-load-integration: $(BUILD)/tests/test-broker-load-consumer $(BUILD)/tests/latcd-gc-timer \
+		$(BUILD)/tests/test-cache-retirement $(BUILD)/tests/gc-timer-runtime/liblat-aot-runtime.so.2 \
+		$(BUILD)/aot-v2/fixture-config.so
+	@test -n "$(GC_INSTALL_PREFIX)" -a -n "$(GC_X86_GUEST)"
+	LD_LIBRARY_PATH="$(GC_INSTALL_PREFIX)/lib" sh tests/test-broker-load-integration.sh \
+	  "$(abspath $(BUILD)/tests/latcd-gc-timer)" "$(abspath $(BUILD)/tests/test-cache-retirement)" \
+	  "$(abspath $(BUILD)/tests/gc-timer-runtime)" "$(GC_INSTALL_PREFIX)/bin/latx-x86_64" \
+	  "$(GC_X86_GUEST)" "$(abspath $(BUILD)/tests/test-broker-load-consumer)"
+
 $(BUILD)/tests/test-precompile: tests/test-precompile.c \
 		$(BUILD)/latcd/precompile.o $(BUILD)/latcd/protocol.o
 	@mkdir -p $(dir $@)
