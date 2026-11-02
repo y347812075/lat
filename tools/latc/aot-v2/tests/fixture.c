@@ -69,10 +69,14 @@ static const LatAotElfNoteFixtureV2 fixture_note = {
 #endif
 };
 
+#ifndef LAT_AOT_FIXTURE_GUEST_RVA
+#define LAT_AOT_FIXTURE_GUEST_RVA 0x1000
+#endif
+
 __attribute__((section(".rodata.lat.map"), used))
 static const LatAotPcMapV2 fixture_pc_maps[] = {
     {
-        .guest_rva = 0x1000,
+        .guest_rva = LAT_AOT_FIXTURE_GUEST_RVA,
         .host_offset_begin = 0,
         .host_offset_end = LAT_AOT_FIXTURE_BAD_PC_MAP ? 0 : 28,
         .state_record_offset = LAT_AOT_FIXTURE_STACK_DELTA ?
@@ -86,7 +90,7 @@ static const LatAotPcMapV2 fixture_pc_maps[] = {
 __attribute__((section(".rodata.lat.tb"), used))
 static const LatAotTbV2 fixture_tbs[] = {
     {
-        .guest_rva = 0x1000,
+        .guest_rva = LAT_AOT_FIXTURE_GUEST_RVA,
         .host_offset = 0,
         .host_size = 28,
         .flags = LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL,

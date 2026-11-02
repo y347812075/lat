@@ -1085,6 +1085,19 @@ $(BUILD)/aot-v2/fixture-config.so $(BUILD)/aot-v2/fixture-config-bad.so: aot-v2/
 	  -l:liblat-aot-runtime.so.2 -o $@ aot-v2/tests/fixture.c aot-v2/tests/fixture-entry.S
 	chmod go-w $@
 
+$(BUILD)/aot-v2/fixture-config-runner.so: aot-v2/tests/fixture.c \
+		aot-v2/tests/fixture-entry.S aot-v2/tests/module.map \
+		$(BUILD)/aot-v2/liblat-aot-runtime.so.2
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -O2 -fPIC -shared -nostdlib -DLAT_AOT_FIXTURE_CONFIG=1 \
+	  -DLAT_AOT_FIXTURE_GUEST_RVA=0x1020 \
+	  -Wl,-z,defs -Wl,-z,now -Wl,-z,relro -Wl,--unique=.text.lat.tu \
+	  -Wl,--unique=.rodata.lat.tb -Wl,--unique=.rodata.lat.map \
+	  -Wl,--unique=.data.rel.ro.lat.module -Wl,--version-script=aot-v2/tests/module.map \
+	  -Wl,--build-id=sha1 -L$(BUILD)/aot-v2 -Wl,--no-as-needed \
+	  -l:liblat-aot-runtime.so.2 -o $@ aot-v2/tests/fixture.c aot-v2/tests/fixture-entry.S
+	chmod go-w $@
+
 $(BUILD)/tests/test-aot-v2-loader: aot-v2/tests/test-loader.c \
 		$(BUILD)/aot-v2/runtime/module-loader.o \
 		$(BUILD)/aot-v2/runtime/cache-lifecycle.o \
