@@ -30,6 +30,11 @@ if [ "$config_replay" -eq 1 ] && { [ "$module" -eq 1 ] ||
     exit 2
 fi
 
+if [ "$config_replay" -eq 1 ]; then
+    # Replay consumes an explicit runtime key set, not static discovery input.
+    export LATC_TBSET_SELECTION=exact
+    unset LATC_AOT_ALLOW_ZERO_EFLAGS_STUB
+fi
 unset LATC_NATIVE_STATIC_CHECK
 if [ "$module" -eq 1 ] && [ -z "${LATC_TBSET_SELECTION+x}" ]; then
     export LATC_TBSET_SELECTION=bounded

@@ -111,6 +111,12 @@ def main():
     run([native_script, '--config-replay', latc, runner, guest, isolated, keys],
         {'LATX_CVT_OPT': '1', 'LATC_TRANSLATION_CONFIG_FROM': str(work / 'config-0')})
     assert content(isolated) == content(work / '0-True.native')
+    polluted = work / 'polluted.native'
+    run([native_script, '--config-replay', latc, runner, guest, polluted, keys],
+        {'LATX_CVT_OPT': '1', 'LATC_TRANSLATION_CONFIG_FROM': str(work / 'config-0'),
+         'LATC_TBSET_SELECTION': 'exact-static',
+         'LATC_NATIVE_STATIC_CHECK': '1', 'LATC_AOT_ALLOW_ZERO_EFLAGS_STUB': '1'})
+    assert polluted.read_bytes() == isolated.read_bytes()
     cli_isolated = work / 'cli-isolated.native'
     run([latc, 'compile-replay-native', guest, '-o', cli_isolated,
          '--runner', runner, '--tbset', keys, '--config', work / 'config-0'],
