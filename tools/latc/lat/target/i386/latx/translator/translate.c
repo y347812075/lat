@@ -4470,7 +4470,7 @@ void tr_gen_call_to_helper(ADDR func_addr, enum aot_rel_kind REL_KIND)
 {
     IR2_OPND func_addr_opnd = ra_alloc_dbt_arg2();
     TranslationBlock *tb __attribute__((unused)) = NULL;
-    if (option_aot) {
+    if (latx_translation_legacy_aot()) {
         tb = (TranslationBlock *)lsenv->tr_data->curr_tb;
     }
     aot_load_host_addr(func_addr_opnd, (ADDR)func_addr, REL_KIND, 0);
@@ -4533,7 +4533,7 @@ static void tr_gen_call_to_helper_epilogue(int use_fp)
     if (use_fp) {
         IR2_OPND func_addr_opnd = ra_alloc_dbt_arg2();
         TranslationBlock *tb __attribute__((unused)) = NULL;
-        if (option_aot) {
+        if (latx_translation_legacy_aot()) {
             tb = (TranslationBlock *)lsenv->tr_data->curr_tb;
         }
         aot_load_host_addr(func_addr_opnd, (ADDR)convert_fpregs_x80_to_64,
@@ -4553,7 +4553,7 @@ void tr_gen_call_to_helper1(ADDR func, int use_fp, enum aot_rel_kind REL_KIND)
 {
     /* aot relocation requires the tb struct */
     TranslationBlock *tb __attribute__((unused)) = NULL;
-    if (option_aot) {
+    if (latx_translation_legacy_aot()) {
         tb = (TranslationBlock *)lsenv->tr_data->curr_tb;
     }
 
@@ -4575,7 +4575,7 @@ void tr_gen_call_to_helper2(ADDR func, IR2_OPND mem_opnd, int use_fp,
 {
     /* aot relocation requires the tb struct */
     TranslationBlock *tb __attribute__((unused)) = NULL;
-    if (option_aot) {
+    if (latx_translation_legacy_aot()) {
         tb = (TranslationBlock *)lsenv->tr_data->curr_tb;
     }
 
@@ -4599,7 +4599,7 @@ void tr_gen_call_to_helper_xgetbv(void)
 {
     /* aot relocation requires the tb struct */
     TranslationBlock *tb __attribute__((unused)) = NULL;
-    if (option_aot) {
+    if (latx_translation_legacy_aot()) {
         tb = (TranslationBlock *)lsenv->tr_data->curr_tb;
     }
 
@@ -4672,7 +4672,7 @@ void gen_test_page_flag(IR2_OPND mem_opnd, int mem_imm, uint32_t flag,
 #endif
     }
     TranslationBlock *tb __attribute__((unused)) = NULL;
-    if (option_aot) {
+    if (latx_translation_legacy_aot()) {
         tb = (TranslationBlock *)lsenv->tr_data->curr_tb;
     }
 
@@ -4832,7 +4832,7 @@ void tr_gen_call_to_helper_vfll(ADDR func, IR2_OPND arg1, IR2_OPND arg2,
 {
     /* aot relocation requires the tb struct */
     TranslationBlock *tb __attribute__((unused)) = NULL;
-    if (option_aot) {
+    if (latx_translation_legacy_aot()) {
         tb = (TranslationBlock *)lsenv->tr_data->curr_tb;
     }
     helper_save_reg(arg1);
@@ -4936,7 +4936,7 @@ void tr_gen_call_to_helper_pclmulqdq(ADDR func, int  d, int s1, int s2, int ctrl
 {
     /* aot relocation requires the tb struct */
     TranslationBlock *tb __attribute__((unused)) = NULL;
-    if (option_aot) {
+    if (latx_translation_legacy_aot()) {
         tb = (TranslationBlock *)lsenv->tr_data->curr_tb;
     }
 
@@ -5025,7 +5025,7 @@ IR2_OPND tr_lat_spin_lock(IR2_OPND mem_addr, int imm)
     la_slli_w(lat_lock_val, lat_lock_val, 6);
 
     TranslationBlock *tb __attribute__((unused)) = NULL;
-    if (option_aot) {
+    if (latx_translation_legacy_aot()) {
         tb = (TranslationBlock *)lsenv->tr_data->curr_tb;
     }
     aot_load_host_addr(lat_lock_addr, (ADDR)lat_lock,

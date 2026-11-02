@@ -85,6 +85,7 @@ def main():
             assert 'option_cvt_opt' not in source.read_text(), source
     for source in (root / 'target/i386/latx/translator').rglob('*.c'):
         text = source.read_text()
+        assert not re.search(r'\boption_aot\b', text), source
         for option in ('option_set_rounding_opt', 'option_vpaes', 'option_fast_atomic',
                        'option_enable_lasx', 'option_fputag', 'option_save_xmm',
                        'option_enable_fcsr_exc', 'option_lative',

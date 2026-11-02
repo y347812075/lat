@@ -162,7 +162,7 @@ static void generate_pf(IR2_OPND dest, IR2_OPND src0, IR2_OPND src1)
     IR2_OPND low_byte = ra_alloc_itemp();
 
     TranslationBlock *tb __attribute__((unused)) = NULL;
-    if (option_aot) {
+    if (latx_translation_legacy_aot()) {
         tb = (TranslationBlock *)lsenv->tr_data->curr_tb;
     }
     aot_load_host_addr(pf_opnd, (ADDR)pf_table, LOAD_HOST_PFTABLE, 0);
