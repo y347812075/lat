@@ -380,12 +380,13 @@ int lat_aot_v2_module_validate_config_replacement_file(
 static int module_missing_tbset_file(
     const char *path, const char *tbset_path, LatAotModuleInfoV2 *info,
     LatTbKeySet *missing, size_t *requested_count,
+    const LatAotExpectedV2 *expected, const LatAotConfigIdentityV2 *config,
     char *error, size_t error_size)
 {
     memset(missing, 0, sizeof(*missing));
     LatTbKeySet tbset = {0};
     ModuleTbView actual;
-    if (module_tb_view_open(path, info, &actual, NULL, NULL, error, error_size)) {
+    if (module_tb_view_open(path, info, &actual, expected, config, error, error_size)) {
         return -1;
     }
     if (lat_tb_key_set_read_file(tbset_path, info->note.source_sha256,
@@ -429,18 +430,19 @@ int lat_aot_v2_module_missing_tbset_file(
         return fail(error, error_size,
                     "invalid missing module TB set arguments");
     }
-    return module_missing_tbset_file(path, tbset_path, info, missing, NULL,
+    return module_missing_tbset_file(path, tbset_path, info, missing, NULL, NULL, NULL,
                                      error, error_size);
 }
 
-int lat_aot_v2_module_inspect_and_validate_tbset_file(
+static int module_validate_tbset(
     const char *path, const char *tbset_path, LatAotModuleInfoV2 *info,
+    const LatAotExpectedV2 *expected, const LatAotConfigIdentityV2 *config,
     char *error, size_t error_size)
 {
     LatTbKeySet missing = {0};
     size_t requested = 0;
     if (module_missing_tbset_file(path, tbset_path, info, &missing,
-                                  &requested, error, error_size)) {
+                                  &requested, expected, config, error, error_size)) {
         return -1;
     }
     int result = 0;
@@ -453,4 +455,21 @@ int lat_aot_v2_module_inspect_and_validate_tbset_file(
     }
     lat_tb_key_set_destroy(&missing);
     return result;
+}
+
+int lat_aot_v2_module_inspect_and_validate_tbset_file(
+    const char *path, const char *tbset_path, LatAotModuleInfoV2 *info,
+    char *error, size_t error_size)
+{
+    return module_validate_tbset(path, tbset_path, info, NULL, NULL, error, error_size);
+}
+
+int lat_aot_v2_module_validate_config_tbset_file(
+    const char *path, const char *tbset_path, LatAotModuleInfoV2 *info,
+    const LatAotExpectedV2 *expected, const LatAotConfigIdentityV2 *config,
+    char *error, size_t error_size)
+{
+    if (!path || !tbset_path || !info || !expected || !config)
+        return fail(error, error_size, "missing configuration coverage identity");
+    return module_validate_tbset(path, tbset_path, info, expected, config, error, error_size);
 }

@@ -418,6 +418,27 @@ int main(int argc, char **argv)
     memset(config.digest, 0x44, sizeof(config.digest));
     set_config_note(old, &config);
     set_config_note(next, &config);
+    char *config_tbset = g_build_filename(directory, "config.tbset", NULL);
+    LatTbKey requested_keys[] = {{.guest_rva = 0x100, .flags = 3},
+                                 {.guest_rva = 0x300, .flags = 3}};
+    LatTbKeySet requested = {.keys = requested_keys, .count = 2};
+    memset(requested.source_sha256, 0x11, 32);
+    int config_fd = g_open(config_tbset, O_RDWR | O_CREAT | O_EXCL, 0600);
+    g_assert_cmpint(config_fd, >=, 0);
+    g_assert_cmpint(lat_tb_key_set_write_fd(config_fd, &requested, error, sizeof(error)), ==, 0);
+    close(config_fd);
+    LatAotModuleInfoV2 config_info;
+    g_assert_cmpint(lat_aot_v2_module_validate_config_tbset_file(
+        next, config_tbset, &config_info, &expected, &config, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(lat_aot_v2_module_validate_config_tbset_file(
+        old, config_tbset, &config_info, &expected, &config, error, sizeof(error)), ==, -1);
+    g_assert_nonnull(strstr(error, "TB set is not fully covered"));
+    config.digest[0] ^= 1;
+    g_assert_cmpint(lat_aot_v2_module_validate_config_tbset_file(
+        next, config_tbset, &config_info, &expected, &config, error, sizeof(error)), ==, -1);
+    config.digest[0] ^= 1;
+    g_unlink(config_tbset);
+    g_free(config_tbset);
     if (lat_aot_v2_module_validate_config_replacement_file(
             old, next, &expected, &config, error, sizeof(error)))
         g_printerr("config coverage: %s\n", error);
