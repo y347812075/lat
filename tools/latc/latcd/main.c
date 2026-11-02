@@ -3758,14 +3758,24 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         waited = -1;
         errno = ESTALE;
     }
+    bool replay_extra_output = false;
     if (replay && real_managed_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&
         !WEXITSTATUS(status) && domain.state == LATCD_MANAGED_DOMAIN_EMPTY) {
+#ifdef LATCD_GC_TIMER_TEST
+        if (getenv("LATCD_TEST_REPLAY_EXTRA_MODULE")) {
+            int extra = openat(workspace, "output.so", O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+            if (extra < 0) abort();
+            close(extra);
+        }
+#endif
         int image = openat(workspace, "output.native", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
         char *parent = g_path_get_dirname(output_native);
         int temporary = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         int copy = -1;
-        struct stat st;
-        if (temporary < 0 || image < 0 || fstat(image, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+        struct stat st, extra;
+        bool no_module = fstatat(workspace, "output.so", &extra, AT_SYMLINK_NOFOLLOW) && errno == ENOENT;
+        replay_extra_output = !no_module;
+        if (!no_module || temporary < 0 || image < 0 || fstat(image, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
             st.st_size <= 0 || st.st_size > 64 * 1024 * 1024 ||
             (uint64_t)st.st_size > *transient_reservation ||
             (copy = managed_output_copy(temporary, image, st.st_size)) < 0 ||
@@ -3870,6 +3880,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     g_free(trusted_digest);
     g_free(closure_environment);
     g_free(selection_environment);
+    if (waited < 0 && replay_extra_output)
+        return fail(error, error_size, "unexpected replay module output");
     if (waited < 0) {
         return fail(error, error_size, "cannot wait for compiler: %s",
                     strerror(errno));

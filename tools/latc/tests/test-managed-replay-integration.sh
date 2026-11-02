@@ -19,6 +19,18 @@ export LATCD_TEST_REPLAY_CONFIG="$root/.tmp/config"
 export LATCD_TEST_INPUT_TBSET="$root/.tmp/tbset"
 export LATCD_TEST_COMPILER="$prefix/bin/latc" LATCD_TEST_RUNNER="$prefix/bin/latx-x86_64"
 export LATCD_TEST_RUNTIME_DIR="$prefix/lib" LATCD_TEST_REAL_COMPILE=1
+if [ "${LATCD_TEST_REPLAY_EXTRA_MODULE:-0}" = 1 ]; then
+    if sh -c 'printf "%s\n" "$$" > "$1/cgroup.procs"; shift; exec "$@"' sh "$LATCD_TEST_DELEGATION" \
+        "$daemon" --test-managed-compiler "$root" "$LATCD_TEST_DELEGATION" > "$root/id" 2> "$root/error"; then
+        echo 'unexpected replay module accepted' >&2
+        exit 1
+    fi
+    grep -q 'unexpected replay module output' "$root/error"
+    test ! -e "$root/.tmp/output-native"
+    test ! -e "$root/.tmp/output-module"
+    echo 'test-managed-replay-integration: extra module rejected'
+    exit 0
+fi
 sh -c 'printf "%s\n" "$$" > "$1/cgroup.procs"; shift; exec "$@"' sh "$LATCD_TEST_DELEGATION" \
     "$daemon" --test-managed-compiler "$root" "$LATCD_TEST_DELEGATION" > "$root/id"
 id=$(cat "$root/id")
