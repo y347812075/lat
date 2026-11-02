@@ -45,8 +45,13 @@ static gboolean valid_path(const char *path)
 static int verify_file(const LatcdClosureFile *file)
 {
     struct stat before, after;
-    if (fstat(file->fd, &before) || !S_ISREG(before.st_mode) || before.st_size < 0)
+    const int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    int seals = fcntl(file->fd, F_GET_SEALS);
+    if (seals < 0 || (seals & required) != required ||
+        fstat(file->fd, &before) || !S_ISREG(before.st_mode) || before.st_size < 0) {
+        errno = ESTALE;
         return -1;
+    }
     GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
     char buf[65536];
     off_t offset = 0;

@@ -36,6 +36,11 @@ int main(void)
     char buf[9] = {0};
     assert(pread(file->fd, buf, 8, 0) == 8 && !strcmp(buf, "original"));
     assert(!latcd_worker_closure_verify(&closure));
+    int saved_fd = file->fd;
+    file->fd = open(old, O_RDONLY);
+    assert(file->fd >= 0 && latcd_worker_closure_verify(&closure) < 0);
+    assert(!close(file->fd));
+    file->fd = saved_fd;
     int changed = open(old, O_WRONLY);
     assert(changed >= 0 && pwrite(changed, "modified", 8, 0) == 8);
     assert(!latcd_worker_closure_verify(&closure));
