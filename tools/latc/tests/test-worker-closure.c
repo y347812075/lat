@@ -35,6 +35,12 @@ int main(void)
     assert(!fstat(file->fd, &after) && before.st_dev == after.st_dev && before.st_ino == after.st_ino);
     char buf[9] = {0};
     assert(pread(file->fd, buf, 8, 0) == 8 && !strcmp(buf, "original"));
+    assert(!latcd_worker_closure_verify(&closure));
+    int changed = open(old, O_WRONLY);
+    assert(changed >= 0 && pwrite(changed, "modified", 8, 0) == 8);
+    assert(latcd_worker_closure_verify(&closure) < 0);
+    assert(pwrite(changed, "original", 8, 0) == 8 && !close(changed));
+    assert(!latcd_worker_closure_verify(&closure));
     latcd_worker_closure_clear(&closure);
     assert(latcd_worker_closure_load(manifest, "build", FALSE, &closure) < 0 && !closure.files);
     assert(!rename(old, source));

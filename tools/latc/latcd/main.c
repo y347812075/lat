@@ -3293,6 +3293,11 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     const char *bootstrap = config->worker_bootstrap, *toolroot = config->worker_toolroot;
     const char *bwrap = config->worker_bwrap;
     bool handoff_failed = false;
+    if (real_managed_compile && worker_closure.files &&
+        latcd_worker_closure_verify(&worker_closure)) {
+        pin_result = -1;
+        fail(error, error_size, "worker closure changed before compilation");
+    }
     if (use_bootstrap && ((!worker_closure.files && (!toolroot || toolroot[0] != '/')) || bootstrap[0] != '/' ||
         socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, handoff) ||
         (filter = latcd_worker_seccomp_fd()) < 0)) pin_result = -1;
@@ -3700,6 +3705,12 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         (!real_managed_compile || workspace < 0 || domain.state != LATCD_MANAGED_DOMAIN_EMPTY)) {
         waited = -1;
         errno = EIO;
+    }
+    if (real_managed_compile && worker_closure.files && waited == child &&
+        WIFEXITED(status) && !WEXITSTATUS(status) &&
+        latcd_worker_closure_verify(&worker_closure)) {
+        waited = -1;
+        errno = ESTALE;
     }
     if (replay && real_managed_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&
         !WEXITSTATUS(status) && domain.state == LATCD_MANAGED_DOMAIN_EMPTY) {

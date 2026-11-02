@@ -39,6 +39,40 @@ static gboolean valid_path(const char *path)
     return valid;
 }
 
+static int verify_file(const LatcdClosureFile *file)
+{
+    struct stat before, after;
+    if (fstat(file->fd, &before) || !S_ISREG(before.st_mode) || before.st_size < 0)
+        return -1;
+    GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
+    char buf[65536];
+    off_t offset = 0;
+    while (offset < before.st_size) {
+        ssize_t n = pread(file->fd, buf, MIN((off_t)sizeof(buf), before.st_size - offset), offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { g_checksum_free(sum); errno = EIO; return -1; }
+        g_checksum_update(sum, (const guchar *)buf, n);
+        offset += n;
+    }
+    gboolean match = !strcmp(g_checksum_get_string(sum), file->sha256);
+    g_checksum_free(sum);
+    if (!match || fstat(file->fd, &after) || before.st_size != after.st_size ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec || before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec || before.st_ctim.tv_nsec != after.st_ctim.tv_nsec) {
+        errno = ESTALE;
+        return -1;
+    }
+    return 0;
+}
+
+int latcd_worker_closure_verify(const LatcdWorkerClosure *closure)
+{
+    if (!closure || !closure->files || !closure->files->len) { errno = EINVAL; return -1; }
+    for (guint i = 0; i < closure->files->len; i++)
+        if (verify_file(g_ptr_array_index(closure->files, i))) return -1;
+    return 0;
+}
+
 int latcd_worker_closure_load(const char *manifest, const char *build_id,
                               gboolean trusted, LatcdWorkerClosure *closure)
 {
@@ -90,25 +124,12 @@ int latcd_worker_closure_load(const char *manifest, const char *build_id,
             file->fd = high;
         }
         file->destination = g_strdup(dest);
+        memcpy(file->sha256, sha, sizeof(file->sha256));
         g_ptr_array_add(closure->files, file);
-        struct stat before, after;
+        struct stat before;
         if (file->fd < 0 || fstat(file->fd, &before) || !S_ISREG(before.st_mode) ||
             before.st_size < 0 || (trusted && (before.st_mode & 06000))) goto out;
-        GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
-        char buf[65536]; off_t offset = 0;
-        while (offset < before.st_size) {
-            ssize_t n = pread(file->fd, buf, MIN((off_t)sizeof(buf), before.st_size - offset), offset);
-            if (n < 0 && errno == EINTR) continue;
-            if (n <= 0) { g_checksum_free(sum); errno = EIO; goto out; }
-            g_checksum_update(sum, (const guchar *)buf, n); offset += n;
-        }
-        gboolean match = !strcmp(g_checksum_get_string(sum), sha);
-        g_checksum_free(sum);
-        if (!match || fstat(file->fd, &after) || before.st_size != after.st_size ||
-            before.st_mtim.tv_sec != after.st_mtim.tv_sec || before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
-            before.st_ctim.tv_sec != after.st_ctim.tv_sec || before.st_ctim.tv_nsec != after.st_ctim.tv_nsec) {
-            errno = ESTALE; goto out;
-        }
+        if (verify_file(file)) goto out;
     }
     result = 0;
 out:
