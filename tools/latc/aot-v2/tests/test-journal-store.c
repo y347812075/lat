@@ -656,6 +656,36 @@ static void check_range_edges(const char *parent, const char *source,
         g_assert_true(lat_tb_key_set_contains(&set, edges[i], 3));
     lat_tb_key_set_destroy(&set);
     close(fd);
+    LatcdJournalCompileInput frozen;
+    g_assert_cmpint(latcd_journal_open_compile_input(cache, name,
+        bound.build_sha256, bound.codegen_sha256, 1048576, &frozen,
+        error, sizeof(error)), ==, 0);
+    LatTbKey added = {.guest_rva = 257, .flags = 3};
+    g_assert_cmpint(lat_key_journal_append(&journal, &added, NULL,
+        error, sizeof(error)), ==, 0);
+    int collect_result = latcd_journal_collect(cache, bound.build_sha256,
+        bound.codegen_sha256, 1048576, &count, &received, error, sizeof(error));
+    if (collect_result) g_printerr("second collection: %s\n", error);
+    g_assert_cmpint(collect_result, ==, 0);
+    g_assert_cmpuint(received, ==, G_N_ELEMENTS(edges) + 1);
+    LatTbKeySet old = {0}, latest = {0};
+    g_assert_cmpint(lat_tb_key_set_read_fd(frozen.receipt_fd, bound.source_sha256,
+        &old, error, sizeof(error)), ==, 0);
+    fd = openat(stream, "received.tbset", O_RDONLY | O_CLOEXEC);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(lat_tb_key_set_read_fd(fd, bound.source_sha256,
+        &latest, error, sizeof(error)), ==, 0);
+    close(fd);
+    g_assert_cmpuint(old.count, ==, G_N_ELEMENTS(edges));
+    g_assert_cmpuint(latest.count, ==, old.count + 1);
+    for (size_t i = 0; i < old.count; i++)
+        g_assert_true(lat_tb_key_set_contains(&latest, old.keys[i].guest_rva,
+                                              old.keys[i].flags));
+    g_assert_false(lat_tb_key_set_contains(&old, added.guest_rva, added.flags));
+    g_assert_true(lat_tb_key_set_contains(&latest, added.guest_rva, added.flags));
+    lat_tb_key_set_destroy(&old);
+    lat_tb_key_set_destroy(&latest);
+    latcd_journal_close_compile_input(&frozen);
     struct stat before, after;
     g_assert_cmpint(fstatat(stream, "received.tbset", &before, AT_SYMLINK_NOFOLLOW), ==, 0);
     LatTbKey duplicate = {.guest_rva = 63, .flags = 3};
@@ -664,7 +694,7 @@ static void check_range_edges(const char *parent, const char *source,
     lat_key_journal_close(&journal);
     g_assert_cmpint(latcd_journal_collect(cache, bound.build_sha256,
         bound.codegen_sha256, 1048576, &count, &received, error, sizeof(error)), ==, 0);
-    g_assert_cmpuint(received, ==, G_N_ELEMENTS(edges));
+    g_assert_cmpuint(received, ==, G_N_ELEMENTS(edges) + 1);
     g_assert_cmpint(fstatat(stream, "received.tbset", &after, AT_SYMLINK_NOFOLLOW), ==, 0);
     g_assert_cmpuint(before.st_ino, ==, after.st_ino);
     g_assert_cmpint(unlinkat(stream, "received.tbset", 0), ==, 0);
