@@ -3319,11 +3319,12 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     int handoff[2] = {-1, -1}, filter = -1;
     bool use_bootstrap = config->managed && config->worker_bootstrap;
     bool real_managed_compile = use_bootstrap && config->worker_real_compile;
+    char closure_identity[65] = {0};
     const char *bootstrap = config->worker_bootstrap, *toolroot = config->worker_toolroot;
     const char *bwrap = config->worker_bwrap;
     bool handoff_failed = false;
     if (real_managed_compile && worker_closure.files &&
-        latcd_worker_closure_verify(&worker_closure)) {
+        latcd_worker_closure_identity(&worker_closure, closure_identity)) {
         pin_result = -1;
         fail(error, error_size, "worker closure changed before compilation");
     }
@@ -3756,10 +3757,13 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         errno = EIO;
     }
     if (real_managed_compile && worker_closure.files && waited == child &&
-        WIFEXITED(status) && !WEXITSTATUS(status) &&
-        latcd_worker_closure_verify(&worker_closure)) {
-        waited = -1;
-        errno = ESTALE;
+        WIFEXITED(status) && !WEXITSTATUS(status)) {
+        char actual_identity[65];
+        if (latcd_worker_closure_identity(&worker_closure, actual_identity) ||
+            strcmp(closure_identity, actual_identity)) {
+            waited = -1;
+            errno = ESTALE;
+        }
     }
     bool replay_extra_output = false;
     if (replay && real_managed_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&

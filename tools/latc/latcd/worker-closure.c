@@ -112,6 +112,61 @@ int latcd_worker_closure_verify(const LatcdWorkerClosure *closure)
     return 0;
 }
 
+static gint compare_destination(gconstpointer a, gconstpointer b)
+{
+    const LatcdClosureFile *left = *(LatcdClosureFile *const *)a;
+    const LatcdClosureFile *right = *(LatcdClosureFile *const *)b;
+    return strcmp(left->destination, right->destination);
+}
+
+static void checksum_u64(GChecksum *sum, uint64_t value)
+{
+    guint64 encoded = GUINT64_TO_BE(value);
+    g_checksum_update(sum, (const guchar *)&encoded, sizeof(encoded));
+}
+
+int latcd_worker_closure_identity(const LatcdWorkerClosure *closure, char digest[65])
+{
+    if (!digest) { errno = EINVAL; return -1; }
+    if (latcd_worker_closure_verify(closure)) return -1;
+    GPtrArray *sorted = g_ptr_array_new();
+    for (guint i = 0; i < closure->files->len; i++)
+        g_ptr_array_add(sorted, g_ptr_array_index(closure->files, i));
+    g_ptr_array_sort(sorted, compare_destination);
+    GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
+    const char domain[] = "latcd-worker-closure-v1";
+    g_checksum_update(sum, (const guchar *)domain, sizeof(domain));
+    checksum_u64(sum, sorted->len);
+    int result = -1;
+    for (guint i = 0; i < sorted->len; i++) {
+        LatcdClosureFile *file = g_ptr_array_index(sorted, i);
+        struct stat st;
+        if (!valid_path(file->destination) || fstat(file->fd, &st) || st.st_size < 0)
+            goto out;
+        for (guint j = 0; j < i; j++) {
+            LatcdClosureFile *previous = g_ptr_array_index(sorted, j);
+            size_t length = strlen(previous->destination);
+            if (!strncmp(previous->destination, file->destination, length) &&
+                (file->destination[length] == '\0' || file->destination[length] == '/')) {
+                errno = EINVAL;
+                goto out;
+            }
+        }
+        size_t length = strlen(file->destination);
+        checksum_u64(sum, length);
+        g_checksum_update(sum, (const guchar *)file->destination, length);
+        checksum_u64(sum, st.st_mode & 0777);
+        checksum_u64(sum, st.st_size);
+        g_checksum_update(sum, (const guchar *)file->sha256, 64);
+    }
+    g_strlcpy(digest, g_checksum_get_string(sum), 65);
+    result = 0;
+out:
+    g_checksum_free(sum);
+    g_ptr_array_free(sorted, TRUE);
+    return result;
+}
+
 int latcd_worker_closure_load(const char *manifest, const char *build_id,
                               gboolean trusted, LatcdWorkerClosure *closure)
 {
