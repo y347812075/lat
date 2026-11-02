@@ -4444,10 +4444,15 @@ static int validate_current_replacement(const LatcdConfig *config,
         char *old_path = g_build_filename(config->cache_dir,
                                           previous.module, NULL);
         LatAotModuleInfoV2 old_info;
-        if (cached_module_inspect(old_path, info->note.source_sha256,
-                                  &old_info) &&
-            lat_aot_v2_module_validate_replacement_file(
-                old_path, candidate, error, error_size)) {
+        uint8_t codegen_id[32];
+        expected_codegen_id(codegen_id);
+        if (!owned_module_inspect(old_path, &old_info) ||
+            memcmp(old_info.note.source_sha256, info->note.source_sha256, 32)) {
+            result = fail(error, error_size,
+                          "cannot validate current module coverage");
+        } else if (!memcmp(old_info.note.codegen_id, codegen_id, 32) &&
+                   lat_aot_v2_module_validate_replacement_file(
+                       old_path, candidate, error, error_size)) {
             result = -1;
         }
         g_free(old_path);

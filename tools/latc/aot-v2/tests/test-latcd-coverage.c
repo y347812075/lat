@@ -1770,6 +1770,14 @@ int main(int argc, char **argv)
     g_free(historical_path);
     gchar *before = NULL, *after = NULL;
     g_assert_true(g_file_get_contents(manifest, &before, NULL, NULL));
+    g_assert_cmpint(chmod(old_path, 0644), ==, 0);
+    g_assert_cmpint(publish_current_index(&config, hex, new_name, native_name,
+        tbset_name, &info, 2, true, NULL, error, sizeof(error)), ==, -1);
+    g_assert_nonnull(strstr(error, "cannot validate current module coverage"));
+    g_assert_true(g_file_get_contents(manifest, &after, NULL, NULL));
+    g_assert_cmpstr(before, ==, after);
+    g_clear_pointer(&after, g_free);
+    g_assert_cmpint(chmod(old_path, 0444), ==, 0);
     g_assert_cmpint(publish_current_index(&config, hex, new_name, native_name,
         tbset_name, &info, 2, true, NULL, error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "replacement loses module coverage"));
