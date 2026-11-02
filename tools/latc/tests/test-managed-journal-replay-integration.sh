@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-daemon=$1 prefix=$2 guest=$3 work=$4
+daemon=$1 prefix=$2 guest=$3 work=$4 scanner=$5
 : "${LATCD_TEST_SERVICE_DELEGATION:?}" "${LATCD_TEST_BOOTSTRAP:?}" \
   "${LATCD_TEST_BWRAP:?}" "${LATCD_TEST_WORKER_CLOSURE:?}"
 mkdir -m 700 "$work" "$work/cache" "$work/broker" "$work/home"
@@ -49,6 +49,8 @@ if [ -n "${LATCD_TEST_REPLAY_CRASH_PREPARED:-}${LATCD_TEST_REPLAY_CRASH_LINKED:-
     wait "$pid" 2>/dev/null || :
     state=$(find "$work/cache/.gc/managed-task-state" -name '*.ini' -type f)
     grep -qx 'state=REPLAY_ADOPTED' "$state"
+    id=$(basename "$state" .ini)
+    [ "$("$scanner" --task-status "$work/cache" .tmp/base.native)" = 1 ]
     if [ -n "${LATCD_TEST_REPLAY_CRASH_UNLINKED:-}" ]; then
         test -z "$(find "$work/cache/.tmp" -name 'replay-native-*' -print -quit)"
     fi
@@ -57,7 +59,6 @@ if [ -n "${LATCD_TEST_REPLAY_CRASH_PREPARED:-}${LATCD_TEST_REPLAY_CRASH_LINKED:-
         [ -n "$output" ]
         mv "$output" "$work/original.native"
         printf 'replacement\n' > "$output"
-        id=$(basename "$state" .ini)
         if "$daemon" --test-managed-adoption-recovery "$work/cache" "$id" > "$work/reject.log" 2>&1; then
             echo 'replacement accepted by recovery' >&2; exit 1
         fi
@@ -77,6 +78,11 @@ if [ -n "${LATCD_TEST_REPLAY_CRASH_PREPARED:-}${LATCD_TEST_REPLAY_CRASH_LINKED:-
     done
     test -f "$work/cache/.tmp/base.native"
     test -z "$(find "$work/cache/.tmp" -name 'replay-native-*' -print -quit)"
+    kill "$pid"
+    wait "$pid" || :
+    [ "$("$scanner" --task-status "$work/cache" .tmp/base.native)" = 0 ]
+    "$daemon" --test-managed-adoption-recovery "$work/cache" "$id" > "$work/recover-again.log" 2>&1
+    grep -qx 'state=OUTPUTS_REMOVED' "$state"
     echo 'test-managed-journal-replay-integration: crash recovery PASS'
     exit 0
 fi
