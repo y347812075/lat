@@ -41,7 +41,7 @@ env HOME="$work/home" LD_LIBRARY_PATH="$prefix/lib" LATX_AOT=0 LATX_AOT_V2=1 \
     LATX_AOT_V2_JOURNAL_BROKER_UID="$(id -u)" LATX_AOT_V2_AUTOSTART=0 \
     timeout 30 "$prefix/bin/latx-x86_64" "$guest" > "$work/run.out" 2> "$work/run.err" || status=$?
 [ "$status" -eq 42 ] || { cat "$work/run.err" >&2; exit 1; }
-if [ -n "${LATCD_TEST_REPLAY_CRASH_PREPARED:-}${LATCD_TEST_REPLAY_CRASH_LINKED:-}" ]; then
+if [ -n "${LATCD_TEST_REPLAY_CRASH_PREPARED:-}${LATCD_TEST_REPLAY_CRASH_LINKED:-}${LATCD_TEST_REPLAY_CRASH_UNLINKED:-}" ]; then
     n=0
     while kill -0 "$pid" 2>/dev/null; do
         n=$((n + 1)); [ "$n" -lt 600 ] || exit 1; sleep .1
@@ -49,6 +49,9 @@ if [ -n "${LATCD_TEST_REPLAY_CRASH_PREPARED:-}${LATCD_TEST_REPLAY_CRASH_LINKED:-
     wait "$pid" 2>/dev/null || :
     state=$(find "$work/cache/.gc/managed-task-state" -name '*.ini' -type f)
     grep -qx 'state=REPLAY_ADOPTED' "$state"
+    if [ -n "${LATCD_TEST_REPLAY_CRASH_UNLINKED:-}" ]; then
+        test -z "$(find "$work/cache/.tmp" -name 'replay-native-*' -print -quit)"
+    fi
     if [ -n "${LATCD_TEST_REPLAY_REPLACE:-}" ]; then
         output=$(find "$work/cache/.tmp" -name 'replay-native-*' -type f)
         [ -n "$output" ]
@@ -63,7 +66,7 @@ if [ -n "${LATCD_TEST_REPLAY_CRASH_PREPARED:-}${LATCD_TEST_REPLAY_CRASH_LINKED:-
         rm "$output"
         mv "$work/original.native" "$output"
     fi
-    unset LATCD_TEST_REPLAY_CRASH_PREPARED LATCD_TEST_REPLAY_CRASH_LINKED
+    unset LATCD_TEST_REPLAY_CRASH_PREPARED LATCD_TEST_REPLAY_CRASH_LINKED LATCD_TEST_REPLAY_CRASH_UNLINKED
     "$daemon" --serve --socket "$work/admin.sock" --cache-dir "$work/cache" \
         --latc "$prefix/bin/latc" --runner "$prefix/bin/latx-x86_64" \
         --runtime-dir "$prefix/lib" --workers 1 --idle-seconds 0 > "$work/restart.log" 2>&1 &

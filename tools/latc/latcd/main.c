@@ -3823,9 +3823,12 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
 #endif
             if (waited == child && (fsync(temporary) ||
                 latcd_managed_replay_verify(config->cache_dir, task_id, task_lease, error, error_size) ||
-                latcd_managed_replay_discard(config->cache_dir, task_id, task_lease, error, error_size) ||
-                latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
-                                          LATCD_MANAGED_OUTPUTS_REMOVED, error, error_size))) waited = -1;
+                latcd_managed_replay_discard(config->cache_dir, task_id, task_lease, error, error_size))) waited = -1;
+#ifdef LATCD_GC_TIMER_TEST
+            if (waited == child && getenv("LATCD_TEST_REPLAY_CRASH_UNLINKED")) kill(getpid(), SIGKILL);
+#endif
+            if (waited == child && latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
+                                          LATCD_MANAGED_OUTPUTS_REMOVED, error, error_size)) waited = -1;
         }
         if (copy >= 0) close(copy);
         if (temporary >= 0) close(temporary);
