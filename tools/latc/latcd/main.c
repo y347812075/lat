@@ -2283,13 +2283,15 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
         result = 0;
         goto out;
     }
-    if (domain.state == LATCD_MANAGED_ADOPTING) {
+    if (domain.state == LATCD_MANAGED_ADOPTING || domain.state == LATCD_MANAGED_REPLAY_ADOPTING) {
         result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
                                             LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error));
         goto out;
     }
-    if (domain.state == LATCD_MANAGED_OUTPUT_ADOPTED) {
-        if (latcd_managed_outputs_discard(config->cache_dir, id, task, error, sizeof(error))) goto out;
+    if (domain.state == LATCD_MANAGED_OUTPUT_ADOPTED || domain.state == LATCD_MANAGED_REPLAY_ADOPTED) {
+        if ((domain.state == LATCD_MANAGED_REPLAY_ADOPTED ?
+             latcd_managed_replay_discard(config->cache_dir, id, task, error, sizeof(error)) :
+             latcd_managed_outputs_discard(config->cache_dir, id, task, error, sizeof(error)))) goto out;
         /* The publisher may have removed both temporary links before the
          * manifest commit. This records only their absence, not publication. */
         if (!latcd_managed_task_domain(config->cache_dir, id, task, &domain,
@@ -3802,6 +3804,28 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                 journal_input ? input_copies[3] : -1, digest, error, error_size)) {
             waited = -1;
             errno = EINVAL;
+        }
+        if (journal_input && waited == child &&
+            (latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
+                                       LATCD_MANAGED_REPLAY_ADOPTING, error, error_size) ||
+             latcd_managed_replay_prepare(config->cache_dir, task_id, task_lease, copy,
+                                          error, error_size))) waited = -1;
+#ifdef LATCD_GC_TIMER_TEST
+        if (journal_input && waited == child && getenv("LATCD_TEST_REPLAY_CRASH_PREPARED"))
+            kill(getpid(), SIGKILL);
+#endif
+        if (journal_input && waited == child) {
+            char descriptor[64];
+            snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", copy);
+            if (linkat(AT_FDCWD, descriptor, AT_FDCWD, output_native, AT_SYMLINK_FOLLOW)) waited = -1;
+#ifdef LATCD_GC_TIMER_TEST
+            if (waited == child && getenv("LATCD_TEST_REPLAY_CRASH_LINKED")) kill(getpid(), SIGKILL);
+#endif
+            if (waited == child && (fsync(temporary) ||
+                latcd_managed_replay_verify(config->cache_dir, task_id, task_lease, error, error_size) ||
+                latcd_managed_replay_discard(config->cache_dir, task_id, task_lease, error, error_size) ||
+                latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
+                                          LATCD_MANAGED_OUTPUTS_REMOVED, error, error_size))) waited = -1;
         }
         if (copy >= 0) close(copy);
         if (temporary >= 0) close(temporary);
@@ -6424,7 +6448,7 @@ static void *compiler_worker(void *opaque)
                     !flock(fd, LOCK_EX | LOCK_NB) &&
                     !latcd_managed_task_domain(service->config->cache_dir, task->id, fd, &domain,
                                                LATCD_MANAGED_PREPARED, state_error, sizeof(state_error)) &&
-                    (domain.state == LATCD_MANAGED_REPLAY_DISCARDED ||
+                    (domain.state == LATCD_MANAGED_REPLAY_DISCARDED || domain.state == LATCD_MANAGED_OUTPUTS_REMOVED ||
                      domain.state == LATCD_MANAGED_PREEXEC_CANCELLED);
                 if (fd >= 0) close(fd);
                 g_free(path); g_free(name);

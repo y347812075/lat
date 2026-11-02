@@ -41,12 +41,48 @@ env HOME="$work/home" LD_LIBRARY_PATH="$prefix/lib" LATX_AOT=0 LATX_AOT_V2=1 \
     LATX_AOT_V2_JOURNAL_BROKER_UID="$(id -u)" LATX_AOT_V2_AUTOSTART=0 \
     timeout 30 "$prefix/bin/latx-x86_64" "$guest" > "$work/run.out" 2> "$work/run.err" || status=$?
 [ "$status" -eq 42 ] || { cat "$work/run.err" >&2; exit 1; }
+if [ -n "${LATCD_TEST_REPLAY_CRASH_PREPARED:-}${LATCD_TEST_REPLAY_CRASH_LINKED:-}" ]; then
+    n=0
+    while kill -0 "$pid" 2>/dev/null; do
+        n=$((n + 1)); [ "$n" -lt 600 ] || exit 1; sleep .1
+    done
+    wait "$pid" 2>/dev/null || :
+    state=$(find "$work/cache/.gc/managed-task-state" -name '*.ini' -type f)
+    grep -qx 'state=REPLAY_ADOPTED' "$state"
+    if [ -n "${LATCD_TEST_REPLAY_REPLACE:-}" ]; then
+        output=$(find "$work/cache/.tmp" -name 'replay-native-*' -type f)
+        [ -n "$output" ]
+        mv "$output" "$work/original.native"
+        printf 'replacement\n' > "$output"
+        id=$(basename "$state" .ini)
+        if "$daemon" --test-managed-adoption-recovery "$work/cache" "$id" > "$work/reject.log" 2>&1; then
+            echo 'replacement accepted by recovery' >&2; exit 1
+        fi
+        test -f "$work/cache/.tmp/base.native"
+        grep -qx replacement "$output"
+        rm "$output"
+        mv "$work/original.native" "$output"
+    fi
+    unset LATCD_TEST_REPLAY_CRASH_PREPARED LATCD_TEST_REPLAY_CRASH_LINKED
+    "$daemon" --serve --socket "$work/admin.sock" --cache-dir "$work/cache" \
+        --latc "$prefix/bin/latc" --runner "$prefix/bin/latx-x86_64" \
+        --runtime-dir "$prefix/lib" --workers 1 --idle-seconds 0 > "$work/restart.log" 2>&1 &
+    pid=$!
+    n=0
+    while ! grep -qs '^state=OUTPUTS_REMOVED$' "$state"; do
+        kill -0 "$pid"; n=$((n + 1)); [ "$n" -lt 600 ] || { cat "$work/restart.log" >&2; exit 1; }; sleep .1
+    done
+    test -f "$work/cache/.tmp/base.native"
+    test -z "$(find "$work/cache/.tmp" -name 'replay-native-*' -print -quit)"
+    echo 'test-managed-journal-replay-integration: crash recovery PASS'
+    exit 0
+fi
 n=0
 while ! grep -qs 'latcd: test journal replay succeeded task=' "$work/daemon.log"; do
     kill -0 "$pid"; n=$((n + 1)); [ "$n" -lt 600 ] || { cat "$work/daemon.log" >&2; exit 1; }; sleep .1
 done
 id=$(sed -n 's/^latcd: test journal replay succeeded task=//p' "$work/daemon.log" | head -1)
-grep -qx 'state=REPLAY_DISCARDED' "$work/cache/.gc/managed-task-state/$id.ini"
+grep -qx 'state=OUTPUTS_REMOVED' "$work/cache/.gc/managed-task-state/$id.ini"
 grep -qx 'kind=MANAGED_REPLAY' "$work/cache/.gc/tasks/$id.ini"
 grep -qx 'version=5' "$work/cache/.gc/tasks/$id.ini"
 grep -qx 'name=base.native' "$work/cache/.gc/tasks/$id.ini"
