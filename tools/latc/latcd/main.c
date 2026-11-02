@@ -3314,6 +3314,16 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (!pin_result && config->managed && !journal_input &&
         snapshot_managed_inputs(input_pins, input_copies, digest, error, error_size))
         pin_result = -1;
+    bool invalid_replay_baseline = false;
+    if (!pin_result && journal_input && input_copies[3] >= 0) {
+        LatTbKeySet missing = {0};
+        if (lat_replay_native_missing_fd(input_copies[3], input_copies[2],
+                input_copies[1], digest, &missing, error, error_size)) {
+            pin_result = -1;
+            invalid_replay_baseline = true;
+        }
+        lat_tb_key_set_destroy(&missing);
+    }
     int gate[2] = {-1, -1}, domain_fd = -1;
     int workspace = -1;
     int handoff[2] = {-1, -1}, filter = -1;
@@ -3700,6 +3710,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         g_free(trusted_digest);
         g_free(closure_environment);
         g_free(selection_environment);
+        if (invalid_replay_baseline)
+            return fail(error, error_size, "invalid journal replay baseline");
         if (pin_result) return -1;
         return fail(error, error_size, "cannot start compiler: %s",
                     strerror(errno));

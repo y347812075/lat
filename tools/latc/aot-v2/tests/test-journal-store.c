@@ -1165,6 +1165,7 @@ int main(void)
     g_assert_cmpint(run_compiler(&record_config, 0, NULL, NULL, false, replay_base, NULL,
         NULL, &input, native_path, module_path, input.identity.source_sha256,
         replay_tasks, &replay_reservation, &untracked_task, error, sizeof(error)), ==, -1);
+    g_assert_cmpstr(error, ==, "invalid journal replay baseline");
     test_managed_compiler = false;
     g_assert_cmpuint(replay_tasks->len, ==, 1);
     LatcdCompilerTask *replay_task = g_ptr_array_index(replay_tasks, 0);
