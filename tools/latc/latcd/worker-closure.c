@@ -6,12 +6,15 @@
 #include "parson/parson.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #define CLOSURE_MAX_FILES 256
 #define CLOSURE_MAX_MANIFEST (1024 * 1024)
+#define CLOSURE_MAX_BYTES (1024ULL * 1024 * 1024)
 
 static void closure_file_free(gpointer data)
 {
@@ -65,6 +68,37 @@ static int verify_file(const LatcdClosureFile *file)
     return 0;
 }
 
+static int snapshot_file(int source, const struct stat *source_stat)
+{
+    int target = memfd_create("latcd-closure", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (target < 0) return -1;
+    char buf[65536];
+    off_t offset = 0;
+    while (offset < source_stat->st_size) {
+        ssize_t n = pread(source, buf,
+                          MIN((off_t)sizeof(buf), source_stat->st_size - offset), offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) goto failed;
+        if (!n) { errno = ESTALE; goto failed; }
+        for (ssize_t done = 0; done < n;) {
+            ssize_t w = write(target, buf + done, n - done);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) goto failed;
+            done += w;
+        }
+        offset += n;
+    }
+    if (fchmod(target, source_stat->st_mode & 0777) ||
+        fcntl(target, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW |
+              F_SEAL_SHRINK | F_SEAL_SEAL)) goto failed;
+    int high = fcntl(target, F_DUPFD_CLOEXEC, 16);
+    close(target);
+    return high;
+failed:
+    close(target);
+    return -1;
+}
+
 int latcd_worker_closure_verify(const LatcdWorkerClosure *closure)
 {
     if (!closure || !closure->files || !closure->files->len) { errno = EINVAL; return -1; }
@@ -99,6 +133,7 @@ int latcd_worker_closure_load(const char *manifest, const char *build_id,
         errno = EINVAL; goto out;
     }
     closure->files = g_ptr_array_new_with_free_func(closure_file_free);
+    uint64_t total_size = 0;
     for (size_t i = 0; i < json_array_get_count(files); i++) {
         JSON_Object *item = json_array_get_object(files, i);
         const char *source = item ? json_object_get_string(item, "source") : NULL;
@@ -129,6 +164,15 @@ int latcd_worker_closure_load(const char *manifest, const char *build_id,
         struct stat before;
         if (file->fd < 0 || fstat(file->fd, &before) || !S_ISREG(before.st_mode) ||
             before.st_size < 0 || (trusted && (before.st_mode & 06000))) goto out;
+        if ((uint64_t)before.st_size > CLOSURE_MAX_BYTES - total_size) {
+            errno = EFBIG;
+            goto out;
+        }
+        total_size += (uint64_t)before.st_size;
+        int snapshot = snapshot_file(file->fd, &before);
+        if (snapshot < 0) goto out;
+        close(file->fd);
+        file->fd = snapshot;
         if (verify_file(file)) goto out;
     }
     result = 0;

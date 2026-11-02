@@ -3331,6 +3331,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     GPtrArray *compile_options = g_ptr_array_new();
     GPtrArray *compile_exec = g_ptr_array_new();
     GPtrArray *closure_strings = g_ptr_array_new_with_free_func(g_free);
+    GArray *closure_fds = g_array_new(FALSE, FALSE, sizeof(int));
     int tool_fds[3] = {-1, -1, -1};
     int tool_child[3] = {-1, -1, -1};
     if (real_managed_compile) {
@@ -3361,11 +3362,25 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             for (guint i = 0; i < worker_closure.files->len; i++) {
                 LatcdClosureFile *file = g_ptr_array_index(worker_closure.files, i);
                 char *dir = g_path_get_dirname(file->destination);
-                char *fd = g_strdup_printf("%d", file->fd);
+                char path[64];
+                struct stat st = {0};
+                snprintf(path, sizeof(path), "/proc/self/fd/%d", file->fd);
+                int opened = open(path, O_RDONLY | O_CLOEXEC);
+                if (opened >= 0 && opened < 16) {
+                    int high = fcntl(opened, F_DUPFD_CLOEXEC, 16);
+                    close(opened);
+                    opened = high;
+                }
+                if (opened < 0 || fstat(opened, &st)) pin_result = -1;
+                g_array_append_val(closure_fds, opened);
+                char *fd = g_strdup_printf("%d", opened);
+                char *mode = g_strdup_printf("%04o", (unsigned)(st.st_mode & 0777));
                 g_ptr_array_add(closure_strings, dir);
                 g_ptr_array_add(closure_strings, fd);
+                g_ptr_array_add(closure_strings, mode);
                 TEST_ARG("--dir"); TEST_ARG(dir);
-                TEST_ARG("--ro-bind-fd"); TEST_ARG(fd); TEST_ARG(file->destination);
+                TEST_ARG("--perms"); TEST_ARG(mode);
+                TEST_ARG("--ro-bind-data"); TEST_ARG(fd); TEST_ARG(file->destination);
             }
         } else {
             TEST_ARG("--ro-bind"); TEST_ARG(toolroot); TEST_ARG("/usr");
@@ -3482,8 +3497,8 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         )) _exit(126);
             if (real_managed_compile && worker_closure.files)
                 for (guint i = 0; i < worker_closure.files->len; i++) {
-                    LatcdClosureFile *file = g_ptr_array_index(worker_closure.files, i);
-                    if (fcntl(file->fd, F_SETFD, 0)) _exit(126);
+                    int fd = g_array_index(closure_fds, int, i);
+                    if (fcntl(fd, F_SETFD, 0)) _exit(126);
                 }
             if (fcntl(0, F_GETFD) != -1 || errno != EBADF ||
                 fcntl(1, F_GETFD) != -1 || errno != EBADF ||
@@ -3583,6 +3598,11 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (filter_child >= 0) close(filter_child);
     if (filter >= 0) close(filter);
     if (args_child >= 0) close(args_child);
+    for (guint i = 0; i < closure_fds->len; i++) {
+        int fd = g_array_index(closure_fds, int, i);
+        if (fd >= 0) close(fd);
+    }
+    g_array_free(closure_fds, TRUE);
     if (args_fd >= 0) close(args_fd);
     g_ptr_array_free(compile_options, TRUE);
     g_ptr_array_free(compile_exec, TRUE);

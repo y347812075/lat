@@ -38,7 +38,16 @@ int main(void)
     assert(!latcd_worker_closure_verify(&closure));
     int changed = open(old, O_WRONLY);
     assert(changed >= 0 && pwrite(changed, "modified", 8, 0) == 8);
-    assert(latcd_worker_closure_verify(&closure) < 0);
+    assert(!latcd_worker_closure_verify(&closure));
+    assert(pwrite(file->fd, "modified", 8, 0) < 0);
+    char proc[64];
+    snprintf(proc, sizeof(proc), "/proc/self/fd/%d", file->fd);
+    int reader1 = open(proc, O_RDONLY), reader2 = open(proc, O_RDONLY);
+    assert(reader1 >= 0 && reader2 >= 0);
+    char c;
+    assert(read(reader1, &c, 1) == 1 && c == 'o');
+    assert(read(reader2, &c, 1) == 1 && c == 'o');
+    assert(!close(reader1) && !close(reader2));
     assert(pwrite(changed, "original", 8, 0) == 8 && !close(changed));
     assert(!latcd_worker_closure_verify(&closure));
     latcd_worker_closure_clear(&closure);
