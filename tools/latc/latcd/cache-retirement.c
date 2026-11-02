@@ -4357,6 +4357,36 @@ static bool managed_task_state_read(int gc, const char *name, const char *id,
     return valid;
 }
 
+static bool managed_capture_output_fd(int fd, const struct stat *before,
+                                      GKeyFile *state, const char *prefix)
+{
+    GChecksum *hash = g_checksum_new(G_CHECKSUM_SHA256);
+    char buffer[65536];
+    uint64_t offset = 0;
+    bool valid = true;
+    while (offset < (uint64_t)before->st_size) {
+        ssize_t n = pread(fd, buffer, MIN(sizeof(buffer), (uint64_t)before->st_size - offset), offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { valid = false; break; }
+        offset += n;
+        g_checksum_update(hash, (const guchar *)buffer, n);
+    }
+    struct stat after;
+    valid = valid && !fstat(fd, &after) && object_stat_equal(before, &after);
+    if (valid) {
+        char *key = g_strdup_printf("%s_device", prefix);
+        g_key_file_set_uint64(state, "managed", key, before->st_dev); g_free(key);
+        key = g_strdup_printf("%s_inode", prefix);
+        g_key_file_set_uint64(state, "managed", key, before->st_ino); g_free(key);
+        key = g_strdup_printf("%s_size", prefix);
+        g_key_file_set_uint64(state, "managed", key, before->st_size); g_free(key);
+        key = g_strdup_printf("%s_sha256", prefix);
+        g_key_file_set_string(state, "managed", key, g_checksum_get_string(hash)); g_free(key);
+    }
+    g_checksum_free(hash);
+    return valid;
+}
+
 static bool managed_capture_outputs(int root, const char *raw, size_t size, GKeyFile *state)
 {
     GKeyFile *task = g_key_file_new();
@@ -4374,32 +4404,11 @@ static bool managed_capture_outputs(int root, const char *raw, size_t size, GKey
         valid = name && *name && name[0] != '.' &&
             strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") == strlen(name);
         int fd = valid ? openat(temporary, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
-        struct stat before, after, path;
+        struct stat before, path;
         valid = fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) &&
             before.st_uid == geteuid() && before.st_nlink == 1 && !(before.st_mode & 0077) && before.st_size > 0;
-        GChecksum *hash = g_checksum_new(G_CHECKSUM_SHA256);
-        char buffer[65536];
-        uint64_t total = 0;
-        while (valid && total < (uint64_t)before.st_size) {
-            ssize_t n = read(fd, buffer, MIN(sizeof(buffer), (uint64_t)before.st_size - total));
-            if (n < 0 && errno == EINTR) continue;
-            if (n <= 0) { valid = false; break; }
-            total += n;
-            g_checksum_update(hash, (const guchar *)buffer, n);
-        }
-        valid = valid && !fstat(fd, &after) && !fstatat(temporary, name, &path, AT_SYMLINK_NOFOLLOW) &&
-            object_stat_equal(&before, &after) && object_stat_equal(&before, &path);
-        if (valid) {
-            char *key = g_strdup_printf("%s_device", prefixes[i]);
-            g_key_file_set_uint64(state, "managed", key, before.st_dev); g_free(key);
-            key = g_strdup_printf("%s_inode", prefixes[i]);
-            g_key_file_set_uint64(state, "managed", key, before.st_ino); g_free(key);
-            key = g_strdup_printf("%s_size", prefixes[i]);
-            g_key_file_set_uint64(state, "managed", key, before.st_size); g_free(key);
-            key = g_strdup_printf("%s_sha256", prefixes[i]);
-            g_key_file_set_string(state, "managed", key, g_checksum_get_string(hash)); g_free(key);
-        }
-        g_checksum_free(hash);
+        valid = valid && managed_capture_output_fd(fd, &before, state, prefixes[i]) &&
+            !fstatat(temporary, name, &path, AT_SYMLINK_NOFOLLOW) && object_stat_equal(&before, &path);
         if (fd >= 0) close(fd);
         g_free(name);
     }
@@ -4460,30 +4469,11 @@ int latcd_managed_outputs_prepare(const char *root, const char *id, int task_fd,
         g_key_file_load_from_data(state, state_raw, state_size, 0, NULL);
     const char *prefixes[] = {"native", "module"};
     for (unsigned i = 0; valid && i < 2; i++) {
-        struct stat before, after;
+        struct stat before;
         valid = outputs[i] >= 0 && !fsync(outputs[i]) && !fstat(outputs[i], &before) && S_ISREG(before.st_mode) &&
             before.st_uid == geteuid() && before.st_dev == temporary.st_dev &&
             before.st_nlink == 0 && !(before.st_mode & 0077) && before.st_size > 0;
-        GChecksum *hash = g_checksum_new(G_CHECKSUM_SHA256);
-        char buffer[65536]; uint64_t offset = 0;
-        while (valid && offset < (uint64_t)before.st_size) {
-            ssize_t n = pread(outputs[i], buffer, MIN(sizeof(buffer), (uint64_t)before.st_size - offset), offset);
-            if (n < 0 && errno == EINTR) continue;
-            if (n <= 0) { valid = false; break; }
-            offset += n; g_checksum_update(hash, (const guchar *)buffer, n);
-        }
-        valid = valid && !fstat(outputs[i], &after) && object_stat_equal(&before, &after);
-        if (valid) {
-            char *key = g_strdup_printf("%s_device", prefixes[i]);
-            g_key_file_set_uint64(state, "managed", key, before.st_dev); g_free(key);
-            key = g_strdup_printf("%s_inode", prefixes[i]);
-            g_key_file_set_uint64(state, "managed", key, before.st_ino); g_free(key);
-            key = g_strdup_printf("%s_size", prefixes[i]);
-            g_key_file_set_uint64(state, "managed", key, before.st_size); g_free(key);
-            key = g_strdup_printf("%s_sha256", prefixes[i]);
-            g_key_file_set_string(state, "managed", key, g_checksum_get_string(hash)); g_free(key);
-        }
-        g_checksum_free(hash);
+        valid = valid && managed_capture_output_fd(outputs[i], &before, state, prefixes[i]);
     }
     if (valid) {
         g_key_file_set_string(state, "managed", "state", "OUTPUT_ADOPTED");
