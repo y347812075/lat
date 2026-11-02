@@ -6377,6 +6377,11 @@ static void *compiler_worker(void *opaque)
             int status = n < 0 || m < 0 ? -1 : run_compiler(service->config, worker->index,
                 NULL, NULL, false, NULL, NULL, NULL, job->journal_replay,
                 native, module, job->digest, tasks, &reservation, &untracked_task, error, sizeof(error));
+#ifdef LATCD_GC_TIMER_TEST
+            if (!status && tasks->len == 1)
+                fprintf(stderr, "latcd: test journal replay succeeded task=%s\n",
+                        ((LatcdCompilerTask *)g_ptr_array_index(tasks, 0))->id);
+#endif
             /* Registration may persist a root before returning an error. */
             bool retained = untracked_task || (status && !tasks->len);
             for (guint i = 0; i < tasks->len; i++) {
