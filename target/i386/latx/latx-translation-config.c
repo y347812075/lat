@@ -127,6 +127,8 @@ IMM_ACCESSOR(legacy_aot, LEGACY_AOT, option_aot)
 IMM_ACCESSOR(anonym, ANONYM, option_anonym)
 IMM_ACCESSOR(mem_test, MEM_TEST, option_mem_test)
 IMM_ACCESSOR(minke_16k_page_check, MINKE_16K_PAGE_CHECK, option_minke_16k_page_check)
+IMM_ACCESSOR(jr_ra, JR_RA, option_jr_ra)
+IMM_ACCESSOR(jr_ra_stack, JR_RA_STACK, option_jr_ra_stack)
 IMM_ACCESSOR(softfpu_fast, SOFTFPU_FAST, option_softfpu_fast)
 IMM_ACCESSOR(softfpu, SOFTFPU, option_softfpu)
 #ifdef CONFIG_LATX_INSTS_PATTERN

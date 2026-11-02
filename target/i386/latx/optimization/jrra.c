@@ -344,7 +344,7 @@ void jrra_emit_call_metadata(TranslationBlock *tb, target_ulong next_pc,
         return;
     }
 
-    if (option_jr_ra_stack) {
+    if (latx_translation_jr_ra_stack()) {
         la_code_align(2, 0x03400000);
         IR2_OPND target_ptr = ra_alloc_data();
         IR2_OPND tb_base = ra_alloc_data();
@@ -368,7 +368,7 @@ void jrra_emit_call_metadata(TranslationBlock *tb, target_ulong next_pc,
         }
     }
 
-    if (option_jr_ra) {
+    if (latx_translation_jr_ra()) {
         la_code_align(2, 0x03400000);
         IR2_OPND target_ptr = ra_alloc_data();
         IR2_OPND tb_base = ra_alloc_data();
@@ -401,7 +401,7 @@ bool jrra_translate_ret(TranslationBlock *tb, IR2_OPND return_addr_opnd,
 {
 #ifdef CONFIG_LATX_JRRA
     (void)pir1;
-    if (option_jr_ra) {
+    if (latx_translation_jr_ra()) {
         IR2_OPND scr0 = ra_alloc_scr(0);
         IR2_OPND scr1 = ra_alloc_scr(1);
         IR2_OPND saved_x86_pc = ra_alloc_itemp();
@@ -417,7 +417,7 @@ bool jrra_translate_ret(TranslationBlock *tb, IR2_OPND return_addr_opnd,
 
         PER_TB_COUNT((void *)&((tb->profile).jrra_miss), 1);
     }
-    if (option_jr_ra_stack) {
+    if (latx_translation_jr_ra_stack()) {
         la_jirl(zero_ir2_opnd, return_addr_opnd, 0);
         return true;
     }
@@ -438,7 +438,7 @@ void jrra_relocate_return_target(TranslationBlock *tb, uintptr_t new_base)
 {
 #ifdef CONFIG_LATX_JRRA
     if (!tb || !tb->next_86_pc || !tb->return_target_ptr ||
-        (!option_jr_ra && !option_jr_ra_stack)) {
+        (!latx_translation_jr_ra() && !latx_translation_jr_ra_stack())) {
         return;
     }
     uintptr_t addr = (uintptr_t)tb->return_target_ptr;
