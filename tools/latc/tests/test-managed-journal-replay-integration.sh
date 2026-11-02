@@ -76,6 +76,13 @@ if [ -n "${LATCD_TEST_REPLAY_CRASH_PREPARED:-}${LATCD_TEST_REPLAY_CRASH_LINKED:-
     while ! grep -qs '^state=OUTPUTS_REMOVED$' "$state"; do
         kill -0 "$pid"; n=$((n + 1)); [ "$n" -lt 600 ] || { cat "$work/restart.log" >&2; exit 1; }; sleep .1
     done
+    n=0
+    while ! grep -qs '^latcd: test journal replay succeeded task=' "$work/restart.log"; do
+        kill -0 "$pid"; n=$((n + 1)); [ "$n" -lt 600 ] || { cat "$work/restart.log" >&2; exit 1; }; sleep .1
+    done
+    retried=$(sed -n 's/^latcd: test journal replay succeeded task=//p' "$work/restart.log" | head -1)
+    [ -n "$retried" ] && [ "$retried" != "$id" ]
+    grep -qx 'state=OUTPUTS_REMOVED' "$work/cache/.gc/managed-task-state/$retried.ini"
     test -f "$work/cache/.tmp/base.native"
     test -z "$(find "$work/cache/.tmp" -name 'replay-native-*' -print -quit)"
     kill "$pid"
