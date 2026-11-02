@@ -4652,11 +4652,11 @@ void gen_test_page_flag(IR2_OPND mem_opnd, int mem_imm, uint32_t flag,
     uint32_t required_flag = flag & PAGE_WRITE ? PAGE_WRITE : PAGE_READ;
 #endif
 
-    if (!option_mem_test) {
+    if (!latx_translation_mem_test()) {
 #if TARGET_ABI_BITS == 32
         TranslationBlock *current_tb;
 
-        if (!option_minke_16k_page_check) {
+        if (!latx_translation_minke_16k_page_check()) {
             return;
         }
         current_tb = (TranslationBlock *)lsenv->tr_data->curr_tb;
@@ -4710,14 +4710,14 @@ void gen_test_page_flag(IR2_OPND mem_opnd, int mem_imm, uint32_t flag,
     la_addi_d(mem_addr, mem_opnd, mem_imm);
 #if TARGET_ABI_BITS == 32
     if (qemu_host_page_size == LATX_HOST_16K_PAGE_SIZE &&
-        (option_mem_test > 0 || option_minke_16k_page_check)) {
+        (latx_translation_mem_test() > 0 || latx_translation_minke_16k_page_check())) {
         /*
          * LATX_MT=1 checks a guest 4K page only when the surrounding host
          * 16K page has mixed permissions. LATX_MT=2 always checks the cached
          * guest-page flags. Both avoid the interval-tree walk while preserving
          * guest read and write permissions.
          */
-        if (option_mem_test != 2) {
+        if (latx_translation_mem_test() != 2) {
             li_d(itemp0, (ADDR)latx_16k_page_mixed);
             la_bstrpick_d(itemp1, mem_addr, TARGET_ABI_BITS - 1,
                           LATX_HOST_16K_PAGE_BITS);
@@ -4737,7 +4737,7 @@ void gen_test_page_flag(IR2_OPND mem_opnd, int mem_imm, uint32_t flag,
         if (mem_size > 1) {
             la_label(label_check_end);
             la_addi_d(mem_addr, mem_addr, mem_size - 1);
-            if (option_mem_test != 2) {
+            if (latx_translation_mem_test() != 2) {
                 li_d(itemp0, (ADDR)latx_16k_page_mixed);
                 la_bstrpick_d(itemp1, mem_addr, TARGET_ABI_BITS - 1,
                               LATX_HOST_16K_PAGE_BITS);

@@ -1529,6 +1529,8 @@ int latx_translation_enable_fcsr_exc(void);
 int latx_translation_lative(void);
 int latx_translation_close_parallel(void);
 int latx_translation_monitor_shared_mem(void);
+int latx_translation_mem_test(void);
+int latx_translation_minke_16k_page_check(void);
 
 void tr_disasm(struct TranslationBlock *tb, int max_insns);
 void etb_add_succ(void* etb,int depth);

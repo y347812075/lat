@@ -1039,7 +1039,7 @@ void translate_tu(uint32 tb_num_in_tu, TranslationBlock **tb_list)
     bcc_jmp_fail = false;
 #ifdef CONFIG_LATX_AOT
     int rel_checkpoint = -1;
-    if (option_aot && in_pre_translate) {
+    if (latx_translation_legacy_aot() && in_pre_translate) {
         rel_checkpoint = aot_rel_table_checkpoint();
     }
 #endif

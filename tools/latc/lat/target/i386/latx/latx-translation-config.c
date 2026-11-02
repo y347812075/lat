@@ -125,6 +125,8 @@ IMM_ACCESSOR(close_parallel, CLOSE_PARALLEL, close_latx_parallel)
 IMM_ACCESSOR(monitor_shared_mem, MONITOR_SHARED_MEM, option_monitor_shared_mem)
 IMM_ACCESSOR(legacy_aot, LEGACY_AOT, option_aot)
 IMM_ACCESSOR(anonym, ANONYM, option_anonym)
+IMM_ACCESSOR(mem_test, MEM_TEST, option_mem_test)
+IMM_ACCESSOR(minke_16k_page_check, MINKE_16K_PAGE_CHECK, option_minke_16k_page_check)
 IMM_ACCESSOR(softfpu_fast, SOFTFPU_FAST, option_softfpu_fast)
 IMM_ACCESSOR(softfpu, SOFTFPU, option_softfpu)
 #ifdef CONFIG_LATX_INSTS_PATTERN

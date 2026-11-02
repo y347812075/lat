@@ -107,6 +107,9 @@ def main():
     for name in ('latx-config.c', 'ir1/ir1.c', 'translator/tr-eflag.c',
                  'translator/translate.c'):
         assert 'option_anonym' not in (root / 'target/i386/latx' / name).read_text()
+    for option in ('option_mem_test', 'option_minke_16k_page_check'):
+        assert option not in (root / 'target/i386/latx/translator/translate.c').read_text()
+    assert 'option_aot' not in (root / 'target/i386/latx/optimization/tu.c').read_text()
     print('real TU configuration dependency export passed')
 
 
