@@ -60,5 +60,12 @@ assert len(receipts) == 1
 requested = set(read_key_set(receipts[0])[2])
 assert requested and requested - base
 PY
+receipt=$(find "$work/cache/.journals" -name received.tbset -type f)
+if "$prefix/bin/latc" validate-replay-native "$work/cache/.tmp/base.native" \
+    "$work/config" "$receipt" > "$work/base-validation.out" 2>&1; then
+    echo 'baseline already covers journal requests' >&2
+    exit 1
+fi
+grep -q 'missing requested TB' "$work/base-validation.out"
 test -z "$(find "$work/cache" -maxdepth 1 -name '*.so' -print -quit)"
 echo 'test-managed-journal-replay-integration: PASS'
