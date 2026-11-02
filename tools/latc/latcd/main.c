@@ -2900,7 +2900,10 @@ static void *compiler_input_recovery_worker(void *opaque)
             }
             int result = latcd_retirement_queue_step(retirement, 32, 10000,
                 &stats, error, sizeof(error));
-            if (result < 0) {
+            if (result == LATCD_RETIREMENT_SCAN_RETRY) {
+                stats.complete = false;
+                fprintf(stderr, "latcd: retirement discovery changed; retrying\n");
+            } else if (result < 0) {
                 stats.complete = false;
                 retirement_safe = false;
                 fprintf(stderr, "latcd: retirement discovery stopped: %s\n",

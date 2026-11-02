@@ -8418,8 +8418,13 @@ static void test_queue_empty_store(void)
     do {
         result = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
     } while (result > 0);
-    assert(result < 0 && !stats.complete);
+    assert(result == LATCD_RETIREMENT_SCAN_RETRY && !stats.complete);
     assert(!latcd_retirement_queue_take(queue, UINT64_MAX, &attempt));
+    do {
+        result = latcd_retirement_queue_step(queue, 1, 10000, &stats, error, sizeof(error));
+        assert(result >= 0);
+    } while (result);
+    assert(stats.complete && !stats.candidates);
     latcd_retirement_queue_free(queue);
     g_free(entry); g_free(store);
     remove_root(root); g_free(root);

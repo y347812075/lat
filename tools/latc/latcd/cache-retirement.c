@@ -7077,15 +7077,29 @@ int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
         int gc = root < 0 ? -1 : open_directory(root, ".gc", false);
         int tombstones = gc < 0 ? -1 : open_directory(gc, "tombstones", false);
         struct stat held_tombstones, path_tombstones;
-        if (!queue_bind_root(queue, root) || store < 0 || fstat(dirfd(queue->cursor), &held) || fstat(store, &path) ||
-            !object_stat_equal(&queue->discovery_store, &held) ||
-            !object_stat_equal(&held, &path) || tombstones < 0 ||
-            fstat(queue->discovery_tombstones, &held_tombstones) || fstat(tombstones, &path_tombstones) ||
+        bool identity = queue_bind_root(queue, root) && store >= 0 &&
+            !fstat(dirfd(queue->cursor), &held) && !fstat(store, &path) &&
+            held.st_dev == queue->discovery_store.st_dev && held.st_ino == queue->discovery_store.st_ino &&
+            held.st_dev == path.st_dev && held.st_ino == path.st_ino && tombstones >= 0 &&
+            !fstat(queue->discovery_tombstones, &held_tombstones) && !fstat(tombstones, &path_tombstones) &&
+            held_tombstones.st_dev == queue->discovery_tombstone_store.st_dev &&
+            held_tombstones.st_ino == queue->discovery_tombstone_store.st_ino &&
+            held_tombstones.st_dev == path_tombstones.st_dev && held_tombstones.st_ino == path_tombstones.st_ino;
+        char events[4096];
+        ssize_t event_count = -1;
+        if (identity) {
+            do { event_count = read(queue->discovery_watch, events, sizeof(events)); }
+            while (event_count < 0 && errno == EINTR);
+        }
+        bool clean = event_count < 0 && errno == EAGAIN;
+        if (!identity || !object_stat_equal(&queue->discovery_store, &held) ||
+            !object_stat_equal(&held, &path) ||
             !object_stat_equal(&queue->discovery_tombstone_store, &held_tombstones) ||
-            !object_stat_equal(&held_tombstones, &path_tombstones) ||
-            !queue_watch_clean(queue->discovery_watch)) {
+            !object_stat_equal(&held_tombstones, &path_tombstones) || !clean) {
             reason = "retirement directories changed during scan";
             result = -1;
+            if (identity && event_count > 0 && !queue->diagnostic_cutoff &&
+                !queue->persistence_uncertain) result = LATCD_RETIREMENT_SCAN_RETRY;
         }
         if (tombstones >= 0) close(tombstones);
         if (gc >= 0) close(gc);
@@ -7232,7 +7246,11 @@ out:
             stats->next_deadline_us = candidate->deadline;
     }
     g_free(boot);
-    return result < 0 ? fail(error, error_size, "%s", reason) : result;
+    if (result < 0) {
+        fail(error, error_size, "%s", reason);
+        return result;
+    }
+    return result;
 }
 
 typedef struct {

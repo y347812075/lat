@@ -741,6 +741,9 @@ int latcd_retirement_queue_page_plan(const LatcdRetirementQueue *queue, const ch
 /* Diagnostic snapshot of the last aggregation; never authorizes consumption. */
 int latcd_retirement_queue_aggregated_page(const LatcdRetirementQueue *queue,
                                           LatcdRetirementPageState *state);
+/* A monitored normal scan invalidated by concurrent writes must be restarted;
+ * its partial snapshot never authorizes selection or deletion. */
+#define LATCD_RETIREMENT_SCAN_RETRY (-2)
 int latcd_retirement_queue_step(LatcdRetirementQueue *queue, unsigned entries,
                                  uint64_t time_us, LatcdRetirementQueueStats *stats,
                                  char *error, size_t error_size);
