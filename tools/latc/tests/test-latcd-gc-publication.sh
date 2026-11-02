@@ -8,7 +8,7 @@ runtime=$5
 guest=$6
 work=$7
 mode=${8:-pin}
-case "$mode" in pin|pin-restart|unreferenced|capture|capture-restart|broker-copy) ;; *) exit 2 ;; esac
+case "$mode" in pin|pin-restart|unreferenced|capture|capture-restart|broker-copy|broker-copy-restart) ;; *) exit 2 ;; esac
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 mkdir -m 700 "$work" "$work/cache" "$work/broker"
 cache=$work/cache
@@ -35,7 +35,7 @@ PY
 }
 trap cleanup EXIT
 unset LATCD_TEST_BROKER_DIRECTORY
-if [ "$mode" = pin ] || [ "$mode" = broker-copy ]; then export LATCD_TEST_BROKER_DIRECTORY="$work/broker"; fi
+if [ "$mode" = pin ] || [ "$mode" = broker-copy ] || [ "$mode" = broker-copy-restart ]; then export LATCD_TEST_BROKER_DIRECTORY="$work/broker"; fi
 LATCD_TEST_STAGE_PAGE=1 LATCD_TEST_CONSUME_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
     "$test_daemon" --serve --socket "$socket" --cache-dir "$cache" --latc "$latc" \
     --runner "$runner" --runtime-dir "$runtime" --stats "$work/stats.json" \
@@ -94,7 +94,7 @@ if [ "$mode" = pin ]; then
     if "$broker_client" --socket "$work/broker/broker.sock" --service-uid 4294967294 --output "$work/invalid.so" "$guest"; then exit 1; fi
     test ! -e "$work/invalid.so"
 fi
-if [ "$mode" = broker-copy ]; then
+if [ "$mode" = broker-copy ] || [ "$mode" = broker-copy-restart ]; then
     python3 "$script_dir/test-broker-publication.py" "$work/broker/broker.sock" "$cache" "$guest" \
         "$work/broker-ready" "$work/broker-release" >"$work/broker.out" 2>"$work/broker.err" &
     broker_pid=$!
@@ -231,7 +231,7 @@ if sys.argv[4] in ('capture', 'capture-restart'):
 else:
     assert all((root / name).is_file() for name in names)
 PY
-if [ "$mode" = pin-restart ] || [ "$mode" = capture-restart ]; then
+if [ "$mode" = pin-restart ] || [ "$mode" = capture-restart ] || [ "$mode" = broker-copy-restart ]; then
     kill -KILL "$pid"; wait "$pid" 2>/dev/null || :; pid=
     rm -f "$socket"
     LATCD_TEST_RECOVER_PAGE=1 LATCD_TEST_WAITING_DRIVER=1 \
@@ -319,7 +319,7 @@ new = json.loads((work / 'new.json').read_text())
 assert json.loads((cache / (source + '.current')).read_text()) == new
 assert all((cache / new[k]).is_file() for k in ('module', 'native', 'tbset'))
 PY
-if [ "$mode" = broker-copy ]; then
+if [ "$mode" = broker-copy ] || [ "$mode" = broker-copy-restart ]; then
     touch "$work/broker-release"
     wait "$broker_pid" || { cat "$work/broker.err" >&2; exit 1; }
     broker_pid=
