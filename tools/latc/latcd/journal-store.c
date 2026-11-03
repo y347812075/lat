@@ -567,6 +567,11 @@ int latcd_journal_reopen_task_input(const char *cache,
             !memcmp(&actual.journal, &identity->journal, sizeof(actual.journal)) &&
             !memcmp(actual.input_size, identity->input_size, sizeof(actual.input_size)) &&
             !memcmp(actual.input_sha256, identity->input_sha256, sizeof(actual.input_sha256));
+        if (ok) {
+            close(input->source_fd);
+            input->source_fd = source;
+            source = -1;
+        }
     }
     if (source >= 0) close(source);
     if (frozen >= 0) close(frozen);

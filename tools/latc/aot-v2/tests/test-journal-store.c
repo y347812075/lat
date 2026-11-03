@@ -692,6 +692,12 @@ static void check_range_edges(const char *parent, const char *source,
     LatcdJournalCompileInput reopened;
     g_assert_cmpint(latcd_journal_reopen_task_input(cache, &recorded, original_inputs[1],
         1048576, &reopened, error, sizeof(error)), ==, 0);
+    const int required_seals = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    int source_seals = fcntl(reopened.source_fd, F_GET_SEALS);
+    g_assert_cmpint(source_seals & required_seals, ==, required_seals);
+    int reopened_fds[3] = {reopened.source_fd, reopened.receipt_fd, reopened.config_fd};
+    g_assert_cmpint(latcd_journal_validate_frozen_input(&reopened, reopened_fds,
+        1048576, error, sizeof(error)), ==, 0);
     LatTbKeySet restored = {0};
     g_assert_cmpint(lat_tb_key_set_read_fd(reopened.receipt_fd, bound.source_sha256,
         &restored, error, sizeof(error)), ==, 0);
