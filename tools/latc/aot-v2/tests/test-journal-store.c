@@ -1303,12 +1303,15 @@ int main(void)
     g_assert_cmpstr(persisted_digest, ==, expected_hash);
     close(persisted_receipt);
     g_key_file_set_string(persisted, "journal", "receipt_sha256", "bad");
-    g_assert_cmpint(remove_task_receipt(&record_config, record_id, persisted), ==, -1);
+    g_assert_cmpint(remove_task_inputs(&record_config, record_id, record_lease,
+                                       persisted), ==, -1);
     g_assert_true(g_file_test(receipt_path, G_FILE_TEST_EXISTS));
     g_key_file_set_string(persisted, "journal", "receipt_sha256", expected_hash);
-    g_assert_cmpint(remove_task_receipt(&record_config, record_id, persisted), ==, 0);
+    g_assert_cmpint(remove_task_inputs(&record_config, record_id, record_lease,
+                                       persisted), ==, 0);
     g_assert_cmpuint(generation_capacity.metadata_committed, ==, metadata_before);
-    g_assert_cmpint(remove_task_receipt(&record_config, record_id, persisted), ==, 0);
+    g_assert_cmpint(remove_task_inputs(&record_config, record_id, record_lease,
+                                       persisted), ==, 0);
     g_free(receipt_path);
     g_free(receipt_name);
     char source_hex[65];

@@ -183,7 +183,7 @@ $(BUILD)/latcd/latcd: $(BUILD)/latcd/main.o $(BUILD)/latcd/protocol.o \
 		$(BUILD)/aot-v2/runtime/cache-lifecycle.o \
 		$(BUILD)/aot-v2/runtime/internal-fd-registry.o \
 		$(BUILD)/aot-v2/compiler/module-inspect.o \
-		$(BUILD)/aot-v2/runtime/elf-validate.o
+		$(BUILD)/aot-v2/runtime/elf-validate.o $(BUILD)/latcd/managed-launch.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread -ldl
 
 $(BUILD)/tests/latcd-gc-timer-main.o: latcd/main.c
@@ -198,7 +198,7 @@ $(BUILD)/tests/latcd-gc-timer: $(BUILD)/tests/latcd-gc-timer-main.o $(BUILD)/lat
 	$(BUILD)/aot-v2/common/translation-config.o $(BUILD)/aot-v2/common/tb-key-set.o \
 	$(BUILD)/aot-v2/runtime/cache-domain.o $(BUILD)/aot-v2/runtime/cache-lifecycle.o \
 	$(BUILD)/aot-v2/runtime/internal-fd-registry.o $(BUILD)/aot-v2/compiler/module-inspect.o \
-	$(BUILD)/aot-v2/runtime/elf-validate.o
+	$(BUILD)/aot-v2/runtime/elf-validate.o $(BUILD)/latcd/managed-launch.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread -ldl
 
 .PHONY: test-latcd-gc-timer
@@ -261,6 +261,10 @@ $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-journal-s
 $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
 	$(BUILD)/latcd/worker-seccomp.o $(BUILD)/latcd/worker-closure.o $(BUILD)/latcd/launch-options.o
 
+$(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-journal-store \
+$(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: \
+	$(BUILD)/latcd/managed-launch.o
+
 $(BUILD)/tests/test-launch-options: tests/test-launch-options.c $(BUILD)/latcd/launch-options.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -268,6 +272,15 @@ $(BUILD)/tests/test-launch-options: tests/test-launch-options.c $(BUILD)/latcd/l
 test-launch-options: $(BUILD)/tests/test-launch-options
 	$(BUILD)/tests/test-launch-options
 test: test-launch-options
+
+$(BUILD)/tests/test-managed-launch: tests/test-managed-launch.c \
+		$(BUILD)/latcd/managed-launch.o $(BUILD)/latcd/cache-capacity.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
+.PHONY: test-managed-launch
+test-managed-launch: $(BUILD)/tests/test-managed-launch
+	$(BUILD)/tests/test-managed-launch
+test: test-managed-launch
 $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-journal-store \
 $(BUILD)/tests/test-latcd-channel $(BUILD)/tests/test-latcd-coverage: $(BUILD)/latcd/worker-domain.o
 $(BUILD)/latcd/latcd $(BUILD)/tests/latcd-gc-timer $(BUILD)/tests/test-journal-store \

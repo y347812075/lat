@@ -23,6 +23,7 @@
 #include "managed-path.h"
 #include "worker-closure.h"
 #include "launch-options.h"
+#include "managed-launch.h"
 #include "replay-validate.h"
 #include "parson/parson.h"
 
@@ -432,6 +433,18 @@ static void digest_hex(const uint8_t digest[32], char hex[65])
         hex[i * 2 + 1] = digits[digest[i] & 15];
     }
     hex[64] = '\0';
+}
+
+static bool parse_digest_hex(const char text[65], uint8_t digest[32])
+{
+    if (!text || strlen(text) != 64) return false;
+    for (size_t i = 0; i < 32; i++) {
+        int high = g_ascii_xdigit_value(text[2 * i]);
+        int low = g_ascii_xdigit_value(text[2 * i + 1]);
+        if (high < 0 || low < 0) return false;
+        digest[i] = (uint8_t)((high << 4) | low);
+    }
+    return true;
 }
 
 static void expected_codegen_id(uint8_t digest[32])
@@ -1522,7 +1535,8 @@ static int prepare_metadata_directories(const char *cache_dir)
         "source-locks", "tasks", "compiler-budgets", "compiler-releases",
         "compiler-output-releases", "copy-releases", "copy-receipts",
         "copy-handoffs", "transactions", "tombstones", "holds", "mount-leases",
-        "retirement-schedule", "managed-task-state", "journal-inputs"
+        "retirement-schedule", "managed-task-state", "journal-inputs",
+        "managed-launch"
     };
     int root = open(cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int gc = root < 0 ? -1 : open_task_directory(root, ".gc");
@@ -1615,7 +1629,8 @@ out:
 static bool receipt_digest(int fd, char digest[65]);
 
 /* Caller holds the task's exclusive lease and has proved the domain terminal. */
-static int remove_task_receipt(const LatcdConfig *config, const char *id, GKeyFile *record)
+static int remove_task_inputs(const LatcdConfig *config, const char *id, int task_fd,
+                              GKeyFile *record)
 {
     int root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int gc = root < 0 ? -1 : open_task_directory(root, ".gc");
@@ -1644,7 +1659,13 @@ static int remove_task_receipt(const LatcdConfig *config, const char *id, GKeyFi
     g_clear_error(&parse_error);
     g_free(expected);
     g_free(name);
-    return result;
+    char launch_error[256] = {0};
+    int launch = latcd_managed_launch_discard(config->cache_dir, id, task_fd,
+                                              launch_error, sizeof(launch_error));
+    if (launch)
+        fprintf(stderr, "latcd: cannot remove launch contract for %s: %s\n",
+                id, launch_error);
+    return result || launch ? -1 : 0;
 }
 
 static int persist_task_record(int directory, const char *id, GKeyFile *record)
@@ -2359,6 +2380,15 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
                                            LATCD_MANAGED_PREEXEC_CANCELLED, error, sizeof(error));
         goto out;
     }
+    /* The launch contract is durable before DOMAIN_BOUND and is removed with the
+     * journal inputs at a terminal state. Only states that can still lead to a
+     * worker launch must prove a contract; terminal states are re-cleaned. */
+    bool launch_required = domain.state != LATCD_MANAGED_PREEXEC_CANCELLED &&
+        domain.state != LATCD_MANAGED_OUTPUTS_REMOVED &&
+        domain.state != LATCD_MANAGED_REPLAY_DISCARDED;
+    if (journal && launch_required &&
+        latcd_managed_launch_validate_self(config->cache_dir, id, task,
+            error, sizeof(error))) goto out;
     if (replay && (domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY)) {
         result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
                                             LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error));
@@ -2530,7 +2560,7 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
                     LATCD_MANAGED_PREPARED, state_error, sizeof(state_error)) &&
                 (terminal.state == LATCD_MANAGED_PREEXEC_CANCELLED || terminal.state == LATCD_MANAGED_OUTPUTS_REMOVED ||
                  terminal.state == LATCD_MANAGED_REPLAY_DISCARDED)) {
-                if (journal && remove_task_receipt(config, id, record)) unsafe = true;
+                if (journal && remove_task_inputs(config, id, task, record)) unsafe = true;
                 if (!unsafe) latcd_cache_capacity_release_task(&generation_capacity, id);
             }
             g_key_file_free(record);
@@ -3381,7 +3411,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     int pin_result = pin_compiler_inputs(journal_input ? journal_pins : inputs,
                                          input_pins, error, error_size);
     int input_copies[4] = {-1, -1, -1, -1};
-    LatcdJournalReplayIdentity journal_identity;
+    LatcdJournalReplayIdentity journal_identity = {0};
     if (journal_input && !pin_result && (snapshot_journal_replay_input(journal_input, input_pins[3], config->max_cache_bytes,
             input_copies, error, error_size) ||
         latcd_journal_replay_identity(journal_input, input_copies, config->max_cache_bytes,
@@ -3589,6 +3619,35 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                                   F_SEAL_SHRINK | F_SEAL_SEAL) ||
                             lseek(args_fd, 0, SEEK_SET) < 0 ||
                             (args_child = fcntl(args_fd, F_DUPFD_CLOEXEC, 16)) < 0))
+            pin_result = -1;
+    }
+    struct stat launch_identity = {0};
+    char launch_digest[65] = {0};
+    if (journal_input && real_managed_compile && !pin_result) {
+        LatcdManagedLaunchInput contract = {
+            .receipt_size = journal_identity.input_size[1],
+            .compiler_fd = tool_fds[0],
+            .runner_fd = tool_fds[1],
+            .runtime_fd = tool_fds[2],
+            .launcher_fd = launcher_fds[0],
+            .bootstrap_fd = launcher_fds[1],
+            .baseline_fd = input_copies[3],
+            .options = launch.options,
+            .exec = launch.exec,
+            .environment = launch.environment,
+        };
+        memcpy(contract.build_sha256, journal_identity.journal.build_sha256, 32);
+        memcpy(contract.codegen_sha256, journal_identity.journal.codegen_sha256, 32);
+        memcpy(contract.config_sha256, journal_identity.input_sha256[2], 32);
+        memcpy(contract.source_sha256, journal_identity.input_sha256[0], 32);
+        memcpy(contract.receipt_sha256, journal_identity.input_sha256[1], 32);
+        /* A sealed per-file closure carries its own identity; the wide read-only
+         * toolroot fallback has none and records the zero digest. */
+        if ((closure_identity[0] && !parse_digest_hex(closure_identity, contract.closure_sha256)) ||
+            latcd_managed_launch_prepare(config->cache_dir, task_id, task_lease, &contract,
+                &launch_identity, launch_digest, error, error_size) ||
+            latcd_managed_launch_verify(config->cache_dir, task_id, task_lease,
+                &launch_identity, launch_digest, &contract, error, error_size))
             pin_result = -1;
     }
     LatcdManagedDomain domain = {0};
@@ -6696,7 +6755,7 @@ static void *compiler_worker(void *opaque)
                 if (terminal) {
                     GKeyFile *record = g_key_file_new();
                     terminal = g_key_file_load_from_file(record, path, 0, NULL) &&
-                        !remove_task_receipt(service->config, task->id, record);
+                        !remove_task_inputs(service->config, task->id, fd, record);
                     g_key_file_unref(record);
                 }
                 if (fd >= 0) close(fd);
@@ -8978,6 +9037,38 @@ static int test_managed_task_record(const char *root)
                         journal_replay ? &journal : NULL, environment, 4096,
                         &id, error, sizeof(error));
     if (lease < 0) goto out;
+    if (journal_replay) {
+        GPtrArray *launch_options = g_ptr_array_new();
+        GPtrArray *launch_exec = g_ptr_array_new();
+        g_ptr_array_add(launch_options, "--setenv");
+        g_ptr_array_add(launch_exec, "/bootstrap");
+        const char *launch_environment[] = {"LANG=C", NULL};
+        LatcdManagedLaunchInput launch = {
+            .receipt_size = journal.input_size[1],
+            .compiler_fd = -1,
+            .runner_fd = -1,
+            .runtime_fd = -1,
+            .launcher_fd = -1,
+            .bootstrap_fd = -1,
+            .baseline_fd = pins[3],
+            .options = launch_options,
+            .exec = launch_exec,
+            .environment = launch_environment,
+        };
+        memcpy(launch.build_sha256, journal.journal.build_sha256, 32);
+        struct stat launch_identity;
+        char launch_digest[65];
+        if (latcd_managed_launch_prepare(root, id, lease, &launch, &launch_identity,
+                launch_digest, error, sizeof(error)) ||
+            latcd_managed_launch_verify(root, id, lease, &launch_identity, launch_digest,
+                &launch, error, sizeof(error))) {
+            g_ptr_array_free(launch_exec, TRUE);
+            g_ptr_array_free(launch_options, TRUE);
+            goto out;
+        }
+        g_ptr_array_free(launch_exec, TRUE);
+        g_ptr_array_free(launch_options, TRUE);
+    }
     if (replay) {
         LatcdManagedDomain domain = {0};
         g_strlcpy(domain.boot, "12345678-1234-1234-1234-123456789abc", sizeof(domain.boot));
