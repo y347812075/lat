@@ -4268,6 +4268,9 @@ static bool managed_task_state_read(int gc, const char *name, const char *id,
                  !memchr(data, 0, length);
     GKeyFile *record = g_key_file_new();
     valid = valid && g_key_file_load_from_data(record, data, length, 0, NULL);
+    char *state_version = g_key_file_get_string(record, "managed", "version", NULL);
+    bool launch_bound = state_version && !strcmp(state_version, "2");
+    valid = valid && state_version && (!strcmp(state_version, "1") || launch_bound);
     const char *keys[] = {"version", "task_id", "task_device", "task_inode", "task_sha256", "state"};
     gsize groups = 0;
     char **names = g_key_file_get_groups(record, &groups);
@@ -4296,14 +4299,22 @@ static bool managed_task_state_read(int gc, const char *name, const char *id,
     bool discarded = record_string_is(record, "managed", "state", "REPLAY_DISCARDED");
     bool replay_adopting = record_string_is(record, "managed", "state", "REPLAY_ADOPTING");
     bool replay_adopted = record_string_is(record, "managed", "state", "REPLAY_ADOPTED");
-    valid = valid && groups == 1 && (prepared ? exact_keys(record, "managed", keys, G_N_ELEMENTS(keys)) : (delegated || preexec) ?
+    valid = valid && (groups == 1 || (launch_bound && groups == 2)) &&
+        (prepared ? !launch_bound && exact_keys(record, "managed", keys, G_N_ELEMENTS(keys)) : (delegated || preexec) ?
         exact_keys(record, "managed", delegation_keys, G_N_ELEMENTS(delegation_keys)) : adopted ?
         exact_keys(record, "managed", adopted_keys, G_N_ELEMENTS(adopted_keys)) : replay_adopted ?
         exact_keys(record, "managed", replay_keys, G_N_ELEMENTS(replay_keys)) :
         exact_keys(record, "managed", bound_keys, G_N_ELEMENTS(bound_keys))) &&
-        record_string_is(record, "managed", "version", "1") &&
         record_string_is(record, "managed", "task_id", id) &&
         (prepared || delegated || preexec || bound || authorized || cancelled || empty || workspace || adopting || adopted || removed || discarded || replay_adopting || replay_adopted);
+    const char *launch_keys[] = {"device", "inode", "size", "sha256"};
+    if (valid && launch_bound) {
+        char *sha = g_key_file_get_string(record, "launch", "sha256", NULL);
+        valid = g_key_file_has_group(record, "launch") &&
+            exact_keys(record, "launch", launch_keys, G_N_ELEMENTS(launch_keys)) &&
+            sha && strlen(sha) == 64 && strspn(sha, "0123456789abcdef") == 64;
+        g_free(sha);
+    }
     if (valid && (discarded || replay_adopting || replay_adopted)) {
         GKeyFile *task_record = g_key_file_new();
         valid = g_key_file_load_from_data(task_record, raw, size, 0, NULL) &&
@@ -4355,12 +4366,28 @@ static bool managed_task_state_read(int gc, const char *name, const char *id,
             g_strlcpy(parsed.boot, boot, sizeof(parsed.boot));
             parsed.delegation.st_dev = dd; parsed.delegation.st_ino = di;
             parsed.domain.st_dev = wd; parsed.domain.st_ino = wi;
+            if (launch_bound) {
+                uint64_t ld, li, ls;
+                char *sha = g_key_file_get_string(record, "launch", "sha256", NULL);
+                valid = record_uint64(record, "launch", "device", &ld) &&
+                    record_uint64(record, "launch", "inode", &li) && li &&
+                    record_uint64(record, "launch", "size", &ls) && ls &&
+                    sha && strlen(sha) == 64;
+                if (valid) {
+                    parsed.launch.st_dev = ld; parsed.launch.st_ino = li;
+                    parsed.launch.st_size = ls;
+                    g_strlcpy(parsed.launch_sha256, sha,
+                              sizeof(parsed.launch_sha256));
+                }
+                g_free(sha);
+            }
         }
         if (root >= 0) close(root);
         g_free(boot);
     }
     if (valid && domain) *domain = parsed;
-    g_free(digest); g_strfreev(names); g_key_file_unref(record); g_free(data); close(states);
+    g_free(state_version); g_free(digest); g_strfreev(names);
+    g_key_file_unref(record); g_free(data); close(states);
     return valid;
 }
 
@@ -4808,7 +4835,7 @@ int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
                                    "DELEGATION_BOUND", "PREEXEC_CANCELLED", "REPLAY_ADOPTING", "REPLAY_ADOPTED"};
             GKeyFile *record = g_key_file_new();
             char *digest = g_compute_checksum_for_data(G_CHECKSUM_SHA256, (const guchar *)raw, size);
-            g_key_file_set_string(record, "managed", "version", "1");
+            g_key_file_set_string(record, "managed", "version", value.launch.st_ino ? "2" : "1");
             g_key_file_set_string(record, "managed", "task_id", id);
             g_key_file_set_uint64(record, "managed", "task_device", held.st_dev);
             g_key_file_set_uint64(record, "managed", "task_inode", held.st_ino);
@@ -4822,6 +4849,12 @@ int latcd_managed_task_domain(const char *root, const char *id, int task_fd,
             if (next != LATCD_MANAGED_DELEGATION_BOUND && next != LATCD_MANAGED_PREEXEC_CANCELLED) {
                 g_key_file_set_uint64(record, "managed", "domain_device", value.domain.st_dev);
                 g_key_file_set_uint64(record, "managed", "domain_inode", value.domain.st_ino);
+            }
+            if (value.launch.st_ino) {
+                g_key_file_set_uint64(record, "launch", "device", value.launch.st_dev);
+                g_key_file_set_uint64(record, "launch", "inode", value.launch.st_ino);
+                g_key_file_set_uint64(record, "launch", "size", value.launch.st_size);
+                g_key_file_set_string(record, "launch", "sha256", value.launch_sha256);
             }
             if (next != LATCD_MANAGED_OUTPUT_ADOPTED ||
                 managed_capture_outputs(directory, raw, size, record, false))

@@ -2464,8 +2464,9 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
         domain.state != LATCD_MANAGED_OUTPUTS_REMOVED &&
         domain.state != LATCD_MANAGED_REPLAY_DISCARDED;
     if (journal && launch_required &&
-        latcd_managed_launch_validate_self(config->cache_dir, id, task,
-            error, sizeof(error))) goto out;
+        (!domain.launch.st_ino ||
+         latcd_managed_launch_validate_bound(config->cache_dir, id, task,
+             &domain.launch, domain.launch_sha256, error, sizeof(error)))) goto out;
     if (replay && (domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY)) {
         result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
                                             LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error));
@@ -3733,6 +3734,11 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             pin_result = -1;
     }
     LatcdManagedDomain domain = {0};
+    if (!pin_result && journal_input) {
+        domain.launch = launch_identity;
+        g_strlcpy(domain.launch_sha256, launch_digest,
+                  sizeof(domain.launch_sha256));
+    }
     pid_t child = -1;
 #ifdef LATCD_GC_TIMER_TEST
     bool test_descendant = config->managed && getenv("LATCD_TEST_DOMAIN_DESCENDANT");
@@ -9128,6 +9134,8 @@ static int test_managed_task_record(const char *root)
                         journal_replay ? &journal : NULL, environment, 4096,
                         &id, error, sizeof(error));
     if (lease < 0) goto out;
+    struct stat launch_identity = {0};
+    char launch_digest[65] = {0};
     if (journal_replay) {
         GPtrArray *launch_options = g_ptr_array_new();
         GPtrArray *launch_exec = g_ptr_array_new();
@@ -9147,8 +9155,6 @@ static int test_managed_task_record(const char *root)
             .environment = launch_environment,
         };
         memcpy(launch.build_sha256, journal.journal.build_sha256, 32);
-        struct stat launch_identity;
-        char launch_digest[65];
         if (latcd_managed_launch_prepare(root, id, lease, &launch, &launch_identity,
                 launch_digest, error, sizeof(error)) ||
             latcd_managed_launch_verify(root, id, lease, &launch_identity, launch_digest,
@@ -9162,6 +9168,11 @@ static int test_managed_task_record(const char *root)
     }
     if (replay) {
         LatcdManagedDomain domain = {0};
+        if (journal_replay) {
+            domain.launch = launch_identity;
+            g_strlcpy(domain.launch_sha256, launch_digest,
+                      sizeof(domain.launch_sha256));
+        }
         g_strlcpy(domain.boot, "12345678-1234-1234-1234-123456789abc", sizeof(domain.boot));
         domain.delegation.st_ino = 2; domain.domain.st_ino = 4;
         if (latcd_managed_task_domain(root, id, lease, &domain, LATCD_MANAGED_DELEGATION_BOUND, error, sizeof(error)))

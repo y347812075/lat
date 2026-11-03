@@ -25,11 +25,10 @@ typedef struct LatcdManagedLaunchInput {
     const char *const *environment;
 } LatcdManagedLaunchInput;
 
-/* Persist the exact final launch plan in the daemon-private metadata store.
- * The record is written before the first durable launch state and is verified
- * against the live inputs immediately before execution; binding the digest
- * into a versioned managed state record is still outstanding, so this record
- * is an audit/consistency artifact and not an execution barrier by itself. */
+/* Persist the exact final launch plan in daemon-private metadata. Journal
+ * worker state commits the returned identity and digest before delegation and
+ * recovery requires both to match. The live plan is also rechecked before
+ * execution; this record does not by itself authorize a producer. */
 int latcd_managed_launch_prepare(const char *root, const char *id, int task_fd,
     const LatcdManagedLaunchInput *input, struct stat *identity,
     char digest[65], char *error, size_t error_size);
@@ -44,6 +43,12 @@ int latcd_managed_launch_verify(const char *root, const char *id, int task_fd,
 /* Recovery-side structural validation. It binds the private record to the
  * held task and cache identities but cannot compare the original live fds. */
 int latcd_managed_launch_validate_self(const char *root, const char *id, int task_fd,
+    char *error, size_t error_size);
+
+/* Validate the private record and require it to match the launch identity and
+ * digest already committed in a managed task state transition. */
+int latcd_managed_launch_validate_bound(const char *root, const char *id, int task_fd,
+    const struct stat *expected, const char *expected_digest,
     char *error, size_t error_size);
 
 int latcd_managed_launch_discard(const char *root, const char *id, int task_fd,

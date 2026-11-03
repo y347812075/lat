@@ -501,6 +501,35 @@ int latcd_managed_launch_validate_self(const char *root, const char *id, int tas
     return result ? -1 : 0;
 }
 
+int latcd_managed_launch_validate_bound(const char *root, const char *id, int task_fd,
+    const struct stat *expected, const char *expected_digest,
+    char *error, size_t error_size)
+{
+    if (!expected || !expected_digest || !digest_string(expected_digest))
+        return fail(error, error_size, "missing bound managed launch identity");
+    if (latcd_managed_launch_validate_self(root, id, task_fd,
+                                            error, error_size)) return -1;
+    int directory = open_directory(root, false);
+    char *name = g_strdup_printf("%s.launch", id);
+    char *data = NULL;
+    size_t size = 0;
+    struct stat identity;
+    char digest[65];
+    int result = directory < 0 ? -1 : read_contract(directory, name, &data, &size,
+        &identity, digest, error, error_size);
+    if (!result && (identity.st_dev != expected->st_dev ||
+                    identity.st_ino != expected->st_ino ||
+                    identity.st_size != expected->st_size ||
+                    strcmp(digest, expected_digest))) {
+        result = fail(error, error_size,
+                      "managed launch identity differs from task state");
+    }
+    g_free(data);
+    g_free(name);
+    if (directory >= 0) close(directory);
+    return result;
+}
+
 int latcd_managed_launch_discard(const char *root, const char *id, int task_fd,
     char *error, size_t error_size)
 {

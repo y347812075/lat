@@ -123,7 +123,17 @@ int main(void)
     assert(capacity.metadata_committed > metadata_base);
     assert(!latcd_managed_launch_verify(root, TASK_ID, task_fd, &identity, digest, &input,
         error, sizeof(error)));
-    assert(!latcd_managed_launch_validate_self(root, TASK_ID, task_fd, error, sizeof(error)));
+    assert(!latcd_managed_launch_validate_bound(root, TASK_ID, task_fd, &identity, digest,
+        error, sizeof(error)));
+    struct stat wrong_identity = identity;
+    wrong_identity.st_ino++;
+    assert(latcd_managed_launch_validate_bound(root, TASK_ID, task_fd, &wrong_identity, digest,
+        error, sizeof(error)));
+    char wrong_digest[65];
+    g_strlcpy(wrong_digest, digest, sizeof(wrong_digest));
+    wrong_digest[0] = wrong_digest[0] == '0' ? '1' : '0';
+    assert(latcd_managed_launch_validate_bound(root, TASK_ID, task_fd, &identity, wrong_digest,
+        error, sizeof(error)));
 
     /* A different task identity never matches the recorded contract. */
     assert(latcd_managed_launch_validate_self(root, "12345678-1234-1234-1234-123456789abd",

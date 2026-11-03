@@ -13,7 +13,8 @@ int latcd_managed_task_prepare(const char *root, const char *id, int task_fd,
                                char *error, size_t error_size);
 typedef struct LatcdManagedDomain {
     char boot[37];
-    struct stat delegation, domain;
+    struct stat delegation, domain, launch;
+    char launch_sha256[65];
     unsigned state;
 } LatcdManagedDomain;
 enum { LATCD_MANAGED_PREPARED, LATCD_MANAGED_BOUND,

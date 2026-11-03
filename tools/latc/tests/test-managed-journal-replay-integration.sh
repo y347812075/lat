@@ -64,6 +64,18 @@ if [ -n "${LATCD_TEST_REPLAY_CRASH_PREPARED:-}${LATCD_TEST_REPLAY_CRASH_LINKED:-
         test -f "$work/cache/.tmp/base.native"
         rm "$receipt"
         mv "$work/original.receipt" "$receipt"
+        launch="$work/cache/.gc/managed-launch/$id.launch"
+        test -s "$launch"
+        mv "$launch" "$work/original.launch"
+        printf 'invalid launch\n' > "$launch"
+        chmod 400 "$launch"
+        if "$daemon" --test-managed-adoption-recovery "$work/cache" "$id" > "$work/launch-reject.log" 2>&1; then
+            echo 'replacement launch accepted by recovery' >&2; exit 1
+        fi
+        grep -qx 'state=REPLAY_ADOPTED' "$state"
+        test -f "$work/cache/.tmp/base.native"
+        rm "$launch"
+        mv "$work/original.launch" "$launch"
     fi
     if [ -n "${LATCD_TEST_REPLAY_CRASH_UNLINKED:-}" ]; then
         test -z "$(find "$work/cache/.tmp" -name 'replay-native-*' -print -quit)"
