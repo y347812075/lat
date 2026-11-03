@@ -82,6 +82,20 @@ if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
     echo 'missing worker closure accepted' >&2; exit 1
 fi
 grep -q 'managed worker closure rejected' "$work/closure.err"
+sed 's|}$|,"automatic_retirement":"true"}|' "$work/config" > "$work/automatic-nonbool-config"
+if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
+    env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/automatic-nonbool-config" \
+    >"$work/automatic-nonbool.out" 2>"$work/automatic-nonbool.err"; then
+    echo 'non-boolean automatic retirement accepted' >&2; exit 1
+fi
+grep -q 'managed configuration rejected' "$work/automatic-nonbool.err"
+sed 's|}$|,"automatic_retirement":true}|' "$work/config" > "$work/automatic-legacy-config"
+if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
+    env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/automatic-legacy-config" \
+    >"$work/automatic-legacy.out" 2>"$work/automatic-legacy.err"; then
+    echo 'automatic retirement accepted for legacy cache' >&2; exit 1
+fi
+grep -q 'automatic retirement requires a managed cache domain' "$work/automatic-legacy.err"
 test ! -e "$work/admin/admin.sock"
 test ! -e "$work/broker/broker.sock"
 chmod 777 "$work/broker"

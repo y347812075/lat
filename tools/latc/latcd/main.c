@@ -111,6 +111,7 @@ typedef struct LatcdConfig {
     uint32_t cpu_seconds;
     uint32_t open_files;
     bool flush_only;
+    bool automatic_retirement;
     uint32_t idle_seconds;
     bool managed;
     const char *worker_bwrap, *worker_bootstrap, *worker_toolroot;
@@ -2798,42 +2799,36 @@ static bool retirement_recovery_ready(const LatcdConfig *config)
         (!config->managed || atomic_load(&managed_task_recovery_state) == 1);
 }
 
-static bool page_driver_admitted(void)
+static bool page_driver_admitted(const LatcdConfig *config)
 {
 #ifdef LATCD_GC_TIMER_TEST
-    return getenv("LATCD_TEST_STAGE_PAGE") || getenv("LATCD_TEST_RECOVER_PAGE");
-#else
-    /* Managed metadata does not establish a controlled access domain or roots. */
-    return false;
+    if (getenv("LATCD_TEST_STAGE_PAGE") || getenv("LATCD_TEST_RECOVER_PAGE"))
+        return true;
 #endif
+    return config && config->managed && config->automatic_retirement;
 }
 
-static void retirement_hold_for_discovery(void)
+static void retirement_hold_for_discovery(const LatcdConfig *config)
 {
-    if (!page_driver_admitted()) return;
+    if (!page_driver_admitted(config)) return;
     pthread_mutex_lock(&retirement_queue_lock);
     retirement_idle_hold = true;
     retirement_idle_generation++;
     pthread_mutex_unlock(&retirement_queue_lock);
 }
 
-static bool page_driver_stage_requested(void)
+static bool page_driver_stage_requested(const LatcdConfig *config)
 {
-#ifdef LATCD_GC_TIMER_TEST
-    return getenv("LATCD_TEST_STAGE_PAGE") != NULL ||
-           getenv("LATCD_TEST_RECOVER_PAGE") != NULL;
-#else
+    (void)config;
     return true;
-#endif
 }
 
-static bool page_recovery_admitted(void)
+static bool page_recovery_admitted(const LatcdConfig *config)
 {
 #ifdef LATCD_GC_TIMER_TEST
-    return getenv("LATCD_TEST_RECOVER_PAGE") != NULL;
-#else
-    return page_driver_admitted();
+    if (getenv("LATCD_TEST_RECOVER_PAGE")) return true;
 #endif
+    return page_driver_admitted(config);
 }
 
 /* The caller owns the sole scheduler queue and the page budget. */
@@ -2846,7 +2841,7 @@ static int test_waiting_page_step(LatcdPageDriver *driver, const LatcdConfig *co
     uint8_t results[128];
     struct timespec ts;
     int result;
-    if (!page_driver_admitted()) return fail(error, error_size, "page driver admission unavailable");
+    if (!page_driver_admitted(config)) return fail(error, error_size, "page driver admission unavailable");
     if (clock_gettime(CLOCK_BOOTTIME, &ts)) return -1;
     uint64_t now = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
     if (latcd_retirement_page_state_load(config->cache_dir, &page, error, error_size)) return -1;
@@ -3001,7 +2996,7 @@ static int test_stage_retirement_page(LatcdPageDriver *driver, const LatcdConfig
 {
     LatcdRetirementPageState page;
     int result = 0;
-    if (!page_driver_admitted()) return fail(error, error_size, "page driver admission unavailable");
+    if (!page_driver_admitted(config)) return fail(error, error_size, "page driver admission unavailable");
     if (!driver->discovery) {
         struct timespec ts;
         char *boot = NULL;
@@ -3072,7 +3067,7 @@ static void *compiler_input_recovery_worker(void *opaque)
         bool start_page_discovery = false;
         if (retirement_safe && retirement_recovery_ready(work->config) &&
             page_driver_state.waiting && test_page_driver &&
-            page_driver_admitted() && now >= next_retirement) {
+            page_driver_admitted(work->config) && now >= next_retirement) {
             uint64_t deadline = 0;
             char error[256] = {0};
             int result = test_waiting_page_step(&page_driver_state, work->config, retirement, &deadline, error, sizeof(error));
@@ -3130,8 +3125,8 @@ static void *compiler_input_recovery_worker(void *opaque)
                 retirement_idle_hold = false;
             pthread_mutex_unlock(&retirement_queue_lock);
             if (result <= 0) idle_scan_active = false;
-            if (!result && stats.ready && !page_driver_state.staged && page_driver_stage_requested()) {
-                if (page_driver_admitted()) start_page_discovery = true;
+            if (!result && stats.ready && !page_driver_state.staged && page_driver_stage_requested(work->config)) {
+                if (page_driver_admitted(work->config)) start_page_discovery = true;
 #ifndef LATCD_GC_TIMER_TEST
                 else if (!page_driver_state.blocked_reported) {
                     fprintf(stderr, "latcd: retirement page blocked: controlled access and complete roots unavailable\n");
@@ -3155,7 +3150,7 @@ static void *compiler_input_recovery_worker(void *opaque)
             if (page_driver_state.waiting && test_page_driver) next_retirement = 0;
         }
         if (retirement_safe && retirement_recovery_ready(work->config) && (start_page_discovery ||
-            (page_driver_state.discovery && page_driver_admitted() && now >= next_retirement))) {
+            (page_driver_state.discovery && page_driver_admitted(work->config) && now >= next_retirement))) {
             char error[256] = {0};
             int stage = test_stage_retirement_page(&page_driver_state, work->config, error, sizeof(error));
             if (stage < 0) {
@@ -4948,7 +4943,7 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
             fprintf(stderr, "latcd: %s; transaction retained for recovery\n",
                     retirement_error);
         }
-        retirement_hold_for_discovery();
+        retirement_hold_for_discovery(config);
         retirement_notify();
     }
     if (!result && crash && !strcmp(crash, "retired")) raise(SIGKILL);
@@ -6583,7 +6578,7 @@ static void write_stats_locked(LatcdService *service)
         ",\"retirement_candidates\":%u,\"retirement_due_candidates\":%u"
         ",\"retirement_next_deadline_boottime_us\":%" PRIu64
         ",\"retirement_oldest_due_wait_us\":%" PRIu64
-        ",\"retirement_discovery_complete\":%s,\"automatic_deletion_enabled\":false"
+        ",\"retirement_discovery_complete\":%s,\"automatic_deletion_enabled\":%s"
         ",\"retirement_ready_candidates\":%u,\"retirement_deferred_candidates\":%u"
         ",\"retirement_next_attempt_boottime_us\":%" PRIu64
         ",\"retirement_timer_wakeups\":%" PRIu64 ",\"retirement_publication_wakeups\":%" PRIu64
@@ -6600,6 +6595,7 @@ static void write_stats_locked(LatcdService *service)
         metadata_bytes, metadata_reserved, state_bytes, state_reserved, unknown_budgets, budget_recovery,
         retirement.candidates, retirement.due, retirement.next_deadline_us, retirement.oldest_due_wait_us,
         retirement.complete ? "true" : "false",
+        service->config->automatic_retirement ? "true" : "false",
         retirement.ready, retirement.deferred, retirement.next_attempt_us,
         timer_wakeups, publication_wakeups,
         capacity_ready ? "true" : "false", cache_domain_managed ? "true" : "false",
@@ -8498,7 +8494,7 @@ static int run_service(const LatcdConfig *config)
         stop_requested = 1;
     }
     pthread_t recovery_thread;
-    retirement_hold_for_discovery();
+    retirement_hold_for_discovery(config);
     bool recovery_started = !pthread_create(&recovery_thread, NULL,
         compiler_input_recovery_worker, &task_recovery);
     if (!recovery_started) {
@@ -9524,6 +9520,7 @@ int main(int argc, char **argv)
         config.worker_bwrap = managed_config.worker_bwrap;
         config.worker_bootstrap = managed_config.worker_bootstrap;
         config.worker_real_compile = managed_config.worker_closure != NULL;
+        config.automatic_retirement = managed_config.automatic_retirement;
     }
     for (int i = managed_entry ? argc : 1; i < argc; i++) {
         if (!strcmp(argv[i], "--once")) once = 1;
@@ -9767,10 +9764,18 @@ int main(int argc, char **argv)
         return 1;
     }
     cache_domain_managed = domain > 0;
-    if (cache_domain_managed)
+    if (config.automatic_retirement && !cache_domain_managed) {
+        fprintf(stderr, "latcd: automatic retirement requires a managed cache domain\n");
+        close(cache_owner);
+        return 1;
+    }
+    if (cache_domain_managed) {
         fprintf(stderr, "latcd: managed cache domain=%s\n", cache_domain_id);
-    else
+        if (config.automatic_retirement)
+            fprintf(stderr, "latcd: automatic retirement enabled for managed domain\n");
+    } else {
         fprintf(stderr, "latcd: legacy cache domain (no managed marker)\n");
+    }
     struct sigaction recovery_action = { .sa_handler = signal_stop };
     sigemptyset(&recovery_action.sa_mask);
     sigaction(SIGINT, &recovery_action, NULL);
@@ -9826,7 +9831,7 @@ int main(int argc, char **argv)
     bool retry_recovered = false;
     bool page_recovered = false;
     if (!budget_result && latcd_retirement_page_startup_check(config.cache_dir, error, sizeof(error))) {
-        if (page_recovery_admitted()) {
+        if (page_recovery_admitted(&config)) {
             LatcdRetirementPageState page;
             if (latcd_retirement_page_restore_budget(config.cache_dir, &generation_capacity,
                     config.max_cache_bytes, LATCD_RETIREMENT_GRACE_US,

@@ -1527,6 +1527,12 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc == 1) {
+        LatcdConfig admission = {0};
+        g_assert_false(page_driver_admitted(&admission));
+        admission.managed = true;
+        g_assert_false(page_driver_admitted(&admission));
+        admission.automatic_retirement = true;
+        g_assert_true(page_driver_admitted(&admission));
         test_broker_read_bounds();
         test_broker_export_request();
         test_owner_binding_swap(false, false);

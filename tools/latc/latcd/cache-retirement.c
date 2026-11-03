@@ -1509,9 +1509,9 @@ static int page_state_store_guarded(int root_fd, int gc, const LatcdRetirementPa
         (budget && state->count && (!budget->page_identity_bound ||
          latcd_retirement_page_budget_identity(state, binding) ||
          memcmp(binding, budget->page_identity, sizeof(binding)))) ||
-        (budget && !budget->page_identity_bound) || fstat(root_fd, &cache) ||
-        state->cache_device != (uint64_t)cache.st_dev ||
-        state->cache_inode != (uint64_t)cache.st_ino) goto out;
+        (budget && !budget->page_identity_bound)) { errno = EINVAL; goto out; }
+    if (fstat(root_fd, &cache) || state->cache_device != (uint64_t)cache.st_dev ||
+        state->cache_inode != (uint64_t)cache.st_ino) { errno = ESTALE; goto out; }
     g_key_file_set_integer(record, "page", "version", state->retry_cursor[0] ?
         (state->consumption_bound ? 11 : budget && state->count ? 10 : 9) :
         (state->consumption_bound ? 8 : budget && state->count ? 7 : 5));
@@ -1753,28 +1753,42 @@ static int page_stage(const char *root, const LatcdRetirementPageState *page,
     char *boot = NULL;
     uint64_t now = 0;
     int directory = -1, gc = -1, result = -1;
-    if (retirement_clock(&boot, &now) ||
-        latcd_retirement_page_state_compatible(page, boot, page->grace_us, now) ||
-        page_state_load(root, &previous, &legacy, error, error_size) || legacy ||
-        previous.committed_pending || previous.count || previous.cursor[0] ||
-        page->committed_pending ||
-        previous.cache_device != page->cache_device || previous.cache_inode != page->cache_inode ||
+    if (retirement_clock(&boot, &now)) goto out;
+    if (latcd_retirement_page_state_compatible(page, boot, page->grace_us, now)) {
+        fail(error, error_size, "retirement page stage state is incompatible");
+        goto out;
+    }
+    if (page_state_load(root, &previous, &legacy, error, error_size)) goto out;
+    if (legacy || previous.committed_pending || previous.count || previous.cursor[0] ||
+        page->committed_pending) {
+        fail(error, error_size, "retirement page stage previous page is occupied");
+        goto out;
+    }
+    if (previous.cache_device != page->cache_device || previous.cache_inode != page->cache_inode ||
         previous.grace_us != page->grace_us || previous.round_cutoff != page->round_cutoff ||
         strcmp(previous.boot, page->boot) || strcmp(previous.committed_cursor, page->committed_cursor) ||
-        strcmp(previous.retry_cursor, page->retry_cursor) ||
-        page->sequence < previous.sequence) goto out;
+        strcmp(previous.retry_cursor, page->retry_cursor) || page->sequence < previous.sequence) {
+        fail(error, error_size, "retirement page stage checkpoint identity changed");
+        goto out;
+    }
     directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     gc = directory < 0 ? -1 : open_directory(directory, ".gc", false);
     struct stat held, path;
     if (!same_directory(scheduler, gc) || fstat(directory, &held) || lstat(root, &path) ||
         held.st_dev != path.st_dev || held.st_ino != path.st_ino ||
-        !directory_matches_at(directory, ".gc", gc)) goto out;
+        !directory_matches_at(directory, ".gc", gc)) {
+        fail(error, error_size, "retirement page stage cache identity changed");
+        goto out;
+    }
     if (budget) {
         LatcdRetirementPageInventory inventory = {0};
         uint8_t results[128] = {0}, binding[32];
         uint64_t bytes;
         int matching = latcd_cache_capacity_open_matching_root(capacity, root, directory);
-        if (matching < 0) goto out;
+        if (matching < 0) {
+            fail(error, error_size, "retirement page stage capacity root changed");
+            goto out;
+        }
         close(matching);
         if (schedule_page_results(root, now, page, results, &inventory, error, error_size) < 0) {
             fail(error, error_size, "retirement page schedule scan failed");
@@ -1795,6 +1809,11 @@ static int page_stage(const char *root, const LatcdRetirementPageState *page,
         bool not_installed = false;
         result = page_state_store_guarded(directory, gc, page, budget, &not_installed,
                                           before_install, install_context);
+        if (result && (!error || !error_size || !error[0])) {
+            int saved = errno;
+            fail(error, error_size, "retirement page stage commit failed: %s",
+                 strerror(saved ? saved : EIO));
+        }
         if (result && not_installed) {
             int saved = errno;
             if (latcd_cache_capacity_cancel_page(capacity, budget))
@@ -1808,8 +1827,11 @@ out:
     if (gc >= 0) close(gc);
     if (directory >= 0) close(directory);
     close(scheduler);
-    if (result && (!error || !error_size || !error[0]))
-        return fail(error, error_size, "retirement page stage failed; reload");
+    if (result && (!error || !error_size || !error[0])) {
+        int saved = errno;
+        return fail(error, error_size, "retirement page stage failed: %s",
+                    strerror(saved ? saved : EIO));
+    }
     return result ? -1 : 0;
 }
 

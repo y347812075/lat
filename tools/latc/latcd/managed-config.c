@@ -132,8 +132,9 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
     char **paths[] = {&c->cache, &c->admin, &c->broker, &c->compiler, &c->runner, &c->runtime};
     int result = -1;
     size_t count = object ? json_object_get_count(object) : 0;
+    bool automatic_present = object && json_object_has_value(object, "automatic_retirement");
     if (!object || count < sizeof(keys) / sizeof(keys[0]) ||
-        count > sizeof(keys) / sizeof(keys[0]) + 4 ||
+        count > sizeof(keys) / sizeof(keys[0]) + 5 ||
         !json_object_get_string(object, keys[0]) || !json_object_get_string(object, keys[1]) ||
         strlen(json_object_get_string(object, keys[0])) != json_object_get_string_len(object, keys[0]) ||
         strlen(json_object_get_string(object, keys[1])) != json_object_get_string_len(object, keys[1]) ||
@@ -153,6 +154,11 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
         c->worker_cgroup = strdup(s);
         if (!c->worker_cgroup) goto out;
     }
+    if (automatic_present) {
+        JSON_Value *automatic = json_object_get_value(object, "automatic_retirement");
+        if (!automatic || json_value_get_type(automatic) != JSONBoolean) goto out;
+        c->automatic_retirement = json_value_get_boolean(automatic) != 0;
+    }
     const char *optional[] = {"worker_bwrap", "worker_bootstrap", "worker_closure"};
     char **targets[] = {&c->worker_bwrap, &c->worker_bootstrap, &c->worker_closure};
     for (unsigned i = 0; i < 3; i++) if (json_object_has_value(object, optional[i])) {
@@ -164,7 +170,8 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
     }
     if (!!c->worker_bwrap != !!c->worker_bootstrap || (c->worker_closure && !c->worker_bwrap) ||
         count != sizeof(keys) / sizeof(keys[0]) + !!c->worker_cgroup +
-                 !!c->worker_bwrap + !!c->worker_bootstrap + !!c->worker_closure) goto out;
+                 !!c->worker_bwrap + !!c->worker_bootstrap + !!c->worker_closure +
+                 automatic_present) goto out;
     result = 0;
 out:
     if (value) json_value_free(value);
