@@ -3837,13 +3837,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             if (waited == child && getenv("LATCD_TEST_REPLAY_CRASH_LINKED")) kill(getpid(), SIGKILL);
 #endif
             if (waited == child && (fsync(temporary) ||
-                latcd_managed_replay_verify(config->cache_dir, task_id, task_lease, error, error_size) ||
-                latcd_managed_replay_discard(config->cache_dir, task_id, task_lease, error, error_size))) waited = -1;
-#ifdef LATCD_GC_TIMER_TEST
-            if (waited == child && getenv("LATCD_TEST_REPLAY_CRASH_UNLINKED")) kill(getpid(), SIGKILL);
-#endif
-            if (waited == child && latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
-                                          LATCD_MANAGED_OUTPUTS_REMOVED, error, error_size)) waited = -1;
+                latcd_managed_replay_verify(config->cache_dir, task_id, task_lease, error, error_size))) waited = -1;
         }
         if (copy >= 0) close(copy);
         if (temporary >= 0) close(temporary);
@@ -6556,6 +6550,26 @@ static void *compiler_worker(void *opaque)
             int status = n < 0 || m < 0 ? -1 : run_compiler(service->config, worker->index,
                 NULL, NULL, false, test_base, NULL, NULL, job->journal_replay,
                 native, module, job->digest, tasks, &reservation, &untracked_task, error, sizeof(error));
+#ifdef LATCD_GC_TIMER_TEST
+            if (!status && getenv("LATCD_TEST_REPLAY_CRASH_HANDOFF")) kill(getpid(), SIGKILL);
+#endif
+            if (!status && tasks->len == 1) {
+                LatcdCompilerTask *task = g_ptr_array_index(tasks, 0);
+                if (task->publication_lease < 0 ||
+                    latcd_managed_replay_discard(service->config->cache_dir, task->id,
+                                                 task->publication_lease, error, sizeof(error)))
+                    status = -1;
+#ifdef LATCD_GC_TIMER_TEST
+                if (!status && getenv("LATCD_TEST_REPLAY_CRASH_UNLINKED")) kill(getpid(), SIGKILL);
+#endif
+                if (!status && latcd_managed_task_domain(service->config->cache_dir, task->id,
+                        task->publication_lease, &(LatcdManagedDomain){0}, LATCD_MANAGED_OUTPUTS_REMOVED,
+                        error, sizeof(error)))
+                    status = -1;
+            } else if (!status) {
+                status = -1;
+                g_strlcpy(error, "missing replay task", sizeof(error));
+            }
 #ifdef LATCD_GC_TIMER_TEST
             if (!status && tasks->len == 1)
                 fprintf(stderr, "latcd: test journal replay succeeded task=%s\n",
