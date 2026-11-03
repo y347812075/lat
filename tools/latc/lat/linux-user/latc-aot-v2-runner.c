@@ -1132,6 +1132,19 @@ static int relocate_source_fd(int *owned_fd, int guest_fd)
     return 0;
 }
 
+static int relocate_module_fd(LatAotV2RuntimeModule *module, int guest_fd)
+{
+    if (module->loaded.backing_fd != guest_fd) {
+        return 0;
+    }
+    int replacement = lat_aot_v2_internal_fd_relocate(guest_fd);
+    if (replacement < 0) {
+        return -1;
+    }
+    module->loaded.backing_fd = replacement;
+    return 0;
+}
+
 int latc_aot_v2_relocate_source_fd(int fd)
 {
     int result = 0;
@@ -1209,6 +1222,13 @@ retry:
     for (LatAotV2SourceMapping *source = source_mappings; source;
          source = source->next) {
         if (relocate_source_fd(&source->fd, fd)) {
+            result = -1;
+            goto out;
+        }
+    }
+    for (LatAotV2RuntimeModule *module = runtime_modules; module;
+         module = module->next) {
+        if (relocate_module_fd(module, fd)) {
             result = -1;
             goto out;
         }

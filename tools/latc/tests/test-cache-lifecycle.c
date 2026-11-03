@@ -699,6 +699,43 @@ static int test_dup_registration(bool dup3, bool protect_source, bool snapshot, 
     return 0;
 }
 
+static int test_internal_fd_relocation(void)
+{
+    int source = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    int guest = -1;
+    int replacement = -1;
+    int result = -1;
+    if (source < 0) goto out;
+
+    lat_aot_v2_internal_fd_lock();
+    int registered = lat_aot_v2_internal_fd_register_locked(source);
+    lat_aot_v2_internal_fd_unlock();
+    if (registered) goto out;
+
+    replacement = lat_aot_v2_internal_fd_relocate(source);
+    if (replacement < 0 || replacement == source ||
+        !lat_aot_v2_internal_fd_is_protected(replacement) ||
+        !(fcntl(replacement, F_GETFD) & FD_CLOEXEC)) goto out;
+    errno = 0;
+    if (fcntl(source, F_GETFD) != -1 || errno != EBADF) goto out;
+
+    guest = open("/dev/zero", O_RDONLY | O_CLOEXEC);
+    if (guest < 0 ||
+        lat_aot_v2_internal_fd_dup_replace(guest, source, 0, false) != source)
+        goto out;
+    result = 0;
+out:
+    if (guest >= 0) close(guest);
+    if (source >= 0) close(source);
+    if (replacement >= 0) {
+        lat_aot_v2_internal_fd_lock();
+        if (lat_aot_v2_internal_fd_unregister_close_locked(replacement))
+            result = -1;
+        lat_aot_v2_internal_fd_unlock();
+    }
+    return result;
+}
+
 static int test_guest_snapshot(const char *root)
 {
     char path[4096], error[256];
@@ -938,7 +975,8 @@ int main(void)
                 return 1;
             }
     if (test_dup_registration(false, true, true, -1, false) ||
-        test_dup_registration(false, true, false, -1, true)) return 1;
+        test_dup_registration(false, true, false, -1, true) ||
+        test_internal_fd_relocation()) return 1;
     const int commands[] = {F_GETFD, F_SETFD, F_DUPFD, F_DUPFD_CLOEXEC};
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
         if (test_dup_registration(false, true, false, commands[i], false)) return 1;

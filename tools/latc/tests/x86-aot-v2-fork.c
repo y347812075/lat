@@ -40,6 +40,9 @@ int main(void)
         if (fork_hot_value(42) != expected) {
             return 4;
         }
+        if (dup2(worker_stop[0], 3) != 3) {
+            return 7;
+        }
         puts("FORK_CHILD_AOT_OK");
         return 0;
     }
@@ -48,6 +51,9 @@ int main(void)
     if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
         WEXITSTATUS(status) != 0 || fork_hot_value(42) != expected) {
         return 5;
+    }
+    if (dup2(worker_stop[0], 3) != 3) {
+        return 7;
     }
     if (write(worker_stop[1], "x", 1) != 1 ||
         pthread_join(worker, NULL)) {

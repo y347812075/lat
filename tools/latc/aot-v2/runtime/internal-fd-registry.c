@@ -143,6 +143,50 @@ bool lat_aot_v2_internal_fd_is_protected(int fd)
     return protected;
 }
 
+int lat_aot_v2_internal_fd_relocate(int fd)
+{
+    int replacement = -1;
+    int saved_errno;
+
+    lat_aot_v2_internal_fd_allocation_lock();
+    if (!fd_is_protected_locked(fd)) {
+        errno = EINVAL;
+        goto out;
+    }
+    int original_flags = fcntl(fd, F_GETFD);
+    if (original_flags < 0) goto out;
+
+    replacement = fcntl(fd, F_DUPFD, 3);
+    if (replacement < 0) goto out;
+    if ((original_flags & FD_CLOEXEC) &&
+        fcntl(replacement, F_SETFD, FD_CLOEXEC)) {
+        saved_errno = errno;
+        close(replacement);
+        replacement = -1;
+        errno = saved_errno;
+        goto out;
+    }
+    if (lat_aot_v2_internal_fd_register_locked(replacement)) {
+        saved_errno = errno;
+        close(replacement);
+        replacement = -1;
+        errno = saved_errno;
+        goto out;
+    }
+    if (lat_aot_v2_internal_fd_unregister_close_locked(fd)) {
+        saved_errno = errno;
+        lat_aot_v2_internal_fd_unregister_close_locked(replacement);
+        replacement = -1;
+        errno = saved_errno;
+        goto out;
+    }
+out:
+    saved_errno = errno;
+    lat_aot_v2_internal_fd_unlock();
+    errno = saved_errno;
+    return replacement;
+}
+
 int lat_aot_v2_internal_fd_close_guest(int fd)
 {
     lat_aot_v2_internal_fd_lock();

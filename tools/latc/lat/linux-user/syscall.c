@@ -13604,8 +13604,7 @@ static abi_long guest_fd_dup_replace(CPUArchState *env, abi_long oldfd,
 {
     abi_long ret;
 
-    if (latc_aot_v2_fd_is_protected(oldfd) ||
-        latc_aot_v2_fd_is_protected(newfd)) {
+    if (latc_aot_v2_fd_is_protected(oldfd)) {
         return -TARGET_EACCES;
     }
 
@@ -13620,6 +13619,10 @@ static abi_long guest_fd_dup_replace(CPUArchState *env, abi_long oldfd,
         }
     }
 #endif
+    if (oldfd != newfd && latc_aot_v2_fd_is_protected(newfd)) {
+        ret = -TARGET_EACCES;
+        goto out;
+    }
     ret = get_errno(latc_aot_v2_fd_dup_replace(oldfd, newfd,
                                              host_flags, use_dup3));
     if (ret >= 0) {

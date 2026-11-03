@@ -57,4 +57,11 @@ int lat_aot_v2_internal_fd_close_range(unsigned first, unsigned last,
                                         LatAotV2InternalFdRangePrepare prepare,
                                         void *opaque);
 
+/*
+ * Move a protected internal descriptor to a free number, preserving FD_CLOEXEC,
+ * and close the old number so a guest descriptor replacement can reuse it.
+ * Returns the replacement fd, or -1 with errno set.
+ */
+int lat_aot_v2_internal_fd_relocate(int fd);
+
 #endif
