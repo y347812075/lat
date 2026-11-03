@@ -112,6 +112,7 @@ typedef struct LatcdConfig {
     uint32_t open_files;
     bool flush_only;
     bool automatic_retirement;
+    uint64_t retirement_grace_us;
     uint32_t idle_seconds;
     bool managed;
     const char *worker_bwrap, *worker_bootstrap, *worker_toolroot;
@@ -2876,7 +2877,7 @@ static int test_waiting_page_step(LatcdPageDriver *driver, const LatcdConfig *co
         unsigned receipt_count, match_count;
         if (!driver->witness) {
             driver->witness = latcd_retirement_queue_new(config->cache_dir,
-                                                            LATCD_RETIREMENT_GRACE_US);
+                                                            config->retirement_grace_us);
             result = latcd_retirement_queue_page_receipt_begin(driver->witness,
                 &driver->budget, i, error, error_size);
             if (result) return -1;
@@ -3005,13 +3006,13 @@ static int test_stage_retirement_page(LatcdPageDriver *driver, const LatcdConfig
         g_strchomp(boot);
         uint64_t now = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
         result = latcd_retirement_page_state_resume(config->cache_dir, boot,
-            LATCD_RETIREMENT_GRACE_US, now, &page, error, error_size);
+            config->retirement_grace_us, now, &page, error, error_size);
         g_free(boot);
         if (result < 0 || (result == 1 && latcd_retirement_page_round_begin(config->cache_dir,
-                LATCD_RETIREMENT_GRACE_US, &page, error, error_size))) return -1;
+                config->retirement_grace_us, &page, error, error_size))) return -1;
         result = 0;
         driver->discovery = latcd_retirement_queue_new(
-            config->cache_dir, LATCD_RETIREMENT_GRACE_US);
+            config->cache_dir, config->retirement_grace_us);
         result = latcd_retirement_queue_page_discovery_begin(driver->discovery,
                                                                error, error_size);
     }
@@ -3047,7 +3048,7 @@ static void *compiler_input_recovery_worker(void *opaque)
     uint64_t idle_scan_generation = 0;
     int timer = timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC | TFD_NONBLOCK);
     LatcdRetirementQueue *retirement = latcd_retirement_queue_new(work->config->cache_dir,
-        LATCD_RETIREMENT_GRACE_US);
+        work->config->retirement_grace_us);
     char retirement_error[256];
     bool retirement_safe = !latcd_retirement_queue_restore(retirement, retirement_error, sizeof(retirement_error));
 #ifdef LATCD_GC_TIMER_TEST
@@ -9506,6 +9507,7 @@ int main(int argc, char **argv)
         .negative_ms = LATCD_DEFAULT_NEGATIVE_MS,
         .cpu_seconds = LATCD_DEFAULT_CPU_SECONDS,
         .open_files = LATCD_DEFAULT_OPEN_FILES,
+        .retirement_grace_us = LATCD_RETIREMENT_GRACE_US,
     };
     if (managed_entry) {
         serve = 1;
@@ -9521,6 +9523,8 @@ int main(int argc, char **argv)
         config.worker_bootstrap = managed_config.worker_bootstrap;
         config.worker_real_compile = managed_config.worker_closure != NULL;
         config.automatic_retirement = managed_config.automatic_retirement;
+        if (managed_config.retirement_grace_us)
+            config.retirement_grace_us = managed_config.retirement_grace_us;
     }
     for (int i = managed_entry ? argc : 1; i < argc; i++) {
         if (!strcmp(argv[i], "--once")) once = 1;
@@ -9834,7 +9838,7 @@ int main(int argc, char **argv)
         if (page_recovery_admitted(&config)) {
             LatcdRetirementPageState page;
             if (latcd_retirement_page_restore_budget(config.cache_dir, &generation_capacity,
-                    config.max_cache_bytes, LATCD_RETIREMENT_GRACE_US,
+                    config.max_cache_bytes, config.retirement_grace_us,
                     &page_driver_state.budget, &page, error, sizeof(error))) budget_result = -1;
             else page_recovered = true;
         } else
@@ -9843,7 +9847,7 @@ int main(int argc, char **argv)
         if (latcd_retirement_retry_page_load(config.cache_dir, retry_page, retry_error, sizeof(retry_error)))
             budget_result = -1;
         else if (latcd_retirement_retry_page_restore_budget(config.cache_dir, &generation_capacity,
-                config.max_cache_bytes, LATCD_RETIREMENT_GRACE_US, &retry_budget, retry_page,
+                config.max_cache_bytes, config.retirement_grace_us, &retry_budget, retry_page,
                 error, sizeof(error))) budget_result = -1;
         else retry_recovered = true;
         }
@@ -9869,7 +9873,7 @@ int main(int argc, char **argv)
     }
     if (!budget_result && retry_recovered) {
         LatcdRetryRecovery *retry = latcd_retry_recovery_new(config.cache_dir,
-            LATCD_RETIREMENT_GRACE_US, &retry_budget, false);
+            config.retirement_grace_us, &retry_budget, false);
         if (!retry) budget_result = fail(error, sizeof(error), "cannot create retry recovery");
         else {
             do {

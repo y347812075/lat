@@ -89,6 +89,20 @@ if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
     echo 'non-boolean automatic retirement accepted' >&2; exit 1
 fi
 grep -q 'managed configuration rejected' "$work/automatic-nonbool.err"
+sed 's|}$|,"retirement_grace_us":1000000}|' "$work/config" > "$work/grace-without-auto-config"
+if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
+    env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/grace-without-auto-config" \
+    >"$work/grace-without-auto.out" 2>"$work/grace-without-auto.err"; then
+    echo 'retirement grace without automatic retirement accepted' >&2; exit 1
+fi
+grep -q 'managed configuration rejected' "$work/grace-without-auto.err"
+sed 's|}$|,"automatic_retirement":true,"retirement_grace_us":"one"}|' "$work/config" > "$work/grace-nonnumber-config"
+if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
+    env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/grace-nonnumber-config" \
+    >"$work/grace-nonnumber.out" 2>"$work/grace-nonnumber.err"; then
+    echo 'non-number retirement grace accepted' >&2; exit 1
+fi
+grep -q 'managed configuration rejected' "$work/grace-nonnumber.err"
 sed 's|}$|,"automatic_retirement":true}|' "$work/config" > "$work/automatic-legacy-config"
 if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
     env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/automatic-legacy-config" \

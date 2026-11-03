@@ -1,6 +1,7 @@
 #ifndef LATCD_MANAGED_CONFIG_H
 #define LATCD_MANAGED_CONFIG_H
 #include <stdbool.h>
+#include <stdint.h>
 #include <sys/types.h>
 
 typedef struct LatcdManagedConfig {
@@ -10,6 +11,7 @@ typedef struct LatcdManagedConfig {
     char *worker_bwrap, *worker_bootstrap, *worker_closure;
     /* Trusted-deployment opt-in; requires an initialized managed cache domain. */
     bool automatic_retirement;
+    uint64_t retirement_grace_us;
 } LatcdManagedConfig;
 
 /* Returns two held descriptors; managed mode enforces root-owned paths. */

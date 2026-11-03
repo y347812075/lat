@@ -133,8 +133,9 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
     int result = -1;
     size_t count = object ? json_object_get_count(object) : 0;
     bool automatic_present = object && json_object_has_value(object, "automatic_retirement");
+    bool grace_present = object && json_object_has_value(object, "retirement_grace_us");
     if (!object || count < sizeof(keys) / sizeof(keys[0]) ||
-        count > sizeof(keys) / sizeof(keys[0]) + 5 ||
+        count > sizeof(keys) / sizeof(keys[0]) + 6 ||
         !json_object_get_string(object, keys[0]) || !json_object_get_string(object, keys[1]) ||
         strlen(json_object_get_string(object, keys[0])) != json_object_get_string_len(object, keys[0]) ||
         strlen(json_object_get_string(object, keys[1])) != json_object_get_string_len(object, keys[1]) ||
@@ -159,6 +160,14 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
         if (!automatic || json_value_get_type(automatic) != JSONBoolean) goto out;
         c->automatic_retirement = json_value_get_boolean(automatic) != 0;
     }
+    if (grace_present) {
+        JSON_Value *grace = json_object_get_value(object, "retirement_grace_us");
+        double value = grace ? json_value_get_number(grace) : 0;
+        if (!grace || json_value_get_type(grace) != JSONNumber || value < 1000000 ||
+            value > (double)(UINT64_C(30) * 24 * 60 * 60 * 1000000)) goto out;
+        c->retirement_grace_us = (uint64_t)value;
+        if ((double)c->retirement_grace_us != value) goto out;
+    }
     const char *optional[] = {"worker_bwrap", "worker_bootstrap", "worker_closure"};
     char **targets[] = {&c->worker_bwrap, &c->worker_bootstrap, &c->worker_closure};
     for (unsigned i = 0; i < 3; i++) if (json_object_has_value(object, optional[i])) {
@@ -171,7 +180,7 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
     if (!!c->worker_bwrap != !!c->worker_bootstrap || (c->worker_closure && !c->worker_bwrap) ||
         count != sizeof(keys) / sizeof(keys[0]) + !!c->worker_cgroup +
                  !!c->worker_bwrap + !!c->worker_bootstrap + !!c->worker_closure +
-                 automatic_present) goto out;
+                 automatic_present + grace_present) goto out;
     result = 0;
 out:
     if (value) json_value_free(value);
@@ -189,6 +198,7 @@ int latcd_managed_config_validate(const LatcdManagedConfig *c)
     struct __user_cap_data_struct caps[2] = {{0}, {0}};
     if (!c || !c->cache || !c->admin || !c->broker || !c->compiler ||
         !c->runner || !c->runtime || !c->service_uid ||
+        (c->retirement_grace_us && !c->automatic_retirement) ||
         c->service_uid == c->client_uid || getresuid(&real, &effective, &saved) ||
         real != c->service_uid || effective != c->service_uid || saved != c->service_uid ||
         getresgid(&real_gid, &effective_gid, &saved_gid) || !real_gid ||
