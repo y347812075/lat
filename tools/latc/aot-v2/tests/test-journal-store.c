@@ -1263,6 +1263,28 @@ int main(void)
     g_assert_cmpstr(persisted_hash, ==, expected_hash);
     g_assert_cmpuint(g_key_file_get_uint64(persisted, "journal", "config_size", NULL),
                      ==, input.config_size);
+    char *receipt_name = g_strdup_printf("%s.receipt", record_id);
+    char *receipt_path = g_build_filename(record_cache, ".gc", "journal-inputs", receipt_name, NULL);
+    uint64_t metadata_before = generation_capacity.metadata_committed;
+    g_assert_cmpint(persist_task_receipt(&record_config, record_id, worker_inputs[1],
+                                         &replay_identity), ==, 0);
+    g_assert_cmpuint(generation_capacity.metadata_committed, ==,
+                     metadata_before + replay_identity.input_size[1]);
+    int persisted_receipt = open(receipt_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    char persisted_digest[65];
+    g_assert_cmpint(persisted_receipt, >=, 0);
+    g_assert_true(receipt_digest(persisted_receipt, persisted_digest));
+    g_assert_cmpstr(persisted_digest, ==, expected_hash);
+    close(persisted_receipt);
+    g_key_file_set_string(persisted, "journal", "receipt_sha256", "bad");
+    g_assert_cmpint(remove_task_receipt(&record_config, record_id, persisted), ==, -1);
+    g_assert_true(g_file_test(receipt_path, G_FILE_TEST_EXISTS));
+    g_key_file_set_string(persisted, "journal", "receipt_sha256", expected_hash);
+    g_assert_cmpint(remove_task_receipt(&record_config, record_id, persisted), ==, 0);
+    g_assert_cmpuint(generation_capacity.metadata_committed, ==, metadata_before);
+    g_assert_cmpint(remove_task_receipt(&record_config, record_id, persisted), ==, 0);
+    g_free(receipt_path);
+    g_free(receipt_name);
     char source_hex[65];
     digest_hex(input.identity.source_sha256, source_hex);
     char *object_name = g_strconcat(source_hex, ".native", NULL);

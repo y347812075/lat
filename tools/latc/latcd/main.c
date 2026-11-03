@@ -1522,7 +1522,7 @@ static int prepare_metadata_directories(const char *cache_dir)
         "source-locks", "tasks", "compiler-budgets", "compiler-releases",
         "compiler-output-releases", "copy-releases", "copy-receipts",
         "copy-handoffs", "transactions", "tombstones", "holds", "mount-leases",
-        "retirement-schedule", "managed-task-state"
+        "retirement-schedule", "managed-task-state", "journal-inputs"
     };
     int root = open(cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int gc = root < 0 ? -1 : open_task_directory(root, ".gc");
@@ -1555,6 +1555,96 @@ static void task_object_identity(GKeyFile *record, const char *group,
     g_key_file_set_uint64(record, group, "uid", st->st_uid);
     g_key_file_set_int64(record, group, "mtime_sec", st->st_mtim.tv_sec);
     g_key_file_set_uint64(record, group, "mtime_nsec", st->st_mtim.tv_nsec);
+}
+
+/* The task record is durable before this file is linked. Its immutable hash
+ * and size identify the receipt even if the live journal advances. */
+static int persist_task_receipt(const LatcdConfig *config, const char *id,
+                                int input, const LatcdJournalReplayIdentity *identity)
+{
+    int root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = root < 0 ? -1 : open_task_directory(root, ".gc");
+    int directory = gc < 0 ? -1 : open_task_directory(gc, "journal-inputs");
+    char *name = g_strdup_printf("%s.receipt", id);
+    LatcdMetadataReservation reservation;
+    bool reserved = false, installed = false, leftover = false;
+    int fd = -1, result = -1;
+    uint64_t size = identity->input_size[1], offset = 0;
+    GChecksum *hash = g_checksum_new(G_CHECKSUM_SHA256);
+    uint8_t buffer[65536], digest[32];
+    gsize digest_size = sizeof(digest);
+    if (directory < 0 || !size || size > INT64_MAX ||
+        latcd_cache_capacity_metadata_begin(directory, name, size, &reservation)) goto out;
+    reserved = true;
+    fd = openat(directory, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
+    if (fd < 0) goto out;
+    while (offset < size) {
+        ssize_t count = pread(input, buffer, MIN(sizeof(buffer), size - offset), offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) goto out;
+        g_checksum_update(hash, buffer, count);
+        size_t done = 0;
+        while (done < (size_t)count) {
+            ssize_t written = write(fd, buffer + done, count - done);
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) goto out;
+            done += written;
+        }
+        offset += count;
+    }
+    g_checksum_get_digest(hash, digest, &digest_size);
+    if (memcmp(digest, identity->input_sha256[1], sizeof(digest)) ||
+        fchmod(fd, 0400) || fsync(fd)) goto out;
+    char descriptor[64];
+    snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", fd);
+    if (linkat(AT_FDCWD, descriptor, directory, name, AT_SYMLINK_FOLLOW)) goto out;
+    installed = true;
+    if (fsync(directory)) { leftover = true; goto out; }
+    result = 0;
+out:
+    if (fd >= 0 && close(fd)) leftover = true;
+    if (reserved) latcd_cache_capacity_metadata_finish(&reservation, installed, leftover);
+    if (directory >= 0) close(directory);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    g_checksum_free(hash);
+    g_free(name);
+    return result;
+}
+
+static bool receipt_digest(int fd, char digest[65]);
+
+/* Caller holds the task's exclusive lease and has proved the domain terminal. */
+static int remove_task_receipt(const LatcdConfig *config, const char *id, GKeyFile *record)
+{
+    int root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int gc = root < 0 ? -1 : open_task_directory(root, ".gc");
+    int directory = gc < 0 ? -1 : open_task_directory(gc, "journal-inputs");
+    char *name = g_strdup_printf("%s.receipt", id);
+    char *expected = g_key_file_get_string(record, "journal", "receipt_sha256", NULL);
+    GError *parse_error = NULL;
+    uint64_t size = g_key_file_get_uint64(record, "journal", "receipt_size", &parse_error);
+    int fd = directory < 0 ? -1 : openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    int result = -1;
+    if (fd < 0 && directory >= 0 && errno == ENOENT && expected && !parse_error && size) {
+        result = fsync(directory);
+    } else if (fd >= 0 && expected && !parse_error && size) {
+        struct stat before, after;
+        char actual[65];
+        if (!fstat(fd, &before) && S_ISREG(before.st_mode) && before.st_uid == geteuid() &&
+            before.st_nlink == 1 && !(before.st_mode & 0222) && before.st_size > 0 &&
+            (uint64_t)before.st_size == size && receipt_digest(fd, actual) &&
+            !strcmp(actual, expected) && !fstat(fd, &after) && metadata_equal(&before, &after))
+            result = latcd_cache_capacity_metadata_remove_checked(directory, name, &before);
+    }
+    if (fd >= 0) close(fd);
+    if (directory >= 0) close(directory);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    g_clear_error(&parse_error);
+    g_free(expected);
+    g_free(name);
+    return result;
 }
 
 static int persist_task_record(int directory, const char *id, GKeyFile *record)
@@ -2439,8 +2529,10 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
             if (!unsafe && !latcd_managed_task_domain(config->cache_dir, id, task, &terminal,
                     LATCD_MANAGED_PREPARED, state_error, sizeof(state_error)) &&
                 (terminal.state == LATCD_MANAGED_PREEXEC_CANCELLED || terminal.state == LATCD_MANAGED_OUTPUTS_REMOVED ||
-                 terminal.state == LATCD_MANAGED_REPLAY_DISCARDED))
-                latcd_cache_capacity_release_task(&generation_capacity, id);
+                 terminal.state == LATCD_MANAGED_REPLAY_DISCARDED)) {
+                if (journal && remove_task_receipt(config, id, record)) unsafe = true;
+                if (!unsafe) latcd_cache_capacity_release_task(&generation_capacity, id);
+            }
             g_key_file_free(record);
             if (task >= 0) close(task);
             retained++;
@@ -3320,6 +3412,11 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                 fail(error, error_size, "capacity: cannot persist compiler budget");
             }
         }
+    }
+    if (!pin_result && journal_input &&
+        persist_task_receipt(config, task_id, input_copies[1], &journal_identity)) {
+        pin_result = -1;
+        fail(error, error_size, "cannot persist journal task receipt");
     }
     if (!pin_result && config->managed && !journal_input &&
         snapshot_managed_inputs(input_pins, input_copies, digest, error, error_size))
@@ -6596,6 +6693,12 @@ static void *compiler_worker(void *opaque)
                                                LATCD_MANAGED_PREPARED, state_error, sizeof(state_error)) &&
                     (domain.state == LATCD_MANAGED_REPLAY_DISCARDED || domain.state == LATCD_MANAGED_OUTPUTS_REMOVED ||
                      domain.state == LATCD_MANAGED_PREEXEC_CANCELLED);
+                if (terminal) {
+                    GKeyFile *record = g_key_file_new();
+                    terminal = g_key_file_load_from_file(record, path, 0, NULL) &&
+                        !remove_task_receipt(service->config, task->id, record);
+                    g_key_file_unref(record);
+                }
                 if (fd >= 0) close(fd);
                 g_free(path); g_free(name);
                 retained |= !terminal;

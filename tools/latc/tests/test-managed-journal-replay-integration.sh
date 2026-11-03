@@ -50,6 +50,7 @@ if [ -n "${LATCD_TEST_REPLAY_CRASH_PREPARED:-}${LATCD_TEST_REPLAY_CRASH_LINKED:-
     state=$(find "$work/cache/.gc/managed-task-state" -name '*.ini' -type f)
     grep -qx 'state=REPLAY_ADOPTED' "$state"
     id=$(basename "$state" .ini)
+    test -s "$work/cache/.gc/journal-inputs/$id.receipt"
     [ "$("$scanner" --task-status "$work/cache" .tmp/base.native)" = 1 ]
     if [ -n "${LATCD_TEST_REPLAY_CRASH_UNLINKED:-}" ]; then
         test -z "$(find "$work/cache/.tmp" -name 'replay-native-*' -print -quit)"
@@ -82,6 +83,8 @@ if [ -n "${LATCD_TEST_REPLAY_CRASH_PREPARED:-}${LATCD_TEST_REPLAY_CRASH_LINKED:-
     done
     retried=$(sed -n 's/^latcd: test journal replay succeeded task=//p' "$work/restart.log" | head -1)
     [ -n "$retried" ] && [ "$retried" != "$id" ]
+    test ! -e "$work/cache/.gc/journal-inputs/$id.receipt"
+    test ! -e "$work/cache/.gc/journal-inputs/$retried.receipt"
     grep -qx 'state=OUTPUTS_REMOVED' "$work/cache/.gc/managed-task-state/$retried.ini"
     test -f "$work/cache/.tmp/base.native"
     test -z "$(find "$work/cache/.tmp" -name 'replay-native-*' -print -quit)"
