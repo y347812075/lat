@@ -660,6 +660,12 @@ static void check_range_edges(const char *parent, const char *source,
     g_assert_cmpint(latcd_journal_open_compile_input(cache, name,
         bound.build_sha256, bound.codegen_sha256, 1048576, &frozen,
         error, sizeof(error)), ==, 0);
+    int original_inputs[4] = {-1, -1, -1, -1};
+    LatcdJournalReplayIdentity recorded;
+    g_assert_cmpint(snapshot_journal_replay_input(&frozen, -1, 1048576,
+        original_inputs, error, sizeof(error)), ==, 0);
+    g_assert_cmpint(latcd_journal_replay_identity(&frozen, original_inputs,
+        1048576, &recorded, error, sizeof(error)), ==, 0);
     LatTbKey added = {.guest_rva = 257, .flags = 3};
     g_assert_cmpint(lat_key_journal_append(&journal, &added, NULL,
         error, sizeof(error)), ==, 0);
@@ -683,6 +689,20 @@ static void check_range_edges(const char *parent, const char *source,
                                               old.keys[i].flags));
     g_assert_false(lat_tb_key_set_contains(&old, added.guest_rva, added.flags));
     g_assert_true(lat_tb_key_set_contains(&latest, added.guest_rva, added.flags));
+    LatcdJournalCompileInput reopened;
+    g_assert_cmpint(latcd_journal_reopen_task_input(cache, &recorded, original_inputs[1],
+        1048576, &reopened, error, sizeof(error)), ==, 0);
+    LatTbKeySet restored = {0};
+    g_assert_cmpint(lat_tb_key_set_read_fd(reopened.receipt_fd, bound.source_sha256,
+        &restored, error, sizeof(error)), ==, 0);
+    g_assert_cmpuint(restored.count, ==, old.count);
+    g_assert_false(lat_tb_key_set_contains(&restored, added.guest_rva, added.flags));
+    lat_tb_key_set_destroy(&restored);
+    latcd_journal_close_compile_input(&reopened);
+    recorded.input_sha256[1][0] ^= 1;
+    g_assert_cmpint(latcd_journal_reopen_task_input(cache, &recorded, original_inputs[1],
+        1048576, &reopened, error, sizeof(error)), ==, -1);
+    close_compiler_inputs(original_inputs);
     lat_tb_key_set_destroy(&old);
     lat_tb_key_set_destroy(&latest);
     latcd_journal_close_compile_input(&frozen);

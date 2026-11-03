@@ -453,9 +453,9 @@ int latcd_journal_replay_identity(const LatcdJournalCompileInput *input,
     return 0;
 }
 
-int latcd_journal_open_compile_input(const char *cache, const char *stream,
+static int open_compile_input(const char *cache, const char *stream,
     const uint8_t build[32], const uint8_t codegen[32], uint64_t max_bytes,
-    LatcdJournalCompileInput *input, char *error, size_t error_size)
+    int task_receipt, LatcdJournalCompileInput *input, char *error, size_t error_size)
 {
     if (!input) return fail(error, error_size, "missing journal input");
     memset(input, 0, sizeof(*input));
@@ -490,8 +490,17 @@ int latcd_journal_open_compile_input(const char *cache, const char *stream,
     input->source_fd = ok ? readonly_file(directory, "source", max_bytes, false, &st) : -1;
     ok = ok && input->source_fd >= 0 && hash_fd(input->source_fd, digest) &&
         !memcmp(digest, record.identity.source_sha256, 32);
-    fd = ok ? readonly_file(directory, "received.tbset",
-        64 + record.capacity * sizeof(LatTbKey), true, &st) : -1;
+    if (ok && task_receipt >= 0) {
+        fd = fcntl(task_receipt, F_DUPFD_CLOEXEC, 3);
+        if (fd >= 0 && (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+            (uint64_t)st.st_size > 64 + record.capacity * sizeof(LatTbKey))) {
+            close(fd);
+            fd = -1;
+        }
+    } else {
+        fd = ok ? readonly_file(directory, "received.tbset",
+            64 + record.capacity * sizeof(LatTbKey), true, &st) : -1;
+    }
     input->receipt_fd = fd >= 0 ? sealed_copy(fd, st.st_size) : -1;
     if (fd >= 0) close(fd);
     LatTbKeySet set = {0};
@@ -507,6 +516,63 @@ int latcd_journal_open_compile_input(const char *cache, const char *stream,
     if (!ok) {
         latcd_journal_close_compile_input(input);
         return fail(error, error_size, "invalid journal compile input %s", stream);
+    }
+    return 0;
+}
+
+int latcd_journal_open_compile_input(const char *cache, const char *stream,
+    const uint8_t build[32], const uint8_t codegen[32], uint64_t max_bytes,
+    LatcdJournalCompileInput *input, char *error, size_t error_size)
+{
+    return open_compile_input(cache, stream, build, codegen, max_bytes, -1,
+                              input, error, error_size);
+}
+
+int latcd_journal_reopen_task_input(const char *cache,
+    const LatcdJournalReplayIdentity *identity, int receipt_fd, uint64_t max_bytes,
+    LatcdJournalCompileInput *input, char *error, size_t error_size)
+{
+    if (!identity || !input || receipt_fd < 0)
+        return fail(error, error_size, "missing recorded journal input");
+    char stream[33];
+    hex(identity->journal.epoch, 16, stream);
+    if (open_compile_input(cache, stream, identity->journal.build_sha256,
+            identity->journal.codegen_sha256, max_bytes, receipt_fd,
+            input, error, error_size)) return -1;
+    struct stat before, after;
+    int frozen = -1, source = -1;
+    LatcdJournalReplayIdentity actual;
+    bool ok = !memcmp(&input->identity, &identity->journal, sizeof(input->identity)) &&
+        !fstat(receipt_fd, &before) && S_ISREG(before.st_mode) && before.st_size > 0 &&
+        (uint64_t)before.st_size == identity->input_size[1] &&
+        (uint64_t)before.st_size <= max_bytes &&
+        (frozen = sealed_copy(receipt_fd, before.st_size)) >= 0 &&
+        !fstat(receipt_fd, &after) && before.st_dev == after.st_dev &&
+        before.st_ino == after.st_ino && before.st_size == after.st_size &&
+        before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
+        before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
+        before.st_ctim.tv_sec == after.st_ctim.tv_sec &&
+        before.st_ctim.tv_nsec == after.st_ctim.tv_nsec;
+    if (ok) {
+        close(input->receipt_fd);
+        input->receipt_fd = frozen;
+        frozen = -1;
+        memcpy(input->receipt_sha256, identity->input_sha256[1], 32);
+        struct stat st;
+        ok = !fstat(input->source_fd, &st) && st.st_size > 0 &&
+            (source = sealed_copy(input->source_fd, st.st_size)) >= 0;
+        int fds[3] = {source, input->receipt_fd, input->config_fd};
+        ok = ok && !latcd_journal_replay_identity(input, fds, max_bytes, &actual,
+                                                   error, error_size) &&
+            !memcmp(&actual.journal, &identity->journal, sizeof(actual.journal)) &&
+            !memcmp(actual.input_size, identity->input_size, sizeof(actual.input_size)) &&
+            !memcmp(actual.input_sha256, identity->input_sha256, sizeof(actual.input_sha256));
+    }
+    if (source >= 0) close(source);
+    if (frozen >= 0) close(frozen);
+    if (!ok) {
+        latcd_journal_close_compile_input(input);
+        return fail(error, error_size, "recorded journal input mismatch");
     }
     return 0;
 }

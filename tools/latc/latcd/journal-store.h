@@ -28,6 +28,11 @@ typedef struct LatcdJournalReplayIdentity {
 int latcd_journal_open_compile_input(const char *cache, const char *stream,
     const uint8_t build[32], const uint8_t codegen[32], uint64_t max_bytes,
     LatcdJournalCompileInput *input, char *error, size_t error_size);
+/* Reconstruct a recorded worker input using its task-owned receipt. The
+ * caller must authenticate the task record and hold its lease. */
+int latcd_journal_reopen_task_input(const char *cache,
+    const LatcdJournalReplayIdentity *identity, int receipt_fd, uint64_t max_bytes,
+    LatcdJournalCompileInput *input, char *error, size_t error_size);
 void latcd_journal_close_compile_input(LatcdJournalCompileInput *input);
 
 /* Validate the exact sealed copies passed to a replay worker against the
