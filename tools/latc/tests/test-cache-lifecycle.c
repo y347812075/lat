@@ -699,9 +699,9 @@ static int test_dup_registration(bool dup3, bool protect_source, bool snapshot, 
     return 0;
 }
 
-static int test_internal_fd_relocation(void)
+static int test_internal_fd_relocation_case(bool cloexec)
 {
-    int source = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    int source = open("/dev/null", O_RDONLY | (cloexec ? O_CLOEXEC : 0));
     int guest = -1;
     int replacement = -1;
     int result = -1;
@@ -715,7 +715,7 @@ static int test_internal_fd_relocation(void)
     replacement = lat_aot_v2_internal_fd_relocate(source);
     if (replacement < 0 || replacement == source ||
         !lat_aot_v2_internal_fd_is_protected(replacement) ||
-        !(fcntl(replacement, F_GETFD) & FD_CLOEXEC)) goto out;
+        !!(fcntl(replacement, F_GETFD) & FD_CLOEXEC) != cloexec) goto out;
     errno = 0;
     if (fcntl(source, F_GETFD) != -1 || errno != EBADF) goto out;
 
@@ -734,6 +734,12 @@ out:
         lat_aot_v2_internal_fd_unlock();
     }
     return result;
+}
+
+static int test_internal_fd_relocation(void)
+{
+    return test_internal_fd_relocation_case(false) ||
+           test_internal_fd_relocation_case(true);
 }
 
 static int test_guest_snapshot(const char *root)
