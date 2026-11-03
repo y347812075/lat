@@ -1628,6 +1628,83 @@ out:
 
 static bool receipt_digest(int fd, char digest[65]);
 
+/* The caller owns the task lease; the launch contract binds the record inode
+ * and contents. The returned inputs are sealed snapshots owned by the caller. */
+static int reopen_task_journal(const LatcdConfig *config, const char *id, int task,
+                               LatcdJournalCompileInput *input,
+                               char *error, size_t error_size)
+{
+    struct stat before, after;
+    char data[65536];
+    GKeyFile *record = g_key_file_new();
+    LatcdJournalReplayIdentity identity = {0};
+    int root = -1, gc = -1, directory = -1, receipt = -1, result = -1;
+    char *name = NULL, *epoch = NULL, *kind = NULL, *record_id = NULL;
+    if (latcd_managed_launch_validate_self(config->cache_dir, id, task, error, error_size) ||
+        fstat(task, &before) || !S_ISREG(before.st_mode) || before.st_uid != geteuid() ||
+        before.st_nlink != 1 || (before.st_mode & 0222) || before.st_size <= 0 ||
+        (uint64_t)before.st_size > sizeof(data) ||
+        pread(task, data, before.st_size, 0) != before.st_size ||
+        fstat(task, &after) || !metadata_equal(&before, &after) ||
+        !g_key_file_load_from_data(record, data, before.st_size, G_KEY_FILE_NONE, NULL))
+        goto out;
+    kind = g_key_file_get_string(record, "task", "kind", NULL);
+    record_id = g_key_file_get_string(record, "task", "id", NULL);
+    epoch = g_key_file_get_string(record, "journal", "epoch", NULL);
+    if (!kind || (strcmp(kind, "MANAGED_REPLAY") && strcmp(kind, "MANAGED_JOURNAL_COMPILER")) ||
+        !record_id || strcmp(record_id, id) || !epoch || strlen(epoch) != 32)
+        goto out;
+    for (size_t i = 0; i < sizeof(identity.journal.epoch); i++) {
+        int high = g_ascii_xdigit_value(epoch[i * 2]);
+        int low = g_ascii_xdigit_value(epoch[i * 2 + 1]);
+        if (high < 0 || low < 0) goto out;
+        identity.journal.epoch[i] = (uint8_t)((high << 4) | low);
+    }
+    const char *names[] = {"build_sha256", "codegen_sha256", "config_sha256",
+        "source_sha256", "receipt_sha256", "config_bytes_sha256"};
+    uint8_t *hashes[] = {identity.journal.build_sha256, identity.journal.codegen_sha256,
+        identity.journal.config_sha256, identity.input_sha256[0],
+        identity.input_sha256[1], identity.input_sha256[2]};
+    for (size_t i = 0; i < G_N_ELEMENTS(names); i++) {
+        char *value = g_key_file_get_string(record, "journal", names[i], NULL);
+        bool valid = value && parse_digest_hex(value, hashes[i]);
+        g_free(value);
+        if (!valid) goto out;
+    }
+    memcpy(identity.journal.source_sha256, identity.input_sha256[0], 32);
+    const char *sizes[] = {"source_size", "receipt_size", "config_size"};
+    for (size_t i = 0; i < G_N_ELEMENTS(sizes); i++) {
+        GError *parse_error = NULL;
+        identity.input_size[i] = g_key_file_get_uint64(record, "journal", sizes[i], &parse_error);
+        bool valid = !parse_error && identity.input_size[i] &&
+                     identity.input_size[i] <= config->max_cache_bytes;
+        g_clear_error(&parse_error);
+        if (!valid) goto out;
+    }
+    root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    gc = root < 0 ? -1 : open_task_directory(root, ".gc");
+    directory = gc < 0 ? -1 : open_task_directory(gc, "journal-inputs");
+    name = g_strdup_printf("%s.receipt", id);
+    receipt = directory < 0 ? -1 : openat(directory, name,
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    struct stat st;
+    if (receipt < 0 || fstat(receipt, &st) || !S_ISREG(st.st_mode) ||
+        st.st_uid != geteuid() || st.st_nlink != 1 || (st.st_mode & 0222)) goto out;
+    result = latcd_journal_reopen_task_input(config->cache_dir, &identity, receipt,
+                                             config->max_cache_bytes, input,
+                                             error, error_size);
+out:
+    if (result && error && error_size && !error[0])
+        g_strlcpy(error, "cannot reopen recorded journal input", error_size);
+    if (receipt >= 0) close(receipt);
+    if (directory >= 0) close(directory);
+    if (gc >= 0) close(gc);
+    if (root >= 0) close(root);
+    g_free(name); g_free(epoch); g_free(kind); g_free(record_id);
+    g_key_file_unref(record);
+    return result;
+}
+
 /* Caller holds the task's exclusive lease and has proved the domain terminal. */
 static int remove_task_inputs(const LatcdConfig *config, const char *id, int task_fd,
                               GKeyFile *record)
@@ -2411,6 +2488,11 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
         goto out;
     }
     if (domain.state == LATCD_MANAGED_OUTPUT_ADOPTED || domain.state == LATCD_MANAGED_REPLAY_ADOPTED) {
+        if (journal && domain.state == LATCD_MANAGED_REPLAY_ADOPTED) {
+            LatcdJournalCompileInput recovered;
+            if (reopen_task_journal(config, id, task, &recovered, error, sizeof(error))) goto out;
+            latcd_journal_close_compile_input(&recovered);
+        }
         if ((domain.state == LATCD_MANAGED_REPLAY_ADOPTED ?
              latcd_managed_replay_discard(config->cache_dir, id, task, error, sizeof(error)) :
              latcd_managed_outputs_discard(config->cache_dir, id, task, error, sizeof(error)))) goto out;
@@ -6711,9 +6793,18 @@ static void *compiler_worker(void *opaque)
 #endif
             if (!status && tasks->len == 1) {
                 LatcdCompilerTask *task = g_ptr_array_index(tasks, 0);
+                LatcdJournalCompileInput recovered;
                 if (task->publication_lease < 0 ||
-                    latcd_managed_replay_discard(service->config->cache_dir, task->id,
-                                                 task->publication_lease, error, sizeof(error)))
+                    reopen_task_journal(service->config, task->id,
+                                        task->publication_lease, &recovered,
+                                        error, sizeof(error))) {
+                    status = -1;
+                } else {
+                    latcd_journal_close_compile_input(&recovered);
+                }
+                if (task->publication_lease < 0 ||
+                    (!status && latcd_managed_replay_discard(service->config->cache_dir, task->id,
+                                                 task->publication_lease, error, sizeof(error))))
                     status = -1;
 #ifdef LATCD_GC_TIMER_TEST
                 if (!status && getenv("LATCD_TEST_REPLAY_CRASH_UNLINKED")) kill(getpid(), SIGKILL);

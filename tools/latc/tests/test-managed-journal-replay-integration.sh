@@ -52,6 +52,19 @@ if [ -n "${LATCD_TEST_REPLAY_CRASH_PREPARED:-}${LATCD_TEST_REPLAY_CRASH_LINKED:-
     id=$(basename "$state" .ini)
     test -s "$work/cache/.gc/journal-inputs/$id.receipt"
     [ "$("$scanner" --task-status "$work/cache" .tmp/base.native)" = 1 ]
+    if [ -n "${LATCD_TEST_REPLAY_CRASH_HANDOFF:-}" ]; then
+        receipt="$work/cache/.gc/journal-inputs/$id.receipt"
+        mv "$receipt" "$work/original.receipt"
+        printf 'invalid receipt\n' > "$receipt"
+        chmod 400 "$receipt"
+        if "$daemon" --test-managed-adoption-recovery "$work/cache" "$id" > "$work/receipt-reject.log" 2>&1; then
+            echo 'replacement receipt accepted by recovery' >&2; exit 1
+        fi
+        grep -qx 'state=REPLAY_ADOPTED' "$state"
+        test -f "$work/cache/.tmp/base.native"
+        rm "$receipt"
+        mv "$work/original.receipt" "$receipt"
+    fi
     if [ -n "${LATCD_TEST_REPLAY_CRASH_UNLINKED:-}" ]; then
         test -z "$(find "$work/cache/.tmp" -name 'replay-native-*' -print -quit)"
     fi
