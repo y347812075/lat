@@ -775,6 +775,7 @@ $(BUILD)/tests/test-native-migration-v12 \
 	python3 tests/test-terminal-trap.py
 	python3 tests/test-module-selection-environment.py scripts/compile-aot-v2-module.sh
 	python3 tests/test-module-runtime-prefix.py
+	python3 tests/test-managed-wrapper.py
 	$(MAKE) check-import
 
 $(BUILD)/tests/test-latcd-protocol: \
