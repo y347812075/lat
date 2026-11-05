@@ -872,7 +872,7 @@ static int snapshot_source_copy(int source_fd, const char *temporary_dir,
         fail(error, error_size, "source changed while creating snapshot");
         goto out;
     }
-    if (fsync(output)) {
+    if (fdatasync(output)) {
         fail(error, error_size, "cannot sync source snapshot: %s",
              strerror(errno));
         goto out;
@@ -1881,8 +1881,15 @@ static int record_task(const LatcdConfig *config, bool copying, bool replay, boo
     task_root_test_barrier(copying, 'b');
     /* Inputs are already pinned, and COPY may hold C: never wait or invert the
      * executor's roots-to-object order. Keep SH through durable registration. */
-    int roots = latcd_retirement_roots_lock(config->cache_dir, LOCK_SH | LOCK_NB,
+    int roots;
+    unsigned roots_attempts = 0;
+    do {
+        roots = latcd_retirement_roots_lock(config->cache_dir, LOCK_SH | LOCK_NB,
                                             error, error_size);
+        if (roots >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK) ||
+            ++roots_attempts >= 30000) break;
+        g_usleep(1000);
+    } while (!stop_requested);
     if (roots < 0) {
         if (!copying && (errno == EWOULDBLOCK || errno == EAGAIN)) task_roots_busy = true;
         goto out;
@@ -2006,8 +2013,18 @@ static int record_task(const LatcdConfig *config, bool copying, bool replay, boo
             goto failed;
         }
 #endif
-        if (latcd_managed_task_prepare(config->cache_dir, id, lease, error, error_size))
-            goto failed;
+        int prepared;
+        unsigned attempts = 0;
+        do {
+            error[0] = '\0';
+            prepared = latcd_managed_task_prepare(config->cache_dir, id, lease,
+                                                  error, error_size);
+            if (!prepared) break;
+            if ((errno != EAGAIN && errno != EWOULDBLOCK) || ++attempts >= 30000)
+                break;
+            g_usleep(1000);
+        } while (!stop_requested);
+        if (prepared) goto failed;
 #ifdef LATCD_GC_TIMER_TEST
         if (getenv("LATCD_TEST_MANAGED_AFTER_PREPARE")) raise(SIGKILL);
 #endif
@@ -2445,23 +2462,25 @@ static int release_copy_task(const LatcdConfig *config, int task_pin,
                               char *error, size_t error_size);
 
 /* Caller owns the daemon lease and the exclusive task lease. */
-static int recover_managed_domain(const LatcdConfig *config, const char *id, int task, bool replay, bool journal)
+static int recover_managed_domain(const LatcdConfig *config, const char *id, int task,
+                                  bool replay, bool journal,
+                                  char *error, size_t error_size)
 {
     LatcdManagedDomain domain = {0};
-    char error[256], *boot = NULL;
+    char *boot = NULL;
     gsize length = 0;
     struct stat delegation;
     int result = -1;
     if (worker_delegation_fd < 0 ||
         latcd_managed_task_domain(config->cache_dir, id, task, &domain,
-                                  LATCD_MANAGED_PREPARED, error, sizeof(error))) goto out;
+                                  LATCD_MANAGED_PREPARED, error, error_size)) goto out;
     if (journal && domain.state == LATCD_MANAGED_PREPARED) {
         if (fstat(worker_delegation_fd, &domain.delegation) ||
             !g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot, &length, NULL)) goto out;
         g_strchomp(boot);
         g_strlcpy(domain.boot, boot, sizeof(domain.boot));
         result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
-                                           LATCD_MANAGED_PREEXEC_CANCELLED, error, sizeof(error));
+                                           LATCD_MANAGED_PREEXEC_CANCELLED, error, error_size);
         goto out;
     }
     /* The launch contract is durable before DOMAIN_BOUND and is removed with the
@@ -2473,15 +2492,15 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
     if (journal && launch_required &&
         (!domain.launch.st_ino ||
          latcd_managed_launch_validate_bound(config->cache_dir, id, task,
-             &domain.launch, domain.launch_sha256, error, sizeof(error)))) goto out;
+             &domain.launch, domain.launch_sha256, error, error_size))) goto out;
     if (replay && (domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY)) {
         result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
-                                            LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error));
+                                            LATCD_MANAGED_REPLAY_DISCARDED, error, error_size);
         goto out;
     }
     if (!replay && (domain.state == LATCD_MANAGED_CANCELLED || domain.state == LATCD_MANAGED_DOMAIN_EMPTY)) {
         result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
-                                            LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error));
+                                            LATCD_MANAGED_OUTPUTS_REMOVED, error, error_size);
         goto out;
     }
     if (domain.state == LATCD_MANAGED_PREEXEC_CANCELLED || domain.state == LATCD_MANAGED_REPLAY_DISCARDED ||
@@ -2492,22 +2511,22 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
     }
     if (domain.state == LATCD_MANAGED_ADOPTING || domain.state == LATCD_MANAGED_REPLAY_ADOPTING) {
         result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
-                                            LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error));
+                                            LATCD_MANAGED_OUTPUTS_REMOVED, error, error_size);
         goto out;
     }
     if (domain.state == LATCD_MANAGED_OUTPUT_ADOPTED || domain.state == LATCD_MANAGED_REPLAY_ADOPTED) {
         if (journal && domain.state == LATCD_MANAGED_REPLAY_ADOPTED) {
             LatcdJournalCompileInput recovered;
-            if (reopen_task_journal(config, id, task, &recovered, error, sizeof(error))) goto out;
+            if (reopen_task_journal(config, id, task, &recovered, error, error_size)) goto out;
             latcd_journal_close_compile_input(&recovered);
         }
         if ((domain.state == LATCD_MANAGED_REPLAY_ADOPTED ?
-             latcd_managed_replay_discard(config->cache_dir, id, task, error, sizeof(error)) :
-             latcd_managed_outputs_discard(config->cache_dir, id, task, error, sizeof(error)))) goto out;
+             latcd_managed_replay_discard(config->cache_dir, id, task, error, error_size) :
+             latcd_managed_outputs_discard(config->cache_dir, id, task, error, error_size))) goto out;
         /* The publisher may have removed both temporary links before the
          * manifest commit. This records only their absence, not publication. */
         if (!latcd_managed_task_domain(config->cache_dir, id, task, &domain,
-                                       LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error)))
+                                       LATCD_MANAGED_OUTPUTS_REMOVED, error, error_size))
             result = 0;
         goto out;
     }
@@ -2522,7 +2541,7 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
         /* No worker is cloned until DOMAIN_BOUND is durable. Do not touch a
          * same-named cgroup whose identity was never recorded. */
         result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
-                                           LATCD_MANAGED_PREEXEC_CANCELLED, error, sizeof(error));
+                                           LATCD_MANAGED_PREEXEC_CANCELLED, error, error_size);
         goto out;
     }
     int populated;
@@ -2538,15 +2557,42 @@ static int recover_managed_domain(const LatcdConfig *config, const char *id, int
         if (populated) goto out;
     }
     result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
-                                       LATCD_MANAGED_CANCELLED, error, sizeof(error));
+                                       LATCD_MANAGED_CANCELLED, error, error_size);
     if (!result && replay)
         result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
-                                           LATCD_MANAGED_REPLAY_DISCARDED, error, sizeof(error));
+                                           LATCD_MANAGED_REPLAY_DISCARDED, error, error_size);
     else if (!result)
         result = latcd_managed_task_domain(config->cache_dir, id, task, &domain,
-                                           LATCD_MANAGED_OUTPUTS_REMOVED, error, sizeof(error));
+                                           LATCD_MANAGED_OUTPUTS_REMOVED, error, error_size);
 out:
     g_free(boot);
+    return result;
+}
+
+static int retire_managed_compiler_task(const LatcdConfig *config,
+                                        LatcdCompilerTask *task,
+                                        bool replay, bool journal,
+                                        char *error, size_t error_size)
+{
+    if (task->publication_lease >= 0) {
+        close(task->publication_lease);
+        task->publication_lease = -1;
+    }
+    char *name = g_strdup_printf("%s.ini", task->id);
+    char *path = g_build_filename(config->cache_dir, ".gc", "tasks", name, NULL);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    struct stat observed;
+    int result = -1;
+    if (fd >= 0 && !fstat(fd, &observed) &&
+        observed.st_dev == task->identity.st_dev &&
+        observed.st_ino == task->identity.st_ino &&
+        !flock(fd, LOCK_EX | LOCK_NB) &&
+        !recover_managed_domain(config, task->id, fd, replay, journal,
+                                error, error_size))
+        result = 0;
+    if (fd >= 0) close(fd);
+    g_free(path);
+    g_free(name);
     return result;
 }
 
@@ -2557,6 +2603,7 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
     int root = -1, gc = -1, tasks = -1, releases = -1, result = -1;
     DIR *directory = *cursor;
     unsigned recovered = 0, retained = 0;
+    const char *stale_stage = NULL;
     *visited = 0;
     int64_t started = g_get_monotonic_time();
     root = open(config->cache_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -2573,6 +2620,7 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
         struct stat identity;
         if (fstat(tasks, &identity) ||
             !budget_directory_identity(dirfd(directory), &identity)) {
+            stale_stage = "task directory identity changed";
             errno = ESTALE;
             goto out;
         }
@@ -2589,13 +2637,23 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
         const char *name = entry->d_name;
         char id[37];
         if (strlen(name) != 40 || strcmp(name + 36, ".ini")) {
-            if (config->managed) { errno = ESTALE; result = -1; break; }
+            if (config->managed) {
+                stale_stage = name;
+                errno = ESTALE;
+                result = -1;
+                break;
+            }
             retained++; continue;
         }
         memcpy(id, name, 36);
         id[36] = 0;
         if (!g_uuid_string_is_valid(id)) {
-            if (config->managed) { errno = ESTALE; result = -1; break; }
+            if (config->managed) {
+                stale_stage = name;
+                errno = ESTALE;
+                result = -1;
+                break;
+            }
             retained++; continue;
         }
         if (compiler_task_is_local(id)) { retained++; continue; }
@@ -2636,14 +2694,18 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
         if (config->managed && (!valid || !known)) {
             g_key_file_free(record);
             if (task >= 0) close(task);
+            stale_stage = name;
             errno = ESTALE; result = -1; break;
         }
         if (managed) {
             char *kind = g_key_file_get_string(record, "task", "kind", NULL);
             bool replay = !g_strcmp0(kind, "MANAGED_REPLAY");
-            bool unsafe = !valid || (production ? g_strcmp0(kind, "MANAGED_JOURNAL_COMPILER") != 0 : (journal && !replay)) ||
-                recover_managed_domain(config, id, task, replay, journal);
+            bool unsafe = !valid ||
+                (production ? g_strcmp0(kind, "MANAGED_JOURNAL_COMPILER") != 0 :
+                 (journal && !replay));
             g_free(kind);
+            if (!unsafe && recover_managed_domain(config, id, task, replay, journal,
+                                                   error, error_size)) unsafe = true;
             LatcdManagedDomain terminal = {0};
             char state_error[256];
             if (!unsafe && !latcd_managed_task_domain(config->cache_dir, id, task, &terminal,
@@ -2656,7 +2718,12 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
             g_key_file_free(record);
             if (task >= 0) close(task);
             retained++;
-            if (config->managed && unsafe) { errno = ESTALE; result = -1; break; }
+            if (config->managed && unsafe) {
+                stale_stage = name;
+                errno = ESTALE;
+                result = -1;
+                break;
+            }
             continue;
         }
         if (valid && copying) {
@@ -2684,6 +2751,7 @@ static int recover_compiler_inputs_step(const LatcdConfig *config, DIR **cursor,
         if (config->managed && !valid) {
             g_key_file_free(record);
             if (task >= 0) close(task);
+            stale_stage = name;
             errno = ESTALE; result = -1; break;
         }
         bool temporary_matches = false;
@@ -2760,7 +2828,12 @@ out:
     if (gc >= 0) close(gc);
     if (root >= 0) close(root);
     if (recovered) fprintf(stderr, "latcd: task root recovery recovered=%u retained=%u\n", recovered, retained);
-    if (result < 0) fail(error, error_size, "cannot scan compiler task roots: %s", strerror(errno));
+    if (result < 0) {
+        char detail[256];
+        g_strlcpy(detail, error[0] ? error : strerror(errno), sizeof(detail));
+        fail(error, error_size, "cannot scan compiler task roots%s%s: %s",
+             stale_stage ? " at " : "", stale_stage ? stale_stage : "", detail);
+    }
     return result;
 }
 
@@ -3617,7 +3690,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         const char *initial[] = {"--unshare-all", "--die-with-parent",
             "--symlink", "usr/bin", "/bin",
             "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
-            "--proc", "/proc", "--dev", "/dev", "--size", "268435456", "--tmpfs", "/work",
+            "--proc", "/proc", "--dev", "/dev", "--size", "1073741824", "--tmpfs", "/work",
             "--dir", "/input"};
         for (size_t i = 0; i < G_N_ELEMENTS(initial); i++) TEST_ARG(initial[i]);
         if (worker_closure.files) {
@@ -4191,8 +4264,13 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     if (waited < 0 && replay_extra_output)
         return fail(error, error_size, "unexpected replay module output");
     if (waited < 0) {
-        return fail(error, error_size, "cannot wait for compiler: %s",
-                    strerror(errno));
+        /* Preserve the validation or publication error recorded by the failed
+         * stage. Several stages intentionally normalize errno to EINVAL, so
+         * replacing the diagnostic here hides the actual rejection reason. */
+        if (!error[0])
+            return fail(error, error_size, "cannot complete compiler run: %s",
+                        strerror(errno));
+        return -1;
     }
     if (!WIFEXITED(status)) {
         return fail(error, error_size, "compiler terminated by signal");
@@ -5242,14 +5320,22 @@ static int broker_load_job(const LatcdConfig *config, int source, int config_fd,
         pread(config_fd, bytes, st.st_size, 0) != st.st_size ||
         lat_translation_config_decode(bytes, st.st_size, build, &decoded, error, sizeof(error)) ||
         lat_translation_config_digest(&decoded, hash, error, sizeof(error)) ||
-        memcmp(hash, request->config_sha256, 32)) return -1;
+        memcmp(hash, request->config_sha256, 32)) {
+        fprintf(stderr, "latcd: broker load request rejected: %s\n",
+                error[0] ? error : strerror(errno));
+        return -1;
+    }
     memcpy(expected.source_sha256, source_hash, 32);
     expected_codegen_id(expected.codegen_id);
     memcpy(identity.digest, hash, 32);
     LatcdBrokerExportResponse exported = {0};
     int fd = broker_export_current_config(config, source_hash, error, sizeof(error),
         deadline, cancelled, opaque, &exported, &expected, &identity);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        fprintf(stderr, "latcd: broker load export failed: %s\n",
+                error[0] ? error : strerror(errno));
+        return -1;
+    }
     response->status = 0;
     response->purpose = LATCD_BROKER_LOAD_PURPOSE;
     response->module_size = exported.module_size;
@@ -6416,34 +6502,18 @@ out:
     for (guint i = 0; i < compiler_tasks->len; i++) {
         LatcdCompilerTask *task = g_ptr_array_index(compiler_tasks, i);
         int released = -1;
+        char state_error[256] = {0};
         if (config->managed) {
-            if (task->publication_lease >= 0) {
-                close(task->publication_lease);
-                task->publication_lease = -1;
-            }
-            char *name = g_strdup_printf("%s.ini", task->id);
-            char *path = g_build_filename(config->cache_dir, ".gc", "tasks", name, NULL);
-            int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-            struct stat observed;
-            LatcdManagedDomain domain = {0};
-            char state_error[256];
-            if (fd >= 0 && !fstat(fd, &observed) &&
-                observed.st_dev == task->identity.st_dev && observed.st_ino == task->identity.st_ino &&
-                !flock(fd, LOCK_EX | LOCK_NB) &&
-                !latcd_managed_task_domain(config->cache_dir, task->id, fd, &domain,
-                                            LATCD_MANAGED_PREPARED, state_error, sizeof(state_error)) &&
-                domain.state == LATCD_MANAGED_OUTPUT_ADOPTED &&
-                !latcd_managed_task_domain(config->cache_dir, task->id, fd, &domain,
-                                            LATCD_MANAGED_OUTPUTS_REMOVED, state_error, sizeof(state_error)))
+            if (!retire_managed_compiler_task(config, task, false, journal_input != NULL,
+                                              state_error, sizeof(state_error)))
                 released = 0;
-            if (fd >= 0) close(fd);
-            g_free(path); g_free(name);
         } else {
             released = record_compiler_release(config, task->id, &task->identity, true);
         }
         if (released) {
             transient_retained = true;
-            fprintf(stderr, "latcd: compiler output release not durable; retaining task root\n");
+            fprintf(stderr, "latcd: compiler output release not durable; retaining task root: %s\n",
+                    state_error[0] ? state_error : strerror(errno));
         }
         compiler_task_local(task->id, false);
     }
@@ -8407,9 +8477,10 @@ static void register_journal(const LatcdConfig *config, int source, int config_f
     filesystem_reserved = true;
     if (snapshot_source_copy(source, temporary, before.st_size,
             NULL, response->source_sha256, &copied, &snapshot, error, sizeof(error)) ||
-        !metadata_equal(&before, &copied)) {
+            !metadata_equal(&before, &copied)) {
         response->status = LATCD_STATUS_BAD_SOURCE;
-    } else {
+    }
+    if (response->status == LATCD_STATUS_OK) {
         char stream[33];
         int result;
         result = client_uid ? latcd_journal_register_bound_fd(config->cache_dir, snapshot,
@@ -8641,7 +8712,7 @@ static int run_service(const LatcdConfig *config)
             latcd_managed_directory(test_broker_directory, geteuid(), 0755) :
             open(test_broker_directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (directory < 0 || broker_server_start(&test_broker, config, directory,
-                "broker.sock", broker_uid, 10 * G_TIME_SPAN_SECOND)) {
+                "broker.sock", broker_uid, LATCD_BROKER_REQUEST_TIMEOUT_MS * G_TIME_SPAN_MILLISECOND)) {
             fprintf(stderr, "latcd: %sbroker startup failed: %s\n",
                     config->managed ? "" : "test ", strerror(errno));
             service_status = 1;
@@ -9449,7 +9520,8 @@ static int test_managed_adoption_recovery(const char *root, const char *id)
     worker_delegation_fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (task >= 0 && worker_delegation_fd >= 0 &&
         !flock(task, LOCK_EX | LOCK_NB) &&
-        !recover_managed_domain(&config, id, task, false, true)) result = 0;
+        !recover_managed_domain(&config, id, task, false, true,
+                                NULL, 0)) result = 0;
     if (worker_delegation_fd >= 0) close(worker_delegation_fd);
     worker_delegation_fd = -1;
     if (task >= 0) close(task);
@@ -9562,6 +9634,28 @@ static int test_managed_compiler_run(const char *root, const char *delegation)
                      test_base_module, test_config, NULL, false, native, module,
                      digest, tasks, &reservation, &untracked_task, error, sizeof(error))) goto out;
     if (tasks->len != 1) goto out;
+    if (getenv("LATCD_TEST_RETIRE_COMPILER_TASK")) {
+        LatcdCompilerTask *task = g_ptr_array_index(tasks, 0);
+        if (retire_managed_compiler_task(&config, task, test_config != NULL, false,
+                                         error, sizeof(error))) goto out;
+        char *name = g_strdup_printf("%s.ini", task->id);
+        char *path = g_build_filename(root, ".gc", "tasks", name, NULL);
+        int task_fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        LatcdManagedDomain terminal = {0};
+        unsigned expected = test_config ? LATCD_MANAGED_REPLAY_DISCARDED :
+                                          LATCD_MANAGED_OUTPUTS_REMOVED;
+        int checked = task_fd < 0 || latcd_managed_task_domain(
+            root, task->id, task_fd, &terminal, LATCD_MANAGED_PREPARED,
+            error, sizeof(error)) || terminal.state != expected;
+        if (task_fd >= 0) close(task_fd);
+        g_free(path);
+        g_free(name);
+        if (checked) goto out;
+        if (reservation) {
+            latcd_cache_capacity_finish_transient(&generation_capacity, reservation, false);
+            reservation = 0;
+        }
+    }
     printf("%s\n", ((LatcdCompilerTask *)g_ptr_array_index(tasks, 0))->id);
     result = 0;
 out:
@@ -9800,7 +9894,7 @@ int main(int argc, char **argv)
         return result;
     }
     if (!config.workers) {
-        config.workers = default_worker_count();
+        config.workers = config.managed ? 1 : default_worker_count();
     }
     if (!config.cache_dir || !config.compiler || !config.runner ||
         !config.runtime_dir || !config.max_input || !config.max_jobs ||

@@ -1252,12 +1252,14 @@ int main(void)
         &invalid_direct, LATCD_MANAGED_BOUND, error, sizeof(error)), ==, -1);
     worker_delegation_fd = open(record_cache, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     g_assert_cmpint(worker_delegation_fd, >=, 0);
-    g_assert_cmpint(recover_managed_domain(&record_config, replay_id, recovery_task, true, true), ==, 0);
+    g_assert_cmpint(recover_managed_domain(&record_config, replay_id, recovery_task, true, true,
+                                           error, sizeof(error)), ==, 0);
     LatcdManagedDomain recovered_domain = {0};
     g_assert_cmpint(latcd_managed_task_domain(record_cache, replay_id, recovery_task,
         &recovered_domain, LATCD_MANAGED_PREPARED, error, sizeof(error)), ==, 0);
     g_assert_cmpuint(recovered_domain.state, ==, LATCD_MANAGED_PREEXEC_CANCELLED);
-    g_assert_cmpint(recover_managed_domain(&record_config, replay_id, recovery_task, true, true), ==, 0);
+    g_assert_cmpint(recover_managed_domain(&record_config, replay_id, recovery_task, true, true,
+                                           error, sizeof(error)), ==, 0);
     close(worker_delegation_fd);
     worker_delegation_fd = -1;
     close(recovery_task);

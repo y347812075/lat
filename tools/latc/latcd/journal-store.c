@@ -31,6 +31,19 @@ typedef struct RegistrationV2 {
     uint64_t client_uid;
 } RegistrationV2;
 
+typedef struct SourceDigestCacheEntry {
+    dev_t device;
+    ino_t inode;
+    off_t size;
+    uint8_t digest[32];
+    bool used;
+} SourceDigestCacheEntry;
+
+enum { SOURCE_DIGEST_CACHE_SIZE = 256 };
+static SourceDigestCacheEntry source_digest_cache[SOURCE_DIGEST_CACHE_SIZE];
+static size_t source_digest_cache_next;
+static GMutex source_digest_cache_lock;
+
 static bool read_exact(int fd, void *bytes, size_t size);
 static int readonly_file(int directory, const char *name, uint64_t limit,
                          bool single_link, struct stat *st);
@@ -205,6 +218,40 @@ static bool hash_fd(int fd, uint8_t digest[32])
     if (ok) g_checksum_get_digest(hash, digest, &size);
     g_checksum_free(hash);
     return ok;
+}
+
+static bool source_digest_cached(int fd, const uint8_t expected[32])
+{
+    struct stat st;
+    int seals = fcntl(fd, F_GET_SEALS);
+    int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    if (seals < 0 || (seals & required) != required || fstat(fd, &st)) return false;
+    bool found = false;
+    g_mutex_lock(&source_digest_cache_lock);
+    for (size_t i = 0; i < SOURCE_DIGEST_CACHE_SIZE; i++) {
+        SourceDigestCacheEntry *entry = &source_digest_cache[i];
+        if (entry->used && entry->device == st.st_dev && entry->inode == st.st_ino &&
+            entry->size == st.st_size && !memcmp(entry->digest, expected, 32)) {
+            found = true;
+            break;
+        }
+    }
+    g_mutex_unlock(&source_digest_cache_lock);
+    return found;
+}
+
+static void source_digest_remember(int fd, const uint8_t digest[32])
+{
+    struct stat st;
+    if (fstat(fd, &st)) return;
+    g_mutex_lock(&source_digest_cache_lock);
+    SourceDigestCacheEntry *entry = &source_digest_cache[source_digest_cache_next];
+    source_digest_cache_next = (source_digest_cache_next + 1) % SOURCE_DIGEST_CACHE_SIZE;
+    *entry = (SourceDigestCacheEntry) {
+        .device = st.st_dev, .inode = st.st_ino, .size = st.st_size, .used = true,
+    };
+    memcpy(entry->digest, digest, 32);
+    g_mutex_unlock(&source_digest_cache_lock);
 }
 
 static uint64_t stream_storage(uint64_t capacity)
@@ -686,6 +733,7 @@ static int journal_append(const char *cache, uint64_t journal_id, const uint8_t 
     }
     bool found = false;
     int result = -1;
+    int directory = -1, registered_source = -1;
     char stream[33] = {0};
     Registration selected = {0};
     struct dirent *entry;
@@ -720,12 +768,26 @@ static int journal_append(const char *cache, uint64_t journal_id, const uint8_t 
         goto out;
     }
     uint8_t digest[32];
-    if (!hash_fd(source_fd, digest) ||
-        memcmp(digest, selected.identity.source_sha256, 32)) {
+    struct stat source_stat, pinned_stat;
+    directory = directory_at(root, stream, false);
+    registered_source = directory < 0 ? -1 : openat(
+        directory, "source", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    bool source_bound = registered_source >= 0 && !fstat(source_fd, &source_stat) &&
+        !fstat(registered_source, &pinned_stat) && S_ISREG(source_stat.st_mode) &&
+        source_stat.st_dev == pinned_stat.st_dev && source_stat.st_ino == pinned_stat.st_ino &&
+        source_stat.st_size == pinned_stat.st_size;
+    bool digest_cached = source_digest_cached(
+        source_fd, selected.identity.source_sha256);
+    if (source_bound || digest_cached) {
+        memcpy(source_sha, selected.identity.source_sha256, 32);
+    } else if (!hash_fd(source_fd, digest) ||
+               memcmp(digest, selected.identity.source_sha256, 32)) {
         fail(error, error_size, "journal source identity mismatch");
         goto out;
+    } else {
+        memcpy(source_sha, digest, 32);
+        source_digest_remember(source_fd, digest);
     }
-    memcpy(source_sha, digest, 32);
     uint8_t config[LATCD_JOURNAL_CONFIG_LIMIT];
     struct stat config_stat;
     int seals = fcntl(config_fd, F_GET_SEALS);
@@ -748,7 +810,6 @@ static int journal_append(const char *cache, uint64_t journal_id, const uint8_t 
         fail(error, error_size, "journal configuration identity mismatch");
         goto out;
     }
-    int directory = directory_at(root, stream, false);
     LatKeyJournal journal;
     if (directory < 0) {
         fail(error, error_size, "cannot open journal epoch directory");
@@ -756,13 +817,14 @@ static int journal_append(const char *cache, uint64_t journal_id, const uint8_t 
     }
     if (lat_key_journal_open_at(directory, "keys", &selected.identity, true,
                                 &journal, error, error_size)) {
-        close(directory);
         goto out;
     }
     result = lat_key_journal_append(&journal, key, slot, error, error_size);
     lat_key_journal_close(&journal);
     close(directory);
 out:
+    if (registered_source >= 0) close(registered_source);
+    if (directory >= 0) close(directory);
     closedir(directory_list);
     close(root);
     return result;

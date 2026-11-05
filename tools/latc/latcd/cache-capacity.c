@@ -179,7 +179,12 @@ static void check_changes(LatcdCacheCapacity *capacity)
         ssize_t size = read(capacity->watch_fd, buffer.bytes, sizeof(buffer.bytes));
         if (size < 0 && errno == EINTR) continue;
         if (size < 0 && errno == EAGAIN) return;
-        if (size <= 0) { capacity->ready = false; return; }
+        if (size <= 0) {
+            if (capacity->ready)
+                fprintf(stderr, "latcd: capacity index invalidated: watcher closed\n");
+            capacity->ready = false;
+            return;
+        }
         for (size_t offset = 0; offset < (size_t)size;) {
             struct inotify_event *event = (void *)(buffer.bytes + offset);
             offset += sizeof(*event) + event->len;
@@ -203,8 +208,12 @@ static void check_changes(LatcdCacheCapacity *capacity)
                      !(expected && event->mask == (IN_CREATE | IN_ISDIR))) ||
                     (!(event->mask & IN_ISDIR) && event->len &&
                      (event->mask & (IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO)) &&
-                     !g_hash_table_contains(capacity->state_expected, file_key)))
+                     !g_hash_table_contains(capacity->state_expected, file_key))) {
+                    if (capacity->ready) fprintf(stderr,
+                        "latcd: capacity index invalidated: unexpected state directory event wd=%d mask=0x%x name=%s\n",
+                        event->wd, event->mask, event->len ? event->name : "-");
                     capacity->ready = false;
+                }
                 g_free(key);
                 g_free(file_key);
                 g_free(registration);
@@ -218,8 +227,12 @@ static void check_changes(LatcdCacheCapacity *capacity)
                 const char *expected = key ? key : file;
                 if ((prefix && event->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED)) ||
                     event->mask & IN_Q_OVERFLOW ||
-                    !expected || !g_hash_table_contains(capacity->state_expected, expected))
+                    !expected || !g_hash_table_contains(capacity->state_expected, expected)) {
+                    if (capacity->ready) fprintf(stderr,
+                        "latcd: capacity index invalidated: unexpected state file event wd=%d mask=0x%x name=%s\n",
+                        event->wd, event->mask, event->len ? event->name : "-");
                     capacity->ready = false;
+                }
                 if (file && event->mask & IN_IGNORED) g_hash_table_remove(capacity->state_files, watch);
                 g_free(key);
                 continue;
@@ -230,31 +243,58 @@ static void check_changes(LatcdCacheCapacity *capacity)
             bool removing_file = capacity->removing_generation && generation_names &&
                 g_hash_table_contains(generation_names, capacity->removing_generation);
             if (event->mask & IN_Q_OVERFLOW ||
-                ((event->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED)) && !removing_file))
+                ((event->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED)) && !removing_file)) {
+                if (capacity->ready) fprintf(stderr,
+                    "latcd: capacity index invalidated: watched object removed or queue overflow wd=%d mask=0x%x\n",
+                    event->wd, event->mask);
                 capacity->ready = false;
+            }
             if (event->wd == capacity->root_watch && !event->len && (event->mask & IN_ATTRIB)) {
                 struct stat st;
                 if (fstat(capacity->root_fd, &st) || st.st_uid != geteuid() ||
-                    (st.st_mode & 0077)) capacity->ready = false;
+                    (st.st_mode & 0077)) {
+                    if (capacity->ready) fprintf(stderr,
+                        "latcd: capacity index invalidated: unsafe root attributes\n");
+                    capacity->ready = false;
+                }
             }
             if (event->wd != capacity->root_watch && event->mask != IN_Q_OVERFLOW &&
                 !((event->mask & (IN_MODIFY | IN_ATTRIB) && expected_file) ||
-                  (event->mask & (IN_DELETE_SELF | IN_IGNORED) && removing_file)))
+                  (event->mask & (IN_DELETE_SELF | IN_IGNORED) && removing_file))) {
+                if (capacity->ready) fprintf(stderr,
+                    "latcd: capacity index invalidated: unexpected watched file event wd=%d mask=0x%x\n",
+                    event->wd, event->mask);
                 capacity->ready = false;
+            }
             if (event->wd == capacity->root_watch && event->len &&
                 (current_name(event->name) || state_store_name(event->name))) {
-                if (!g_hash_table_contains(capacity->state_expected, event->name))
+                if (!g_hash_table_contains(capacity->state_expected, event->name)) {
+                    if (capacity->ready) fprintf(stderr,
+                        "latcd: capacity index invalidated: unexpected root state event name=%s mask=0x%x\n",
+                        event->name, event->mask);
                     capacity->ready = false;
+                }
             }
             if (event->wd == capacity->root_watch &&
                 event->len && !strcmp(event->name, ".gc") &&
                 !(event->mask == (IN_CREATE | IN_ISDIR) &&
-                  g_hash_table_contains(capacity->state_expected, "@mkdir-root/.gc"))) capacity->ready = false;
-            if (event->len && (!strcmp(event->name, ".superseded") || generated_name(event->name)) &&
-                (!capacity->expected_names || !g_hash_table_contains(capacity->expected_names, event->name)))
+                  g_hash_table_contains(capacity->state_expected, "@mkdir-root/.gc"))) {
+                if (capacity->ready) fprintf(stderr,
+                    "latcd: capacity index invalidated: unexpected .gc event mask=0x%x\n",
+                    event->mask);
                 capacity->ready = false;
+            }
+            if (event->len && (!strcmp(event->name, ".superseded") || generated_name(event->name)) &&
+                (!capacity->expected_names || !g_hash_table_contains(capacity->expected_names, event->name))) {
+                if (capacity->ready) fprintf(stderr,
+                    "latcd: capacity index invalidated: unexpected generated object name=%s mask=0x%x\n",
+                    event->name, event->mask);
+                capacity->ready = false;
+            }
         }
     }
+    if (capacity->ready) fprintf(stderr,
+        "latcd: capacity index invalidated: inotify event budget exhausted\n");
     capacity->ready = false;
 }
 
