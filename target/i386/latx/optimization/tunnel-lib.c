@@ -571,6 +571,11 @@ void reg_priv_plt(const char *method_name, abi_ulong plt_addr, abi_ulong org)
     if (!option_tunnel_lib) {
         return;
     }
+    CPUState *cpu = env_cpu(lsenv->cpu_state);
+    if (!latc_aot_v2_key_publish_ready(org, cpu ? cpu->tcg_cflags : 0)) {
+        tunnel_debug("defer tunnel registration until journal key commit");
+        return;
+    }
     if (!tunnel_method_hash) {
         init_tunnel_table();
     }

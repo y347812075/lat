@@ -288,8 +288,11 @@ static void check_format(void)
     for (size_t i = 0; i < sizeof(original); i++) {
         unsigned char changed = original[i] ^ 0x80;
         assert(pwrite(journal.fd, &changed, 1, i) == 1);
-        assert(lat_key_journal_open(journal.fd, &identity, false,
-                                   &rejected, error, sizeof(error)) < 0);
+        if (lat_key_journal_open(journal.fd, &identity, false,
+                                 &rejected, error, sizeof(error)) >= 0) {
+            fprintf(stderr, "accepted corrupt journal header byte %zu\n", i);
+            abort();
+        }
         assert(pwrite(journal.fd, original + i, 1, i) == 1);
     }
     int bad = memfd_create("bad-journal", MFD_CLOEXEC | MFD_ALLOW_SEALING);

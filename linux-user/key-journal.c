@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -35,7 +36,8 @@ typedef struct JournalHeader {
     uint32_t slot_size;
     uint32_t flags;
     LatKeyJournalIdentity identity;
-    uint8_t reserved[16];
+    uint64_t hint;
+    uint8_t reserved[8];
 } JournalHeader;
 
 typedef struct JournalSlot {
@@ -125,6 +127,7 @@ static bool valid_header(const JournalHeader *header,
         header->header_size == sizeof(*header) &&
         header->slot_size == sizeof(JournalSlot) &&
         header->capacity && header->capacity <= LAT_KEY_JOURNAL_MAX_SLOTS &&
+        header->hint < header->capacity &&
         !header->flags && !nonzero(header->reserved, sizeof(header->reserved)) &&
         !memcmp(&header->identity, identity, sizeof(*identity)) &&
         size == (off_t)(sizeof(*header) + header->capacity * sizeof(JournalSlot));
@@ -181,6 +184,7 @@ int lat_key_journal_open(int fd, const LatKeyJournalIdentity *expected,
         header.version != JOURNAL_VERSION ||
         header.header_size != sizeof(header) || header.slot_size != sizeof(JournalSlot) ||
         !header.capacity || header.capacity > LAT_KEY_JOURNAL_MAX_SLOTS ||
+        header.hint >= header.capacity ||
         header.flags || nonzero(header.reserved, sizeof(header.reserved)) ||
         memcmp(&header.identity, expected, sizeof(*expected)) ||
         stat.st_size != (off_t)(sizeof(header) + header.capacity * sizeof(JournalSlot))) {
@@ -199,6 +203,7 @@ int lat_key_journal_open(int fd, const LatKeyJournalIdentity *expected,
     journal->mapping = mapping;
     journal->mapping_size = size;
     journal->capacity = header.capacity;
+    journal->hint = header.hint;
     journal->writable = writable;
     journal->owner_pid = getpid();
     return 0;
@@ -231,6 +236,7 @@ int lat_key_journal_open_at(int directory_fd, const char *name,
     journal->fd = fd;
     journal->capacity = header.capacity;
     journal->mapping_size = sizeof(header) + header.capacity * sizeof(JournalSlot);
+    journal->hint = header.hint;
     journal->writable = writable;
     journal->file_backed = true;
     journal->owner_pid = getpid();
@@ -342,6 +348,16 @@ static int file_reserve(LatKeyJournal *journal, uint64_t *slot,
             if (!reserved) read = false;
         }
         int saved = errno;
+        if (reserved) {
+            uint64_t hint = (index + 1) % journal->capacity;
+            reserved = full_io(journal->fd, &hint, sizeof(hint),
+                               offsetof(JournalHeader, hint), true) &&
+                       file_size_valid(journal);
+            if (!reserved) {
+                saved = errno;
+                read = false;
+            }
+        }
         if (file_lock(journal, index, F_UNLCK))
             return fail(errno, error, error_size, "cannot unlock named journal");
         if (!read || invalid)

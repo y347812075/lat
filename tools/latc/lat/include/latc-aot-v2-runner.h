@@ -99,6 +99,7 @@ void latc_aot_v2_key_scope_enter(CPUState *cpu, uint32_t cflags, bool atomic_ste
 void latc_aot_v2_key_scope_leave(void);
 void latc_aot_v2_key_gate(CPUState *cpu, target_ulong pc, uint32_t cflags);
 void latc_aot_v2_key_publish_check(CPUState *cpu, target_ulong pc, uint32_t cflags);
+bool latc_aot_v2_key_publish_ready(target_ulong pc, uint32_t cflags);
 bool latc_aot_v2_key_retry_pending(void);
 bool latc_aot_v2_key_retry_service(CPUState *cpu);
 bool latc_aot_v2_key_resume_jrra(target_ulong pc, uint32_t cflags);

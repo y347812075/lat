@@ -42,7 +42,7 @@ static int latcd_client_operation_timeout(uint32_t operation)
         fallback = 5000;
     } else if (operation == LATCD_OP_APPEND_JOURNAL) {
         name = "LATX_AOT_V2_JOURNAL_TIMEOUT_MS";
-        fallback = 5000;
+        fallback = LATCD_BROKER_REQUEST_TIMEOUT_MS;
     } else if (operation == LATCD_OP_HELLO ||
                operation == LATCD_OP_PREPARE_SOURCE_LOCK) {
         name = "LATX_AOT_V2_HELLO_TIMEOUT_MS";
@@ -466,7 +466,7 @@ int latcd_client_broker_load(const char *path, uid_t uid, int source, int config
     if (sendmsg(socket_fd, &msg, MSG_NOSIGNAL) != sizeof(request)) goto failed;
     struct pollfd event = {.fd = socket_fd, .events = POLLIN};
     int ready;
-    do { ready = poll(&event, 1, 10000); } while (ready < 0 && errno == EINTR);
+    do { ready = poll(&event, 1, LATCD_BROKER_REQUEST_TIMEOUT_MS); } while (ready < 0 && errno == EINTR);
     if (ready <= 0 || !(event.revents & POLLIN)) { errno = ETIMEDOUT; goto failed; }
     LatcdBrokerLoadResponse response;
     struct iovec received = {.iov_base = &response, .iov_len = sizeof(response)};
@@ -496,7 +496,14 @@ int latcd_client_broker_load(const char *path, uid_t uid, int source, int config
     if (valid && protection->register_locked(output)) valid = false;
     if (!valid && output >= 0) { close(output); output = -1; }
     protection->unlock();
-    if (!valid) { errno = EPROTO; goto failed; }
+    if (!valid) {
+        snprintf(error, error_size,
+                 "invalid broker load response status=%u purpose=%u request=%llu fds=%u",
+                 response.status, response.purpose,
+                 (unsigned long long)response.request_id, fds);
+        errno = EPROTO;
+        goto failed;
+    }
     struct stat st;
     int seals = fcntl(output, F_GET_SEALS);
     if (seals < 0 || (seals & required) != required || fstat(output, &st) ||

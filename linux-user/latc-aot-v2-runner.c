@@ -1495,6 +1495,32 @@ void latc_aot_v2_key_publish_check(CPUState *cpu, target_ulong pc, uint32_t cfla
     key_retry.scope_active = saved;
 }
 
+bool latc_aot_v2_key_publish_ready(target_ulong pc, uint32_t cflags)
+{
+    if (!key_journal_enabled ||
+        atomic_load_explicit(&key_discovery_failed, memory_order_acquire)) {
+        return true;
+    }
+    bool discovery = atomic_load_explicit(&pending_key_discovery,
+                                          memory_order_acquire);
+    LatAotV2ModuleStats *stats = module_stats_for_pc(pc);
+    if (!discovery && (!stats || pc < atomic_load(&stats->source_base))) {
+        return true;
+    }
+    if (stats && pc >= atomic_load(&stats->source_base)) {
+        LatAotV2TbsetEntry candidate = {
+            .rva = pc - atomic_load(&stats->source_base),
+            .flags = aot_v2_semantic_flags(cflags),
+        };
+        pthread_mutex_lock(&tbset_lock);
+        bool committed = g_hash_table_contains(stats->committed_tbset,
+                                               &candidate);
+        pthread_mutex_unlock(&tbset_lock);
+        if (!discovery && committed) return true;
+    }
+    return false;
+}
+
 static void note_dispatch_miss(LatAotV2ModuleStats *stats,
                                uint64_t guest_pc, uint32_t cflags)
 {
@@ -3649,9 +3675,15 @@ static int broker_open_module(int source_fd, const LatAotExpectedV2 *expected,
     const LatcdClientFdProtection protection = {lat_aot_v2_internal_fd_allocation_lock,
         lat_aot_v2_internal_fd_unlock, lat_aot_v2_internal_fd_register_locked, close_internal_fd};
     uint64_t request = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
+    int64_t started = g_get_monotonic_time();
     int fd = latcd_client_broker_load(key_journal_broker, key_journal_broker_uid,
         snapshot, key_journal_config_fd, st.st_size, expected->source_sha256,
         key_journal_config_digest, request, &protection, error, error_size);
+    if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
+        fprintf(stderr, "latx: broker load pid=%d size=%llu elapsed_us=%lld result=%d\n",
+                getpid(), (unsigned long long)st.st_size,
+                (long long)(g_get_monotonic_time() - started), fd);
+    }
     close_internal_fd(snapshot);
     if (fd < 0) return -1;
     LatAotConfigIdentityV2 identity = {.revision = LAT_AOT_CONFIG_NOTE_REVISION,
@@ -3755,9 +3787,15 @@ submit:
         lat_aot_v2_internal_fd_register_locked, close_internal_fd,
     };
     uint64_t request = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
+    int64_t started = g_get_monotonic_time();
     result = latcd_client_broker_journal(key_journal_broker, key_journal_broker_uid,
         snapshot, key_journal_config_fd, stats->source_sha256, operation, request, sequence,
         epoch, &protection, error, size);
+    if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
+        fprintf(stderr, "latx: broker journal op=%u key=0x%llx elapsed_us=%lld result=%d\n",
+                operation, (unsigned long long)sequence,
+                (long long)(g_get_monotonic_time() - started), result);
+    }
     if (!result && operation == LATCD_OP_REGISTER_JOURNAL) {
         for (unsigned i = 0; i < 16; i++)
             snprintf(stats->journal_epoch + 2 * i, 3, "%02x", epoch[i]);

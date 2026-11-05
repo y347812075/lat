@@ -232,6 +232,11 @@ void latc_aot_v2_key_publish_check(CPUState *cpu, target_ulong pc, uint32_t cfla
 {
     (void)cpu; (void)pc; (void)cflags;
 }
+bool latc_aot_v2_key_publish_ready(target_ulong pc, uint32_t cflags)
+{
+    (void)pc; (void)cflags;
+    return true;
+}
 bool latc_aot_v2_key_retry_pending(void) { return false; }
 bool latc_aot_v2_key_retry_service(CPUState *cpu) { (void)cpu; return false; }
 bool latc_aot_v2_key_resume_jrra(target_ulong pc, uint32_t cflags)
