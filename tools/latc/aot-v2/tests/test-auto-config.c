@@ -24,12 +24,13 @@ static void test_system_defaults(const char *home, int variant)
     snprintf(path, sizeof(path), "%s/client.env", dir);
     FILE *file = fopen(path, "w");
     assert(file);
-    assert(fputs("LATX_AOT=0\nLATX_AOT_V2=1\nLATX_AOT_V2_AUTOSTART=0\n"
+    assert(fputs("LATX_AOT_V2_AUTOSTART=0\n"
                  "LATX_AOT_V2_KEY_JOURNAL=1\n"
                  "LATX_AOT_V2_JOURNAL_BROKER=/run/test/broker.sock\n"
                  "LATX_AOT_V2_JOURNAL_BROKER_UID=1234\n"
                  "LATX_AOT_V2_REPORT=1\n", file) >= 0);
-    if (variant == 2) assert(fputs("LATX_AOT_V2=0\n", file) >= 0);
+    if (variant == 2) assert(fputs("LATX_AOT_V2_AUTOSTART=0\n", file) >= 0);
+    if (variant == 8) assert(fputs("LATX_AOT=0\nLATX_AOT_V2=1\n", file) >= 0);
     assert(!fclose(file));
     assert(!chmod(path, 0644));
     if (variant == 3) assert(!chmod(path, 0666));
@@ -42,24 +43,27 @@ static void test_system_defaults(const char *home, int variant)
     unsetenv("LATX_AOT_V2_KEY_JOURNAL");
     unsetenv("LATX_AOT_V2_JOURNAL_BROKER");
     unsetenv("LATX_AOT_V2_JOURNAL_BROKER_UID");
+    unsetenv("LATX_AOT_V2_CACHE_DIR");
+    unsetenv("LATX_AOT_V2_LATCD_SOCKET");
+    unsetenv("LATX_AOT_V2_MODULE");
+    setenv("LATX_AOT", "1", 1);
+    if (variant != 1 && variant != 6) setenv("LATX_AOT_V2", "1", 1);
     if (variant == 1) {
         setenv("LATX_AOT_V2", "0", 1);
-        setenv("LATX_AOT_V2_KEY_JOURNAL", "1", 1);
-        setenv("LATX_AOT_V2_JOURNAL_BROKER", "/inherited", 1);
-        unsetenv("LATX_AOT");
     }
+    if (variant == 7) setenv("LATX_AOT_V2_LATCD_SOCKET", "/custom.sock", 1);
     lat_aot_test_system_defaults(dir);
-    if (variant == 0) {
+    if (variant == 0 || variant == 8) {
         assert(getenv("LATX_AOT_V2"));
         assert(getenv("LATX_AOT_V2_JOURNAL_BROKER_UID"));
         assert(!strcmp(getenv("LATX_AOT_V2"), "1"));
         assert(!strcmp(getenv("LATX_AOT_V2_JOURNAL_BROKER_UID"), "1234"));
     } else {
-        assert((variant == 1) == (getenv("LATX_AOT_V2") != NULL));
+        assert((variant != 6) == (getenv("LATX_AOT_V2") != NULL));
         assert(!getenv("LATX_AOT_V2_KEY_JOURNAL"));
         assert(!getenv("LATX_AOT_V2_JOURNAL_BROKER"));
-        if (variant == 1) assert(!strcmp(getenv("LATX_AOT"), "0"));
     }
+    assert(!strcmp(getenv("LATX_AOT"), "1"));
     assert(!unlink(path));
     assert(!rmdir(dir));
 }
@@ -116,7 +120,7 @@ static void run_case(int number)
     bool selected = false;
     int selection_rc = lat_aot_config_select(&selected_legacy, explicit,
                                             &selected, error, sizeof(error));
-    assert((selection_rc != 0) == (number == 2 || number == 5));
+    assert((selection_rc != 0) == (number == 5));
     assert(lat_aot_cache_path() == NULL);
     assert(lat_aot_socket_path() == NULL);
     if (!selection_rc) {
@@ -125,7 +129,7 @@ static void run_case(int number)
         assert(selected_legacy == (expected ? 0 : legacy));
     }
     int rc = lat_aot_config_init(&legacy, explicit, "/usr/bin", "/usr/lib", error, sizeof(error));
-    assert((rc != 0) == (number == 2 || number == 5));
+    assert((rc != 0) == (number == 5));
     if (!rc) {
         bool v2 = number != 0 && number != 4 && number != 7 && number != 9;
         assert(legacy == (v2 ? 0 : 1));
@@ -172,7 +176,7 @@ int main(void)
     unsetenv("XDG_CACHE_HOME");
     unsetenv("XDG_STATE_HOME");
     unsetenv("XDG_RUNTIME_DIR");
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 9; i++) {
         pid_t child = fork();
         assert(child >= 0);
         if (!child) { test_system_defaults(home, i); _exit(0); }

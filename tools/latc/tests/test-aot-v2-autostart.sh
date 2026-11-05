@@ -43,18 +43,16 @@ run_guest LATX_AOT=0 LATX_AOT_V2=0 LATX_AOT_V2_CACHE_DIR="$work/stale-cache" \
   > "$work/off.stdout" 2> "$work/off.stderr"
 cmp "$work/jit.stdout" "$work/off.stdout"
 test ! -d "$work/stale-cache"
-if run_guest LATX_AOT=1 LATX_AOT_V2=1 > "$work/conflict.stdout" 2> "$work/conflict.stderr"; then
-    echo 'mutually exclusive modes were accepted' >&2
-    exit 1
-fi
-test ! -s "$work/conflict.stdout"
-grep -q 'cannot both be enabled' "$work/conflict.stderr"
-if run_guest LATX_AOT=1 LATX_AOT_V2=1 LATX_SOFTFPU=1 \
-  > "$work/conflict-softfpu.stdout" 2> "$work/conflict-softfpu.stderr"; then
-    exit 1
-fi
-test ! -s "$work/conflict-softfpu.stdout"
-grep -q 'cannot both be enabled' "$work/conflict-softfpu.stderr"
+run_guest LATX_AOT=1 LATX_AOT_V2=1 LATX_AOT_V2_REPORT=1 \
+  LATX_AOT_V2_LATCD_SOCKET="$work/missing.sock" \
+  > "$work/precedence.stdout" 2> "$work/precedence.stderr"
+cmp "$work/jit.stdout" "$work/precedence.stdout"
+grep -q 'AOT v2 runtime stats' "$work/precedence.stderr"
+run_guest LATX_AOT=1 LATX_AOT_V2=1 LATX_SOFTFPU=1 \
+  LATX_AOT_V2_REPORT=1 LATX_AOT_V2_LATCD_SOCKET="$work/missing.sock" \
+  > "$work/precedence-softfpu.stdout" 2> "$work/precedence-softfpu.stderr"
+cmp "$work/jit.stdout" "$work/precedence-softfpu.stdout"
+grep -q 'AOT v2 runtime stats' "$work/precedence-softfpu.stderr"
 test ! -d "$work/cache"
 
 # Concurrent short-lived guests must all submit successfully to one daemon.

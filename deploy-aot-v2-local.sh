@@ -160,8 +160,6 @@ with open(path, "w", encoding="ascii") as output:
     output.write("\n")
 PY
 printf '%s\n' \
-    'LATX_AOT=0' \
-    'LATX_AOT_V2=1' \
     'LATX_AOT_V2_AUTOSTART=0' \
     'LATX_AOT_V2_KEY_JOURNAL=1' \
     'LATX_AOT_V2_JOURNAL_BROKER=/run/lat-aot-v2/broker.sock' \

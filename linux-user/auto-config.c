@@ -31,6 +31,11 @@ static void load_system_defaults(const char *directory, uid_t owner)
 {
     char contents[4097];
     struct stat st;
+    const char *requested = getenv("LATX_AOT_V2");
+    if (!requested || strcmp(requested, "1") ||
+        getenv("LATX_AOT_V2_CACHE_DIR") || getenv("LATX_AOT_V2_LATCD_SOCKET") ||
+        getenv("LATX_AOT_V2_MODULE") || getenv("LATX_AOT_V2_JOURNAL_BROKER") ||
+        getenv("LATX_AOT_V2_JOURNAL_BROKER_UID")) return;
     int dir = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (dir < 0) return;
     if (fstat(dir, &st) || st.st_uid != owner || (st.st_mode & 0022)) {
@@ -71,9 +76,7 @@ static void load_system_defaults(const char *directory, uid_t owner)
         }
         values[i] = equals;
     }
-    if (valid && (!values[0] || strcmp(values[0], "0") ||
-        !values[1] || strcmp(values[1], "1") ||
-        !values[2] || strcmp(values[2], "0") ||
+    if (valid && (!values[2] || strcmp(values[2], "0") ||
         !values[3] || strcmp(values[3], "1") ||
         !values[4] || values[4][0] != '/' || !values[5])) valid = false;
     if (valid) {
@@ -82,13 +85,8 @@ static void load_system_defaults(const char *directory, uid_t owner)
         guint64 uid = g_ascii_strtoull(values[5], &end, 10);
         if (errno || *end || *values[5] == '-' || uid >= UINT32_MAX) valid = false;
     }
-    if (valid && getenv("LATX_AOT_V2") && !strcmp(getenv("LATX_AOT_V2"), "0")) {
-        setenv("LATX_AOT", values[0], 0);
-        unsetenv("LATX_AOT_V2_KEY_JOURNAL");
-        unsetenv("LATX_AOT_V2_JOURNAL_BROKER");
-        unsetenv("LATX_AOT_V2_JOURNAL_BROKER_UID");
-    } else if (valid) {
-        for (size_t i = 0; i < G_N_ELEMENTS(keys); i++) {
+    if (valid) {
+        for (size_t i = 2; i < G_N_ELEMENTS(keys); i++) {
             if (values[i]) setenv(keys[i], values[i], 0);
         }
     }
@@ -190,6 +188,7 @@ void lat_aot_config_environment(void)
 int lat_aot_config_select(int *legacy, bool explicit_legacy, bool *selected,
                          char *error, size_t error_size)
 {
+    (void)explicit_legacy;
     const char *broker = getenv("LATX_AOT_V2_JOURNAL_BROKER");
     const char *broker_uid = getenv("LATX_AOT_V2_JOURNAL_BROKER_UID");
     bool broker_requested = broker || broker_uid;
@@ -215,10 +214,6 @@ int lat_aot_config_select(int *legacy, bool explicit_legacy, bool *selected,
         ((cache && *cache) || (socket_path && *socket_path) || (module && *module) ||
          broker_mode);
     if (!*selected) return 0;
-    if (explicit_legacy && *legacy) {
-        snprintf(error, error_size, "LATX_AOT and AOT v2 cannot both be enabled");
-        return -1;
-    }
     *legacy = 0;
     return 0;
 }
