@@ -32,7 +32,7 @@ int main(int argc, char **argv)
         (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) ==
         (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL));
     struct stat copy_stat;
-    assert(!fstat(copy, &copy_stat) && (copy_stat.st_mode & 0777) == 0500);
+    assert(!fstat(copy, &copy_stat) && (copy_stat.st_mode & 0777) == 0555);
     LatAotExpectedV2 expected = {0};
     LatAotConfigIdentityV2 config = {0};
     char error[256];
@@ -65,7 +65,7 @@ int main(int argc, char **argv)
         copy = latcd_cache_export_config_bounded(source, digest, size, &expected,
                                                   &config, 0, NULL, NULL, error, sizeof(error));
         assert(copy >= 0);
-        assert(!fstat(copy, &copy_stat) && (copy_stat.st_mode & 0777) == 0500);
+        assert(!fstat(copy, &copy_stat) && (copy_stat.st_mode & 0777) == 0555);
         assert((fcntl(copy, F_GET_SEALS) & (F_SEAL_WRITE | F_SEAL_GROW |
                 F_SEAL_SHRINK | F_SEAL_SEAL)) == (F_SEAL_WRITE | F_SEAL_GROW |
                 F_SEAL_SHRINK | F_SEAL_SEAL));

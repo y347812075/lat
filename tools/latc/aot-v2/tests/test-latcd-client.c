@@ -46,7 +46,7 @@ static int test_broker_load(int server, const char *path)
     int module = memfd_create("load-module", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     int seals = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
     if (input < 0 || module < 0 || write(input, "x", 1) != 1 ||
-        write(module, "module", 6) != 6 || fchmod(module, 0500) ||
+        write(module, "module", 6) != 6 || fchmod(module, 0555) ||
         fcntl(input, F_ADD_SEALS, seals) || fcntl(module, F_ADD_SEALS, seals))
         return fail("load fixture");
     for (unsigned variant = 0; variant < 4; variant++) {
@@ -57,7 +57,7 @@ static int test_broker_load(int server, const char *path)
             LatcdClientFdProtection protection = {test_lock, test_lock, test_register, test_close};
             char error[256];
             int before = fd_count();
-            int fd = latcd_client_broker_load_test(path, geteuid(), input, input, 1,
+            int fd = latcd_client_broker_load(path, geteuid(), input, input, 1,
                 source_hash, config_hash, 71, &protection, error, sizeof(error));
             if (fd >= 0) close(fd);
             _exit(fd_count() != before || (variant == 0 ? fd < 0 : fd >= 0));
@@ -77,7 +77,7 @@ static int test_broker_load(int server, const char *path)
         int received[2]; memcpy(received, CMSG_DATA(c), sizeof(received));
         close(received[0]); close(received[1]);
         LatcdBrokerLoadResponse response = {.version = LATCD_BROKER_LOAD_VERSION,
-            .purpose = LATCD_BROKER_LOAD_TEST_PURPOSE, .request_id = 71,
+            .purpose = LATCD_BROKER_LOAD_PURPOSE, .request_id = 71,
             .module_size = 6, .source_sha256 = {7}, .config_sha256 = {8}};
         GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
         g_checksum_update(sum, (const guchar *)"module", 6);

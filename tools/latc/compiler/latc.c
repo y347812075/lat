@@ -39,7 +39,8 @@ static void usage(const char *name)
     fprintf(stderr, "  %s inspect-native [--json] IMAGE\n", name);
     fprintf(stderr, "  %s validate-replay-native IMAGE CONFIG TBSET [BASE]\n", name);
     fprintf(stderr, "  %s missing-replay-tbset IMAGE CONFIG TBSET GUEST -o DELTA\n", name);
-    fprintf(stderr, "  %s compile-replay-native X86_ELF -o IMAGE --runner RUNNER --tbset TBSET --config CONFIG\n", name);
+    fprintf(stderr, "  %s compile-replay-native X86_ELF -o IMAGE --runner RUNNER --tbset TBSET --config CONFIG"
+                    " --runtime-dir DIRECTORY --module-output MODULE\n", name);
     fprintf(stderr, "  %s mark-native-x86 IMAGE\n", name);
     fprintf(stderr, "  %s merge-native BASE DELTA -o OUTPUT\n", name);
     fprintf(stderr, "  %s plan-native-tus IMAGE SEED_TBSET -o OUTPUT_TBSET\n", name);
@@ -50,6 +51,7 @@ static void usage(const char *name)
     fprintf(stderr, "  %s emit-aot-v2 NATIVE_IMAGE OUTPUT_DIRECTORY"
                     " [X86_ELF [TBSET]]\n",
             name);
+    fprintf(stderr, "  %s emit-aot-v2-config NATIVE_IMAGE OUTPUT_DIRECTORY CONFIG\n", name);
     fprintf(stderr,
             "  %s compile-module X86_ELF -o MODULE --runner RUNNER"
             " --runtime-dir DIRECTORY [--tbset FILE [--static-tbset]]\n",
@@ -411,7 +413,8 @@ static int compile_module(const char *input, const char *output,
 
 static int compile_replay_native(const char *input, const char *output,
                                  const char *runner, const char *tbset,
-                                 const char *config)
+                                 const char *config, const char *runtime_dir,
+                                 const char *module_output)
 {
     GError *gerror = NULL;
     gchar *executable = g_file_read_link("/proc/self/exe", &gerror);
@@ -422,11 +425,13 @@ static int compile_replay_native(const char *input, const char *output,
         return 1;
     }
 #ifdef LATC_INSTALLED_SCRIPT_DIR
+    gchar *script_dir = g_strdup(LATC_INSTALLED_SCRIPT_DIR);
     gchar *script = g_build_filename(LATC_INSTALLED_SCRIPT_DIR,
                                      "compile-native-image.sh", NULL);
 #else
     gchar *build_dir = g_path_get_dirname(executable);
     gchar *tool_dir = g_path_get_dirname(build_dir);
+    gchar *script_dir = g_strdup(tool_dir);
     gchar *script = g_build_filename(tool_dir, "scripts",
                                      "compile-native-image.sh", NULL);
 #endif
@@ -442,17 +447,78 @@ static int compile_replay_native(const char *input, const char *output,
     }
     g_strfreev(environment);
     g_free(script);
+    if (child < 0) goto fail;
+    int status;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) goto fail;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status)) goto fail;
+    if (module_output && *module_output) {
+        gchar *link_image = g_strdup_printf("%s.link-XXXXXX", output);
+        int copy = g_mkstemp_full(link_image, O_RDWR | O_CLOEXEC, 0600);
+        int image_fd = open(output, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        int config_fd = open(config, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        int tbset_fd = open(tbset, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        char replay_error[256] = {0};
+        bool copied = copy >= 0 && image_fd >= 0 && config_fd >= 0 && tbset_fd >= 0;
+        char buffer[65536];
+        while (copied) {
+            ssize_t n = read(image_fd, buffer, sizeof(buffer));
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0) { copied = false; break; }
+            if (!n) break;
+            for (ssize_t offset = 0; offset < n;) {
+                ssize_t written = write(copy, buffer + offset, n - offset);
+                if (written < 0 && errno == EINTR) continue;
+                if (written <= 0) { copied = false; break; }
+                offset += written;
+            }
+        }
+        bool authorized = copied && !lat_replay_native_authorize_incremental_fd(
+            copy, config_fd, tbset_fd, -1, NULL, replay_error, sizeof(replay_error));
+        if (image_fd >= 0) close(image_fd);
+        if (config_fd >= 0) close(config_fd);
+        if (tbset_fd >= 0) close(tbset_fd);
+        if (copy >= 0) close(copy);
+        if (!authorized) {
+            fprintf(stderr, "latc: cannot authorize replay image: %s\n",
+                    replay_error[0] ? replay_error : strerror(errno));
+            unlink(link_image);
+            g_free(link_image);
+            goto fail;
+        }
+        gchar *link_script = g_build_filename(script_dir,
+                                              "link-aot-v2-module.sh", NULL);
+        pid_t linker = fork();
+        if (linker == 0) {
+            execl(link_script, link_script, executable, link_image, runtime_dir,
+                  module_output, "", "", config, (char *)NULL);
+            _exit(127);
+        }
+        g_free(link_script);
+        if (linker < 0) status = -1;
+        else while (waitpid(linker, &status, 0) < 0) {
+            if (errno != EINTR) { status = -1; break; }
+        }
+        unlink(link_image);
+        g_free(link_image);
+        if (status == -1) goto fail;
+    }
+    g_free(script_dir);
+    g_free(executable);
 #ifndef LATC_INSTALLED_SCRIPT_DIR
     g_free(tool_dir);
     g_free(build_dir);
 #endif
-    g_free(executable);
-    if (child < 0) return 1;
-    int status;
-    while (waitpid(child, &status, 0) < 0) {
-        if (errno != EINTR) return 1;
-    }
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+fail:
+    g_free(script_dir);
+    g_free(executable);
+#ifndef LATC_INSTALLED_SCRIPT_DIR
+    g_free(tool_dir);
+    g_free(build_dir);
+#endif
+    return 1;
 }
 
 static int compile_bundle(const char *input, const char *output,
@@ -685,16 +751,21 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "compile-replay-native") == 0) {
         const char *output = NULL, *runner = NULL, *tbset = NULL, *config = NULL;
+        const char *runtime_dir = NULL, *module_output = NULL;
         for (int i = 3; i < argc; i++) {
             if (!strcmp(argv[i], "-o") && i + 1 < argc) output = argv[++i];
             else if (!strcmp(argv[i], "--runner") && i + 1 < argc) runner = argv[++i];
             else if (!strcmp(argv[i], "--tbset") && i + 1 < argc) tbset = argv[++i];
             else if (!strcmp(argv[i], "--config") && i + 1 < argc) config = argv[++i];
+            else if (!strcmp(argv[i], "--runtime-dir") && i + 1 < argc) runtime_dir = argv[++i];
+            else if (!strcmp(argv[i], "--module-output") && i + 1 < argc) module_output = argv[++i];
             else { usage(argv[0]); return 2; }
         }
         if (!output || !*output || !runner || !*runner || !tbset || !*tbset ||
-            !config || !*config) { usage(argv[0]); return 2; }
-        return compile_replay_native(argv[2], output, runner, tbset, config);
+            !config || !*config || (module_output &&
+            (!runtime_dir || !*runtime_dir))) { usage(argv[0]); return 2; }
+        return compile_replay_native(argv[2], output, runner, tbset, config,
+                                     runtime_dir, module_output);
     }
     if (strcmp(argv[1], "compile-module") == 0) {
         const char *input = argv[2];
@@ -973,6 +1044,32 @@ int main(int argc, char **argv)
             return 2;
         }
         return split_tbset(argv[2], argv[3], argv[4]);
+    }
+    if (strcmp(argv[1], "emit-aot-v2-config") == 0) {
+        char error[256] = {0};
+        gchar *data = NULL;
+        gsize size = 0;
+        LatTranslationConfig decoded;
+        LatAotConfigIdentityV2 identity = {
+            .revision = LAT_AOT_CONFIG_NOTE_REVISION,
+            .schema = LAT_AOT_CONFIG_SCHEMA_V1,
+            .domain = LAT_AOT_CONFIG_DOMAIN_TRANSLATION_V1,
+        };
+        if (argc != 5 ||
+            !g_file_get_contents(argv[4], &data, &size, NULL) ||
+            lat_translation_config_decode(data, size, NULL, &decoded,
+                                          error, sizeof(error)) ||
+            lat_translation_config_digest(&decoded, identity.digest,
+                                          error, sizeof(error)) ||
+            lat_aot_v2_emit_module_sources_with_config(
+                argv[2], argv[3], &identity, error, sizeof(error))) {
+            fprintf(stderr, "latc: %s\n", error[0] ? error : "invalid module configuration");
+            g_free(data);
+            return 1;
+        }
+        g_free(data);
+        printf("output_directory=%s\n", argv[3]);
+        return 0;
     }
     if (strcmp(argv[1], "emit-aot-v2") == 0) {
         char error[256] = {0};

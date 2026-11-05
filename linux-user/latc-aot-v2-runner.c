@@ -552,6 +552,7 @@ void latc_aot_v2_prepare_submission_channel(void)
          getenv("LATC_STRICT_AOT_COLLECT_NO_SUBMIT"))) {
         return;
     }
+    if (lat_aot_broker_enabled()) return;
     pthread_mutex_lock(&submission_lock);
     if (submission_channel < 0) {
         char error[256];
@@ -785,16 +786,15 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
                                       int source_fd,
                                       LatAotV2RuntimeInstance **instance,
                                       char *error, size_t error_size);
-#ifdef LATCD_BROKER_LOAD_TEST_CLIENT
-static bool test_broker_load_ready;
-static bool test_broker_load_enabled(void)
+static bool broker_load_ready;
+static bool broker_load_enabled(void)
 {
-    return getenv("LATX_AOT_V2_TEST_BROKER_LOAD") != NULL;
+    return lat_aot_broker_enabled() && key_journal_broker &&
+           !key_journal_broker_invalid;
 }
-static int test_broker_open_module(int source_fd, const LatAotExpectedV2 *expected,
-                                   LatAotV2RuntimeModule **module,
-                                   char *error, size_t error_size);
-#endif
+static int broker_open_module(int source_fd, const LatAotExpectedV2 *expected,
+                              LatAotV2RuntimeModule **module,
+                              char *error, size_t error_size);
 static int validate_runner_cache_domain(const char *cache,
                                         char *error, size_t error_size)
 {
@@ -1466,7 +1466,8 @@ bool latc_aot_v2_mapping_enabled(void)
     const char *cache = lat_aot_cache_path();
     const char *module = lat_aot_module_path();
     const char *socket = lat_aot_socket_path();
-    return (cache && *cache) || (module && *module) || (socket && *socket);
+    return lat_aot_broker_enabled() || (cache && *cache) ||
+           (module && *module) || (socket && *socket);
 }
 
 static bool trace_jit_key(target_ulong guest_pc)
@@ -1561,7 +1562,7 @@ void latc_aot_v2_note_jit_key(target_ulong guest_pc, uint32_t cflags)
                 rcu_atfork_child_is_deferred(),
                 latc_aot_v2_mapping_enabled());
     }
-    if (!socket || !*socket) {
+    if (!lat_aot_broker_enabled() && (!socket || !*socket)) {
         return;
     }
     pthread_mutex_lock(&tbset_lock);
@@ -1894,9 +1895,7 @@ static int precompile_source(int source_fd, char *error, size_t error_size)
 
 static void drain_mappings(void)
 {
-#ifdef LATCD_BROKER_LOAD_TEST_CLIENT
-    if (test_broker_load_enabled() && !test_broker_load_ready) return;
-#endif
+    if (broker_load_enabled() && !broker_load_ready) return;
     if (have_mmap_lock()) {
         return;
     }
@@ -2974,10 +2973,11 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
                                       char *error, size_t error_size)
 {
     const char *cache = lat_aot_cache_path();
-    if (!cache || !*cache) {
+    bool broker = lat_aot_broker_enabled();
+    if ((!cache || !*cache) && !broker) {
         return 0;
     }
-    if (validate_runner_cache_domain(cache, error, error_size) < 0) {
+    if (!broker && validate_runner_cache_domain(cache, error, error_size) < 0) {
         return -1;
     }
     if (instance) {
@@ -3002,27 +3002,31 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
                      expected.codegen_id);
         expected.available_features = available_aot_features();
         module = NULL;
-#ifdef LATCD_BROKER_LOAD_TEST_CLIENT
-        if (test_broker_load_enabled()) {
-            if (test_broker_open_module(source_fd, &expected, &module, error, error_size)) return -1;
-        } else
-#else
-        (void)source_fd;
-#endif
-        for (unsigned int attempt = 0; attempt < 2; attempt++) {
-            bool retry_manifest = false;
-            if (open_manifest_module(cache, source_hex, &expected, &module,
-                                     &retry_manifest, error, error_size)) {
-                return -1;
+        if (broker) {
+            if (broker_load_enabled() &&
+                broker_open_module(source_fd, &expected, &module, error, error_size)) {
+                if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
+                    fprintf(stderr, "latx: AOT v2 broker has no current module: %s\n", error);
+                }
+                return 0;
             }
-            if (module) break;
-            if (!retry_manifest) return 0;
-            error[0] = '\0';
-            if (attempt == 1) {
-                errno = ENOENT;
-                return -1;
+        } else {
+            for (unsigned int attempt = 0; attempt < 2; attempt++) {
+                bool retry_manifest = false;
+                if (open_manifest_module(cache, source_hex, &expected, &module,
+                                         &retry_manifest, error, error_size)) {
+                    return -1;
+                }
+                if (module) break;
+                if (!retry_manifest) return 0;
+                error[0] = '\0';
+                if (attempt == 1) {
+                    errno = ENOENT;
+                    return -1;
+                }
             }
         }
+        if (!module) return 0;
         if (register_host_module(module)) {
             int saved_errno = errno;
             if (!error[0]) {
@@ -3078,18 +3082,17 @@ static int register_discovered_module(const LatGuestElfInfoV2 *info,
     if (getenv("LATX_AOT_V2_TRACE_LOAD")) {
         fprintf(stderr, "latx: AOT v2 instances registered=%d\n", registered);
     }
-#ifdef LATCD_BROKER_LOAD_TEST_CLIENT
-    if (registered && test_broker_load_enabled()) {
+    if (registered && broker_load_enabled()) {
         LatAotTargetV2 target = {0};
         uint64_t pc = info->load_bias + info->preferred_base + 0x1020;
         if (!lat_aot_v2_registry_lookup(&registry, pc,
                                         LAT_AOT_TB_CODE64 | LAT_AOT_TB_PARALLEL,
                                         &target)) {
-            fprintf(stderr, "latx: test broker registry lookup succeeded\n");
+            if (getenv("LATX_AOT_V2_TRACE_LOAD"))
+                fprintf(stderr, "latx: broker registry lookup succeeded\n");
             lat_aot_v2_registry_target_release(&target);
         }
     }
-#endif
     return registered ? 1 : 0;
 }
 
@@ -3422,10 +3425,9 @@ static int prepare_key_journal_config(CPUArchState *env, bool native_replay_doma
     return 0;
 }
 
-#ifdef LATCD_BROKER_LOAD_TEST_CLIENT
-static int test_broker_open_module(int source_fd, const LatAotExpectedV2 *expected,
-                                   LatAotV2RuntimeModule **module,
-                                   char *error, size_t error_size)
+static int broker_open_module(int source_fd, const LatAotExpectedV2 *expected,
+                              LatAotV2RuntimeModule **module,
+                              char *error, size_t error_size)
 {
     struct stat st;
     if (!key_journal_broker || key_journal_broker_invalid || key_journal_config_fd < 0 ||
@@ -3462,7 +3464,7 @@ static int test_broker_open_module(int source_fd, const LatAotExpectedV2 *expect
     const LatcdClientFdProtection protection = {lat_aot_v2_internal_fd_allocation_lock,
         lat_aot_v2_internal_fd_unlock, lat_aot_v2_internal_fd_register_locked, close_internal_fd};
     uint64_t request = atomic_fetch_add(&compiler_request_sequence, 1) + 1;
-    int fd = latcd_client_broker_load_test(key_journal_broker, key_journal_broker_uid,
+    int fd = latcd_client_broker_load(key_journal_broker, key_journal_broker_uid,
         snapshot, key_journal_config_fd, st.st_size, expected->source_sha256,
         key_journal_config_digest, request, &protection, error, error_size);
     close_internal_fd(snapshot);
@@ -3475,11 +3477,10 @@ static int test_broker_open_module(int source_fd, const LatAotExpectedV2 *expect
                                           error, error_size)) {
         g_free(loaded); return -1;
     }
-    loaded->path = g_strdup("test-broker-load");
+    loaded->path = g_strdup("managed-broker-load");
     *module = loaded;
     return 0;
 }
-#endif
 
 static bool key_journal_epoch_id(const char *epoch, uint64_t *id)
 {
@@ -3717,18 +3718,17 @@ int latc_aot_v2_prepare(CPUArchState *env, bool native_replay_domain)
 {
     if (key_journal_enabled && key_journal_config_fd < 0) {
         char error[256] = "missing daemon socket";
-        if (!lat_aot_socket_path() || prepare_key_journal_config(
+        if ((!lat_aot_socket_path() && !lat_aot_broker_enabled()) ||
+            prepare_key_journal_config(
                 env, native_replay_domain, error, sizeof(error))) {
             fprintf(stderr, "latx: cannot prepare key journal: %s\n", error);
             _exit(125);
         }
     }
-#ifdef LATCD_BROKER_LOAD_TEST_CLIENT
-    if (test_broker_load_enabled()) {
+    if (broker_load_enabled()) {
         if (key_journal_config_fd < 0) return -1;
-        test_broker_load_ready = true;
+        broker_load_ready = true;
     }
-#endif
     const char *module_path = lat_aot_module_path();
     const char *source_path = getenv("LATX_AOT_V2_SOURCE");
     bool strict = aot_v2_strict;
@@ -4023,7 +4023,7 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
 #ifdef CONFIG_LATX_FAST_JMPCACHE
     /* PIE and DSO targets keep using the generation-checked AOT v2 cache. */
     bool legacy_fast_cache =
-        !lat_aot_cache_path() ||
+        (!lat_aot_cache_path() && !lat_aot_broker_enabled()) ||
         (runtime_instance->runtime_module &&
          runtime_instance->runtime_module->legacy_fast_cache);
     if (legacy_fast_cache) {
@@ -4076,7 +4076,7 @@ bool latc_aot_v2_activate_target(CPUState *cpu,
     aot_v2_execution_active = true;
 #ifdef CONFIG_LATX_FAST_JMPCACHE
     latx_aot_v2_fast_jmp_cache_set_context(cpu, instance);
-    if (lat_aot_cache_path()) {
+    if (lat_aot_cache_path() || lat_aot_broker_enabled()) {
         uint32_t hash = tb_jmp_cache_hash_func(target->guest_pc);
         latx_aot_v2_fast_jmp_cache_add(
             cpu, hash, target->guest_pc, target->host_address,

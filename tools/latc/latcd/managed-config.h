@@ -8,8 +8,8 @@ typedef struct LatcdManagedConfig {
     uid_t service_uid, client_uid;
     char *cache, *admin, *broker, *compiler, *runner, *runtime;
     char *worker_cgroup;
-    char *worker_bwrap, *worker_bootstrap, *worker_closure;
-    /* Trusted-deployment opt-in; requires an initialized managed cache domain. */
+    char *worker_bwrap, *worker_bootstrap, *worker_closure, *worker_toolroot;
+    /* Managed deployments retire old generations by default; false is an opt-out. */
     bool automatic_retirement;
     uint64_t retirement_grace_us;
 } LatcdManagedConfig;
@@ -17,7 +17,7 @@ typedef struct LatcdManagedConfig {
 /* Returns two held descriptors; managed mode enforces root-owned paths. */
 int latcd_managed_launcher_open(const char *bwrap, const char *bootstrap,
                                 int managed, int fds[2]);
-/* Reject launchers that require a host dynamic loader before sandbox setup. */
+/* Validate a trusted launcher executable before sandbox setup. */
 int latcd_managed_static_launcher(int fd);
 
 int latcd_managed_config_load(const char *path, LatcdManagedConfig *config);

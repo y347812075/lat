@@ -744,7 +744,7 @@ int main(void)
     uint8_t digest[32] = {0};
     GPtrArray *tasks_for_compile = g_ptr_array_new_with_free_func(g_free);
     g_assert_cmpint(run_compiler(&managed, 0, NULL, NULL, false, NULL, NULL,
-                                 NULL, NULL, NULL, NULL, digest, tasks_for_compile,
+                                 NULL, NULL, false, NULL, NULL, digest, tasks_for_compile,
                                  &reservation, &untracked_task, isolation_error,
                                  sizeof(isolation_error)), ==, -1);
     g_assert_cmpstr(isolation_error, ==, "managed compiler isolation unavailable");
@@ -1115,6 +1115,8 @@ int main(void)
     managed_service.active = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     managed_service.running_sources = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     managed_service.journal_receipts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    managed_config.worker_bootstrap = "/bin/false";
+    managed_config.worker_real_compile = true;
     test_managed_compiler = true;
     g_setenv("LATCD_TEST_JOURNAL_REPLAY", "1", TRUE);
     g_assert_cmpint(journal_queue_receipts(&managed_config, &managed_service,
@@ -1203,7 +1205,7 @@ int main(void)
     test_managed_compiler = true;
     input.receipt_sha256[0] ^= 1;
     g_assert_cmpint(run_compiler(&record_config, 0, NULL, NULL, false, NULL, NULL,
-        NULL, &input, native_path, module_path, input.identity.source_sha256,
+        NULL, &input, false, native_path, module_path, input.identity.source_sha256,
         replay_tasks, &replay_reservation, &untracked_task, error, sizeof(error)), ==, -1);
     input.receipt_sha256[0] ^= 1;
     test_managed_compiler = false;
@@ -1219,7 +1221,7 @@ int main(void)
     g_assert_cmpint(stat(replay_base, &replay_base_identity), ==, 0);
     test_managed_compiler = true;
     g_assert_cmpint(run_compiler(&record_config, 0, NULL, NULL, false, replay_base, NULL,
-        NULL, &input, native_path, module_path, input.identity.source_sha256,
+        NULL, &input, false, native_path, module_path, input.identity.source_sha256,
         replay_tasks, &replay_reservation, &untracked_task, error, sizeof(error)), ==, -1);
     g_assert_cmpstr(error, ==, "invalid journal replay baseline");
     test_managed_compiler = false;

@@ -18,6 +18,10 @@ typedef struct LatAotModuleInfoV2 {
 int lat_aot_v2_module_inspect_file(const char *path,
                                    LatAotModuleInfoV2 *info,
                                    char *error, size_t error_size);
+int lat_aot_v2_module_inspect_config_file(
+    const char *path, LatAotModuleInfoV2 *info,
+    const LatAotExpectedV2 *expected, const LatAotConfigIdentityV2 *config,
+    char *error, size_t error_size);
 /* Inspects the opened object without taking ownership of fd. */
 int lat_aot_v2_module_inspect_fd(int fd, size_t max_size, LatAotModuleInfoV2 *info,
                                  char *error, size_t error_size);

@@ -1912,6 +1912,7 @@ static void print_bytes(FILE *file, const uint8_t bytes[32])
 }
 
 static int emit_metadata(const char *path, const ModulePack *pack,
+                         const LatAotConfigIdentityV2 *config,
                          char *error, size_t error_size)
 {
     FILE *file = fopen(path, "w");
@@ -1924,23 +1925,34 @@ static int emit_metadata(const char *path, const ModulePack *pack,
     const char *guest_slot_flag = pack->three_level_guest_slots ?
         "LAT_AOT_MODULE_THREE_LEVEL_GUEST_SLOTS" :
         "LAT_AOT_MODULE_TWO_LEVEL_GUEST_SLOTS";
+    const char *note_type = config ? "LatAotConfigNoteV2" : "LatAotNoteV2";
+    const char *note_size = config ? "sizeof(LatAotConfigNoteV2)" : "sizeof(LatAotNoteV2)";
+    const char *module_type = config ? "LatAotConfigModuleV2" : "LatAotModuleV2";
+    const char *module_size = config ? "sizeof(LatAotConfigModuleV2)" : "sizeof(LatAotModuleV2)";
     fprintf(file,
         "#include \"lat-aot-v2.h\"\n#include <elf.h>\n"
         "#define MAGIC { 'L','A','T','A','O','T','2',0 }\n"
         "extern const uint8_t lat_aot_generated_text_begin[];\n"
         "extern const uint8_t lat_aot_generated_text_end[];\n"
-        "typedef struct { Elf64_Nhdr h; char name[4]; LatAotNoteV2 d; } Note;\n"
+        "typedef struct { Elf64_Nhdr h; char name[4]; %s d; } Note;\n"
         "__attribute__((section(\".note.lat.aot\"),aligned(4),used))\n"
-        "static const Note note = { {4,sizeof(LatAotNoteV2),0x4c415432},"
-        "\"LAT\", { MAGIC,2,sizeof(LatAotNoteV2),"
+        "static const Note note = { {4,%s,0x4c415432},"
+        "\"LAT\", {%s MAGIC,2,%s,"
         "LAT_AOT_MODULE_PARTIAL|LAT_AOT_MODULE_READONLY_TEXT|"
         "LAT_AOT_MODULE_PRECISE_PC_MAP|%s,"
         "LAT_AOT_V2_REQUIRED_BASE_FEATURES|LAT_AOT_FEATURE_LASX,{ ",
-        guest_slot_flag);
+        note_type, note_size, config ? " {" : " ", note_size, guest_slot_flag);
     print_bytes(file, pack->header->guest_sha256);
     fprintf(file, " },{ ");
     print_bytes(file, codegen);
-    fprintf(file, " },{0} } };\n");
+    fprintf(file, " },{0}");
+    if (config) {
+        fprintf(file, " },{%u,%u,%u,%u,{",
+                config->revision, config->schema, config->domain, config->reserved);
+        print_bytes(file, config->digest);
+        fprintf(file, "} }");
+    }
+    fprintf(file, " } };\n");
 
     fprintf(file,
         "extern const LatAotTbV2 lat_aot_generated_tbs_begin[];\n"
@@ -1951,12 +1963,11 @@ static int emit_metadata(const char *path, const ModulePack *pack,
         "extern const LatAotGuestSlotV2 lat_aot_generated_slots_end[];\n"
         "__attribute__((visibility(\"default\"),"
         "section(\".data.rel.ro.lat.module\"),used))\n"
-        "const LatAotModuleV2 lat_aot_module_v2 = {"
-        "MAGIC,2,sizeof(LatAotModuleV2),"
+        "const %s lat_aot_module_v2 = {%s MAGIC,2,%s,"
         "LAT_AOT_MODULE_PARTIAL|LAT_AOT_MODULE_READONLY_TEXT|"
         "LAT_AOT_MODULE_PRECISE_PC_MAP|%s,"
         "LAT_AOT_V2_REQUIRED_BASE_FEATURES|LAT_AOT_FEATURE_LASX,{ ",
-        guest_slot_flag);
+        module_type, config ? " {" : " ", module_size, guest_slot_flag);
     print_bytes(file, pack->header->guest_sha256);
     fprintf(file, " },{ ");
     print_bytes(file, codegen);
@@ -1964,7 +1975,14 @@ static int emit_metadata(const char *path, const ModulePack *pack,
         " },{0},lat_aot_generated_text_begin,lat_aot_generated_text_end,"
         "lat_aot_generated_tbs_begin,lat_aot_generated_tbs_end,"
         "lat_aot_generated_maps_begin,lat_aot_generated_maps_end,"
-        "lat_aot_generated_slots_begin,lat_aot_generated_slots_end};\n");
+        "lat_aot_generated_slots_begin,lat_aot_generated_slots_end");
+    if (config) {
+        fprintf(file, " },{%u,%u,%u,%u,{",
+                config->revision, config->schema, config->domain, config->reserved);
+        print_bytes(file, config->digest);
+        fprintf(file, "}}");
+    }
+    fprintf(file, "};\n");
     int result = 0;
     if (fclose(file)) {
         result = fail(error, error_size, "cannot close %s", path);
@@ -2625,6 +2643,7 @@ static int emit_module_sources(const char *native_image,
                                const char *output_directory,
                                const CfgProgram *program,
                                const uint8_t guest_sha256[32],
+                               const LatAotConfigIdentityV2 *config,
                                char *error, size_t error_size)
 {
     gchar *image = NULL;
@@ -2768,7 +2787,7 @@ static int emit_module_sources(const char *native_image,
         if (write_all(text_path, pack.code, header->code_size,
                       error, error_size) ||
             emit_tables(output_directory, &pack, error, error_size) ||
-            emit_metadata(metadata_path, &pack, error, error_size) ||
+            emit_metadata(metadata_path, &pack, config, error, error_size) ||
             emit_assembly(assembly_path, &pack, error, error_size)) {
             result = -1;
         }
@@ -2807,7 +2826,7 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
                                    char *error, size_t error_size)
 {
     return emit_module_sources(native_image, output_directory, NULL, NULL,
-                               error, error_size);
+                               NULL, error, error_size);
 }
 
 int lat_aot_v2_emit_module_sources_with_cfg(
@@ -2816,5 +2835,18 @@ int lat_aot_v2_emit_module_sources_with_cfg(
     char *error, size_t error_size)
 {
     return emit_module_sources(native_image, output_directory, program,
-                               guest_sha256, error, error_size);
+                               guest_sha256, NULL, error, error_size);
+}
+
+int lat_aot_v2_emit_module_sources_with_config(
+    const char *native_image, const char *output_directory,
+    const LatAotConfigIdentityV2 *config,
+    char *error, size_t error_size)
+{
+    if (!config) {
+        errno = EINVAL;
+        return fail(error, error_size, "missing module configuration identity");
+    }
+    return emit_module_sources(native_image, output_directory, NULL, NULL,
+                               config, error, error_size);
 }

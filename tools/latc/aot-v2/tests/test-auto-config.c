@@ -22,6 +22,9 @@ static void run_case(int number)
     unsetenv("LATX_AOT_V2_LATCD_SOCKET");
     unsetenv("LATX_AOT_V2_MODULE");
     unsetenv("LATX_AOT_V2_AUTOSTART");
+    unsetenv("LATX_AOT_V2_KEY_JOURNAL");
+    unsetenv("LATX_AOT_V2_JOURNAL_BROKER");
+    unsetenv("LATX_AOT_V2_JOURNAL_BROKER_UID");
     int legacy = 1;
     bool explicit = false;
     if (number != 0) setenv("LATX_AOT_V2", "1", 1);
@@ -51,6 +54,11 @@ static void run_case(int number)
         setenv("LATX_AOT_V2_CACHE_DIR", "", 1);
         setenv("LATX_AOT_V2_LATCD_SOCKET", "/unused/socket", 1);
     }
+    if (number == 13) {
+        setenv("LATX_AOT_V2_KEY_JOURNAL", "1", 1);
+        setenv("LATX_AOT_V2_JOURNAL_BROKER", "/unused/broker.sock", 1);
+        setenv("LATX_AOT_V2_JOURNAL_BROKER_UID", "1234", 1);
+    }
     setenv("LATX_AOT_V2_AUTOSTART", number == 12 ? "1" : "0", 1);
     lat_aot_config_environment();
     if (number == 7) lat_aot_config_option("LATX_AOT_V2", "0");
@@ -72,7 +80,14 @@ static void run_case(int number)
     if (!rc) {
         bool v2 = number != 0 && number != 4 && number != 7 && number != 9;
         assert(legacy == (v2 ? 0 : 1));
-        assert((lat_aot_cache_path() != NULL) == v2);
+        if (number == 13) {
+            assert(lat_aot_broker_enabled());
+            assert(lat_aot_cache_path() == NULL);
+            assert(lat_aot_socket_path() == NULL);
+        } else {
+            assert(!lat_aot_broker_enabled());
+            assert((lat_aot_cache_path() != NULL) == v2);
+        }
         if (number == 6) {
             assert(!strcmp(lat_aot_cache_path(), "/unused/cache"));
             assert(!strcmp(lat_aot_socket_path(), "/unused/socket"));
@@ -81,7 +96,7 @@ static void run_case(int number)
             assert(!*lat_aot_cache_path());
             assert(!strcmp(lat_aot_socket_path(), "/unused/socket"));
         }
-        if (v2 && number != 6 && number != 8 && number != 11) {
+        if (v2 && number != 6 && number != 8 && number != 11 && number != 13) {
             assert(lat_aot_socket_path());
             assert(strlen(lat_aot_socket_path()) < 108);
             if (number != 12) assert(!lat_aot_ensure_daemon());
@@ -108,7 +123,7 @@ int main(void)
     unsetenv("XDG_CACHE_HOME");
     unsetenv("XDG_STATE_HOME");
     unsetenv("XDG_RUNTIME_DIR");
-    for (int i = 0; i < 13; i++) {
+    for (int i = 0; i < 14; i++) {
         pid_t child = fork();
         assert(child >= 0);
         if (!child) { run_case(i); _exit(0); }

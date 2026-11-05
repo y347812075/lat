@@ -126,3 +126,38 @@ int lat_replay_native_validate_incremental_fd(int image_fd, int config_fd,
     lat_tb_key_set_destroy(&missing);
     return result;
 }
+
+int lat_replay_native_authorize_incremental_fd(int image_fd, int config_fd,
+    int tbset_fd, int base_fd, const uint8_t expected_source[32],
+    char *error, size_t error_size)
+{
+    if (lat_replay_native_validate_incremental_fd(image_fd, config_fd, tbset_fd,
+                                                   base_fd, expected_source,
+                                                   error, error_size))
+        return -1;
+    LatNativeImageHeaderV2 header;
+    if (pread(image_fd, &header, sizeof(header), 0) != sizeof(header) ||
+        !(header.flags & LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED)) {
+        if (error && error_size) snprintf(error, error_size, "invalid replay header");
+        return -1;
+    }
+    struct stat image_stat;
+    if (fstat(image_fd, &image_stat) || !S_ISREG(image_stat.st_mode) ||
+        header.translation_config_size == 0 ||
+        header.translation_config_size > (uint64_t)image_stat.st_size) {
+        if (error && error_size) snprintf(error, error_size, "invalid replay image size");
+        return -1;
+    }
+    off_t config_size = (off_t)header.translation_config_size;
+    header.flags &= ~LAT_NATIVE_IMAGE_CONFIG_UNVERIFIED;
+    header.translation_config_size = 0;
+    header.translation_config_projection = 0;
+    memset(header.translation_config_sha256, 0, sizeof(header.translation_config_sha256));
+    if (ftruncate(image_fd, image_stat.st_size - config_size) ||
+        pwrite(image_fd, &header, sizeof(header), 0) != sizeof(header) || fsync(image_fd)) {
+        if (error && error_size)
+            snprintf(error, error_size, "cannot authorize replay image: %s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}

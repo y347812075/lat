@@ -56,7 +56,7 @@ int main(int argc, char **argv)
         lat_translation_config_digest(&decoded, config_hash, error, sizeof(error))) return 1;
     LatcdClientFdProtection protection = {lat_aot_v2_internal_fd_allocation_lock,
         lat_aot_v2_internal_fd_unlock, lat_aot_v2_internal_fd_register_locked, close_internal};
-    int fd = latcd_client_broker_load_test(argv[1], geteuid(), source, config_fd, source_size,
+    int fd = latcd_client_broker_load(argv[1], geteuid(), source, config_fd, source_size,
         source_hash, config_hash, 1, &protection, error, sizeof(error));
     close(source); close(config_fd);
     if (argc == 6) {

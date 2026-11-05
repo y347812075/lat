@@ -138,9 +138,14 @@ static int current_manifest_read(const LatcdConfig *config, const char *hex,
                                  LatcdCurrentManifest *manifest);
 static int persisted_manifest_valid(const LatcdConfig *config,
                                     const char source_key[65],
-                                    const uint8_t digest[32]);
+                                    const uint8_t digest[32],
+                                    const LatAotExpectedV2 *expected,
+                                    const LatAotConfigIdentityV2 *config_identity);
 static int cached_module_inspect(const char *path, const uint8_t digest[32],
                                  LatAotModuleInfoV2 *info);
+static int cached_module_inspect_identity(
+    const char *path, const uint8_t digest[32], LatAotModuleInfoV2 *info,
+    const LatAotExpectedV2 *expected, const LatAotConfigIdentityV2 *config);
 static _Atomic unsigned int active_precompiles;
 static char cache_domain_id[37];
 static bool cache_domain_managed;
@@ -160,10 +165,10 @@ static uint32_t default_worker_count(void)
 }
 
 typedef struct LatcdJob {
-#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
     LatcdJournalCompileInput *journal_replay;
+    bool journal_publish;
+    char *journal_tbset;
     char journal_stream[33];
-#endif
     char *snapshot;
     struct stat source_identity;
     char *tbset;
@@ -1150,7 +1155,7 @@ static int merge_tbset(const LatcdConfig *config, const uint8_t digest[32],
         LatcdCurrentManifest manifest = {0};
         if (!current_manifest_read(config, source_hex, &manifest) &&
             *manifest.tbset &&
-            persisted_manifest_valid(config, source_hex, digest)) {
+            persisted_manifest_valid(config, source_hex, digest, NULL, NULL)) {
             char *published = g_build_filename(config->cache_dir,
                                                 manifest.tbset, NULL);
             LatTbKeySet published_set = {0}, complete = {0};
@@ -1326,7 +1331,7 @@ static int prepare_static_tbset(const LatcdConfig *config,
     pthread_mutex_lock(&cache_lock);
     char *published = NULL;
     if (!current_manifest_read(config, hex, &manifest) && *manifest.tbset &&
-        persisted_manifest_valid(config, hex, digest)) {
+        persisted_manifest_valid(config, hex, digest, NULL, NULL)) {
         published = g_build_filename(config->cache_dir, manifest.tbset, NULL);
     }
     const char *paths[] = { known, published };
@@ -3353,6 +3358,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                         const char *base_native, const char *base_module,
                         const char *replay_config,
                         const LatcdJournalCompileInput *journal_input,
+                        bool journal_publish,
                         const char *output_native,
                         const char *output, const uint8_t digest[32], GPtrArray *compiler_tasks,
                         uint64_t *transient_reservation,
@@ -3362,7 +3368,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     bool replay = replay_config != NULL || journal_input != NULL;
     char journal_source[64], journal_receipt[64];
     if (journal_input) {
-        if (source || tbset || replay_config)
+        if (source || replay_config)
             return fail(error, error_size, "conflicting journal replay inputs");
         snprintf(journal_source, sizeof(journal_source), "/proc/self/fd/%d", journal_input->source_fd);
         snprintf(journal_receipt, sizeof(journal_receipt), "/proc/self/fd/%d", journal_input->receipt_fd);
@@ -3373,13 +3379,10 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                    (base_native && !journal_input)))
         return fail(error, error_size, "invalid managed replay inputs");
     /* A managed worker must not inherit access to the cache or task locks.
-     * Until its isolated task domain is available, never run it unsandboxed. */
-    if (config->managed) {
-#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
-        if (!test_managed_compiler)
-#endif
+     * Production compilation is admitted only with the complete sandbox
+     * launcher and a sealed closure or read-only tool root. */
+    if (config->managed && !managed_replay_sandbox_ready(config))
         return fail(error, error_size, "managed compiler isolation unavailable");
-    }
     if (replay && !managed_replay_sandbox_ready(config))
         return fail(error, error_size, "managed replay requires a real sandbox");
     if (!config->managed && validate_toolchain(config, error, error_size)) {
@@ -3499,7 +3502,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
                                 journal_input ? base_native : base_module,
                                 output_native, output};
     char *task_id = NULL;
-    int task_lease = pin_result ? -1 : record_task(config, false, replay, false, task_paths,
+    int task_lease = pin_result ? -1 : record_task(config, false, replay, journal_publish, task_paths,
         input_pins, digest, journal_input ? &journal_identity : NULL, environment, cache_peak,
         &task_id, error, error_size);
     if (!pin_result && task_lease < 0) *untracked_task = true;
@@ -3675,6 +3678,12 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             g_ptr_array_add(launch.exec, (gpointer)command[i]);
         if (replay) { g_ptr_array_add(launch.exec, (gpointer)"--config"); g_ptr_array_add(launch.exec, (gpointer)paths[2]); }
         else { g_ptr_array_add(launch.exec, (gpointer)"--runtime-dir"); g_ptr_array_add(launch.exec, (gpointer)"/usr/lib"); }
+        if (journal_publish) {
+            g_ptr_array_add(launch.exec, (gpointer)"--runtime-dir");
+            g_ptr_array_add(launch.exec, (gpointer)"/usr/lib");
+            g_ptr_array_add(launch.exec, (gpointer)"--module-output");
+            g_ptr_array_add(launch.exec, (gpointer)"/work/output.so");
+        }
         if (tbset) { g_ptr_array_add(launch.exec, (gpointer)"--tbset"); g_ptr_array_add(launch.exec, (gpointer)paths[1]); }
         if (static_tbset) g_ptr_array_add(launch.exec, (gpointer)"--static-tbset");
     } else {
@@ -4020,7 +4029,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             errno = ECANCELED;
         }
     }
-    if (replay && waited == child && WIFEXITED(status) && !WEXITSTATUS(status) &&
+    if (replay && !journal_publish && waited == child && WIFEXITED(status) && !WEXITSTATUS(status) &&
         (!real_managed_compile || workspace < 0 || domain.state != LATCD_MANAGED_DOMAIN_EMPTY)) {
         waited = -1;
         errno = EIO;
@@ -4035,7 +4044,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         }
     }
     bool replay_extra_output = false;
-    if (replay && real_managed_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&
+    if (replay && !journal_publish && real_managed_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&
         !WEXITSTATUS(status) && domain.state == LATCD_MANAGED_DOMAIN_EMPTY) {
 #ifdef LATCD_GC_TIMER_TEST
         if (getenv("LATCD_TEST_REPLAY_EXTRA_MODULE")) {
@@ -4084,7 +4093,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
         g_free(parent);
         if (image >= 0) close(image);
     }
-    if (!replay && real_managed_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&
+    if ((!replay || journal_publish) && real_managed_compile && workspace >= 0 && waited == child && WIFEXITED(status) &&
         !WEXITSTATUS(status) && domain.state == LATCD_MANAGED_DOMAIN_EMPTY) {
         const char *destinations[] = {output_native, output};
         int outputs[2] = {-1, -1};
@@ -4106,6 +4115,10 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
             if (outputs[i] < 0) waited = -1;
         }
         for (unsigned i = 0; i < 2; i++) if (files[i] >= 0) close(files[i]);
+        if (waited == child && journal_publish &&
+            lat_replay_native_validate_incremental_fd(
+                outputs[0], input_copies[2], input_copies[1], input_copies[3],
+                digest, error, error_size)) waited = -1;
         if (waited == child && latcd_managed_outputs_prepare(config->cache_dir, task_id,
                 task_lease, outputs, error, error_size)) waited = -1;
 #ifdef LATCD_GC_TIMER_TEST
@@ -4136,7 +4149,7 @@ static int run_compiler(const LatcdConfig *config, uint32_t worker_index,
     }
     if (workspace >= 0) close(workspace);
     if (replay) close_compiler_inputs(input_copies);
-    if (replay && (domain.state == LATCD_MANAGED_DOMAIN_EMPTY || domain.state == LATCD_MANAGED_CANCELLED) &&
+    if (replay && !journal_publish && (domain.state == LATCD_MANAGED_DOMAIN_EMPTY || domain.state == LATCD_MANAGED_CANCELLED) &&
         latcd_managed_task_domain(config->cache_dir, task_id, task_lease, &domain,
                                   LATCD_MANAGED_REPLAY_DISCARDED, error, error_size)) {
         waited = -1;
@@ -4537,6 +4550,8 @@ static int snapshot_current_pair(const LatcdConfig *config,
                                  const LatcdCurrentManifest *manifest,
                                  const uint8_t digest[32], const char *temporary,
                                  char **native, char **module, int snapshot_pins[4],
+                                 const LatAotExpectedV2 *expected,
+                                 const LatAotConfigIdentityV2 *config_identity,
                                  char *error, size_t error_size)
 {
     /* Caller holds C. Capture S outside C; G and snapshot pins overlap. */
@@ -4592,7 +4607,8 @@ static int snapshot_current_pair(const LatcdConfig *config,
     if (!result && pair && (!module_sha || !native_sha ||
         strcmp(module_sha, manifest->module_sha256) ||
         strcmp(native_sha, manifest->native_sha256) ||
-        !cached_module_inspect(*module, digest, &info))) {
+        !cached_module_inspect_identity(*module, digest, &info,
+                                        expected, config_identity))) {
         result = fail(error, error_size, "module/native pair snapshot mismatch");
     }
     g_free(module_sha);
@@ -4645,6 +4661,19 @@ static int owned_module_inspect(const char *path, LatAotModuleInfoV2 *info)
            !lat_aot_v2_module_inspect_file(path, info, NULL, 0);
 }
 
+static int owned_module_inspect_identity(
+    const char *path, LatAotModuleInfoV2 *info,
+    const LatAotExpectedV2 *expected, const LatAotConfigIdentityV2 *config)
+{
+    struct stat status;
+    return !lat_aot_v2_cache_object_available(path, NULL, 0) &&
+           !lstat(path, &status) && S_ISREG(status.st_mode) &&
+           status.st_uid == geteuid() && status.st_nlink == 1 &&
+           !(status.st_mode & 0222) &&
+           !lat_aot_v2_module_inspect_config_file(
+               path, info, expected, config, NULL, 0);
+}
+
 static int cached_module_inspect(const char *path, const uint8_t digest[32],
                                  LatAotModuleInfoV2 *info)
 {
@@ -4653,6 +4682,29 @@ static int cached_module_inspect(const char *path, const uint8_t digest[32],
     return owned_module_inspect(path, info) &&
            !memcmp(info->note.source_sha256, digest, 32) &&
            !memcmp(info->note.codegen_id, codegen_id, 32);
+}
+
+static int cached_module_inspect_identity(
+    const char *path, const uint8_t digest[32], LatAotModuleInfoV2 *info,
+    const LatAotExpectedV2 *expected, const LatAotConfigIdentityV2 *config)
+{
+    uint8_t codegen_id[32];
+    expected_codegen_id(codegen_id);
+    return !config ? cached_module_inspect(path, digest, info) :
+           owned_module_inspect_identity(path, info, expected, config) &&
+           !memcmp(info->note.source_sha256, digest, 32) &&
+           !memcmp(info->note.codegen_id, codegen_id, 32);
+}
+
+static int inspect_module_tbset(
+    const char *module, const char *tbset, LatAotModuleInfoV2 *info,
+    const LatAotExpectedV2 *expected, const LatAotConfigIdentityV2 *config,
+    char *error, size_t error_size)
+{
+    return config ? lat_aot_v2_module_validate_config_tbset_file(
+               module, tbset, info, expected, config, error, error_size) :
+           lat_aot_v2_module_inspect_and_validate_tbset_file(
+               module, tbset, info, error, error_size);
 }
 
 static void current_manifest_clear(LatcdCurrentManifest *manifest)
@@ -4679,6 +4731,8 @@ static bool current_manifest_equal(const LatcdCurrentManifest *first,
 static int validate_current_replacement(const LatcdConfig *config,
                                  const char *hex, const char *candidate,
                                  const LatAotModuleInfoV2 *info,
+                                 const LatAotExpectedV2 *expected,
+                                 const LatAotConfigIdentityV2 *config_identity,
                                  char *error, size_t error_size)
 {
     /* cache_lock is held. Observed tbsets need not list every compiled TB. */
@@ -4689,6 +4743,16 @@ static int validate_current_replacement(const LatcdConfig *config,
         return fail(error, error_size, "cannot read current manifest");
     }
     if (!status) {
+        if (config_identity) {
+            char *old_path = g_build_filename(config->cache_dir,
+                                              previous.module, NULL);
+            result = lat_aot_v2_module_validate_config_replacement_file(
+                old_path, candidate, expected, config_identity,
+                error, error_size);
+            g_free(old_path);
+            current_manifest_clear(&previous);
+            return result;
+        }
         char *old_path = g_build_filename(config->cache_dir,
                                           previous.module, NULL);
         LatAotModuleInfoV2 old_info;
@@ -4711,6 +4775,8 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
                                  const char *native_name,
                                  const char *tbset_name,
                                  const LatAotModuleInfoV2 *info,
+                                 const LatAotExpectedV2 *expected,
+                                 const LatAotConfigIdentityV2 *config_identity,
                                  uint64_t published_sequence,
                                  bool new_pair, bool *published,
                                  char *error, size_t error_size)
@@ -4719,7 +4785,8 @@ static int publish_current_index(const LatcdConfig *config, const char *hex,
     int source_lock_fd = -1;
     char *candidate = g_build_filename(config->cache_dir, module_name, NULL);
     int validation = validate_current_replacement(config, hex, candidate,
-                                                   info, error, error_size);
+                                                   info, expected, config_identity,
+                                                   error, error_size);
     g_free(candidate);
     if (validation) {
         return -1;
@@ -5157,48 +5224,39 @@ static int broker_load_job(const LatcdConfig *config, int source, int config_fd,
 {
     *response = (LatcdBrokerLoadResponse) {.version = LATCD_BROKER_LOAD_VERSION,
         .status = 1, .request_id = request->request_id};
-#ifdef LATCD_GC_TIMER_TEST
-    if (getenv("LATCD_TEST_BROKER_LOAD")) {
-        uint8_t source_hash[32], build[32], bytes[LATCD_JOURNAL_CONFIG_LIMIT], hash[32];
-        struct stat st;
-        int seals = fcntl(config_fd, F_GET_SEALS);
-        int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
-        char error[256] = {0};
-        LatTranslationConfig decoded;
-        LatAotExpectedV2 expected = {.available_features = UINT64_MAX};
-        LatAotConfigIdentityV2 identity = {.revision = LAT_AOT_CONFIG_NOTE_REVISION,
-            .schema = LAT_AOT_CONFIG_SCHEMA_V1, .domain = LAT_AOT_CONFIG_DOMAIN_TRANSLATION_V1};
-        if (request->version != LATCD_BROKER_LOAD_VERSION || request->reserved ||
-            latcd_broker_source_validate_bounded(source, request->source_size,
-                config->max_input, request->source_sha256, source_hash, error, sizeof(error),
-                deadline, cancelled, opaque) || journal_build_id(build) || seals < 0 ||
-            (seals & required) != required || fstat(config_fd, &st) || !S_ISREG(st.st_mode) ||
-            st.st_size <= 0 || (uint64_t)st.st_size > sizeof(bytes) ||
-            pread(config_fd, bytes, st.st_size, 0) != st.st_size ||
-            lat_translation_config_decode(bytes, st.st_size, build, &decoded, error, sizeof(error)) ||
-            lat_translation_config_digest(&decoded, hash, error, sizeof(error)) ||
-            memcmp(hash, request->config_sha256, 32)) return -1;
-        memcpy(expected.source_sha256, source_hash, 32);
-        expected_codegen_id(expected.codegen_id);
-        memcpy(identity.digest, hash, 32);
-        LatcdBrokerExportResponse exported = {0};
-        int fd = broker_export_current_config(config, source_hash, error, sizeof(error),
-            deadline, cancelled, opaque, &exported, &expected, &identity);
-        if (fd < 0) return -1;
-        response->status = 0;
-        response->purpose = LATCD_BROKER_LOAD_TEST_PURPOSE;
-        response->module_size = exported.module_size;
-        memcpy(response->source_sha256, source_hash, 32);
-        memcpy(response->config_sha256, hash, 32);
-        memcpy(response->module_sha256, exported.module_sha256, 32);
-        return fd;
-    }
-#else
-    (void)config; (void)source; (void)config_fd; (void)deadline;
-    (void)cancelled; (void)opaque;
-#endif
-    errno = EACCES;
-    return -1;
+    uint8_t source_hash[32], build[32], bytes[LATCD_JOURNAL_CONFIG_LIMIT], hash[32];
+    struct stat st;
+    int seals = fcntl(config_fd, F_GET_SEALS);
+    int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    char error[256] = {0};
+    LatTranslationConfig decoded;
+    LatAotExpectedV2 expected = {.available_features = UINT64_MAX};
+    LatAotConfigIdentityV2 identity = {.revision = LAT_AOT_CONFIG_NOTE_REVISION,
+        .schema = LAT_AOT_CONFIG_SCHEMA_V1, .domain = LAT_AOT_CONFIG_DOMAIN_TRANSLATION_V1};
+    if (request->version != LATCD_BROKER_LOAD_VERSION || request->reserved ||
+        latcd_broker_source_validate_bounded(source, request->source_size,
+            config->max_input, request->source_sha256, source_hash, error, sizeof(error),
+            deadline, cancelled, opaque) || journal_build_id(build) || seals < 0 ||
+        (seals & required) != required || fstat(config_fd, &st) || !S_ISREG(st.st_mode) ||
+        st.st_size <= 0 || (uint64_t)st.st_size > sizeof(bytes) ||
+        pread(config_fd, bytes, st.st_size, 0) != st.st_size ||
+        lat_translation_config_decode(bytes, st.st_size, build, &decoded, error, sizeof(error)) ||
+        lat_translation_config_digest(&decoded, hash, error, sizeof(error)) ||
+        memcmp(hash, request->config_sha256, 32)) return -1;
+    memcpy(expected.source_sha256, source_hash, 32);
+    expected_codegen_id(expected.codegen_id);
+    memcpy(identity.digest, hash, 32);
+    LatcdBrokerExportResponse exported = {0};
+    int fd = broker_export_current_config(config, source_hash, error, sizeof(error),
+        deadline, cancelled, opaque, &exported, &expected, &identity);
+    if (fd < 0) return -1;
+    response->status = 0;
+    response->purpose = LATCD_BROKER_LOAD_PURPOSE;
+    response->module_size = exported.module_size;
+    memcpy(response->source_sha256, source_hash, 32);
+    memcpy(response->config_sha256, hash, 32);
+    memcpy(response->module_sha256, exported.module_sha256, 32);
+    return fd;
 }
 
 static bool broker_worker_cancelled(void *opaque)
@@ -5435,10 +5493,6 @@ static int G_GNUC_UNUSED broker_connection_step(LatcdBrokerConnection *connectio
             }
             connection->load = connection->submitted = true;
         } else if (length == sizeof(LatcdBrokerJournalRequest)) {
-#if !defined(LATCD_GC_TIMER_TEST) && !defined(LATCD_JOURNAL_SNAPSHOT_TEST)
-            errno = EOPNOTSUPP;
-            return -1;
-#else
             LatcdBrokerJournalRequest request;
             int fds[2] = {-1, -1};
             if (latcd_broker_receive_pair(connection->fd, connection->uid, connection->gid,
@@ -5454,7 +5508,6 @@ static int G_GNUC_UNUSED broker_connection_step(LatcdBrokerConnection *connectio
                 close(fds[0]); close(fds[1]); return -1;
             }
             connection->journal = connection->submitted = true;
-#endif
         } else {
             LatcdBrokerExportRequest request;
             int source = -1;
@@ -5753,7 +5806,8 @@ static int publish_covered_tbset(const LatcdConfig *config,
     bool current_installed = false;
     if (publish_current_index(config, source_hex, manifest.module,
                               manifest.native, tbset_name, &info,
-                              published_sequence, false, &current_installed, error, sizeof(error))) {
+                              NULL, NULL, published_sequence, false,
+                              &current_installed, error, sizeof(error))) {
         if (current_installed) { tbset_staged = false; capacity_retained = true; }
         current_manifest_clear(&manifest);
         pthread_mutex_unlock(&cache_lock);
@@ -5870,7 +5924,8 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
                             bool static_tbset,
                             const uint8_t digest[32],
                             uint64_t published_sequence,
-                            LatcdResponseV2 *response)
+                            LatcdResponseV2 *response,
+                            const LatcdJournalCompileInput *journal_input)
 {
     task_roots_busy = false;
     char error[sizeof(response->message)] = {0};
@@ -5900,10 +5955,34 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     bool capacity_retained = false;
     bool capacity_expected = false;
     int status = LATCD_STATUS_IO_ERROR;
+    LatAotExpectedV2 journal_expected = { .available_features = UINT64_MAX };
+    LatAotConfigIdentityV2 journal_config_identity = {
+        .revision = LAT_AOT_CONFIG_NOTE_REVISION,
+        .schema = LAT_AOT_CONFIG_SCHEMA_V1,
+        .domain = LAT_AOT_CONFIG_DOMAIN_TRANSLATION_V1,
+    };
+    const LatAotExpectedV2 *validation_expected = NULL;
+    const LatAotConfigIdentityV2 *validation_config = NULL;
     memcpy(response->source_sha256, digest, 32);
     char hex[65];
     digest_hex(digest, hex);
     char tbset_hex[65] = {0};
+    if (journal_input) {
+        LatTranslationConfig decoded;
+        memcpy(journal_expected.source_sha256, digest, 32);
+        expected_codegen_id(journal_expected.codegen_id);
+        if (lat_translation_config_decode(journal_input->config,
+                journal_input->config_size,
+                journal_input->identity.build_sha256,
+                &decoded, error, sizeof(error)) ||
+            lat_translation_config_digest(&decoded, journal_config_identity.digest,
+                                           error, sizeof(error))) {
+            status = LATCD_STATUS_BAD_SOURCE;
+            goto out;
+        }
+        validation_expected = &journal_expected;
+        validation_config = &journal_config_identity;
+    }
     if (complete_tbset) {
         if (!g_file_get_contents(complete_tbset, &tbset_data,
                                  &tbset_size, NULL)) {
@@ -5946,11 +6025,14 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
                                                  current.native, NULL);
         char *current_tbset = *current.tbset ?
             g_build_filename(config->cache_dir, current.tbset, NULL) : NULL;
-        bool current_hit = cached_module_inspect(current_module, digest, &info) &&
+        bool current_hit = cached_module_inspect_identity(
+                current_module, digest, &info,
+                validation_expected, validation_config) &&
             !access(current_native, R_OK) &&
             (!complete_tbset || (current_tbset && !access(current_tbset, R_OK) &&
-             !lat_aot_v2_module_validate_tbset_file(current_module,
-                 complete_tbset, error, sizeof(error))));
+             !inspect_module_tbset(current_module, complete_tbset, &info,
+                 validation_expected, validation_config,
+                 error, sizeof(error))));
         if (current_hit) {
             g_free(module_name);
             g_free(native_name);
@@ -5972,16 +6054,20 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     }
     current_manifest_clear(&current);
     bool cache_hit = !static_tbset &&
-        cached_module_inspect(final_module, digest, &info) &&
+        cached_module_inspect_identity(final_module, digest, &info,
+                                       validation_expected, validation_config) &&
         !access(final_native, R_OK) &&
         (!complete_tbset || !access(final_tbset, R_OK));
     if (cache_hit && complete_tbset) {
-        cache_hit = !lat_aot_v2_module_inspect_and_validate_tbset_file(
-            final_module, complete_tbset, &info, error, sizeof(error));
+        cache_hit = !inspect_module_tbset(
+            final_module, complete_tbset, &info,
+            validation_expected, validation_config,
+            error, sizeof(error));
     }
     if (cache_hit) {
         int publish_result = publish_current_index(
             config, hex, module_name, native_name, tbset_name, &info,
+            validation_expected, validation_config,
             published_sequence, false, NULL, error, sizeof(error));
         if (publish_result) {
             pthread_mutex_unlock(&cache_lock);
@@ -5999,14 +6085,17 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         status = LATCD_STATUS_OK;
         goto out;
     }
-    if (!static_tbset && complete_tbset && compile_tbset &&
-        strcmp(compile_tbset, complete_tbset)) {
+    if (journal_input ||
+        (!static_tbset && complete_tbset && compile_tbset &&
+         strcmp(compile_tbset, complete_tbset))) {
         LatcdCurrentManifest previous = {0};
         if (!current_manifest_read(config, hex, &previous) &&
-            persisted_manifest_valid(config, hex, digest)) {
+            persisted_manifest_valid(config, hex, digest,
+                                     validation_expected, validation_config)) {
             if (snapshot_current_pair(config, &previous, digest, temporary_dir,
                                      &base_native, &base_module,
                                      baseline_pins,
+                                     validation_expected, validation_config,
                                      error, sizeof(error))) {
                 current_manifest_clear(&previous);
                 pthread_mutex_unlock(&cache_lock);
@@ -6047,9 +6136,15 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     unlink(native);
     int compiler_result = run_compiler(config, worker_index, snapshot,
                                        compile_tbset, static_tbset,
-                                       base_native, base_module, NULL, NULL, native,
+                                       base_native, journal_input ? NULL : base_module,
+                                       NULL, journal_input,
+                                       journal_input != NULL, native,
                                        module, digest, compiler_tasks, &transient_reservation, &untracked_task, error, sizeof(error));
     if (compiler_result) {
+        if (journal_input) {
+            status = LATCD_STATUS_COMPILE_FAILED;
+            goto out;
+        }
         if (task_roots_busy) goto out;
         if (!base_native) {
             status = LATCD_STATUS_COMPILE_FAILED;
@@ -6075,7 +6170,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         full_compile_tbset = retained_tbset ? retained_tbset : complete_tbset;
         compiler_result = run_compiler(config, worker_index, snapshot,
                                        full_compile_tbset, static_tbset,
-                                       NULL, NULL, NULL, NULL, native, module, digest,
+                                       NULL, NULL, NULL, NULL, false, native, module, digest,
                                        compiler_tasks, &transient_reservation, &untracked_task, error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
@@ -6089,11 +6184,13 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     uint8_t codegen_id[32];
     expected_codegen_id(codegen_id);
     int inspect_result = complete_tbset ?
-        lat_aot_v2_module_inspect_and_validate_tbset_file(
-            module, complete_tbset, &info, error, sizeof(error)) :
+        inspect_module_tbset(
+            module, complete_tbset, &info,
+            validation_expected, validation_config,
+            error, sizeof(error)) :
         lat_aot_v2_module_inspect_file(module, &info,
                                        error, sizeof(error));
-    bool retry_full = inspect_result && complete_tbset && base_native;
+    bool retry_full = inspect_result && complete_tbset && base_native && !journal_input;
     if (retry_full) {
         /*
          * Incremental merging can omit requested TBs even though a full
@@ -6112,14 +6209,16 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         full_compile_tbset = retained_tbset ? retained_tbset : complete_tbset;
         compiler_result = run_compiler(config, worker_index, snapshot,
                                        full_compile_tbset, static_tbset,
-                                       NULL, NULL, NULL, NULL, native, module, digest,
+                                       NULL, NULL, NULL, NULL, false, native, module, digest,
                                        compiler_tasks, &transient_reservation, &untracked_task, error, sizeof(error));
         if (compiler_result) {
             status = LATCD_STATUS_COMPILE_FAILED;
             goto out;
         }
-        inspect_result = lat_aot_v2_module_inspect_and_validate_tbset_file(
-            module, complete_tbset, &info, error, sizeof(error));
+        inspect_result = inspect_module_tbset(
+            module, complete_tbset, &info,
+            validation_expected, validation_config,
+            error, sizeof(error));
     }
     if (inspect_result || memcmp(info.note.source_sha256, digest, 32) ||
         memcmp(info.note.codegen_id, codegen_id, 32)) {
@@ -6135,8 +6234,10 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
         fprintf(stderr, "latcd: test incremental module validated\n");
     }
 #endif
-    if (retained_tbset && lat_aot_v2_module_validate_tbset_file(
-            module, retained_tbset, error, sizeof(error))) {
+    if (retained_tbset && inspect_module_tbset(
+            module, retained_tbset, &info,
+            validation_expected, validation_config,
+            error, sizeof(error))) {
         status = LATCD_STATUS_INVALID_MODULE;
         goto out;
     }
@@ -6198,6 +6299,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
 
     pthread_mutex_lock(&cache_lock);
     if (validate_current_replacement(config, hex, module, &info,
+                                      validation_expected, validation_config,
                                       error, sizeof(error))) {
         status = LATCD_STATUS_INVALID_MODULE;
         pthread_mutex_unlock(&cache_lock);
@@ -6272,6 +6374,7 @@ static int publish_snapshot(const LatcdConfig *config, uint32_t worker_index,
     bool current_installed = false;
     int publish_result = publish_current_index(
         config, hex, module_name, native_name, tbset_name, &info,
+        validation_expected, validation_config,
         published_sequence, true, &current_installed, error, sizeof(error));
     if (publish_result) {
         if (current_installed) {
@@ -6425,7 +6528,7 @@ static int process_request(const LatcdConfig *config, int source_fd,
                               canonical ? canonical : tbset,
                               static_tbset,
                               response->source_sha256, 0,
-                              response);
+                              response, NULL);
 out:
     if (result && !response->message[0]) {
         g_strlcpy(response->message, error[0] ? error : "unknown error",
@@ -6447,12 +6550,10 @@ static void job_free(LatcdJob *job)
     if (!job) {
         return;
     }
-#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
     if (job->journal_replay) {
         latcd_journal_close_compile_input(job->journal_replay);
         g_free(job->journal_replay);
     }
-#endif
     if (job->snapshot) {
         unlink(job->snapshot);
     }
@@ -6461,6 +6562,7 @@ static void job_free(LatcdJob *job)
     }
     g_free(job->snapshot);
     g_free(job->tbset);
+    g_free(job->journal_tbset);
     g_free(job);
 }
 
@@ -6772,8 +6874,45 @@ static void *compiler_worker(void *opaque)
             .size = sizeof(response),
         };
         char error[sizeof(response.message)] = {0};
-#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
         if (job->journal_replay) {
+            if (job->journal_publish) {
+                int result = publish_snapshot(service->config, worker->index,
+                    NULL, job->journal_tbset, job->journal_tbset, false,
+                    job->digest, job->compile_sequence, &response,
+                    job->journal_replay);
+                if (result && response.status == LATCD_STATUS_OK) {
+                    response.status = LATCD_STATUS_COMPILE_FAILED;
+                    g_strlcpy(response.message, "managed journal publication failed",
+                              sizeof(response.message));
+                }
+                pthread_mutex_lock(&service->lock);
+                g_hash_table_remove(service->running_sources, job->source_key);
+                g_hash_table_remove(service->active, job->key);
+                LatcdSourceState *source_state = source_state_locked(
+                    service, job->source_key);
+                if (!result) {
+                    service->compiled++;
+                    response.accepted_sequence = job->compile_sequence;
+                    response.published_sequence = job->compile_sequence;
+                    if (job->compile_sequence > source_state->published_sequence)
+                        source_state->published_sequence = job->compile_sequence;
+                    source_state->failed_sequence = 0;
+                    g_hash_table_remove(service->negative, job->key);
+                } else {
+                    service->failed++;
+                    LatcdJournalReceiptState *receipt = g_hash_table_lookup(
+                        service->journal_receipts, job->journal_stream);
+                    if (receipt && !strcmp(receipt->digest, job->key + 65))
+                        g_hash_table_remove(service->journal_receipts, job->journal_stream);
+                    fprintf(stderr, "latcd: journal publish failed: %s\n",
+                            error[0] ? error : response.message);
+                }
+                write_stats_locked(service);
+                pthread_cond_broadcast(&service->ready);
+                pthread_mutex_unlock(&service->lock);
+                job_free(job);
+                continue;
+            }
             char *tmp = g_build_filename(service->config->cache_dir, ".tmp", NULL);
             char *native = g_build_filename(tmp, "replay-native-XXXXXX", NULL);
             char *module = g_build_filename(tmp, "replay-module-XXXXXX", NULL);
@@ -6789,7 +6928,7 @@ static void *compiler_worker(void *opaque)
             test_base = getenv("LATCD_TEST_JOURNAL_REPLAY_BASE");
 #endif
             int status = n < 0 || m < 0 ? -1 : run_compiler(service->config, worker->index,
-                NULL, NULL, false, test_base, NULL, NULL, job->journal_replay,
+                NULL, NULL, false, test_base, NULL, NULL, job->journal_replay, false,
                 native, module, job->digest, tasks, &reservation, &untracked_task, error, sizeof(error));
 #ifdef LATCD_GC_TIMER_TEST
             if (!status && getenv("LATCD_TEST_REPLAY_CRASH_HANDOFF")) kill(getpid(), SIGKILL);
@@ -6876,7 +7015,6 @@ static void *compiler_worker(void *opaque)
             job_free(job);
             continue;
         }
-#endif
         char *canonical = NULL;
         char *stable_tbset = NULL;
         char *compile_delta = NULL;
@@ -6934,7 +7072,8 @@ static void *compiler_worker(void *opaque)
                 if (!result && delta_empty) {
                     pthread_mutex_lock(&cache_lock);
                     bool manifest_valid = persisted_manifest_valid(
-                        service->config, job->source_key, job->digest);
+                        service->config, job->source_key, job->digest,
+                        NULL, NULL);
                     pthread_mutex_unlock(&cache_lock);
                     if (!manifest_valid) {
                         delta_empty = false;
@@ -6947,7 +7086,7 @@ static void *compiler_worker(void *opaque)
                                           job->snapshot,
                                           compile_delta ? compile_delta : compile_tbset,
                                           compile_tbset, job->static_tbset,
-                                          job->digest, job->compile_sequence, &response);
+                                          job->digest, job->compile_sequence, &response, NULL);
                 if (result != -2 || attempt == 99 || stop_requested) break;
                 usleep(10000);
             }
@@ -6960,7 +7099,7 @@ static void *compiler_worker(void *opaque)
                     result = publish_snapshot(
                         service->config, worker->index, job->snapshot,
                         compile_tbset, compile_tbset, job->static_tbset,
-                        job->digest, job->compile_sequence, &response);
+                        job->digest, job->compile_sequence, &response, NULL);
                     if (result != -2 || attempt == 99 || stop_requested) break;
                     usleep(10000);
                 }
@@ -7115,7 +7254,9 @@ static int hex_digest(const char text[64], uint8_t digest[32])
 
 static int persisted_manifest_valid(const LatcdConfig *config,
                                     const char source_key[65],
-                                    const uint8_t digest[32])
+                                    const uint8_t digest[32],
+                                    const LatAotExpectedV2 *expected,
+                                    const LatAotConfigIdentityV2 *config_identity)
 {
     LatcdCurrentManifest manifest = {0};
     int valid = !current_manifest_read(config, source_key, &manifest);
@@ -7126,7 +7267,8 @@ static int persisted_manifest_valid(const LatcdConfig *config,
     char *tbset = valid && *manifest.tbset ?
         g_build_filename(config->cache_dir, manifest.tbset, NULL) : NULL;
     LatAotModuleInfoV2 info;
-    valid = valid && cached_module_inspect(module, digest, &info) &&
+    valid = valid && cached_module_inspect_identity(
+                module, digest, &info, expected, config_identity) &&
             !access(native, R_OK) && (!*manifest.tbset || !access(tbset, R_OK));
     g_free(tbset);
     g_free(native);
@@ -7170,7 +7312,7 @@ static void load_persisted_source_states(LatcdService *service)
             !lat_tb_key_set_difference(&known, &published, &missing,
                                        error, sizeof(error)) &&
             !missing.count && persisted_manifest_valid(
-                service->config, source_key, digest);
+                service->config, source_key, digest, NULL, NULL);
         if (known_valid) {
             LatcdSourceState *state = source_state_locked(service, source_key);
             state->accepted_sequence = known.sequence;
@@ -7211,9 +7353,7 @@ static char *reuse_active_source(LatcdService *service, int source_fd,
     g_hash_table_iter_init(&iterator, service->active);
     while (g_hash_table_iter_next(&iterator, NULL, &value)) {
         LatcdJob *job = value;
-#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
         if (job->journal_replay) continue;
-#endif
         if (!metadata_equal(&before, &job->source_identity)) continue;
         path = g_build_filename(temporary_dir, "source-reuse-XXXXXX", NULL);
         int fd = g_mkstemp_full(path, O_RDWR | O_CLOEXEC, 0600);
@@ -7662,9 +7802,21 @@ static int journal_queue_receipts(const LatcdConfig *config,
             close(receipt);
             source = input.source_fd;
             receipt = input.receipt_fd;
-            if (config->managed) {
-#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
-                if (test_managed_compiler && getenv("LATCD_TEST_JOURNAL_REPLAY")) {
+            if (config->managed && managed_replay_sandbox_ready(config)) {
+                    char *journal_tbset = NULL;
+                    bool journal_owned = false;
+                    char *receipt_path = g_build_filename(config->cache_dir, ".journals",
+                                                          name, "received.tbset", NULL);
+                    if (merge_tbset(config, input.identity.source_sha256, receipt_path,
+                                    &journal_tbset, NULL,
+                                    error, sizeof(error))) {
+                        g_free(receipt_path);
+                        failures++;
+                        latcd_journal_close_compile_input(&input);
+                        if (directory >= 0) close(directory);
+                        break;
+                    }
+                    g_free(receipt_path);
                     char key[130];
                     GChecksum *identity = g_checksum_new(G_CHECKSUM_SHA256);
                     g_checksum_update(identity, input.identity.epoch, sizeof(input.identity.epoch));
@@ -7689,6 +7841,9 @@ static int journal_queue_receipts(const LatcdConfig *config,
                     } else {
                         LatcdJob *job = g_new0(LatcdJob, 1);
                         job->journal_replay = g_memdup2(&input, sizeof(input));
+                        job->journal_publish = getenv("LATCD_TEST_JOURNAL_REPLAY") == NULL;
+                        job->journal_tbset = journal_tbset;
+                        journal_owned = true;
                         g_strlcpy(job->journal_stream, name, sizeof(job->journal_stream));
                         g_strlcpy(job->key, key, sizeof(job->key));
                         g_strlcpy(job->source_key, source_key, sizeof(job->source_key));
@@ -7712,10 +7867,11 @@ static int journal_queue_receipts(const LatcdConfig *config,
                     if (source >= 0) close(source);
                     if (receipt >= 0) close(receipt);
                     if (directory >= 0) close(directory);
+                    if (!journal_owned) g_free(journal_tbset);
                     if (failures) break;
                     continue;
-                }
-#endif
+            }
+            if (config->managed) {
                 failures++;
                 snprintf(error, sizeof(error),
                          "journal configuration replay is not admitted");
@@ -7800,11 +7956,7 @@ static int journal_queue_receipts(const LatcdConfig *config,
 static bool journal_automatic_admission_available(const LatcdConfig *config)
 {
     if (!config->managed) return true;
-#if defined(LATCD_GC_TIMER_TEST) || defined(LATCD_JOURNAL_SNAPSHOT_TEST)
-    return test_managed_compiler && getenv("LATCD_TEST_JOURNAL_REPLAY");
-#else
-    return false;
-#endif
+    return managed_replay_sandbox_ready(config);
 }
 
 static void admit_journal_receipts_periodically(
@@ -9396,7 +9548,7 @@ static int test_managed_compiler_run(const char *root, const char *delegation)
     if (worker_delegation_fd < 0 || latcd_worker_delegation_init(worker_delegation_fd, &manager)) goto out;
     test_managed_compiler = true;
     if (run_compiler(&config, 0, source, test_tbset, false, test_base_native,
-                     test_base_module, test_config, NULL, native, module,
+                     test_base_module, test_config, NULL, false, native, module,
                      digest, tasks, &reservation, &untracked_task, error, sizeof(error))) goto out;
     if (tasks->len != 1) goto out;
     printf("%s\n", ((LatcdCompilerTask *)g_ptr_array_index(tasks, 0))->id);
@@ -9521,7 +9673,9 @@ int main(int argc, char **argv)
         config.broker_uid = managed_config.client_uid;
         config.worker_bwrap = managed_config.worker_bwrap;
         config.worker_bootstrap = managed_config.worker_bootstrap;
-        config.worker_real_compile = managed_config.worker_closure != NULL;
+        config.worker_toolroot = managed_config.worker_toolroot;
+        config.worker_real_compile = managed_config.worker_closure != NULL ||
+                                     managed_config.worker_toolroot != NULL;
         config.automatic_retirement = managed_config.automatic_retirement;
         if (managed_config.retirement_grace_us)
             config.retirement_grace_us = managed_config.retirement_grace_us;
@@ -9727,10 +9881,15 @@ int main(int argc, char **argv)
     }
     if (managed_entry && managed_config.worker_cgroup) {
         worker_delegation_fd = latcd_worker_delegation_open(managed_config.worker_cgroup);
-        if (worker_delegation_fd < 0 ||
-            latcd_worker_delegation_init(worker_delegation_fd, &worker_manager_fd)) {
+        if (worker_delegation_fd < 0) {
+            fprintf(stderr, "latcd: worker delegation open rejected: %s\n", strerror(errno));
+            close(cache_owner);
+            latcd_managed_config_clear(&managed_config);
+            return 1;
+        }
+        if (latcd_worker_delegation_init(worker_delegation_fd, &worker_manager_fd)) {
             fprintf(stderr, "latcd: worker delegation rejected: %s\n", strerror(errno));
-            if (worker_delegation_fd >= 0) close(worker_delegation_fd);
+            close(worker_delegation_fd);
             close(cache_owner);
             latcd_managed_config_clear(&managed_config);
             return 1;

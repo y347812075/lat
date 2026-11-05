@@ -24,7 +24,7 @@
 
 static char *mode, *cache, *socket_path, *module, *autostart;
 static char *state, *daemon_path, *compiler_path, *runner_path, *runtime_path;
-static bool enabled, managed, can_start;
+static bool enabled, managed, can_start, broker_mode;
 static int64_t retry_after;
 
 bool lat_aot_config_option(const char *key, const char *value)
@@ -101,13 +101,30 @@ void lat_aot_config_environment(void)
 int lat_aot_config_select(int *legacy, bool explicit_legacy, bool *selected,
                          char *error, size_t error_size)
 {
+    const char *broker = getenv("LATX_AOT_V2_JOURNAL_BROKER");
+    const char *broker_uid = getenv("LATX_AOT_V2_JOURNAL_BROKER_UID");
+    bool broker_requested = broker || broker_uid;
+    if (broker_requested) {
+        char *end = NULL;
+        errno = 0;
+        guint64 uid = broker_uid && *broker_uid ?
+            g_ascii_strtoull(broker_uid, &end, 10) : UINT64_MAX;
+        if (!getenv("LATX_AOT_V2_KEY_JOURNAL") || !broker || broker[0] != '/' ||
+            !broker_uid || !*broker_uid || *broker_uid == '-' ||
+            !end || *end || errno || uid >= UINT32_MAX) {
+            snprintf(error, error_size, "invalid managed broker configuration");
+            return -1;
+        }
+        broker_mode = true;
+    }
     if ((mode && strcmp(mode, "0") && strcmp(mode, "1")) ||
         (autostart && strcmp(autostart, "0") && strcmp(autostart, "1"))) {
         snprintf(error, error_size, "AOT v2 enable/autostart values must be 0 or 1");
         return -1;
     }
     *selected = mode ? !strcmp(mode, "1") :
-        ((cache && *cache) || (socket_path && *socket_path) || (module && *module));
+        ((cache && *cache) || (socket_path && *socket_path) || (module && *module) ||
+         broker_mode);
     if (!*selected) return 0;
     if (explicit_legacy && *legacy) {
         snprintf(error, error_size, "LATX_AOT and AOT v2 cannot both be enabled");
@@ -127,6 +144,15 @@ int lat_aot_config_init(int *legacy, bool explicit_legacy, const char *bindir,
     if (!enabled) return 0;
     if (getauxval(AT_SECURE) || getuid() != geteuid() || getgid() != getegid()) {
         enabled = false;
+        return 0;
+    }
+    if (broker_mode) {
+        managed = false;
+        can_start = false;
+        daemon_path = g_build_filename(bindir, "latcd", NULL);
+        compiler_path = g_build_filename(bindir, "latc", NULL);
+        runner_path = g_build_filename(bindir, "latx-x86_64", NULL);
+        runtime_path = g_strdup(libdir);
         return 0;
     }
     managed = !(socket_path && *socket_path) && !(module && *module);
@@ -188,6 +214,7 @@ int lat_aot_config_init(int *legacy, bool explicit_legacy, const char *bindir,
 const char *lat_aot_cache_path(void) { return enabled ? cache : NULL; }
 const char *lat_aot_socket_path(void) { return enabled ? socket_path : NULL; }
 const char *lat_aot_module_path(void) { return enabled ? module : NULL; }
+bool lat_aot_broker_enabled(void) { return enabled && broker_mode; }
 
 static bool cache_identity(uint8_t digest[32])
 {

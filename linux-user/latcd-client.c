@@ -7,9 +7,7 @@
 #include "lat-key-journal.h"
 
 #include <errno.h>
-#ifdef LATCD_BROKER_LOAD_TEST_CLIENT
 #include <glib.h>
-#endif
 #include <fcntl.h>
 #include <poll.h>
 #include <stdarg.h>
@@ -434,8 +432,7 @@ int latcd_client_broker_journal(const char *path, uid_t uid, int source, int con
     return result;
 }
 
-#ifdef LATCD_BROKER_LOAD_TEST_CLIENT
-int latcd_client_broker_load_test(const char *path, uid_t uid, int source, int config,
+int latcd_client_broker_load(const char *path, uid_t uid, int source, int config,
     uint64_t source_size, const uint8_t source_hash[32], const uint8_t config_hash[32],
     uint64_t request_id, const LatcdClientFdProtection *protection,
     char *error, size_t error_size)
@@ -492,7 +489,7 @@ int latcd_client_broker_load_test(const char *path, uid_t uid, int source, int c
         }
     }
     valid = valid && fds == 1 && response.version == LATCD_BROKER_LOAD_VERSION &&
-        !response.status && response.purpose == LATCD_BROKER_LOAD_TEST_PURPOSE &&
+        !response.status && response.purpose == LATCD_BROKER_LOAD_PURPOSE &&
         !response.reserved && response.request_id == request_id &&
         !memcmp(response.source_sha256, source_hash, 32) &&
         !memcmp(response.config_sha256, config_hash, 32);
@@ -503,7 +500,7 @@ int latcd_client_broker_load_test(const char *path, uid_t uid, int source, int c
     struct stat st;
     int seals = fcntl(output, F_GET_SEALS);
     if (seals < 0 || (seals & required) != required || fstat(output, &st) ||
-        !S_ISREG(st.st_mode) || (st.st_mode & 0777) != 0500 || st.st_size <= 0 ||
+        !S_ISREG(st.st_mode) || (st.st_mode & 0777) != 0555 || st.st_size <= 0 ||
         (uint64_t)st.st_size != response.module_size || response.module_size > (UINT64_C(1) << 30)) {
         errno = EPROTO; goto failed;
     }
@@ -534,7 +531,6 @@ failed: {
     return fail(error, error_size, "broker load failed: %s", strerror(saved));
 }
 }
-#endif
 
 static int register_journal(const char *path, int channel, int source, int config,
                               const uint8_t digest[32], uint64_t capacity,

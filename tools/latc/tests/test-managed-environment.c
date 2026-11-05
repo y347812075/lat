@@ -67,17 +67,20 @@ int main(void)
     header.e_ehsize = sizeof(header);
     header.e_phoff = sizeof(header);
     header.e_phentsize = sizeof(Elf64_Phdr);
-    header.e_phnum = 1;
-    Elf64_Phdr phdr = {.p_type = PT_LOAD, .p_flags = PF_R | PF_X};
+    header.e_phnum = 2;
+    Elf64_Phdr phdr[2] = {
+        {.p_type = PT_LOAD, .p_flags = PF_R | PF_X},
+        {.p_type = PT_LOAD, .p_flags = PF_R},
+    };
     assert(write(fd, &header, sizeof(header)) == sizeof(header));
-    assert(write(fd, &phdr, sizeof(phdr)) == sizeof(phdr));
+    assert(write(fd, phdr, sizeof(phdr)) == sizeof(phdr));
     assert(!latcd_managed_static_launcher(fd));
-    phdr.p_type = PT_INTERP;
-    assert(pwrite(fd, &phdr, sizeof(phdr), sizeof(header)) == sizeof(phdr));
-    assert(latcd_managed_static_launcher(fd) < 0);
-    phdr.p_type = PT_DYNAMIC;
-    assert(pwrite(fd, &phdr, sizeof(phdr), sizeof(header)) == sizeof(phdr));
-    assert(latcd_managed_static_launcher(fd) < 0);
+    phdr[1].p_type = PT_INTERP;
+    assert(pwrite(fd, &phdr[1], sizeof(phdr[1]), sizeof(header) + sizeof(phdr[0])) == sizeof(phdr[1]));
+    assert(!latcd_managed_static_launcher(fd));
+    phdr[1].p_type = PT_DYNAMIC;
+    assert(pwrite(fd, &phdr[1], sizeof(phdr[1]), sizeof(header) + sizeof(phdr[0])) == sizeof(phdr[1]));
+    assert(!latcd_managed_static_launcher(fd));
     assert(!ftruncate(fd, sizeof(header)));
     assert(latcd_managed_static_launcher(fd) < 0);
     close(fd);

@@ -13,7 +13,7 @@
 
 #define LATCD_BROKER_JOURNAL_VERSION 1u
 #define LATCD_BROKER_LOAD_VERSION 1u
-#define LATCD_BROKER_LOAD_TEST_PURPOSE 1u
+#define LATCD_BROKER_LOAD_PURPOSE 1u
 typedef struct LatcdBrokerLoadRequest {
     uint32_t version;
     uint32_t reserved;

@@ -1,0 +1,25 @@
+[Unit]
+Description=LAT AOT v2 managed compiler daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /usr/bin/latcd --managed-config /etc/lat-aot-v2/managed.json
+Restart=on-failure
+RestartSec=2s
+KillMode=control-group
+Delegate=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/lat-aot-v2 /run/lat-aot-v2
+RuntimeDirectory=lat-aot-v2
+RuntimeDirectoryMode=0755
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

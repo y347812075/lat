@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "cfg_program.h"
+#include "lat-aot-v2.h"
 
 int lat_aot_v2_emit_module_sources(const char *native_image,
                                    const char *output_directory,
@@ -12,6 +13,10 @@ int lat_aot_v2_emit_module_sources(const char *native_image,
 int lat_aot_v2_emit_module_sources_with_cfg(
     const char *native_image, const char *output_directory,
     const CfgProgram *program, const uint8_t guest_sha256[32],
+    char *error, size_t error_size);
+int lat_aot_v2_emit_module_sources_with_config(
+    const char *native_image, const char *output_directory,
+    const LatAotConfigIdentityV2 *config,
     char *error, size_t error_size);
 void lat_aot_v2_codegen_digest(const char *build_id, uint8_t digest[32]);
 

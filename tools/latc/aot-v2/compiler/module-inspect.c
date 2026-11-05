@@ -199,6 +199,27 @@ int lat_aot_v2_module_inspect_file(const char *path,
     return result;
 }
 
+int lat_aot_v2_module_inspect_config_file(
+    const char *path, LatAotModuleInfoV2 *info,
+    const LatAotExpectedV2 *expected, const LatAotConfigIdentityV2 *config,
+    char *error, size_t error_size)
+{
+    if (!path || !info || !expected || !config) {
+        return fail(error, error_size,
+                    "invalid configured module inspection arguments");
+    }
+    GMappedFile *mapping = module_map(path, error, error_size);
+    if (!mapping) {
+        return -1;
+    }
+    int result = module_inspect_memory(
+        (const void *)g_mapped_file_get_contents(mapping),
+        g_mapped_file_get_length(mapping), info, expected, config,
+        error, error_size);
+    g_mapped_file_unref(mapping);
+    return result;
+}
+
 int lat_aot_v2_module_validate_tbset_file(const char *path,
                                           const char *tbset_path,
                                           char *error,

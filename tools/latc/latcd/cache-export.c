@@ -57,7 +57,7 @@ int latcd_cache_export_copy_bounded(int source, const char *sha256, uint64_t max
         before.st_mode == after.st_mode && before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
         before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
         !strcmp(g_checksum_get_string(checksum), sha256) &&
-        !fchmod(output, 0500) &&
+        !fchmod(output, 0555) &&
         !fcntl(output, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);
     if (checksum) g_checksum_free(checksum);
     if (!valid) { int saved = errno ? errno : EIO; close(output); errno = saved; return -1; }

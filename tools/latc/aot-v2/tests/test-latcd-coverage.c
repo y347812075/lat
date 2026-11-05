@@ -507,17 +507,25 @@ static void test_broker_export_request(void)
             broker_connection_close(&connection); close(pair[1]);
             broker_worker_stop(&worker);
             g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair), ==, 0);
+            g_assert_cmpint(latcd_broker_peer(pair[1], getuid(), &peer_uid, &peer_gid), ==, 0);
             g_assert_cmpint(broker_worker_start(&worker, &config), ==, 0);
             g_assert_cmpint(broker_connection_open(&connection, pair[0], getuid(),
                 g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND), ==, 0);
             LatcdBrokerJournalRequest journal = {.version = LATCD_BROKER_JOURNAL_VERSION,
-                .operation = LATCD_OP_REGISTER_JOURNAL, .sequence = 4};
+                .operation = LATCD_OP_REGISTER_JOURNAL, .request_id = 42, .sequence = 4};
             int journal_fds[2] = {source, source};
             g_assert_cmpint(latcd_broker_send_pair(pair[1], &journal, sizeof(journal), journal_fds), ==, 0);
-            g_assert_cmpint(broker_connection_step(&connection, &worker), ==, -1);
-            g_assert_cmpint(errno, ==, EOPNOTSUPP);
-            g_assert_false(worker.occupied);
-            g_assert_false(connection.submitted);
+            g_assert_cmpint(broker_connection_step(&connection, &worker), ==, 1);
+            event = (struct pollfd) {.fd = worker.event, .events = POLLIN};
+            g_assert_cmpint(poll(&event, 1, 10000), ==, 1);
+            g_assert_cmpint(broker_connection_step(&connection, &worker), ==, 0);
+            LatcdResponseV2 journal_response;
+            output = -1;
+            g_assert_cmpint(latcd_broker_receive(pair[1], peer_uid, peer_gid,
+                &journal_response, sizeof(journal_response), &output), ==, 0);
+            g_assert_cmpuint(journal_response.magic, ==, LATCD_RESPONSE_MAGIC);
+            g_assert_cmpuint(journal_response.request_id, ==, 42);
+            g_assert_cmpint(output, ==, -1);
             broker_connection_close(&connection); close(pair[1]);
             broker_worker_stop(&worker);
             g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair), ==, 0);
@@ -626,7 +634,7 @@ static void publish_during_digest(int fd)
     close(contender);
     g_assert_cmpint(publish_current_index(cleanup_config, cleanup_hex,
         cleanup_names[0], cleanup_names[1], cleanup_names[2], cleanup_info,
-        5, true, NULL, error, sizeof(error)), ==, 0);
+        NULL, NULL, 5, true, NULL, error, sizeof(error)), ==, 0);
     pthread_mutex_unlock(&cache_lock);
 }
 
@@ -734,13 +742,15 @@ static void test_publication_cleanup(void)
     generation_capacity.committed = 100;
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[0],
-        names[1], names[2], &info, 1, true, NULL, error, sizeof(error)), ==, 0);
+        names[1], names[2], &info, NULL, NULL, 1, true, NULL,
+        error, sizeof(error)), ==, 0);
     cleanup_config = &config;
     hook_read_path = module;
     read_hook = cleanup_during_digest;
     /* Covered-TB publication keeps the pair but stages an unreferenced set. */
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[0],
-        names[1], names[5], &info, 2, false, NULL, error, sizeof(error)), ==, 0);
+        names[1], names[5], &info, NULL, NULL, 2, false, NULL,
+        error, sizeof(error)), ==, 0);
     g_assert_null(read_hook);
     /* A newly compiled pair is also unreferenced until manifest commit. */
     char *new_module = g_build_filename(directory, names[3], NULL);
@@ -756,7 +766,8 @@ static void test_publication_cleanup(void)
     hook_read_path = new_module;
     read_hook = cleanup_during_digest;
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[3],
-        names[4], names[5], &info, 3, true, NULL, error, sizeof(error)), ==, 0);
+        names[4], names[5], &info, NULL, NULL, 3, true, NULL,
+        error, sizeof(error)), ==, 0);
     g_assert_null(read_hook);
     /* A path pin constrains internal cleanup, not external replacement. */
     char *new_tbset = g_build_filename(directory, names[5], NULL);
@@ -765,13 +776,15 @@ static void test_publication_cleanup(void)
     hook_mutate = false;
     read_hook = replace_during_read;
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[3],
-        names[4], names[5], &info, 4, true, NULL, error, sizeof(error)), ==, -1);
+        names[4], names[5], &info, NULL, NULL, 4, true, NULL,
+        error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "changed during digest"));
     g_assert_cmpint(g_chmod(new_tbset, 0444), ==, 0);
     cleanup_info = &info;
     read_hook = publish_during_digest;
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[3],
-        names[4], names[5], &info, 4, true, NULL, error, sizeof(error)), ==, -1);
+        names[4], names[5], &info, NULL, NULL, 4, true, NULL,
+        error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "changed during digest"));
     LatcdCurrentManifest latest = {0};
     g_assert_cmpint(current_manifest_read(&config, cleanup_hex, &latest), ==, 0);
@@ -781,7 +794,8 @@ static void test_publication_cleanup(void)
     current_manifest_clear(&latest);
     g_assert_cmpint(g_unlink(new_tbset), ==, 0);
     g_assert_cmpint(publish_current_index(&config, cleanup_hex, names[3],
-        names[4], names[5], &info, 6, true, NULL, error, sizeof(error)), ==, -1);
+        names[4], names[5], &info, NULL, NULL, 6, true, NULL,
+        error, sizeof(error)), ==, -1);
     pthread_mutex_unlock(&cache_lock);
     cleanup_config = NULL;
     generation_capacity.committed = 0;
@@ -875,7 +889,8 @@ static void test_incremental_retention(const char *compiler, unsigned mode)
     g_assert_cmpint(lat_aot_v2_module_inspect_file(old, &info, error, sizeof(error)), ==, 0);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
-        input_name, &info, 1, true, NULL, error, sizeof(error)), ==, 0);
+        input_name, &info, NULL, NULL, 1, true, NULL,
+        error, sizeof(error)), ==, 0);
     pthread_mutex_unlock(&cache_lock);
     if (mode == 3) {
         g_assert_cmpint(g_unlink(native), ==, 0);
@@ -883,13 +898,14 @@ static void test_incremental_retention(const char *compiler, unsigned mode)
             error, sizeof(error)), ==, 0);
         latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
     }
-    g_assert_cmpint(persisted_manifest_valid(&config, hex, digest), ==, mode != 3);
+    g_assert_cmpint(persisted_manifest_valid(&config, hex, digest, NULL, NULL),
+                    ==, mode != 3);
     char *manifest = g_strdup_printf("%s/%s.current", directory, hex);
     gchar *before, *after;
     g_assert_true(g_file_get_contents(manifest, &before, NULL, NULL));
     LatcdResponseV2 response = {0};
     int result = publish_snapshot(&config, 0, source, delta, input, false,
-                                  digest, 7, &response);
+                                  digest, 7, &response, NULL);
     g_assert_true(g_file_get_contents(manifest, &after, NULL, NULL));
     if (!mode || mode == 4 || mode == 5) {
         if (result) g_printerr("large incremental: %s\n", response.message);
@@ -1431,7 +1447,7 @@ static void test_persistent_state_capacity(void)
     g_assert_cmpint(lat_aot_v2_module_inspect_file(module, &info, error, sizeof(error)), ==, 0);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, module_name, native_name,
-        "", &info, 1, true, NULL, error, sizeof(error)), ==, 0);
+        "", &info, NULL, NULL, 1, true, NULL, error, sizeof(error)), ==, 0);
     pthread_mutex_unlock(&cache_lock);
     g_assert_cmpint(prepare_metadata_directories(directory), ==, 0);
     g_assert_cmpint(latcd_cache_capacity_scan(&generation_capacity, directory, error, sizeof(error)), ==, 0);
@@ -1444,7 +1460,7 @@ static void test_persistent_state_capacity(void)
     g_assert_true(g_file_get_contents(canonical, &key_before, &key_before_size, NULL));
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, module_name, native_name,
-        "", &info, 2, true, NULL, error, sizeof(error)), ==, -1);
+        "", &info, NULL, NULL, 2, true, NULL, error, sizeof(error)), ==, -1);
     pthread_mutex_unlock(&cache_lock);
     g_assert_nonnull(strstr(error, "capacity:"));
     g_assert_true(g_file_get_contents(manifest, &after, NULL, NULL));
@@ -1471,7 +1487,7 @@ static void test_persistent_state_capacity(void)
     publish_source_identity(&config, &identity, digest);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, module_name, native_name,
-        "", &info, 2, true, NULL, error, sizeof(error)), ==, 0);
+        "", &info, NULL, NULL, 2, true, NULL, error, sizeof(error)), ==, 0);
     pthread_mutex_unlock(&cache_lock);
     g_assert_cmpuint(generation_capacity.state_committed, ==, initial + sizeof(LatTbKey) + 65);
     g_assert_cmpuint(generation_capacity.state_reserved, ==, 0);
@@ -1636,7 +1652,8 @@ int main(int argc, char **argv)
                                                  error, sizeof(error)), ==, 0);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
-        tbset_name, &info, 1, true, NULL, error, sizeof(error)), ==, 0);
+        tbset_name, &info, NULL, NULL, 1, true, NULL,
+        error, sizeof(error)), ==, 0);
     LatcdCurrentManifest paired = {0};
     g_assert_cmpint(current_manifest_read(&config, hex, &paired), ==, 0);
     char *pair_native = NULL, *pair_module = NULL;
@@ -1657,7 +1674,8 @@ int main(int argc, char **argv)
     g_assert_cmpint(broker_export_current(&config, digest, error, sizeof(error),
                                           0, NULL, NULL, &export_response), ==, -1);
     g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
-        &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, -1);
+        &pair_native, &pair_module, pair_pins, NULL, NULL,
+        error, sizeof(error)), ==, -1);
     g_assert_cmpint(pthread_mutex_trylock(&cache_lock), ==, EBUSY);
     g_assert_null(pair_native);
     g_assert_null(pair_module);
@@ -1669,7 +1687,8 @@ int main(int argc, char **argv)
     hook_read_path = native_path;
     read_hook = assert_baseline_handoff;
     g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
-        &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, 0);
+        &pair_native, &pair_module, pair_pins, NULL, NULL,
+        error, sizeof(error)), ==, 0);
     g_assert_nonnull(pair_native);
     g_assert_nonnull(pair_module);
     for (unsigned i = 0; i < 2; i++) {
@@ -1691,16 +1710,19 @@ int main(int argc, char **argv)
     g_clear_pointer(&pair_module, g_free);
     paired.native_sha256[0] = paired.native_sha256[0] == '0' ? '1' : '0';
     g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
-        &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, -1);
+        &pair_native, &pair_module, pair_pins, NULL, NULL,
+        error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "changed before baseline capture"));
     g_assert_null(pair_native);
     g_assert_null(pair_module);
     g_clear_pointer(&paired.native_sha256, g_free);
     g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
-        &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, -1);
+        &pair_native, &pair_module, pair_pins, NULL, NULL,
+        error, sizeof(error)), ==, -1);
     g_clear_pointer(&paired.module_sha256, g_free);
     g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
-        &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, -1);
+        &pair_native, &pair_module, pair_pins, NULL, NULL,
+        error, sizeof(error)), ==, -1);
     g_assert_null(pair_native); /* Caller must re-read the selected manifest. */
     g_assert_null(pair_module);
     current_manifest_clear(&paired);
@@ -1714,7 +1736,8 @@ int main(int argc, char **argv)
     g_assert_true(g_file_set_contents(manifest, legacy, -1, NULL));
     g_assert_cmpint(current_manifest_read(&config, hex, &paired), ==, 0);
     g_assert_cmpint(snapshot_current_pair(&config, &paired, digest, temporary,
-        &pair_native, &pair_module, pair_pins, error, sizeof(error)), ==, 0);
+        &pair_native, &pair_module, pair_pins, NULL, NULL,
+        error, sizeof(error)), ==, 0);
     g_assert_nonnull(pair_native);
     g_assert_null(pair_module);
     g_assert_cmpint(pair_pins[0], >=, 0);
@@ -1735,7 +1758,8 @@ int main(int argc, char **argv)
     g_assert_true(g_file_set_contents(manifest, "{\"version\":2}", -1, NULL));
     g_assert_cmpint(current_manifest_read(&config, hex, &paired), ==, -1);
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
-        tbset_name, &info, 2, true, NULL, error, sizeof(error)), ==, -1);
+        tbset_name, &info, NULL, NULL, 2, true, NULL,
+        error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "cannot read current manifest"));
     gchar *invalid_manifest = NULL;
     g_assert_true(g_file_get_contents(manifest, &invalid_manifest, NULL, NULL));
@@ -1748,7 +1772,8 @@ int main(int argc, char **argv)
     hook_mutate = false;
     read_hook = replace_during_read;
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
-        tbset_name, &info, 2, true, NULL, error, sizeof(error)), ==, -1);
+        tbset_name, &info, NULL, NULL, 2, true, NULL,
+        error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "changed during digest"));
     gchar *concurrent_manifest = NULL;
     g_assert_true(g_file_get_contents(manifest, &concurrent_manifest, NULL, NULL));
@@ -1759,18 +1784,21 @@ int main(int argc, char **argv)
     g_free(selected_manifest);
     read_hook = assert_unlocked_read;
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
-        tbset_name, &info, 1, true, NULL, error, sizeof(error)), ==, 0);
+        tbset_name, &info, NULL, NULL, 1, true, NULL,
+        error, sizeof(error)), ==, 0);
     char *historical_name = g_strdup_printf("%s-historical.so", hex);
     char *historical_path = g_build_filename(directory, historical_name, NULL);
     daemon_fixture(historical_path, keys, 2);
     g_assert_cmpint(publish_current_index(&config, hex, historical_name, native_name,
-        tbset_name, &info, 1, false, NULL, error, sizeof(error)), ==, 0);
+        tbset_name, &info, NULL, NULL, 1, false, NULL,
+        error, sizeof(error)), ==, 0);
     g_assert_cmpint(current_manifest_read(&config, hex, &paired), ==, 0);
     g_assert_null(paired.module_sha256);
     g_assert_null(paired.native_sha256);
     current_manifest_clear(&paired);
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
-        tbset_name, &info, 1, true, NULL, error, sizeof(error)), ==, 0);
+        tbset_name, &info, NULL, NULL, 1, true, NULL,
+        error, sizeof(error)), ==, 0);
     g_unlink(historical_path);
     g_free(historical_name);
     g_free(historical_path);
@@ -1778,14 +1806,16 @@ int main(int argc, char **argv)
     g_assert_true(g_file_get_contents(manifest, &before, NULL, NULL));
     g_assert_cmpint(chmod(old_path, 0644), ==, 0);
     g_assert_cmpint(publish_current_index(&config, hex, new_name, native_name,
-        tbset_name, &info, 2, true, NULL, error, sizeof(error)), ==, -1);
+        tbset_name, &info, NULL, NULL, 2, true, NULL,
+        error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "cannot validate current module coverage"));
     g_assert_true(g_file_get_contents(manifest, &after, NULL, NULL));
     g_assert_cmpstr(before, ==, after);
     g_clear_pointer(&after, g_free);
     g_assert_cmpint(chmod(old_path, 0444), ==, 0);
     g_assert_cmpint(publish_current_index(&config, hex, new_name, native_name,
-        tbset_name, &info, 2, true, NULL, error, sizeof(error)), ==, -1);
+        tbset_name, &info, NULL, NULL, 2, true, NULL,
+        error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "replacement loses module coverage"));
     g_assert_true(g_file_get_contents(manifest, &after, NULL, NULL));
     g_assert_cmpstr(before, ==, after);
@@ -1854,7 +1884,8 @@ int main(int argc, char **argv)
     g_assert_cmpint(chmod(old_path, 0444), ==, 0);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, new_name, native_name,
-        tbset_name, &info, 2, true, NULL, error, sizeof(error)), ==, -1);
+        tbset_name, &info, NULL, NULL, 2, true, NULL,
+        error, sizeof(error)), ==, -1);
     g_assert_nonnull(strstr(error, "replacement loses module coverage"));
     pthread_mutex_unlock(&cache_lock);
     char *retained = NULL;
@@ -1887,7 +1918,7 @@ int main(int argc, char **argv)
     g_assert_true(g_file_set_contents(hit_tbset, input_data, input_size, NULL));
     LatcdResponseV2 response = {0};
     g_assert_cmpint(publish_snapshot(&config, 0, "unused-snapshot", input,
-        input, false, digest, 2, &response), ==, -1);
+        input, false, digest, 2, &response, NULL), ==, -1);
     g_assert_nonnull(strstr(response.message, "replacement loses module coverage"));
     g_assert_true(g_file_get_contents(manifest, &after, NULL, NULL));
     g_assert_cmpstr(before, ==, after);
@@ -1908,7 +1939,8 @@ int main(int argc, char **argv)
     daemon_fixture(new_path, keys, 3);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, new_name, native_name,
-        tbset_name, &info, 2, true, NULL, error, sizeof(error)), ==, 0);
+        tbset_name, &info, NULL, NULL, 2, true, NULL,
+        error, sizeof(error)), ==, 0);
     pthread_mutex_unlock(&cache_lock);
     g_assert_true(g_file_get_contents(manifest, &after, NULL, NULL));
     g_assert_nonnull(strstr(after, new_name));
@@ -1921,7 +1953,7 @@ int main(int argc, char **argv)
     daemon_fixture(old_path, keys, 3);
     pthread_mutex_lock(&cache_lock);
     g_assert_cmpint(publish_current_index(&config, hex, old_name, native_name,
-        "", &info, 2, true, NULL, error, sizeof(error)), ==, 0);
+        "", &info, NULL, NULL, 2, true, NULL, error, sizeof(error)), ==, 0);
     pthread_mutex_unlock(&cache_lock);
     g_assert_cmpint(g_unlink(native_path), ==, 0);
     g_free(before);
@@ -1935,7 +1967,7 @@ int main(int argc, char **argv)
     setenv("LATCD_COMPILE_TMPDIR", g_get_tmp_dir(), 1);
     memset(&response, 0, sizeof(response));
     g_assert_cmpint(publish_snapshot(&config, 0, new_path, NULL, NULL,
-        false, digest, 3, &response), ==, -1);
+        false, digest, 3, &response, NULL), ==, -1);
     g_assert_nonnull(strstr(response.message, "injected failure"));
     g_assert_true(g_file_get_contents(manifest, &after, NULL, NULL));
     g_assert_cmpstr(before, ==, after);
@@ -1968,7 +2000,7 @@ int main(int argc, char **argv)
         error, sizeof(error)), ==, 0);
     latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
     g_assert_cmpint(publish_snapshot(&config, 0, new_path, input, input,
-        false, digest, 4, &response), ==, -1);
+        false, digest, 4, &response, NULL), ==, -1);
     g_assert_cmpint(response.status, ==, LATCD_STATUS_INVALID_MODULE);
     g_assert_nonnull(strstr(response.message, "not fully covered"));
     g_assert_true(g_file_get_contents(manifest, &after, NULL, NULL));
@@ -1994,7 +2026,7 @@ int main(int argc, char **argv)
     if (!child) {
         crash_after_manifest = true;
         publish_snapshot(&config, 0, new_path, NULL, NULL,
-                          false, digest, 5, &response);
+                          false, digest, 5, &response, NULL);
         _exit(99);
     }
     int child_status = 0;
@@ -2016,7 +2048,7 @@ int main(int argc, char **argv)
         error, sizeof(error)), ==, 0);
     latcd_cache_capacity_metadata_bind(&generation_capacity, config.max_cache_bytes);
     g_assert_cmpint(publish_snapshot(&config, 0, new_path, NULL, NULL,
-        false, digest, 6, &response), ==, 0);
+        false, digest, 6, &response, NULL), ==, 0);
     LatcdCurrentManifest restarted = {0};
     g_assert_cmpint(current_manifest_read(&config, hex, &restarted), ==, 0);
     g_assert_cmpstr(restarted.module, ==, committed.module);

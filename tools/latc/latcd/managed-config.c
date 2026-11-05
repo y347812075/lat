@@ -27,7 +27,8 @@ int latcd_managed_static_launcher(int fd)
         memcmp(header.e_ident, ELFMAG, SELFMAG) ||
         header.e_ident[EI_CLASS] != ELFCLASS64 || header.e_ident[EI_DATA] != ELFDATA2LSB ||
         header.e_ident[EI_VERSION] != EV_CURRENT || header.e_version != EV_CURRENT ||
-        header.e_machine != EM_LOONGARCH || header.e_type != ET_EXEC ||
+        header.e_machine != EM_LOONGARCH ||
+        (header.e_type != ET_EXEC && header.e_type != ET_DYN) ||
         header.e_ehsize != sizeof(header) || header.e_phentsize != sizeof(Elf64_Phdr) ||
         !header.e_phnum || header.e_phnum == PN_XNUM ||
         header.e_phoff > (uint64_t)before.st_size ||
@@ -37,8 +38,7 @@ int latcd_managed_static_launcher(int fd)
     bool load = false;
     for (unsigned i = 0; i < header.e_phnum; i++) {
         Elf64_Phdr phdr;
-        if (pread(fd, &phdr, sizeof(phdr), header.e_phoff + i * sizeof(phdr)) != sizeof(phdr) ||
-            phdr.p_type == PT_INTERP || phdr.p_type == PT_DYNAMIC) {
+        if (pread(fd, &phdr, sizeof(phdr), header.e_phoff + i * sizeof(phdr)) != sizeof(phdr)) {
             errno = EINVAL; return -1;
         }
         if (phdr.p_type == PT_LOAD && (phdr.p_flags & PF_X)) load = true;
@@ -59,6 +59,7 @@ void latcd_managed_config_clear(LatcdManagedConfig *c)
     free(c->compiler); free(c->runner); free(c->runtime);
     free(c->worker_cgroup);
     free(c->worker_bwrap); free(c->worker_bootstrap); free(c->worker_closure);
+    free(c->worker_toolroot);
     memset(c, 0, sizeof(*c));
 }
 
@@ -123,6 +124,7 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
 {
     if (!c) { errno = EINVAL; return -1; }
     memset(c, 0, sizeof(*c));
+    c->automatic_retirement = true;
     char raw[8192]; size_t length;
     if (latcd_managed_config_read(path, raw, sizeof(raw), &length)) return -1;
     if (memchr(raw, '\0', length)) { errno = EINVAL; return -1; }
@@ -168,18 +170,24 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
         c->retirement_grace_us = (uint64_t)value;
         if ((double)c->retirement_grace_us != value) goto out;
     }
-    const char *optional[] = {"worker_bwrap", "worker_bootstrap", "worker_closure"};
-    char **targets[] = {&c->worker_bwrap, &c->worker_bootstrap, &c->worker_closure};
-    for (unsigned i = 0; i < 3; i++) if (json_object_has_value(object, optional[i])) {
+    const char *optional[] = {"worker_bwrap", "worker_bootstrap", "worker_closure",
+                              "worker_toolroot"};
+    char **targets[] = {&c->worker_bwrap, &c->worker_bootstrap, &c->worker_closure,
+                        &c->worker_toolroot};
+    for (unsigned i = 0; i < sizeof(optional) / sizeof(optional[0]); i++)
+        if (json_object_has_value(object, optional[i])) {
         const char *s = json_object_get_string(object, optional[i]);
         if (!s || s[0] != '/' || !s[1] ||
             strlen(s) != json_object_get_string_len(object, optional[i])) goto out;
         *targets[i] = strdup(s);
         if (!*targets[i]) goto out;
     }
-    if (!!c->worker_bwrap != !!c->worker_bootstrap || (c->worker_closure && !c->worker_bwrap) ||
+    if (!!c->worker_bwrap != !!c->worker_bootstrap ||
+        ((c->worker_closure || c->worker_toolroot) && !c->worker_bwrap) ||
+        (c->worker_closure && c->worker_toolroot) ||
         count != sizeof(keys) / sizeof(keys[0]) + !!c->worker_cgroup +
                  !!c->worker_bwrap + !!c->worker_bootstrap + !!c->worker_closure +
+                 !!c->worker_toolroot +
                  automatic_present + grace_present) goto out;
     result = 0;
 out:
@@ -192,6 +200,11 @@ int latcd_managed_config_validate(const LatcdManagedConfig *c)
 {
     uid_t real, effective, saved;
     gid_t real_gid, effective_gid, saved_gid;
+    gid_t only_group = 0;
+    int group_count = getgroups(0, NULL);
+    bool bad_groups = group_count < 0 || group_count > 1 ||
+        (group_count == 1 && (getgroups(1, &only_group) != 1 ||
+                              only_group != getegid()));
     struct __user_cap_header_struct header = {
         .version = _LINUX_CAPABILITY_VERSION_3, .pid = 0,
     };
@@ -202,14 +215,14 @@ int latcd_managed_config_validate(const LatcdManagedConfig *c)
         c->service_uid == c->client_uid || getresuid(&real, &effective, &saved) ||
         real != c->service_uid || effective != c->service_uid || saved != c->service_uid ||
         getresgid(&real_gid, &effective_gid, &saved_gid) || !real_gid ||
-        real_gid != effective_gid || real_gid != saved_gid || getgroups(0, NULL) != 0 ||
+        real_gid != effective_gid || real_gid != saved_gid || bad_groups ||
         prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1 ||
         syscall(SYS_capget, &header, caps) || caps[0].effective || caps[0].permitted ||
         caps[0].inheritable || caps[1].effective || caps[1].permitted || caps[1].inheritable) {
         errno = EACCES;
         return -1;
     }
-    int fds[6] = {-1, -1, -1, -1, -1, -1};
+    int fds[7] = {-1, -1, -1, -1, -1, -1, -1};
     int result = -1;
     struct stat dirs[3];
     fds[0] = latcd_managed_directory(c->cache, c->service_uid, 0700);
@@ -233,6 +246,10 @@ int latcd_managed_config_validate(const LatcdManagedConfig *c)
     if (fds[4] < 0) goto out;
     fds[5] = latcd_managed_directory(c->runtime, 0, 0755);
     if (fds[5] < 0) goto out;
+    if (c->worker_toolroot) {
+        fds[6] = latcd_managed_directory(c->worker_toolroot, 0, 0755);
+        if (fds[6] < 0) goto out;
+    }
     char *runtime = NULL;
     if (asprintf(&runtime, "%s/liblat-aot-runtime.so.2", c->runtime) < 0) goto out;
     int library = latcd_managed_file(runtime, 0);
@@ -248,7 +265,7 @@ int latcd_managed_config_validate(const LatcdManagedConfig *c)
 out:
     {
         int error = errno;
-        for (int i = 0; i < 6; i++) if (fds[i] >= 0) close(fds[i]);
+        for (int i = 0; i < 7; i++) if (fds[i] >= 0) close(fds[i]);
         errno = error;
         return result;
     }

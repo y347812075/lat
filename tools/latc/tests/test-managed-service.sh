@@ -63,7 +63,8 @@ chmod 755 "$work/tools/latc"
 chmod 777 "$work/tools/bootstrap"
 expect_rejected
 chmod 755 "$work/tools/bootstrap"
-cp "$compiler" "$work/tools/bwrap.dynamic"
+printf '#!/bin/sh\nexit 0\n' > "$work/tools/bwrap.dynamic"
+chmod 755 "$work/tools/bwrap.dynamic"
 mv "$work/tools/bwrap" "$work/tools/bwrap.static"
 mv "$work/tools/bwrap.dynamic" "$work/tools/bwrap"
 expect_rejected
@@ -89,7 +90,7 @@ if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
     echo 'non-boolean automatic retirement accepted' >&2; exit 1
 fi
 grep -q 'managed configuration rejected' "$work/automatic-nonbool.err"
-sed 's|}$|,"retirement_grace_us":1000000}|' "$work/config" > "$work/grace-without-auto-config"
+sed 's|}$|,"automatic_retirement":false,"retirement_grace_us":1000000}|' "$work/config" > "$work/grace-without-auto-config"
 if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
     env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/grace-without-auto-config" \
     >"$work/grace-without-auto.out" 2>"$work/grace-without-auto.err"; then
@@ -142,6 +143,7 @@ while [ ! -S "$work/broker/broker.sock" ]; do
     n=$((n + 1)); [ "$n" -lt 200 ]; sleep 0.05
 done
 test -S "$work/admin/admin.sock"
+grep -q 'automatic retirement enabled for managed domain' "$work/stderr"
 if setpriv --no-new-privs --reuid=1234 --regid=1234 --clear-groups \
     env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$daemon" --managed-config "$work/invalid-cgroup-config" \
     >"$work/second.out" 2>"$work/second.err"; then

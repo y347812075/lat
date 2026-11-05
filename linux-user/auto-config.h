@@ -14,6 +14,7 @@ int lat_aot_config_init(int *legacy, bool explicit_legacy, const char *bindir,
 const char *lat_aot_cache_path(void);
 const char *lat_aot_socket_path(void);
 const char *lat_aot_module_path(void);
+bool lat_aot_broker_enabled(void);
 bool lat_aot_ensure_daemon(void);
 int lat_aot_open_channel(char *error, size_t error_size);
 /* Connect only to an existing daemon; never starts one. */
