@@ -22,13 +22,22 @@ bool latc_aot_v2_mapping_enabled(void)
 }
 
 void latc_aot_v2_note_mmap(int fd, uint64_t guest_start,
-                           uint64_t mapping_size, uint64_t file_offset)
+                           uint64_t mapping_size, uint64_t file_offset,
+                           bool executable)
 {
     (void)fd;
     (void)guest_start;
     (void)mapping_size;
     (void)file_offset;
+    (void)executable;
     close(fd);
+}
+
+void latc_aot_v2_note_executable_range(uint64_t guest_start,
+                                       uint64_t mapping_size)
+{
+    (void)guest_start;
+    (void)mapping_size;
 }
 
 void latc_aot_v2_drain_mmaps(void)

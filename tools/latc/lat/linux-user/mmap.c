@@ -307,6 +307,9 @@ static int target_mprotect_internal(abi_ulong start, abi_ulong len,
         latc_aot_v2_invalidate_range(thread_cpu, start, len,
                                      LATC_AOT_V2_INVALIDATE_PROTECTION);
     }
+    if (aot_restore) {
+        latc_aot_v2_note_executable_range(start, len);
+    }
 #endif
 #if defined(CONFIG_LATX) && defined(TARGET_I386) && TARGET_ABI_BITS == 32
     if (option_minke_16k_page_check && (target_prot & PROT_EXEC)) {
@@ -325,6 +328,7 @@ static int target_mprotect_internal(abi_ulong start, abi_ulong len,
     mmap_unlock();
 #if defined(CONFIG_LATX) && defined(TARGET_X86_64)
     if (aot_restore) {
+        latc_aot_v2_drain_mmaps();
         latc_aot_v2_revalidate_range(start, len);
     }
 #endif
@@ -1266,8 +1270,9 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int target_prot,
         if (target_prot & PROT_WRITE) {
             close(aot_v2_fd);
         } else {
-            latc_aot_v2_note_mmap(aot_v2_fd, start, aot_v2_size,
-                                  aot_v2_offset);
+            latc_aot_v2_note_mmap(aot_v2_fd, start,
+                                  TARGET_PAGE_ALIGN(aot_v2_size),
+                                  aot_v2_offset, target_prot & PROT_EXEC);
         }
     }
 #endif

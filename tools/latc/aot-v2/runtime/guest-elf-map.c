@@ -189,12 +189,11 @@ static int digest_fd(int fd, const struct stat *initial, uint8_t digest[32])
     return -1;
 }
 
-int lat_guest_elf_inspect_mapping_v2(int fd, uint64_t guest_start,
-                                     uint64_t mapping_size,
-                                     uint64_t file_offset,
-                                     uint64_t page_size,
-                                     LatGuestElfInfoV2 *info,
-                                     char *error, size_t error_size)
+static int inspect_mapping(int fd, uint64_t guest_start,
+                           uint64_t mapping_size, uint64_t file_offset,
+                           uint64_t page_size, bool executable_only,
+                           LatGuestElfInfoV2 *info,
+                           char *error, size_t error_size)
 {
     Elf64_Ehdr elf;
     struct stat status;
@@ -237,17 +236,26 @@ int lat_guest_elf_inspect_mapping_v2(int fd, uint64_t guest_start,
     for (uint16_t i = 0; i < elf.e_phnum; i++) {
         const Elf64_Phdr *phdr = &phdrs[i];
         if (phdr->p_type != PT_LOAD || !phdr->p_filesz ||
-            phdr->p_offset < file_offset ||
-            phdr->p_offset >= mapping_end) {
+            (executable_only && !(phdr->p_flags & PF_X))) {
             continue;
         }
-        uint64_t delta = phdr->p_offset - file_offset;
-        if (guest_start > UINT64_MAX - delta ||
-            guest_start + delta < phdr->p_vaddr) {
+        if (phdr->p_offset > UINT64_MAX - phdr->p_filesz) {
+            free(phdrs);
+            return invalid(error, error_size, "mapped ELF file range overflows");
+        }
+        if (executable_only ?
+            (phdr->p_offset >= mapping_end ||
+             phdr->p_offset + phdr->p_filesz <= file_offset) :
+            (phdr->p_offset < file_offset || phdr->p_offset >= mapping_end)) {
+            continue;
+        }
+        __int128 candidate_wide = (__int128)guest_start + phdr->p_offset -
+                                  file_offset - phdr->p_vaddr;
+        if (candidate_wide < 0 || candidate_wide > UINT64_MAX) {
             free(phdrs);
             return invalid(error, error_size, "mapped ELF load bias overflows");
         }
-        uint64_t candidate = guest_start + delta - phdr->p_vaddr;
+        uint64_t candidate = (uint64_t)candidate_wide;
         if (found_bias && candidate != load_bias) {
             free(phdrs);
             return invalid(error, error_size, "mapped ELF has inconsistent load bias");
@@ -315,6 +323,26 @@ int lat_guest_elf_inspect_mapping_v2(int fd, uint64_t guest_start,
     return 0;
 }
 
+int lat_guest_elf_inspect_mapping_v2(int fd, uint64_t guest_start,
+                                     uint64_t mapping_size,
+                                     uint64_t file_offset, uint64_t page_size,
+                                     LatGuestElfInfoV2 *info,
+                                     char *error, size_t error_size)
+{
+    return inspect_mapping(fd, guest_start, mapping_size, file_offset,
+                           page_size, false, info, error, error_size);
+}
+
+int lat_guest_elf_inspect_exec_mapping_v2(int fd, uint64_t guest_start,
+                                          uint64_t mapping_size,
+                                          uint64_t file_offset, uint64_t page_size,
+                                          LatGuestElfInfoV2 *info,
+                                          char *error, size_t error_size)
+{
+    return inspect_mapping(fd, guest_start, mapping_size, file_offset,
+                           page_size, true, info, error, error_size);
+}
+
 LatGuestElfTrackerV2 *lat_guest_elf_tracker_new_v2(void)
 {
     LatGuestElfTrackerV2 *tracker = calloc(1, sizeof(*tracker));
@@ -349,24 +377,10 @@ int lat_guest_elf_tracker_note_v2(LatGuestElfTrackerV2 *tracker, int fd,
         errno = EINVAL;
         return -1;
     }
-    struct stat status;
-    if (fstat(fd, &status)) {
-        return -1;
-    }
-    for (guint i = 0; i < tracker->entries->len; i++) {
-        LatGuestElfInfoV2 *entry = g_ptr_array_index(tracker->entries, i);
-        if (entry->device == (uint64_t)status.st_dev &&
-            entry->inode == (uint64_t)status.st_ino &&
-            guest_start >= entry->guest_begin && guest_start < entry->guest_end) {
-            *info = entry;
-            *added = 0;
-            return 0;
-        }
-    }
     LatGuestElfInfoV2 inspected;
-    if (lat_guest_elf_inspect_mapping_v2(fd, guest_start, mapping_size,
-                                         file_offset, page_size, &inspected,
-                                         error, error_size)) {
+    if (lat_guest_elf_inspect_exec_mapping_v2(fd, guest_start, mapping_size,
+                                              file_offset, page_size, &inspected,
+                                              error, error_size)) {
         return -1;
     }
     for (guint i = 0; i < tracker->entries->len; i++) {

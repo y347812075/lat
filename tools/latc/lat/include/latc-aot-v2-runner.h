@@ -44,7 +44,10 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child);
 bool latc_aot_v2_mapping_enabled(void);
 /* Takes ownership of fd. ELF inspection is deferred while mmap is locked. */
 void latc_aot_v2_note_mmap(int fd, uint64_t guest_start,
-                           uint64_t mapping_size, uint64_t file_offset);
+                           uint64_t mapping_size, uint64_t file_offset,
+                           bool executable);
+void latc_aot_v2_note_executable_range(uint64_t guest_start,
+                                       uint64_t mapping_size);
 void latc_aot_v2_note_munmap(CPUState *cpu, uint64_t guest_start,
                              uint64_t mapping_size);
 bool latc_aot_v2_invalidate_range(CPUState *cpu, uint64_t guest_start,

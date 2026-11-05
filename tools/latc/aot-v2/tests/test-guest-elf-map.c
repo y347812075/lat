@@ -43,6 +43,70 @@ static int executable_mapping(int fd, uint64_t bias, uint64_t *start,
     return -1;
 }
 
+static int test_overlapping_load_mapping(void)
+{
+    char path[PATH_MAX];
+    const char *temporary = getenv("TMPDIR");
+    if (temporary) {
+        snprintf(path, sizeof(path), "%s/latc-load-map-XXXXXX", temporary);
+    } else {
+        snprintf(path, sizeof(path), "%s/tmp/latc-load-map-XXXXXX", getenv("HOME"));
+    }
+    int fd = mkstemp(path);
+    if (fd < 0) return -1;
+    unlink(path);
+    Elf64_Ehdr elf = {
+        .e_ident = { ELFMAG0, ELFMAG1, ELFMAG2, ELFMAG3,
+                     ELFCLASS64, ELFDATA2LSB, EV_CURRENT },
+        .e_type = ET_DYN, .e_machine = EM_X86_64, .e_version = EV_CURRENT,
+        .e_ehsize = sizeof(Elf64_Ehdr), .e_phoff = sizeof(Elf64_Ehdr),
+        .e_phentsize = sizeof(Elf64_Phdr), .e_phnum = 3,
+    };
+    Elf64_Phdr phdrs[] = {
+        { .p_type = PT_LOAD, .p_flags = PF_R, .p_offset = 0,
+          .p_vaddr = 0, .p_filesz = 0x1000, .p_memsz = 0x1000 },
+        { .p_type = PT_LOAD, .p_flags = PF_R | PF_X, .p_offset = 0x1000,
+          .p_vaddr = 0x1000, .p_filesz = 0x900, .p_memsz = 0x900 },
+        { .p_type = PT_LOAD, .p_flags = PF_R | PF_W, .p_offset = 0x2d70,
+          .p_vaddr = 0x3d70, .p_filesz = 0x3a0, .p_memsz = 0x3a0 },
+    };
+    int result = -1;
+    if (ftruncate(fd, 0x4110) ||
+        pwrite(fd, &elf, sizeof(elf), 0) != sizeof(elf) ||
+        pwrite(fd, phdrs, sizeof(phdrs), elf.e_phoff) != sizeof(phdrs)) {
+        goto out;
+    }
+    const uint64_t bias = UINT64_C(0x555500000000);
+    LatGuestElfInfoV2 info;
+    char error[256] = {0};
+    /* The initial read-only reservation does not establish one bias. */
+    if (!lat_guest_elf_inspect_mapping_v2(fd, bias, 0x4110, 0, 0x1000,
+                                         &info, error, sizeof(error))) {
+        goto out;
+    }
+    /* Once the executable portion is identified, its mapping does. */
+    if (lat_guest_elf_inspect_mapping_v2(fd, bias + 0x1000, 0x1000,
+                                        0x1000, 0x1000, &info,
+                                        error, sizeof(error)) ||
+        info.load_bias != bias || info.exact_exec_ranges[0].begin != bias + 0x1000 ||
+        info.exact_exec_ranges[0].end != bias + 0x1900) {
+        goto out;
+    }
+    if (lat_guest_elf_inspect_exec_mapping_v2(fd, bias + 0x1400, 0x200,
+                                             0x1400, 0x1000, &info,
+                                             error, sizeof(error)) ||
+        info.load_bias != bias ||
+        !lat_guest_elf_inspect_exec_mapping_v2(fd, bias + 0x2000, 0x1000,
+                                               0x2000, 0x1000, &info,
+                                               error, sizeof(error))) {
+        goto out;
+    }
+    result = 0;
+out:
+    close(fd);
+    return result;
+}
+
 static int test_exact_exec_ranges(void)
 {
     char path[PATH_MAX];
@@ -350,6 +414,10 @@ int main(int argc, char **argv)
     if (argc != 4) {
         fprintf(stderr, "usage: %s MAIN INTERPRETER DSO\n", argv[0]);
         return 2;
+    }
+    if (test_overlapping_load_mapping()) {
+        fprintf(stderr, "overlapping ELF load mapping validation failed\n");
+        return 1;
     }
     if (test_exact_exec_ranges()) {
         fprintf(stderr, "exact executable ELF range validation failed\n");

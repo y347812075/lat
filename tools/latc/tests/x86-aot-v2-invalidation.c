@@ -88,6 +88,10 @@ static int load_module(const char *path, Module *module)
     }
     module->exec_begin = find.begin;
     module->exec_end = find.end;
+    fprintf(stderr,
+            "LATC_INVALIDATION_MODULE value=%p cross_page=%p exec_begin=%p exec_end=%p\n",
+            (void *)module->value, (void *)module->cross_page,
+            (void *)module->exec_begin, (void *)module->exec_end);
     fprintf(stderr, "LATC_INVALIDATION_LOAD_END\n");
     return 0;
 }

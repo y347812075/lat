@@ -168,6 +168,13 @@ static _Atomic bool pending_key_discovery;
 static _Atomic bool key_discovery_failed;
 static LatAotV2PendingMapping **pending_mapping_tail = &pending_mapping_head;
 static LatAotV2SourceMapping *source_mappings;
+typedef struct LatAotV2ExecutableMapping {
+    uint64_t begin, end, source_base;
+    LatAotV2ModuleStats *stats;
+    struct LatAotV2ExecutableMapping *next;
+} LatAotV2ExecutableMapping;
+static LatAotV2ExecutableMapping *executable_mappings;
+static pthread_mutex_t executable_mappings_lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread LatAotModuleInstanceV2 *aot_v2_current_instance;
 static __thread uint64_t aot_v2_current_generation;
 static __thread bool aot_v2_execution_active;
@@ -710,11 +717,13 @@ void latc_aot_v2_fork_start(void)
     pthread_mutex_lock(&submission_lock);
     pthread_mutex_lock(&key_journal_lock);
     pthread_mutex_lock(&tbset_lock);
+    pthread_mutex_lock(&executable_mappings_lock);
 }
 
 void latc_aot_v2_fork_end(CPUState *cpu, bool child)
 {
     if (!child) {
+        pthread_mutex_unlock(&executable_mappings_lock);
         pthread_mutex_unlock(&tbset_lock);
         pthread_mutex_unlock(&key_journal_lock);
         pthread_mutex_unlock(&submission_lock);
@@ -768,6 +777,7 @@ void latc_aot_v2_fork_end(CPUState *cpu, bool child)
     (void)cpu;
 #endif
 
+    pthread_mutex_unlock(&executable_mappings_lock);
     pthread_mutex_unlock(&tbset_lock);
     pthread_mutex_unlock(&key_journal_lock);
     pthread_mutex_unlock(&submission_lock);
@@ -1326,18 +1336,74 @@ static LatAotV2ModuleStats *add_module_stats(
 
 static LatAotV2ModuleStats *module_stats_for_pc(uint64_t guest_pc)
 {
-    for (LatAotV2ModuleStats *stats = atomic_load_explicit(
-             &module_stats, memory_order_acquire); stats;
-         stats = stats->next) {
-        uint64_t begin = atomic_load_explicit(&stats->guest_begin,
-                                              memory_order_acquire);
-        uint64_t end = atomic_load_explicit(&stats->guest_end,
-                                            memory_order_acquire);
-        if (guest_pc >= begin && guest_pc < end) {
-            return stats;
+    LatAotV2ModuleStats *result = NULL;
+    pthread_mutex_lock(&executable_mappings_lock);
+    for (LatAotV2ExecutableMapping *mapping = executable_mappings; mapping;
+         mapping = mapping->next) {
+        if (guest_pc >= mapping->begin && guest_pc < mapping->end &&
+            atomic_load_explicit(&mapping->stats->source_base,
+                                 memory_order_acquire) == mapping->source_base) {
+            result = mapping->stats;
+            break;
         }
     }
-    return NULL;
+    pthread_mutex_unlock(&executable_mappings_lock);
+    return result;
+}
+
+static void remove_executable_mappings_locked(uint64_t begin, uint64_t end)
+{
+    LatAotV2ExecutableMapping **link = &executable_mappings;
+    while (*link) {
+        LatAotV2ExecutableMapping *mapping = *link;
+        if (begin >= mapping->end || end <= mapping->begin) {
+            link = &mapping->next;
+        } else if (begin <= mapping->begin && end >= mapping->end) {
+            *link = mapping->next;
+            g_free(mapping);
+        } else if (begin <= mapping->begin) {
+            mapping->begin = end;
+            link = &mapping->next;
+        } else if (end >= mapping->end) {
+            mapping->end = begin;
+            link = &mapping->next;
+        } else {
+            LatAotV2ExecutableMapping *right = g_new(LatAotV2ExecutableMapping, 1);
+            *right = *mapping;
+            right->begin = end;
+            mapping->end = begin;
+            mapping->next = right;
+            link = &right->next;
+        }
+    }
+}
+
+static void add_executable_mapping(const LatGuestElfInfoV2 *info,
+                                   uint64_t begin, uint64_t end,
+                                   LatAotV2ModuleStats *stats)
+{
+    uint64_t base = info->load_bias + info->preferred_base;
+    pthread_mutex_lock(&executable_mappings_lock);
+    for (uint16_t i = 0; i < info->exec_range_count; i++) {
+        uint64_t first = MAX(begin, info->exact_exec_ranges[i].begin);
+        uint64_t last = MIN(end, info->exact_exec_ranges[i].end);
+        if (first >= last) continue;
+        remove_executable_mappings_locked(first, last);
+        LatAotV2ExecutableMapping *mapping = g_new0(LatAotV2ExecutableMapping, 1);
+        *mapping = (LatAotV2ExecutableMapping) {
+            .begin = first, .end = last, .source_base = base, .stats = stats,
+            .next = executable_mappings,
+        };
+        executable_mappings = mapping;
+    }
+    pthread_mutex_unlock(&executable_mappings_lock);
+}
+
+static void remove_executable_mappings(uint64_t begin, uint64_t end)
+{
+    pthread_mutex_lock(&executable_mappings_lock);
+    remove_executable_mappings_locked(begin, end);
+    pthread_mutex_unlock(&executable_mappings_lock);
 }
 
 static bool dispatch_miss_tracking_enabled(void)
@@ -1922,6 +1988,7 @@ static void drain_mappings(void)
             elf_tracker, pending->fd, pending->guest_start,
             pending->mapping_size, pending->file_offset, TARGET_PAGE_SIZE,
             &info, &added, error, sizeof(error));
+        LatAotV2ModuleStats *stats = NULL;
         if (!result && added) {
             discovered_elfs++;
             LatAotV2RuntimeInstance *instance = NULL;
@@ -1937,7 +2004,7 @@ static void drain_mappings(void)
             }
             uint64_t registration_ns =
                 (g_get_monotonic_time() - registration_start) * 1000;
-            LatAotV2ModuleStats *stats = add_module_stats(
+            stats = add_module_stats(
                 info, registered > 0 ? LAT_AOT_V2_MODULE_REGISTERED :
                 registered == 0 ? LAT_AOT_V2_MODULE_MISSING :
                                   LAT_AOT_V2_MODULE_REJECTED,
@@ -1946,8 +2013,6 @@ static void drain_mappings(void)
                 atomic_store_explicit(&stats->registration_ns,
                                       registration_ns,
                                       memory_order_release);
-                latc_aot_v2_collect_existing_jit_tbs(info->guest_begin,
-                                                      info->guest_end);
             }
             if (instance) {
                 instance->stats = stats;
@@ -1973,7 +2038,14 @@ static void drain_mappings(void)
                         error[0] ? " reason=" : "",
                         error);
             }
-        } else if (result && getenv("LATX_AOT_V2_REPORT")) {
+        } else if (!result) {
+            for (stats = atomic_load_explicit(&module_stats, memory_order_acquire);
+                 stats; stats = stats->next) {
+                if (!memcmp(stats->source_sha256, info->source_sha256, 32) &&
+                    atomic_load_explicit(&stats->source_base, memory_order_acquire) ==
+                        info->load_bias + info->preferred_base) break;
+            }
+        } else if (getenv("LATX_AOT_V2_REPORT")) {
             fprintf(stderr,
                     "latx: AOT v2 ignored file mapping "
                     "start=0x%llx size=0x%llx offset=0x%llx: %s\n",
@@ -1981,6 +2053,17 @@ static void drain_mappings(void)
                     (unsigned long long)pending->mapping_size,
                     (unsigned long long)pending->file_offset,
                     error[0] ? error : strerror(errno));
+        }
+        if (!result && stats) {
+            add_executable_mapping(info, pending->guest_start,
+                                   pending->guest_start + pending->mapping_size,
+                                   stats);
+            if (added) {
+                latc_aot_v2_collect_existing_jit_tbs(info->guest_begin,
+                                                      info->guest_end);
+            }
+        } else if (!result) {
+            result = -1;
         }
         if (result) atomic_store_explicit(&key_discovery_failed, true, memory_order_release);
         close(pending->fd);
@@ -1995,23 +2078,28 @@ void latc_aot_v2_drain_mmaps(void)
 }
 
 void latc_aot_v2_note_mmap(int fd, uint64_t guest_start,
-                           uint64_t mapping_size, uint64_t file_offset)
+                           uint64_t mapping_size, uint64_t file_offset,
+                           bool executable)
 {
     if (!latc_aot_v2_mapping_enabled()) {
         close(fd);
         return;
     }
-    LatAotV2PendingMapping *pending = g_new0(LatAotV2PendingMapping, 1);
-    if (!pending) {
+    LatAotV2PendingMapping *pending = executable ?
+        g_new0(LatAotV2PendingMapping, 1) : NULL;
+    if (executable && !pending) {
         close(fd);
+        atomic_store(&key_discovery_failed, true);
         return;
     }
-    *pending = (LatAotV2PendingMapping) {
-        .fd = fd,
-        .guest_start = guest_start,
-        .mapping_size = mapping_size,
-        .file_offset = file_offset,
-    };
+    if (pending) {
+        *pending = (LatAotV2PendingMapping) {
+            .fd = fd,
+            .guest_start = guest_start,
+            .mapping_size = mapping_size,
+            .file_offset = file_offset,
+        };
+    }
     LatAotV2SourceMapping *source = g_new0(LatAotV2SourceMapping, 1);
     if (source) {
         source->fd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
@@ -2028,12 +2116,73 @@ void latc_aot_v2_note_mmap(int fd, uint64_t guest_start,
     if (source) {
         source->next = source_mappings;
         source_mappings = source;
+    } else {
+        atomic_store(&key_discovery_failed, true);
     }
-    *pending_mapping_tail = pending;
-    pending_mapping_tail = &pending->next;
-    atomic_store_explicit(&pending_key_discovery, true, memory_order_release);
+    if (pending) {
+        *pending_mapping_tail = pending;
+        pending_mapping_tail = &pending->next;
+        atomic_store_explicit(&pending_key_discovery, true, memory_order_release);
+    }
     pthread_mutex_unlock(&elf_tracker_lock);
+    if (!pending) close(fd);
     drain_mappings();
+}
+
+static int executable_source_bytes_match(const LatAotV2SourceMapping *source,
+                                         uint64_t begin, uint64_t end)
+{
+    struct stat status;
+    if (fstat(source->fd, &status) || status.st_size < 0) return -1;
+    uint64_t offset = source->file_offset + begin - source->guest_start;
+    unsigned char bytes[4096];
+    while (begin < end) {
+        size_t count = MIN((uint64_t)sizeof(bytes), end - begin);
+        size_t file_count = offset < (uint64_t)status.st_size ?
+            MIN((uint64_t)count, (uint64_t)status.st_size - offset) : 0;
+        memset(bytes, 0, count);
+        if (file_count && pread(source->fd, bytes, file_count, offset) !=
+                              (ssize_t)file_count) return -1;
+        if (memcmp(g2h_untagged(begin), bytes, count)) return 0;
+        begin += count;
+        offset += count;
+    }
+    return 1;
+}
+
+void latc_aot_v2_note_executable_range(uint64_t guest_start,
+                                       uint64_t mapping_size)
+{
+    if (!latc_aot_v2_mapping_enabled() || !mapping_size ||
+        guest_start > UINT64_MAX - mapping_size) return;
+    uint64_t guest_end = guest_start + mapping_size;
+    pthread_mutex_lock(&elf_tracker_lock);
+    for (LatAotV2SourceMapping *source = source_mappings; source;
+         source = source->next) {
+        uint64_t source_end = source->guest_start + source->mapping_size;
+        uint64_t begin = MAX(source->guest_start, guest_start);
+        uint64_t end = MIN(source_end, guest_end);
+        if (begin >= end) continue;
+        int matches = executable_source_bytes_match(source, begin, end);
+        if (matches <= 0) {
+            if (matches < 0) atomic_store(&key_discovery_failed, true);
+            continue;
+        }
+        int fd = fcntl(source->fd, F_DUPFD_CLOEXEC, 3);
+        if (fd < 0) {
+            atomic_store(&key_discovery_failed, true);
+            continue;
+        }
+        LatAotV2PendingMapping *pending = g_new0(LatAotV2PendingMapping, 1);
+        *pending = (LatAotV2PendingMapping) {
+            .fd = fd, .guest_start = begin, .mapping_size = end - begin,
+            .file_offset = source->file_offset + begin - source->guest_start,
+        };
+        *pending_mapping_tail = pending;
+        pending_mapping_tail = &pending->next;
+        atomic_store_explicit(&pending_key_discovery, true, memory_order_release);
+    }
+    pthread_mutex_unlock(&elf_tracker_lock);
 }
 
 static void remove_source_mappings_locked(uint64_t guest_start,
@@ -2043,12 +2192,40 @@ static void remove_source_mappings_locked(uint64_t guest_start,
     while (*link) {
         LatAotV2SourceMapping *source = *link;
         uint64_t source_end = source->guest_start + source->mapping_size;
-        if (guest_start < source_end && guest_end > source->guest_start) {
+        if (guest_start >= source_end || guest_end <= source->guest_start) {
+            link = &source->next;
+        } else if (guest_start <= source->guest_start && guest_end >= source_end) {
             *link = source->next;
             close(source->fd);
             g_free(source);
-        } else {
+        } else if (guest_start <= source->guest_start) {
+            uint64_t removed = guest_end - source->guest_start;
+            source->guest_start = guest_end;
+            source->file_offset += removed;
+            source->mapping_size = source_end - guest_end;
             link = &source->next;
+        } else if (guest_end >= source_end) {
+            source->mapping_size = guest_start - source->guest_start;
+            link = &source->next;
+        } else {
+            int fd = fcntl(source->fd, F_DUPFD_CLOEXEC, 3);
+            if (fd < 0) {
+                atomic_store(&key_discovery_failed, true);
+                *link = source->next;
+                close(source->fd);
+                g_free(source);
+                continue;
+            }
+            LatAotV2SourceMapping *right = g_new0(LatAotV2SourceMapping, 1);
+            *right = (LatAotV2SourceMapping) {
+                .fd = fd, .guest_start = guest_end,
+                .mapping_size = source_end - guest_end,
+                .file_offset = source->file_offset + guest_end - source->guest_start,
+                .next = source->next,
+            };
+            source->mapping_size = guest_start - source->guest_start;
+            source->next = right;
+            link = &right->next;
         }
     }
 }
@@ -2104,6 +2281,7 @@ bool latc_aot_v2_invalidate_range(CPUState *cpu, uint64_t guest_start,
     uint64_t guest_end = guest_start + mapping_size;
     bool current_invalidated = false;
     pthread_mutex_lock(&elf_tracker_lock);
+    remove_executable_mappings(guest_start, guest_end);
     if (elf_tracker && reason != LATC_AOT_V2_INVALIDATE_CODE_WRITE &&
         reason != LATC_AOT_V2_INVALIDATE_PROTECTION) {
         lat_guest_elf_tracker_remove_range_v2(elf_tracker, guest_start,
@@ -3183,20 +3361,27 @@ bool latc_aot_v2_revalidate_range(uint64_t guest_start,
                                                 error, sizeof(error));
         uint64_t registration_ns =
             (g_get_monotonic_time() - registration_start) * 1000;
-        if (result > 0 && instance) {
+        if (result >= 0) {
             LatAotV2ModuleStats *stats = add_module_stats(
-                &info, LAT_AOT_V2_MODULE_REGISTERED, source->fd);
-            instance->stats = stats;
-            if (stats) {
+                &info, result > 0 ? LAT_AOT_V2_MODULE_REGISTERED :
+                                    LAT_AOT_V2_MODULE_MISSING,
+                source->fd);
+            if (result > 0 && instance) {
+                instance->stats = stats;
+            }
+            if (result > 0 && instance && stats) {
                 atomic_store_explicit(&stats->registration_ns,
                                       registration_ns,
                                       memory_order_release);
                 atomic_fetch_add_explicit(&stats->live_instances, 1,
                                           memory_order_release);
+                atomic_fetch_add(&revalidated_instances, 1);
             }
-            atomic_fetch_add(&revalidated_instances, 1);
-            registered = true;
-            break;
+            if (stats) {
+                add_executable_mapping(&info, guest_start, guest_end, stats);
+                registered = true;
+                break;
+            }
         }
         if (result < 0 && errno != EEXIST) {
             atomic_fetch_add(&revalidation_failures, 1);
@@ -3985,6 +4170,15 @@ bool latc_aot_v2_find_target(CPUState *cpu, target_ulong guest_pc,
         target_held = true;
     }
     LatAotV2RuntimeInstance *runtime_instance = (void *)instance;
+    if (runtime_instance->stats &&
+        module_stats_for_pc(guest_pc) != runtime_instance->stats) {
+        if (target_held) {
+            atomic_fetch_sub_explicit(&instance->readers, 1,
+                                      memory_order_seq_cst);
+        }
+        latc_aot_v2_note_jit_key(guest_pc, cflags);
+        return false;
+    }
     if (runtime_instance->stats) {
         stats = runtime_instance->stats;
     }
