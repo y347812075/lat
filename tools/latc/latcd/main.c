@@ -5458,6 +5458,14 @@ typedef struct LatcdBrokerConnection {
     LatcdBrokerLoadResponse load_response;
 } LatcdBrokerConnection;
 
+static bool broker_worker_busy(LatcdBrokerWorker *worker)
+{
+    pthread_mutex_lock(&worker->lock);
+    bool busy = worker->occupied;
+    pthread_mutex_unlock(&worker->lock);
+    return busy;
+}
+
 static int G_GNUC_UNUSED broker_connection_open(LatcdBrokerConnection *connection,
                                                  int fd, uid_t expected_uid,
                                                  int64_t deadline)
@@ -5475,6 +5483,8 @@ static int G_GNUC_UNUSED broker_connection_step(LatcdBrokerConnection *connectio
 {
     if (g_get_monotonic_time() >= connection->deadline) { errno = ETIMEDOUT; return -1; }
     if (!connection->submitted) {
+        /* Leave the packet and its descriptors queued until the worker is free. */
+        if (broker_worker_busy(worker)) return 1;
         char first;
         ssize_t length = recv(connection->fd, &first, sizeof(first),
                               MSG_PEEK | MSG_TRUNC | MSG_DONTWAIT);
@@ -5646,16 +5656,17 @@ static bool G_GNUC_UNUSED broker_server_busy(const LatcdBrokerServer *server)
     return false;
 }
 
-static nfds_t G_GNUC_UNUSED broker_server_pollfds(const LatcdBrokerServer *server,
+static nfds_t G_GNUC_UNUSED broker_server_pollfds(LatcdBrokerServer *server,
                                                    struct pollfd *fds)
 {
     nfds_t n = 0;
+    bool busy = broker_worker_busy(&server->worker);
     fds[n++] = (struct pollfd) {.fd = server->listener.fd, .events = POLLIN};
     fds[n++] = (struct pollfd) {.fd = server->worker.event, .events = POLLIN};
     for (unsigned i = 0; i < LATCD_BROKER_CONNECTIONS; i++) {
         const LatcdBrokerConnection *connection = &server->connections[i];
         if (!server->used[i] || connection->fd < 0) continue;
-        short events = !connection->submitted ? POLLIN :
+        short events = !connection->submitted ? (busy ? 0 : POLLIN) :
                        connection->response_ready ? POLLOUT : 0;
         fds[n++] = (struct pollfd) {.fd = connection->fd, .events = events};
     }

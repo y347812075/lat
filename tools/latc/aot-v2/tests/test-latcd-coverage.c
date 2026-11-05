@@ -447,6 +447,16 @@ static void test_broker_export_request(void)
             g_assert_cmpint(broker_worker_submit(&worker, rejected, &request, 0,
                                                   &rejected_generation), ==, -1);
             close(rejected);
+            int waiting_pair[2];
+            g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, waiting_pair), ==, 0);
+            LatcdBrokerConnection waiting;
+            g_assert_cmpint(broker_connection_open(&waiting, waiting_pair[0], getuid(),
+                g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND), ==, 0);
+            uid_t waiting_uid; gid_t waiting_gid;
+            g_assert_cmpint(latcd_broker_peer(waiting_pair[1], getuid(), &waiting_uid, &waiting_gid), ==, 0);
+            g_assert_cmpint(latcd_broker_send(waiting_pair[1], &request, sizeof(request), source), ==, 0);
+            g_assert_cmpint(broker_connection_step(&waiting, &worker), ==, 1);
+            g_assert_false(waiting.submitted);
             struct pollfd event = {.fd = worker.event, .events = POLLIN};
             g_assert_cmpint(poll(&event, 1, 10000), ==, 1);
             LatcdBrokerExportResponse done = {0}; int output = -1;
@@ -456,6 +466,16 @@ static void test_broker_export_request(void)
             g_assert_cmpint(done.execution_authorized, ==, 0);
             g_assert_cmpint(output, >=, 0); close(output);
             g_assert_cmpint(broker_worker_take(&worker, generation, &done, NULL, NULL, &output), ==, -1);
+            g_assert_cmpint(broker_connection_step(&waiting, &worker), ==, 1);
+            g_assert_true(waiting.submitted);
+            g_assert_cmpint(poll(&event, 1, 10000), ==, 1);
+            g_assert_cmpint(broker_connection_step(&waiting, &worker), ==, 0);
+            output = -1;
+            g_assert_cmpint(latcd_broker_receive(waiting_pair[1], waiting_uid, waiting_gid,
+                &done, sizeof(done), &output), ==, 0);
+            g_assert_cmpint(done.status, ==, 0);
+            g_assert_cmpint(output, >=, 0); close(output);
+            broker_connection_close(&waiting); close(waiting_pair[1]);
             owned = dup(source); g_assert_cmpint(owned, >=, 0);
             g_assert_cmpint(broker_worker_submit(&worker, owned, &request,
                 g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND, &generation), ==, 0);
