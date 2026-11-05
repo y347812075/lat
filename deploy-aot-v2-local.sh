@@ -54,6 +54,7 @@ for name in latc latcd latu-runtime-manager; do
     add "$file" "/usr/bin/$name" 755
 done
 add "$build/latx-x86_64" /usr/libexec/latc/latx-x86_64 755
+add "$build/latx-x86_64" /usr/bin/latx-x86_64 755
 add "$build/latcd-worker-bootstrap" /usr/libexec/latc/latcd-worker-bootstrap 755
 add "$build/liblat-aot-runtime.so.2" /usr/lib/liblat-aot-runtime.so.2 755
 helper=/usr/libexec/latc
@@ -62,10 +63,8 @@ for name in compile-aot-v2-module.sh compile-native-image.sh compile-aot.sh link
 done
 add "$root/tools/latc/aot-v2/include/lat-aot-v2.h" "$helper/aot-v2/include/lat-aot-v2.h" 644
 add "$root/tools/latc/aot-v2/compiler/module.map" "$helper/aot-v2/compiler/module.map" 644
-wrapper_source="$root/tools/latc/scripts/latx-x86_64-managed-wrapper.sh"
 unit_source="$root/tools/latc/scripts/lat-aot-v2-latcd.service.in"
 binfmt_source="$root/latxbuild/debian/x86_64.conf"
-add "$wrapper_source" /usr/bin/latx-x86_64 755
 # Check all sources before copying anything.
 for file in "${sources[@]}"; do
     [[ -f $file ]] || { printf 'Missing source: %s\n' "$file" >&2; exit 1; }

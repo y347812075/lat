@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -14,6 +15,54 @@ static void allocation_lock(void) {}
 static void allocation_unlock(void) {}
 static int register_fd(int fd) { (void)fd; return 0; }
 static void close_fd(int fd) { close(fd); }
+
+static void test_system_defaults(const char *home, int variant)
+{
+    char dir[1024], path[1100];
+    snprintf(dir, sizeof(dir), "%s/system-%d", home, variant);
+    assert(!mkdir(dir, 0700));
+    snprintf(path, sizeof(path), "%s/client.env", dir);
+    FILE *file = fopen(path, "w");
+    assert(file);
+    assert(fputs("LATX_AOT=0\nLATX_AOT_V2=1\nLATX_AOT_V2_AUTOSTART=0\n"
+                 "LATX_AOT_V2_KEY_JOURNAL=1\n"
+                 "LATX_AOT_V2_JOURNAL_BROKER=/run/test/broker.sock\n"
+                 "LATX_AOT_V2_JOURNAL_BROKER_UID=1234\n"
+                 "LATX_AOT_V2_REPORT=1\n", file) >= 0);
+    if (variant == 2) assert(fputs("LATX_AOT_V2=0\n", file) >= 0);
+    assert(!fclose(file));
+    assert(!chmod(path, 0644));
+    if (variant == 3) assert(!chmod(path, 0666));
+    if (variant == 4) {
+        assert(!unlink(path));
+        assert(!symlink("/dev/null", path));
+    }
+    if (variant == 5) assert(!chmod(dir, 0777));
+    unsetenv("LATX_AOT_V2");
+    unsetenv("LATX_AOT_V2_KEY_JOURNAL");
+    unsetenv("LATX_AOT_V2_JOURNAL_BROKER");
+    unsetenv("LATX_AOT_V2_JOURNAL_BROKER_UID");
+    if (variant == 1) {
+        setenv("LATX_AOT_V2", "0", 1);
+        setenv("LATX_AOT_V2_KEY_JOURNAL", "1", 1);
+        setenv("LATX_AOT_V2_JOURNAL_BROKER", "/inherited", 1);
+        unsetenv("LATX_AOT");
+    }
+    lat_aot_test_system_defaults(dir);
+    if (variant == 0) {
+        assert(getenv("LATX_AOT_V2"));
+        assert(getenv("LATX_AOT_V2_JOURNAL_BROKER_UID"));
+        assert(!strcmp(getenv("LATX_AOT_V2"), "1"));
+        assert(!strcmp(getenv("LATX_AOT_V2_JOURNAL_BROKER_UID"), "1234"));
+    } else {
+        assert((variant == 1) == (getenv("LATX_AOT_V2") != NULL));
+        assert(!getenv("LATX_AOT_V2_KEY_JOURNAL"));
+        assert(!getenv("LATX_AOT_V2_JOURNAL_BROKER"));
+        if (variant == 1) assert(!strcmp(getenv("LATX_AOT"), "0"));
+    }
+    assert(!unlink(path));
+    assert(!rmdir(dir));
+}
 
 static void run_case(int number)
 {
@@ -123,6 +172,14 @@ int main(void)
     unsetenv("XDG_CACHE_HOME");
     unsetenv("XDG_STATE_HOME");
     unsetenv("XDG_RUNTIME_DIR");
+    for (int i = 0; i < 6; i++) {
+        pid_t child = fork();
+        assert(child >= 0);
+        if (!child) { test_system_defaults(home, i); _exit(0); }
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status) && !WEXITSTATUS(status));
+    }
     for (int i = 0; i < 14; i++) {
         pid_t child = fork();
         assert(child >= 0);

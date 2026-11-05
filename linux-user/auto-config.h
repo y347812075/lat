@@ -6,6 +6,10 @@
 
 struct LatcdClientFdProtection;
 bool lat_aot_config_option(const char *key, const char *value);
+void lat_aot_config_system_defaults(void);
+#ifdef LAT_AOT_TEST_CONFIG
+void lat_aot_test_system_defaults(const char *directory);
+#endif
 void lat_aot_config_environment(void);
 int lat_aot_config_select(int *legacy, bool explicit_legacy, bool *selected,
                          char *error, size_t error_size);

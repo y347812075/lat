@@ -1661,6 +1661,7 @@ int main(int argc, char **argv, char **envp)
     }
 
 #ifdef CONFIG_LATX
+    lat_aot_config_system_defaults();
     latc_aot_v2_consume_environment();
     if (latc_aot_v2_retain_inherited_pins()) return EXIT_FAILURE;
 #endif

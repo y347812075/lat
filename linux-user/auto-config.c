@@ -27,6 +27,95 @@ static char *state, *daemon_path, *compiler_path, *runner_path, *runtime_path;
 static bool enabled, managed, can_start, broker_mode;
 static int64_t retry_after;
 
+static void load_system_defaults(const char *directory, uid_t owner)
+{
+    char contents[4097];
+    struct stat st;
+    int dir = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dir < 0) return;
+    if (fstat(dir, &st) || st.st_uid != owner || (st.st_mode & 0022)) {
+        close(dir);
+        return;
+    }
+    int fd = openat(dir, "client.env", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    close(dir);
+    if (fd < 0) return;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != owner ||
+        (st.st_mode & 0022) || st.st_size < 0 || st.st_size > 4096) {
+        close(fd);
+        return;
+    }
+    ssize_t size = read(fd, contents, sizeof(contents) - 1);
+    close(fd);
+    if (size != st.st_size) return;
+    contents[size] = '\0';
+    if (memchr(contents, '\0', size)) return;
+    const char *keys[] = { "LATX_AOT", "LATX_AOT_V2", "LATX_AOT_V2_AUTOSTART",
+        "LATX_AOT_V2_KEY_JOURNAL", "LATX_AOT_V2_JOURNAL_BROKER",
+        "LATX_AOT_V2_JOURNAL_BROKER_UID", "LATX_AOT_V2_REPORT" };
+    char *values[G_N_ELEMENTS(keys)] = { 0 };
+    char **lines = g_strsplit(contents, "\n", -1);
+    bool valid = true;
+    for (char **line = lines; *line && valid; line++) {
+        if (!**line) continue;
+        char *equals = strchr(*line, '=');
+        if (!equals) { valid = false; break; }
+        *equals++ = '\0';
+        size_t i;
+        for (i = 0; i < G_N_ELEMENTS(keys); i++) {
+            if (!strcmp(*line, keys[i])) break;
+        }
+        if (i == G_N_ELEMENTS(keys) || values[i] || !*equals) {
+            valid = false;
+            break;
+        }
+        values[i] = equals;
+    }
+    if (valid && (!values[0] || strcmp(values[0], "0") ||
+        !values[1] || strcmp(values[1], "1") ||
+        !values[2] || strcmp(values[2], "0") ||
+        !values[3] || strcmp(values[3], "1") ||
+        !values[4] || values[4][0] != '/' || !values[5])) valid = false;
+    if (valid) {
+        char *end;
+        errno = 0;
+        guint64 uid = g_ascii_strtoull(values[5], &end, 10);
+        if (errno || *end || *values[5] == '-' || uid >= UINT32_MAX) valid = false;
+    }
+    if (valid && getenv("LATX_AOT_V2") && !strcmp(getenv("LATX_AOT_V2"), "0")) {
+        setenv("LATX_AOT", values[0], 0);
+        unsetenv("LATX_AOT_V2_KEY_JOURNAL");
+        unsetenv("LATX_AOT_V2_JOURNAL_BROKER");
+        unsetenv("LATX_AOT_V2_JOURNAL_BROKER_UID");
+    } else if (valid) {
+        for (size_t i = 0; i < G_N_ELEMENTS(keys); i++) {
+            if (values[i]) setenv(keys[i], values[i], 0);
+        }
+    }
+    g_strfreev(lines);
+}
+
+void lat_aot_config_system_defaults(void)
+{
+    char executable[4096];
+    ssize_t size = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
+    if (size < 0 || (size_t)size >= sizeof(executable) - 1 ||
+        getauxval(AT_SECURE) || getuid() != geteuid() || getgid() != getegid()) {
+        return;
+    }
+    executable[size] = '\0';
+    if (!strcmp(executable, "/usr/bin/latx-x86_64")) {
+        load_system_defaults("/etc/lat-aot-v2", 0);
+    }
+}
+
+#ifdef LAT_AOT_TEST_CONFIG
+void lat_aot_test_system_defaults(const char *directory)
+{
+    load_system_defaults(directory, getuid());
+}
+#endif
+
 bool lat_aot_config_option(const char *key, const char *value)
 {
     char **slot = NULL;

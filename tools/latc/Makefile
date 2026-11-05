@@ -775,7 +775,6 @@ $(BUILD)/tests/test-native-migration-v12 \
 	python3 tests/test-terminal-trap.py
 	python3 tests/test-module-selection-environment.py scripts/compile-aot-v2-module.sh
 	python3 tests/test-module-runtime-prefix.py
-	python3 tests/test-managed-wrapper.py
 	$(MAKE) check-import
 
 $(BUILD)/tests/test-latcd-protocol: \
@@ -1513,7 +1512,7 @@ $(BUILD)/tests/test-aot-v2-module-pack: \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/tests/test-auto-config: CFLAGS += -D_GNU_SOURCE -Wwrite-strings
+$(BUILD)/tests/test-auto-config: CFLAGS += -D_GNU_SOURCE -Wwrite-strings -DLAT_AOT_TEST_CONFIG
 $(BUILD)/tests/test-auto-config: aot-v2/tests/test-auto-config.c \
 		aot-v2/runtime/auto-config.c aot-v2/runtime/latcd-client.c $(BUILD)/latcd/protocol.o
 	@mkdir -p $(dir $@)
