@@ -143,7 +143,7 @@ int latcd_managed_config_load(const char *path, LatcdManagedConfig *c)
         strlen(json_object_get_string(object, keys[1])) != json_object_get_string_len(object, keys[1]) ||
         uid_value(json_object_get_string(object, keys[0]), &c->service_uid) ||
         uid_value(json_object_get_string(object, keys[1]), &c->client_uid) ||
-        !c->service_uid || c->service_uid == c->client_uid) goto out;
+        !c->service_uid) goto out;
     for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
         const char *s = json_object_get_string(object, keys[i + 2]);
         if (!s || s[0] != '/' || !s[1] || strlen(s) != json_object_get_string_len(object, keys[i + 2])) goto out;
@@ -212,10 +212,11 @@ int latcd_managed_config_validate(const LatcdManagedConfig *c)
     if (!c || !c->cache || !c->admin || !c->broker || !c->compiler ||
         !c->runner || !c->runtime || !c->service_uid ||
         (c->retirement_grace_us && !c->automatic_retirement) ||
-        c->service_uid == c->client_uid || getresuid(&real, &effective, &saved) ||
+        getresuid(&real, &effective, &saved) ||
         real != c->service_uid || effective != c->service_uid || saved != c->service_uid ||
         getresgid(&real_gid, &effective_gid, &saved_gid) || !real_gid ||
-        real_gid != effective_gid || real_gid != saved_gid || bad_groups ||
+        real_gid != effective_gid || real_gid != saved_gid ||
+        (bad_groups && c->service_uid != c->client_uid) ||
         prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1 ||
         syscall(SYS_capget, &header, caps) || caps[0].effective || caps[0].permitted ||
         caps[0].inheritable || caps[1].effective || caps[1].permitted || caps[1].inheritable) {

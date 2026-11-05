@@ -3,12 +3,17 @@ set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 build="$root/build64"
-service_user=${LAT_AOT_SERVICE_USER:-lat-aot}
+service_user=
+service_uid=
+service_gid=
+client_home=
+client_group=
+cache_dir=
+client_uid=${LAT_AOT_CLIENT_UID:-${SUDO_UID:-$(stat -c %u "$root")}}
 config_dir=/etc/lat-aot-v2
 managed_config="$config_dir/managed.json"
 client_env="$config_dir/client.env"
 state_dir=/var/lib/lat-aot-v2
-cache_dir="$state_dir/cache"
 admin_dir="$state_dir/admin"
 run_dir=/run/lat-aot-v2
 unit_file=/etc/systemd/system/lat-aot-v2-latcd.service
@@ -27,6 +32,28 @@ esac
 }
 options="$build/meson-info/intro-buildoptions.json"
 [[ -f $options ]] || { printf 'Missing build64 configuration.\n' >&2; exit 1; }
+[[ $client_uid =~ ^[1-9][0-9]*$ ]] || {
+    printf 'A non-root client UID is required (SUDO_UID or LAT_AOT_CLIENT_UID).\n' >&2
+    exit 1
+}
+client_record=$(getent passwd "$client_uid") || {
+    printf 'Client UID does not exist: %s\n' "$client_uid" >&2
+    exit 1
+}
+IFS=: read -r service_user _ _ _ _ client_home _ <<< "$client_record"
+service_uid=$client_uid
+service_gid=$(id -g "$service_user")
+client_group=$(id -gn "$service_user")
+[[ $client_home == /* ]] || {
+    printf 'Client account has no absolute home directory: %s\n' "$service_user" >&2
+    exit 1
+}
+build_id=$($build/latc build-id)
+[[ $build_id =~ ^[0-9a-f]{64}$ ]] || {
+    printf 'Invalid LATC build identity: %s\n' "$build_id" >&2
+    exit 1
+}
+cache_dir="$client_home/.cache/lat-aot-v2/$build_id/live"
 mapfile -t directories < <(python3 - "$options" <<'PY'
 import json
 from pathlib import PurePosixPath
@@ -85,19 +112,8 @@ for i in "${!sources[@]}"; do
     fi
 done
 
-client_uid=${LAT_AOT_CLIENT_UID:-${SUDO_UID:-$(stat -c %u "$root")}}
-[[ $client_uid =~ ^[1-9][0-9]*$ ]] || {
-    printf 'A non-root client UID is required (SUDO_UID or LAT_AOT_CLIENT_UID).\n' >&2
-    exit 1
-}
-[[ $service_user =~ ^[a-z_][a-z0-9_-]*$ ]] || {
-    printf 'Invalid service user name: %s\n' "$service_user" >&2
-    exit 1
-}
-
 if [[ $dry_run == 1 ]]; then
-    printf 'Would create/use system service user: %s\n' "$service_user"
-    printf 'Would configure client UID: %s\n' "$client_uid"
+    printf 'Would run the managed system service as: %s (UID %s)\n' "$service_user" "$service_uid"
     printf 'Would initialize managed cache: %s\n' "$cache_dir"
     printf 'Would write managed config: %s\n' "$managed_config"
     printf 'Would write client environment: %s\n' "$client_env"
@@ -110,23 +126,22 @@ getent passwd "$client_uid" >/dev/null || {
     printf 'Client UID does not exist: %s\n' "$client_uid" >&2
     exit 1
 }
-if ! getent group "$service_user" >/dev/null; then
-    /usr/sbin/groupadd --system "$service_user"
-fi
-if ! getent passwd "$service_user" >/dev/null; then
-    /usr/sbin/useradd --system --gid "$service_user" --home-dir "$state_dir" \
-        --shell /usr/sbin/nologin --no-create-home "$service_user"
-fi
-service_uid=$(id -u "$service_user")
-service_gid=$(id -g "$service_user")
-[[ $service_uid != "$client_uid" ]] || {
-    printf 'Service and client UIDs must differ.\n' >&2
-    exit 1
-}
 
 install -d -m 755 -o root -g root "$config_dir" /etc/binfmt.d
 install -d -m 755 -o root -g root "$state_dir"
-install -d -m 700 -o "$service_uid" -g "$service_gid" "$cache_dir" "$admin_dir"
+for directory in "$client_home/.cache" "$client_home/.cache/lat-aot-v2" \
+    "$client_home/.cache/lat-aot-v2/$build_id" "$cache_dir"; do
+    [[ ! -L $directory ]] || {
+        printf 'Cache path component must not be a symlink: %s\n' "$directory" >&2
+        exit 1
+    }
+done
+runuser -u "$service_user" -- sh -c 'umask 077; mkdir -p -- "$1"' sh "$cache_dir"
+[[ -d $cache_dir && $(stat -c %u:%a "$cache_dir") == "$service_uid:700" ]] || {
+    printf 'Cache directory must be owned by UID %s with mode 0700: %s\n' "$service_uid" "$cache_dir" >&2
+    exit 1
+}
+install -d -m 700 -o "$service_uid" -g "$service_gid" "$admin_dir"
 install -d -m 755 -o "$service_uid" -g "$service_gid" "$run_dir"
 
 temporary_config=$(mktemp "$config_dir/.managed.XXXXXXXX")
@@ -166,7 +181,8 @@ printf '%s\n' \
     "LATX_AOT_V2_JOURNAL_BROKER_UID=$service_uid" \
     'LATX_AOT_V2_REPORT=1' > "$temporary_env"
 sed -e "s|@SERVICE_USER@|$service_user|g" \
-    -e "s|@SERVICE_GROUP@|$service_user|g" "$unit_source" > "$temporary_unit"
+    -e "s|@SERVICE_GROUP@|$client_group|g" \
+    -e "s|@CACHE_DIR@|$cache_dir|g" "$unit_source" > "$temporary_unit"
 install -m 444 -o root -g root "$temporary_config" "$managed_config"
 install -m 444 -o root -g root "$temporary_env" "$client_env"
 install -m 644 -o root -g root "$temporary_unit" "$unit_file"
@@ -198,5 +214,5 @@ done
 systemctl restart systemd-binfmt.service
 
 printf 'Done. Managed AOT v2 daemon is enabled; automatic retirement is on.\n'
-printf 'Service user: %s (UID %s), client UID: %s\n' "$service_user" "$service_uid" "$client_uid"
+printf 'Service user/client: %s (UID %s)\n' "$service_user" "$service_uid"
 printf 'Cache: %s\nManaged config: %s\n' "$cache_dir" "$managed_config"

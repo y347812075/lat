@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
@@ -37,6 +38,7 @@ int latcd_managed_directory(const char *path, uid_t leaf_uid, mode_t leaf_mode)
     if (!copy) return -1;
     int fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) { free(copy); return -1; }
+    bool private_ancestor = false;
     if (check_directory(fd, 0, 0, 0)) goto fail;
     char *component = copy;
     for (;;) {
@@ -47,8 +49,30 @@ int latcd_managed_directory(const char *path, uid_t leaf_uid, mode_t leaf_mode)
         }
         int child = openat(fd, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (child < 0) goto fail;
-        close(fd); fd = child;
-        if (check_directory(fd, next ? 0 : leaf_uid, leaf_mode, !next)) goto fail;
+        close(fd);
+        fd = child;
+        if (next) {
+            struct stat st;
+            if (fstat(fd, &st) || !S_ISDIR(st.st_mode)) {
+                errno = EACCES;
+                goto fail;
+            }
+            bool private = st.st_uid == leaf_uid && !(st.st_mode & 0077);
+            if (!((st.st_uid == 0 && !(st.st_mode & 0022)) ||
+                  private || private_ancestor)) {
+                errno = EACCES;
+                goto fail;
+            }
+            if (private) private_ancestor = true;
+            const char *names[] = {"system.posix_acl_access", "system.posix_acl_default"};
+            for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+                if (fgetxattr(fd, names[i], NULL, 0) >= 0 || errno != ENODATA) {
+                    errno = EACCES;
+                    goto fail;
+                }
+        } else if (check_directory(fd, leaf_uid, leaf_mode, 1)) {
+            goto fail;
+        }
         if (!next) break;
         component = next;
     }
