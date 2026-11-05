@@ -2586,10 +2586,22 @@ static int retire_managed_compiler_task(const LatcdConfig *config,
     if (fd >= 0 && !fstat(fd, &observed) &&
         observed.st_dev == task->identity.st_dev &&
         observed.st_ino == task->identity.st_ino &&
-        !flock(fd, LOCK_EX | LOCK_NB) &&
-        !recover_managed_domain(config, task->id, fd, replay, journal,
-                                error, error_size))
-        result = 0;
+        !flock(fd, LOCK_EX | LOCK_NB)) {
+        unsigned attempts = 0;
+        do {
+            if (error && error_size) error[0] = '\0';
+            errno = 0;
+            if (!recover_managed_domain(config, task->id, fd, replay, journal,
+                                        error, error_size)) {
+                result = 0;
+                break;
+            }
+            if ((errno != EAGAIN && errno != EWOULDBLOCK &&
+                 errno != EBUSY && errno != ESTALE) ||
+                ++attempts >= 30000 || stop_requested) break;
+            g_usleep(1000);
+        } while (true);
+    }
     if (fd >= 0) close(fd);
     g_free(path);
     g_free(name);
